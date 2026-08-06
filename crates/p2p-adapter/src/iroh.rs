@@ -204,50 +204,6 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
         }
     }
 
-    async fn send_doc_sync_requests_concurrently(
-        &self,
-        peers: &[p2p::transport::PeerId],
-        request: p2p::message::DocSyncRequest,
-    ) -> bool {
-        let mut peer_iter = peers.iter().cloned();
-        let mut tasks = tokio::task::JoinSet::new();
-        let mut any_sent = false;
-
-        loop {
-            while tasks.len() < DOC_SYNC_DISPATCH_PARALLELISM {
-                let Some(peer) = peer_iter.next() else {
-                    break;
-                };
-                let transport = self.transport.clone();
-                let request = request.clone();
-                tasks.spawn(async move {
-                    let result = transport.send_doc_sync_request(&peer, request).await;
-                    (peer, result)
-                });
-            }
-
-            if tasks.is_empty() {
-                break;
-            }
-
-            match tasks.join_next().await {
-                Some(Ok((peer, Ok(())))) => {
-                    any_sent = true;
-                    tracing::debug!(peer_id = %peer, "sent DocSync request");
-                }
-                Some(Ok((peer, Err(error)))) => {
-                    tracing::warn!(peer_id = %peer, error = %error, "failed to send DocSync request");
-                }
-                Some(Err(error)) => {
-                    tracing::warn!(error = %error, "DocSync dispatch task failed");
-                }
-                None => break,
-            }
-        }
-
-        any_sent
-    }
-
     /// Resolve collection names to CIDs for removal, mirroring `add_replicator`.
     fn resolve_collections_for_remove(&self, collections: Vec<String>) -> Vec<String> {
         match self.doc_pusher {
@@ -875,65 +831,14 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no event bus for sync"))?;
 
-        let connected_peers = self.transport.connected_peers().await.map_err(|error| {
-            P2PError::transport(format!("failed to get connected peers: {error}"))
-        })?;
-        if connected_peers.is_empty() {
-            return Err(P2PError::transport("no connected peers to sync with"));
-        }
-
-        let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
-        let total_expected = connected_peers.len() * doc_ids.len();
-        let mut total_received = 0;
-        let overall_timeout = std::time::Duration::from_secs(10);
-        let idle_timeout = std::time::Duration::from_secs(3);
-        let start = std::time::Instant::now();
-        let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
-
-        for _attempt in 0..3 {
-            if total_received >= total_expected || start.elapsed() >= overall_timeout {
-                break;
-            }
-
-            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
-            if let Err(error) = p2p::signing::sign_with_transport(&self.transport, &mut request) {
-                event_bus.unsubscribe(sub.id());
-                return Err(P2PError::internal(format!(
-                    "failed to sign DocSync request: {error}"
-                )));
-            }
-
-            let any_sent = self
-                .send_doc_sync_requests_concurrently(&connected_peers, request)
-                .await;
-            if !any_sent {
-                break;
-            }
-
-            let mut last_merge = std::time::Instant::now();
-            while total_received < total_expected && start.elapsed() < overall_timeout {
-                if last_merge.elapsed() > idle_timeout {
-                    break;
-                }
-
-                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
-                {
-                    Ok(Some(msg)) => {
-                        if let Some(data) = msg.as_merge_complete() {
-                            if doc_set.contains(&data.doc_id) {
-                                total_received += 1;
-                                last_merge = std::time::Instant::now();
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(_) => {}
-                }
-            }
-        }
-
-        event_bus.unsubscribe(sub.id());
-        Ok(())
+        crate::doc_sync::sync::sync_documents(
+            Arc::new(self.transport.clone()),
+            event_bus.as_ref(),
+            doc_ids,
+            std::time::Duration::from_secs(10),
+            DOC_SYNC_DISPATCH_PARALLELISM,
+        )
+        .await
     }
 
     async fn sync_branchable_collection(&self, collection_id: &str) -> P2PResult<()> {
@@ -1201,6 +1106,53 @@ mod tests {
                 .iter()
                 .any(|r| r.id.as_deref() == Some(transport_b.local_peer_id().as_str())),
             "replicator registered without a redial: {replicators:?}"
+        );
+    }
+
+    /// Characterization: with a peer that accepts the connection but never
+    /// replies, the send itself blocks on iroh's ~30s request-response timeout,
+    /// then fails; `sync_documents` treats that as "nothing sent," breaks out of
+    /// its retry loop on the first attempt, and still reports success. Locks in
+    /// today's behaviour so the doc-sync extraction is provably behaviour-preserving.
+    #[tokio::test]
+    async fn doc_sync_with_unresponsive_peer_returns_ok() {
+        let key_a = load_or_generate_secret_key(None).await.expect("key a");
+        let key_b = load_or_generate_secret_key(None).await.expect("key b");
+        let (command_tx_a, _events_a, _replicators_a, _task_a) =
+            spawn_endpoint(test_endpoint_config(key_a.clone()))
+                .await
+                .expect("endpoint a");
+        let (command_tx_b, _events_b, _replicators_b, _task_b) =
+            spawn_endpoint(test_endpoint_config(key_b.clone()))
+                .await
+                .expect("endpoint b");
+        let transport_a = IrohTransport::new(command_tx_a, key_a);
+        let transport_b = IrohTransport::new(command_tx_b, key_b);
+
+        let adapter = IrohP2PAdapter::<NoopBlockstore> {
+            transport: transport_a,
+            sync_coordinator: None,
+            doc_pusher: Some(crate::doc_sync::test_support::StubPusher::arc()),
+            event_bus: Some(Arc::new(events::ChannelBus::default())),
+            version_syncer: None,
+            replicator_push_options: ReplicatorPushOptionsState::default(),
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            nac_checker: None,
+        };
+
+        // Endpoint B has no coordinator behind it, so it accepts the doc-sync
+        // request at the transport layer and never produces a reply or a merge.
+        let dial_addr = dialable_ticket(&transport_b).await;
+        adapter.connect_peer(&dial_addr).await.expect("dial b");
+
+        let result = adapter
+            .sync_documents("Users", vec!["bae-does-not-matter".to_string()])
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "unresponsive peer should currently return Ok after the send times out, got: {result:?}"
         );
     }
 }
