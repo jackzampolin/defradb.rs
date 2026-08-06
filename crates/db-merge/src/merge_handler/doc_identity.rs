@@ -49,9 +49,57 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         block: &Block,
         visited: &mut HashSet<Cid>,
     ) -> std::result::Result<String, MergeError> {
-        let mut worklist: Vec<(Cid, Block)> = vec![(*cid, block.clone())];
+        // A head's owner lookup, blockstore read, and decode are all DEFERRED
+        // until its frame is popped: probing later siblings eagerly would let
+        // their owner entries (or their storage errors) preempt the first
+        // head's subtree — diverging from the recursive version's
+        // first-head-first resolution, error propagation, and visited
+        // insertion order.
+        enum IdentityFrame {
+            /// The entry composite, already decoded by the caller.
+            Loaded(Cid, Block),
+            /// A discovered head; nothing has been probed yet.
+            Pending(Cid),
+        }
 
-        while let Some((node_cid, node_block)) = worklist.pop() {
+        let mut worklist: Vec<IdentityFrame> = vec![IdentityFrame::Loaded(*cid, block.clone())];
+
+        while let Some(frame) = worklist.pop() {
+            let (node_cid, node_block) = match frame {
+                IdentityFrame::Loaded(node_cid, node_block) => (node_cid, node_block),
+                IdentityFrame::Pending(head_cid) => {
+                    if !visited.insert(head_cid) {
+                        continue;
+                    }
+
+                    let head_owners =
+                        db::doc_id_map::get_doc_ids_for_block(systemstore, &head_cid.to_string())
+                            .await
+                            .map_err(MergeError::Database)?;
+                    // Field blocks can be co-owned, so the owner index is
+                    // only authoritative when it names exactly one document.
+                    if head_owners.len() == 1 {
+                        return Ok(head_owners.into_iter().next().expect("len checked"));
+                    }
+
+                    let head_data = match self.blockstore.get(&head_cid).await {
+                        Ok(Some(data)) => data,
+                        // A genuinely absent head can't help resolve
+                        // identity; a blockstore failure is infrastructure
+                        // and must not be silently treated as "head missing".
+                        Ok(None) => continue,
+                        Err(e) => return Err(MergeError::Storage(e.to_string())),
+                    };
+                    let Ok(head_block) = Block::from_dag_cbor(&head_data) else {
+                        continue;
+                    };
+                    if !matches!(head_block.delta, CrdtDelta::Composite(_)) {
+                        continue;
+                    }
+                    (head_cid, head_block)
+                }
+            };
+
             // Genesis composite: identity is derived from the CID itself, so
             // no ownership lookup is needed (see `resolve_composite_doc_id`).
             let heads = node_block.heads.as_deref().unwrap_or(&[]);
@@ -59,44 +107,22 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 return Ok(db_blocks::derive_doc_id(&node_cid));
             }
 
+            // Field blocks can be co-owned, so the owner index is only
+            // authoritative for a composite when it names exactly one
+            // document. (For Pending nodes this re-checks what their frame
+            // already probed — the recursive predecessor performed the same
+            // harmless re-check at the top of each recursion.)
             let owners = db::doc_id_map::get_doc_ids_for_block(systemstore, &node_cid.to_string())
                 .await
                 .map_err(MergeError::Database)?;
-            // Field blocks can be co-owned, so the owner index is only
-            // authoritative for a composite when it names exactly one
-            // document.
             if owners.len() == 1 {
                 return Ok(owners.into_iter().next().expect("len checked"));
             }
 
+            // Reversed so the FIRST head is popped — and only then probed —
+            // first: DFS parity with the recursive predecessor.
             for head_cid in heads.iter().rev() {
-                if !visited.insert(*head_cid) {
-                    continue;
-                }
-
-                let head_owners =
-                    db::doc_id_map::get_doc_ids_for_block(systemstore, &head_cid.to_string())
-                        .await
-                        .map_err(MergeError::Database)?;
-                if head_owners.len() == 1 {
-                    return Ok(head_owners.into_iter().next().expect("len checked"));
-                }
-
-                let head_data = match self.blockstore.get(head_cid).await {
-                    Ok(Some(data)) => data,
-                    // A genuinely absent head can't help resolve identity; a
-                    // blockstore failure is infrastructure and must not be
-                    // silently treated as "head missing".
-                    Ok(None) => continue,
-                    Err(e) => return Err(MergeError::Storage(e.to_string())),
-                };
-                let Ok(head_block) = Block::from_dag_cbor(&head_data) else {
-                    continue;
-                };
-                if !matches!(head_block.delta, CrdtDelta::Composite(_)) {
-                    continue;
-                }
-                worklist.push((*head_cid, head_block));
+                worklist.push(IdentityFrame::Pending(*head_cid));
             }
         }
 

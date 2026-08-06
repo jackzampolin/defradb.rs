@@ -3221,3 +3221,68 @@ fn resolve_composite_doc_id_walks_deep_ancestry_on_a_small_stack() {
         .join()
         .expect("small-stack resolver thread must not crash");
 }
+
+/// Regression (PR #1316 review): later heads must not be probed until the
+/// first head's subtree is exhausted. The tip has heads `[first, later]`
+/// where `first` is a reachable genesis and `later` carries a unique owner
+/// entry for a DIFFERENT document — eager sibling probing would return the
+/// later head's owner; first-head-first DFS (recursive parity) must resolve
+/// through `first`'s genesis.
+#[tokio::test]
+async fn resolve_composite_doc_id_explores_first_head_before_probing_later_siblings() {
+    let (handler, blockstore) = make_handler();
+
+    let make_composite = |priority: u64, heads: Vec<Cid>| {
+        Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "v1".to_string(),
+                priority,
+                status: 1,
+            }),
+            heads,
+            vec![],
+        )
+    };
+
+    let genesis_a = make_composite(1, vec![]);
+    let genesis_a_cid = genesis_a.generate_cid().unwrap();
+    blockstore
+        .put(&genesis_a_cid, &genesis_a.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+
+    // A distinct composite so its CID differs from the other genesis.
+    let genesis_b = make_composite(2, vec![]);
+    let genesis_b_cid = genesis_b.generate_cid().unwrap();
+    blockstore
+        .put(&genesis_b_cid, &genesis_b.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+
+    // Block::new sorts heads lexicographically by CID string, so which
+    // genesis is the FIRST head is decided by the stored order, not
+    // construction order — read it back and orient the fixture on it.
+    let tip = make_composite(3, vec![genesis_a_cid, genesis_b_cid]);
+    let tip_cid = tip.generate_cid().unwrap();
+    blockstore
+        .put(&tip_cid, &tip.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+    let stored_heads = tip.heads.clone().expect("tip has two heads");
+    let first_head_cid = stored_heads[0];
+    let later_head_cid = stored_heads[1];
+
+    // Register a unique owner for the LATER head only: the wrong answer if
+    // sibling probing happens before the first subtree is explored.
+    register_test_block_owner(&handler, 7, "doc-of-later-head", &later_head_cid).await;
+
+    let resolved = handler
+        .resolve_composite_doc_id(&tip_cid, &tip)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved,
+        db_blocks::derive_doc_id(&first_head_cid),
+        "the first head's subtree must resolve before any later sibling is probed"
+    );
+}
