@@ -42,6 +42,62 @@ pub async fn test_iterator_sees_pending_deletes<S: Store>(store: &S) {
     assert!(iter.next().await.unwrap().is_none());
 }
 
+/// Test pending writes that land on a chunk boundary of the snapshot read.
+///
+/// Backends that read the committed side in bounded windows merge it against
+/// the transaction's pending writes, advancing the two sides independently.
+/// A pending write sitting exactly where one window ends and the next begins
+/// is the case most likely to drop or duplicate a key, because it is the one
+/// place a refill happens mid-merge.
+///
+/// The window is 256 pairs, so this seeds 600 committed keys and then, in an
+/// uncommitted transaction, inserts into the 255/256 seam, deletes the first
+/// key of the second window, and overrides the key after it.
+pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S) {
+    let committed: Vec<Vec<u8>> = (0..600)
+        .map(|i| format!("key_{:05}", i).into_bytes())
+        .collect();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    for key in &committed {
+        txn.set(key, b"v").await.unwrap();
+    }
+    txn.commit().await.unwrap();
+
+    // Sorts after key_00255 and before key_00256, i.e. into the seam.
+    let seam_key = b"key_00255x".to_vec();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(&seam_key, b"new").await.unwrap();
+    txn.delete(&committed[256]).await.unwrap();
+    txn.set(&committed[257], b"override").await.unwrap();
+
+    let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (i, key) in committed.iter().enumerate() {
+        match i {
+            256 => continue, // deleted in this transaction
+            257 => expected.push((key.clone(), b"override".to_vec())),
+            _ => expected.push((key.clone(), b"v".to_vec())),
+        }
+        if i == 255 {
+            expected.push((seam_key.clone(), b"new".to_vec()));
+        }
+    }
+
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+    let mut seen: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    while let Some(kv) = iter.next().await.unwrap() {
+        seen.push((kv.key, kv.value));
+    }
+
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "one insert and one delete across the seam must net out"
+    );
+    assert_eq!(seen, expected, "merged order or values wrong at the seam");
+}
+
 /// Test iterator boundary: single item at exact start bound
 pub async fn test_iterator_single_item_at_start<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();

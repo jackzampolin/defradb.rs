@@ -155,6 +155,12 @@ macro_rules! generate_backend_tests {
         }
 
         #[tokio::test]
+        async fn shared_test_iterator_pending_writes_at_chunk_boundary() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_pending_writes_at_chunk_boundary(&store).await;
+        }
+
+        #[tokio::test]
         async fn shared_test_iterator_reverse_with_prefix() {
             let store = $store_fn().await;
             test_suite::test_iterator_reverse_with_prefix(&store).await;
