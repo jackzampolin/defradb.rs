@@ -1103,3 +1103,70 @@ async fn streaming_auto_commit_read_migrates_and_persists() {
     );
     assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
 }
+
+/// The early-termination counterpart of
+/// `streaming_auto_commit_read_migrates_and_persists`: a `LimitNode` stops
+/// pulling long before the write-back batch boundary, and `ScanNode::close`
+/// then tears the stream down. Documents already migrated through the lens
+/// must be persisted at that point - otherwise every limited query re-runs the
+/// transform forever, and the eager path's write-back is silently lost.
+#[tokio::test]
+async fn streaming_auto_commit_read_persists_after_partial_consumption() {
+    let transform_store = Arc::new(SetVerifiedStore::default());
+    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let v2 = add_verified_version(&db).await;
+
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for name in ["Partial-1", "Partial-2", "Partial-3"] {
+        seed_old_user(&db, &v1, name).await;
+    }
+
+    let fetcher = crate::LensedAutoCommitFetcher::new(db.clone());
+    let mut stream = fetcher
+        .stream_all_with_deleted("Users", false)
+        .await
+        .unwrap();
+
+    // One document out of three, well under the default write-back batch size.
+    let (migrated, _is_deleted) = stream
+        .next()
+        .await
+        .unwrap()
+        .expect("stream yields the first document");
+    assert_eq!(
+        migrated.get("verified"),
+        Some(&document::NormalValue::Bool(true))
+    );
+
+    stream.close().await.unwrap();
+    drop(stream);
+
+    let doc_id = migrated.id().expect("migrated document keeps its DocID");
+    let persisted = load_user(&db, doc_id).await;
+    assert_eq!(
+        persisted.get("verified"),
+        Some(&document::NormalValue::Bool(true)),
+        "a partially consumed stream must persist the documents it did migrate"
+    );
+    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+}

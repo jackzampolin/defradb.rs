@@ -2,10 +2,12 @@
 //!
 //! Like `lensed_fetcher::stream`, this applies migration per document as it
 //! is pulled from storage (Go's read-through model) instead of after a full
-//! collection read. Write-back stays batched exactly as the eager path does
-//! it (`process_document_with_bounded_write_back` flushes every
+//! collection read. Write-back stays batched as the eager path batches it
+//! (`process_document_with_bounded_write_back` flushes every
 //! `migration_write_back_batch_size` documents via its own guarded write
-//! transaction) - only the *read* side becomes lazy.
+//! transaction), with the partial batch flushed when the stream ends - either
+//! by exhaustion or by [`DocStream::close`], which a consumer that stops early
+//! must call.
 
 use std::collections::HashMap;
 
@@ -77,14 +79,7 @@ impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
         };
 
         let Some((doc, is_deleted)) = pulled else {
-            // Exhausted: release the read transaction and flush whatever
-            // partial batch remains, matching the eager path's final
-            // persist_migrated_documents call after its loop.
-            let write_backs = std::mem::take(&mut self.write_backs);
-            self.release_read_txn();
-            self.fetcher
-                .persist_migrated_documents(&self.collection, write_backs)
-                .await?;
+            self.close().await?;
             return Ok(None);
         };
 
@@ -100,6 +95,19 @@ impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
             )
             .await?;
         Ok(Some((processed, is_deleted)))
+    }
+
+    /// Release the read transaction and flush whatever partial write-back
+    /// batch remains, matching the eager path's final
+    /// `persist_migrated_documents` call after its loop. Called both on
+    /// exhaustion and by consumers that stop pulling early; taking the buffer
+    /// first makes a second call a no-op.
+    async fn close(&mut self) -> query::error::Result<()> {
+        let write_backs = std::mem::take(&mut self.write_backs);
+        self.release_read_txn();
+        self.fetcher
+            .persist_migrated_documents(&self.collection, write_backs)
+            .await
     }
 }
 

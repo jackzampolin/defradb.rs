@@ -286,7 +286,11 @@ impl PlanNode for ScanNode {
 
     async fn close(&mut self) -> Result<()> {
         self.docs.clear();
-        self.stream = None;
+        // Close before dropping: a scan stopped early by a satisfied LimitNode
+        // gets no other chance to flush work it deferred per document.
+        if let Some(mut stream) = self.stream.take() {
+            stream.close().await?;
+        }
         self.initialized = false;
         Ok(())
     }

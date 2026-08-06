@@ -16,6 +16,17 @@ pub trait DocStream: MaybeSendSync {
     /// Advance the stream. `Ok(None)` means exhausted; further calls keep
     /// returning `Ok(None)`.
     async fn next(&mut self) -> Result<Option<(Document, bool)>>;
+
+    /// Finish with the stream, whether or not it was exhausted.
+    ///
+    /// A consumer that stops pulling early (a satisfied `LimitNode` above a
+    /// `ScanNode`) must call this before dropping the stream: `Drop` cannot
+    /// await, so this is the only point at which a stream can flush work it
+    /// deferred while yielding documents. The default is a no-op, which is
+    /// correct for streams that defer nothing.
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A [`DocStream`] over an already-materialized vector.
