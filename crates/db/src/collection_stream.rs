@@ -126,6 +126,15 @@ impl DocStream for CollectionDocStream {
             return Ok(Some((doc, is_deleted)));
         }
     }
+
+    async fn close(&mut self) -> query::error::Result<()> {
+        self.exhausted = true;
+        self.iter
+            .get_mut()
+            .close()
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
+    }
 }
 
 #[cfg(test)]
