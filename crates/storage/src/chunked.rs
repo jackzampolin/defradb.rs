@@ -13,16 +13,11 @@ pub(crate) const DEFAULT_CHUNK_SIZE: usize = 256;
 /// Refill closure, type-erased so `ChunkedSnapshot` itself stays non-generic.
 ///
 /// `Send` is required directly (rather than via the `MaybeSend` marker trait)
-/// because trait objects only accept auto traits as additional bounds.
-#[cfg(not(target_arch = "wasm32"))]
+/// because trait objects only accept auto traits as additional bounds. The
+/// whole module is `not(wasm32)`, so no wasm variant is needed.
 type ReadFn = Box<
     dyn FnMut(Option<Vec<u8>>) -> MaybeBoxFuture<'static, Result<Vec<(Vec<u8>, Vec<u8>)>>> + Send,
 >;
-
-/// Refill closure, type-erased so `ChunkedSnapshot` itself stays non-generic.
-#[cfg(target_arch = "wasm32")]
-type ReadFn =
-    Box<dyn FnMut(Option<Vec<u8>>) -> MaybeBoxFuture<'static, Result<Vec<(Vec<u8>, Vec<u8>)>>>>;
 
 /// Reads a snapshot range in bounded windows.
 ///
@@ -210,7 +205,11 @@ mod tests {
 
         assert_eq!(seen.len(), 10);
         assert_eq!(seen, (0u8..10).map(pair).collect::<Vec<_>>());
-        assert_eq!(calls.load(Ordering::SeqCst), 4, "3 full chunks + 1 short");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "2 full chunks, 1 short, 1 empty read to terminate"
+        );
     }
 
     /// A consumer that stops early must not trigger further reads.
