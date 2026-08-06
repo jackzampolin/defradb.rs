@@ -14,6 +14,7 @@ use crate::planner::Planner;
 use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 use super::nested_profile::{NestedQueryProfile, ScopedFulltextProfile};
 
@@ -122,17 +123,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             results.push(json);
         }
 
-        let plan_exec_info = plan.exec_info();
-        // Capture cursor page-info BEFORE close() releases plan resources.
-        // Non-cursor selects don't need it, so skip the wrapper-node traversal
-        // entirely — it would just return `None` after walking the plan tree.
-        let cursor_page_info = if select.is_cursor {
-            plan.page_info()
-        } else {
-            None
-        };
+        let outcome = Ok::<_, crate::error::QueryError>((
+            results,
+            plan.exec_info(),
+            // Capture cursor page-info BEFORE close() releases plan resources.
+            // Non-cursor selects don't need it, so skip the wrapper-node
+            // traversal entirely — it would just return `None` after walking
+            // the plan tree.
+            if select.is_cursor {
+                plan.page_info()
+            } else {
+                None
+            },
+        ));
+
         let plan_close_start = Instant::now();
-        plan.close().await?;
+        let (results, plan_exec_info, cursor_page_info) =
+            plan_drive::close_after(plan.as_mut(), outcome).await?;
         profile.plan_close_elapsed = plan_close_start.elapsed();
 
         // Post-process relation-based aggregates

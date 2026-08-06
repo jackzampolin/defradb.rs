@@ -18,6 +18,7 @@ use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::plan;
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
@@ -282,22 +283,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             // Execute the plan and count iterations
-            plan.init().await?;
-            plan.start().await?;
+            let outcome = async {
+                plan.init().await?;
+                plan.start().await?;
 
-            // Go counts ALL next() calls (including the final false) for planExecutions
-            let mut plan_executions: u64 = 0;
-            let mut result_count: usize = 0;
+                // Go counts ALL next() calls (including the final false) for planExecutions
+                let mut plan_executions: u64 = 0;
+                let mut result_count: usize = 0;
 
-            loop {
-                plan_executions += 1;
-                if !plan.next().await? {
-                    break;
+                loop {
+                    plan_executions += 1;
+                    if !plan.next().await? {
+                        break;
+                    }
+                    result_count += 1;
                 }
-                result_count += 1;
-            }
 
-            plan.close().await?;
+                Ok((result_count, plan_executions))
+            }
+            .await;
+
+            let (result_count, plan_executions) =
+                plan_drive::close_after(plan.as_mut(), outcome).await?;
 
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
@@ -351,22 +358,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             )?;
 
             // Execute the plan and count iterations
-            plan.init().await?;
-            plan.start().await?;
+            let outcome = async {
+                plan.init().await?;
+                plan.start().await?;
 
-            // Go counts ALL next() calls (including the final false) for planExecutions
-            let mut plan_executions: u64 = 0;
-            let mut result_count: usize = 0;
+                // Go counts ALL next() calls (including the final false) for planExecutions
+                let mut plan_executions: u64 = 0;
+                let mut result_count: usize = 0;
 
-            loop {
-                plan_executions += 1;
-                if !plan.next().await? {
-                    break;
+                loop {
+                    plan_executions += 1;
+                    if !plan.next().await? {
+                        break;
+                    }
+                    result_count += 1;
                 }
-                result_count += 1;
-            }
 
-            plan.close().await?;
+                Ok((result_count, plan_executions))
+            }
+            .await;
+
+            let (result_count, plan_executions) =
+                plan_drive::close_after(plan.as_mut(), outcome).await?;
 
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
