@@ -75,6 +75,11 @@ wasm-bindgen-futures = "0.4"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 blst = "0.3"
 getrandom = "0.2"
+criterion.workspace = true
+
+[[bench]]
+name = "merge_dag"
+harness = false
 
 [lints]
 workspace = true

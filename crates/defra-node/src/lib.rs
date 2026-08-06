@@ -1552,4 +1552,7 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "p2p"))]
+mod p2p_bench;
+
+#[cfg(all(test, feature = "p2p"))]
 mod p2p_tests;
