@@ -1,7 +1,6 @@
 pub mod config;
 mod errors;
 mod group_commit;
-mod iterator;
 /// Redb backend implementation with snapshot isolation and ACID transactions.
 ///
 /// This backend provides a pure Rust persistent key-value store using redb.

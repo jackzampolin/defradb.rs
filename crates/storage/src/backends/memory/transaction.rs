@@ -7,12 +7,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::compute_range_bounds;
-use super::iterator::MergingIterator;
 use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
 use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::merging::MergingIterator;
 
 /// In-memory transaction with snapshot isolation and conflict detection.
 ///

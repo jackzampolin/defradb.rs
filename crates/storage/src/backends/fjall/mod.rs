@@ -1,6 +1,5 @@
 pub mod config;
 mod errors;
-mod iterator;
 mod store;
 mod transaction;
 

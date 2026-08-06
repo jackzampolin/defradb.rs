@@ -109,6 +109,11 @@ pub mod encoding;
 pub mod encrypted_store;
 pub mod field_value;
 pub mod keys;
+/// Merges a `chunked` snapshot read against a transaction's pending writes.
+///
+/// Gated identically to `chunked`, whose readers are its only consumers.
+#[cfg(not(target_arch = "wasm32"))]
+mod merging;
 pub mod namespace;
 
 pub mod index;

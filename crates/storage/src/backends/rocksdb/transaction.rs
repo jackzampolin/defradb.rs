@@ -5,7 +5,6 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::iterator::RocksDbMergingIterator;
 use super::metrics::RocksDbTransactionMetrics;
 use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
@@ -15,6 +14,7 @@ use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::merging::MergingIterator;
 
 /// Owned snapshot that holds an `Arc<DB>` to ensure the DB outlives the snapshot.
 ///
@@ -339,7 +339,7 @@ impl Reader for RocksDbTxn {
             })
             .collect();
 
-        Ok(Box::new(RocksDbMergingIterator::new(
+        Ok(Box::new(MergingIterator::new(
             snapshot,
             pending_items,
             opts,

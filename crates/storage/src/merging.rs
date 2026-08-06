@@ -1,3 +1,5 @@
+//! Merge of a bounded-window snapshot read against a transaction's pending changes.
+
 use async_trait::async_trait;
 
 use crate::chunked::ChunkedSnapshot;
@@ -5,15 +7,14 @@ use crate::corekv::{Error, IterOptions, Iterator, KvPair, Result};
 
 /// Merging iterator that combines a bounded-window snapshot read with pending changes.
 ///
-/// The snapshot side is read from the store in bounded windows via
-/// `ChunkedSnapshot`, so a query that stops early (e.g. `LIMIT`) does not pay
-/// for the whole matching range. Pending changes are bounded by the
-/// transaction's own writes, not by collection size, so they stay
-/// materialized into a Vec at iterator creation. The merge itself happens
-/// on-demand during iteration via `next_merged()`.
-pub(crate) struct RocksDbMergingIterator {
+/// The snapshot side is read in bounded windows via `ChunkedSnapshot`, so a
+/// query that stops early (e.g. `LIMIT`) does not pay for the whole matching
+/// range. Pending changes are bounded by the transaction's own writes, not by
+/// collection size, so they stay materialized into a Vec at iterator creation.
+/// The merge itself happens on-demand during iteration via `next_merged()`.
+pub(crate) struct MergingIterator {
     /// Bounded-window reader over the snapshot (sorted ascending for forward
-    /// scans, descending for reverse scans — see `RocksDbTxn::iterator`).
+    /// scans, descending for reverse scans — see each backend's `iterator`).
     snapshot: ChunkedSnapshot,
 
     /// Pending changes (sorted ascending, None = deletion)
@@ -32,7 +33,7 @@ pub(crate) struct RocksDbMergingIterator {
     closed: bool,
 }
 
-impl RocksDbMergingIterator {
+impl MergingIterator {
     /// `snapshot` must already be in the iteration order implied by
     /// `opts.reverse()`; only `pending_items` is reversed here.
     pub(crate) fn new(
@@ -130,10 +131,10 @@ impl RocksDbMergingIterator {
     }
 }
 
-impl crate::corekv::private::Sealed for RocksDbMergingIterator {}
+impl crate::corekv::private::Sealed for MergingIterator {}
 
 #[async_trait]
-impl Iterator for RocksDbMergingIterator {
+impl Iterator for MergingIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {
         if self.closed {
             return Err(Error::Iterator("Iterator has been closed".into()));

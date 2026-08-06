@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::compute_range_bounds;
-use super::iterator::MergingIterator;
 use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
@@ -14,6 +13,7 @@ use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::merging::MergingIterator;
 
 /// Fjall transaction with snapshot isolation and buffered writes.
 pub(crate) struct FjallTxn {

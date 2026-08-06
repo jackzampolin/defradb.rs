@@ -9,7 +9,6 @@ use tracing::instrument;
 
 use super::config::DurabilityMode;
 use super::group_commit::{GroupCommitBuffer, PendingCommit};
-use super::iterator::MergingIterator;
 use super::{bound_as_ref, compute_range_bounds, KV_TABLE};
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
@@ -18,6 +17,7 @@ use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::merging::MergingIterator;
 
 /// Redb transaction with snapshot isolation and buffered writes.
 ///
