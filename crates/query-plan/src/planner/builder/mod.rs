@@ -125,8 +125,8 @@ impl Planner {
 
     /// Set a document fetcher for on-demand data loading.
     ///
-    /// When set, ScanNodes created by this planner will use the fetcher
-    /// to load documents during initialization if no docs are pre-loaded.
+    /// When set, ScanNodes created by this planner will stream documents
+    /// from the fetcher if no docs are pre-loaded.
     pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
         self.fetcher = Some(fetcher);
         self

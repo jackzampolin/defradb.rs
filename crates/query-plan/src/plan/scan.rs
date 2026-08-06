@@ -22,11 +22,14 @@ use query_types::mapper::Filter;
 /// # Data Loading
 ///
 /// ScanNode can obtain documents in two ways:
-/// 1. Pre-loaded via `with_docs()` - for testing or when data is already available
-/// 2. On-demand via a `DocFetcher` - fetches during `init()` if docs are empty
+/// 1. Pre-loaded via `with_docs()` - for testing, or when an earlier stage
+///    (a docID lookup, an index scan) already produced the document set
+/// 2. Streamed from a `DocFetcher` - `init()` opens a stream and each
+///    `next()` pulls a single document from it
 ///
-/// When a fetcher is provided and no docs are pre-loaded, the node will
-/// automatically fetch all documents from the collection during initialization.
+/// The streaming path is what keeps a `LIMIT` cheap: nothing below reads
+/// further once the parent stops pulling, so the cost is proportional to the
+/// documents actually consumed rather than to collection size.
 pub struct ScanNode {
     /// Collection schema
     collection: CollectionVersion,
