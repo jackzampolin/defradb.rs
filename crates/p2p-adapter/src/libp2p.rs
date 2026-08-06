@@ -927,7 +927,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 Arc::new(self.handle.clone()),
                 event_bus.as_ref(),
                 doc_ids,
-                timeout.unwrap_or(std::time::Duration::from_secs(30)),
+                timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT),
                 1,
             )
             .await;
@@ -945,7 +945,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // context does. `start` is taken before the publish, so the merge loop
         // below gets whatever the reply wait leaves rather than a second full
         // budget.
-        let overall_timeout = timeout.unwrap_or(std::time::Duration::from_secs(30));
+        let overall_timeout = timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT);
         let start = std::time::Instant::now();
         let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
 
@@ -957,7 +957,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // that is what a reply is expected from — not the doc-sync topic's
         // subscriber list.
         let expected_peers = connected_peers.len();
-        let response_wait = timeout.unwrap_or(std::time::Duration::from_secs(8));
+        let response_wait = timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT);
         let replies = coord
             .pubsub_sync_documents(doc_ids, Some(response_wait), Some(expected_peers))
             .await

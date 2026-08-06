@@ -840,7 +840,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             Arc::new(self.transport.clone()),
             event_bus.as_ref(),
             doc_ids,
-            timeout.unwrap_or(std::time::Duration::from_secs(10)),
+            timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT),
             DOC_SYNC_DISPATCH_PARALLELISM,
         )
         .await
