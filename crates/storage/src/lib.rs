@@ -98,8 +98,11 @@
 pub mod backends;
 /// Shared by backends that read snapshot ranges in bounded windows.
 ///
-/// Gated per-backend consumer: currently `redb` and `fjall` use it.
-#[cfg(all(any(feature = "redb", feature = "fjall"), not(target_arch = "wasm32")))]
+/// Gated per-backend consumer: currently `redb`, `fjall`, and `rocksdb` use it.
+#[cfg(all(
+    any(feature = "redb", feature = "fjall", feature = "rocksdb"),
+    not(target_arch = "wasm32")
+))]
 mod chunked;
 pub mod corekv;
 pub mod dyn_store;
