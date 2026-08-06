@@ -289,7 +289,9 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                     for req in requests {
                         let cid = req.cid.clone();
                         match gate
-                            .send_pushlog(&peer_key, t.send_two_stream_request(&pid, req))
+                            .send_pushlog_with_rate_limit_retry(&peer_key, || {
+                                t.send_two_stream_request(&pid, req.clone())
+                            })
                             .await
                         {
                             Ok(reply) if reply.err_message.is_some() => {

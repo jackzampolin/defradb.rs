@@ -149,7 +149,62 @@ impl ReplayPushGate {
             })?
             .map_err(ReplayPushSendError::Transport)
     }
+
+    /// `send_pushlog`, but a `RATE_LIMITED_MESSAGE` nack is retried with
+    /// exponential backoff instead of being surfaced to the caller.
+    ///
+    /// The peer's admission control says, verbatim, "retry later" — the
+    /// replay paths previously treated that nack like a hard rejection and
+    /// abandoned the document, leaving the peer permanently stale until the
+    /// doc next changed (the live sync path already honors this nack with a
+    /// retry ladder; this brings replay to parity). Only the rate-limit
+    /// sentinel is retried: hard rejections and transport errors surface
+    /// unchanged on the first occurrence. After `RATE_LIMIT_RETRY_MAX`
+    /// exhausted attempts the last nacked reply is returned, so callers'
+    /// existing give-up handling still fires.
+    pub(crate) async fn send_pushlog_with_rate_limit_retry<F, Fut>(
+        &self,
+        peer_id: &PeerId,
+        mut make_send: F,
+    ) -> Result<PushLogReply, ReplayPushSendError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = p2p::Result<PushLogReply>>,
+    {
+        let mut attempt: u32 = 0;
+        loop {
+            let reply = self.send_pushlog(peer_id, make_send()).await?;
+            let rate_limited = reply
+                .err_message
+                .as_deref()
+                .is_some_and(p2p::error::is_rate_limited_message);
+            if !rate_limited || attempt >= RATE_LIMIT_RETRY_MAX {
+                return Ok(reply);
+            }
+            attempt += 1;
+            // Exponential from the pacer's own cadence, capped: the peer's
+            // token bucket refills at the same configured rate this gate
+            // paces with, so a few doublings spans a full bucket refill.
+            let backoff = self
+                .rate_retry_delay
+                .saturating_mul(1u32 << attempt.min(RATE_LIMIT_RETRY_MAX))
+                .min(RATE_LIMIT_RETRY_BACKOFF_CAP);
+            tracing::debug!(
+                peer_id = %peer_id,
+                attempt,
+                backoff_ms = backoff.as_millis() as u64,
+                "replay push rate-limited by peer; backing off and retrying"
+            );
+            tokio::time::sleep(backoff).await;
+        }
+    }
 }
+
+/// Attempts to spend on a `RATE_LIMITED_MESSAGE` nack before giving the
+/// document up (the caller's existing rejected-reply handling then fires).
+const RATE_LIMIT_RETRY_MAX: u32 = 6;
+/// Ceiling on the per-attempt exponential backoff.
+const RATE_LIMIT_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct ReplayPeerPacer {
@@ -278,5 +333,104 @@ mod tests {
                 Err(current) => observed = current,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn gate() -> ReplayPushGate {
+        ReplayPushGate::new(ReplayPushConfig {
+            max_concurrent_document_tasks: 4,
+            max_concurrent_outbound_pushes: 4,
+            per_peer_rate_limit_burst: 1000,
+            per_peer_rate_limit_rate: 1000.0,
+            send_timeout: Duration::from_secs(1),
+        })
+    }
+
+    fn rate_limited_reply() -> PushLogReply {
+        PushLogReply::error("nacked", p2p::error::RATE_LIMITED_MESSAGE)
+    }
+
+    #[tokio::test]
+    async fn rate_limited_nacks_are_retried_until_success() {
+        let g = gate();
+        let peer = PeerId::new("peer-rl".to_string());
+        let attempts = AtomicUsize::new(0);
+
+        let reply = g
+            .send_pushlog_with_rate_limit_retry(&peer, || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < 3 {
+                        Ok(rate_limited_reply())
+                    } else {
+                        Ok(PushLogReply::success("merged"))
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            reply.err_message.is_none(),
+            "retry must surface the success"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            4,
+            "three rate-limited nacks then the success"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_rate_limit_retries_surface_the_nack() {
+        let g = gate();
+        let peer = PeerId::new("peer-rl-exhaust".to_string());
+        let attempts = AtomicUsize::new(0);
+
+        let reply = g
+            .send_pushlog_with_rate_limit_retry(&peer, || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Ok(rate_limited_reply()) }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reply.err_message.as_deref(),
+            Some(p2p::error::RATE_LIMITED_MESSAGE),
+            "after exhaustion the caller's existing rejected-reply handling must fire"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst) as u32,
+            RATE_LIMIT_RETRY_MAX + 1,
+            "initial attempt plus the bounded retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_rejections_are_not_retried() {
+        let g = gate();
+        let peer = PeerId::new("peer-hard".to_string());
+        let attempts = AtomicUsize::new(0);
+
+        let reply = g
+            .send_pushlog_with_rate_limit_retry(&peer, || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Ok(PushLogReply::error("nacked", "schema mismatch")) }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(reply.err_message.as_deref(), Some("schema mismatch"));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a hard rejection must surface on the first attempt"
+        );
     }
 }

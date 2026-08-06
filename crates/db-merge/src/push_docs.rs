@@ -305,7 +305,9 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     for req in requests {
                         let cid = req.cid.clone();
                         match gate
-                            .send_pushlog(&peer_key, push_h.send_two_stream_request(peer_id, req))
+                            .send_pushlog_with_rate_limit_retry(&peer_key, || {
+                                push_h.send_two_stream_request(peer_id, req.clone())
+                            })
                             .await
                         {
                             Ok(reply) if reply.err_message.is_some() => {
