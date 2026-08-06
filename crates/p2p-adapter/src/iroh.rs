@@ -879,7 +879,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             P2PError::transport(format!("failed to get connected peers: {error}"))
         })?;
         if connected_peers.is_empty() {
-            return Ok(());
+            return Err(P2PError::transport("no connected peers to sync with"));
         }
 
         let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);

@@ -909,7 +909,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             P2PError::transport(format!("failed to get connected peers: {error}"))
         })?;
         if connected_peers.is_empty() {
-            return Ok(());
+            return Err(P2PError::transport("no connected peers to sync with"));
         }
 
         // Wire-compatible with Go (#828): use pubsub_rpc doc-sync when the

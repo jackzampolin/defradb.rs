@@ -287,3 +287,54 @@ for_each_runtime!(p2p_sync_invalid_cid, invalid_cid_rejection_test, .with_p2p())
 for_each_p2p_topology!(p2p_sync_document, document_sync_test, .with_p2p());
 for_each_p2p_topology!(p2p_sync_versions, collection_sync_versions_test, .with_p2p());
 for_each_runtime!(p2p_sync_branchable, sync_branchable_test, .with_p2p());
+
+/// Regression for #1299: a sync with zero connected peers must not report success.
+/// Both runtimes must reject it — Go's `P2P.syncDocuments` returns `ErrTimeoutDocSync`
+/// when it has no active peers, and `p2pHandler.SyncDocuments` answers 500.
+async fn sync_without_peers_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+
+    cluster
+        .wait_for_log(0, "p2p_listening", Duration::from_secs(15))
+        .await
+        .expect("P2P listener did not start");
+
+    node.schema_add("type Users { name: String  age: Int }")
+        .expect("schema");
+
+    let created = node
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .expect("create John");
+    let doc_id = created["add_Users"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID")
+        .to_string();
+
+    let error = node
+        .p2p_document_sync("Users", &[&doc_id])
+        .expect_err("sync with zero connected peers must fail");
+    let message = error.to_string().to_lowercase();
+    assert!(
+        message.contains("no connected peers") || message.contains("timeout while syncing"),
+        "expected a no-peers error, got: {error}"
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v0/p2p/documents/sync", cluster.api_url(0)))
+        .json(&serde_json::json!({
+            "collectionName": "Users",
+            "docIDs": [doc_id],
+        }))
+        .send()
+        .await
+        .expect("sync request");
+
+    assert_eq!(
+        response.status().as_u16(),
+        500,
+        "peerless doc sync should answer 500, body: {}",
+        response.text().await.unwrap_or_default()
+    );
+}
+
+for_each_runtime!(p2p_sync_without_peers, sync_without_peers_test, .with_p2p());
