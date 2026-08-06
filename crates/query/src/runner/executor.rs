@@ -576,6 +576,18 @@ mod tests {
             Ok(vec![self.make_doc(format!("auto-{call}"))])
         }
 
+        /// In-memory mock: there is no storage to stream from.
+        async fn stream_all_with_deleted(
+            &self,
+            collection_name: &str,
+            show_deleted: bool,
+        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+            Ok(Box::new(crate::doc_stream::VecStream::new(
+                self.get_all_with_deleted(collection_name, show_deleted)
+                    .await?,
+            )))
+        }
+
         async fn get_by_ids(
             &self,
             collection_name: &str,
@@ -636,6 +648,18 @@ mod tests {
 
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             Ok(vec![make_users_doc("serial")])
+        }
+
+        /// In-memory mock: there is no storage to stream from.
+        async fn stream_all_with_deleted(
+            &self,
+            collection_name: &str,
+            show_deleted: bool,
+        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+            Ok(Box::new(crate::doc_stream::VecStream::new(
+                self.get_all_with_deleted(collection_name, show_deleted)
+                    .await?,
+            )))
         }
 
         async fn get_by_ids(
