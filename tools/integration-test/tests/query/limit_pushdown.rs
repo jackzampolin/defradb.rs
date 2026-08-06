@@ -135,4 +135,18 @@ async fn deleted_documents_do_not_shorten_a_limited_page() {
         .expect("limit query after deletes");
     let docs = res["User"].as_array().expect("User array");
     assert_eq!(docs.len(), 10, "a full page must still be returned");
+
+    // A page of the right length is not enough: a stream that stopped skipping
+    // deletes would still return 10 rows, just the wrong ones.
+    let deleted_names: Vec<String> = (0..100)
+        .filter(|i| (i + 1) % 3 == 0)
+        .map(|i| format!("User{i}"))
+        .collect();
+    for doc in docs {
+        let name = doc["name"].as_str().expect("name field");
+        assert!(
+            !deleted_names.contains(&name.to_string()),
+            "deleted document {name} was returned inside the page"
+        );
+    }
 }
