@@ -273,12 +273,17 @@ impl Reader for RocksDbTxn {
                 async move { Ok(batch) }
             })
         } else {
-            // Only `Bound::Included`/`Unbounded` are ever produced for the
-            // start: `compute_range_bounds` never returns `Excluded` there.
+            // `set_iterate_lower_bound` is inclusive, so an `Excluded` start
+            // needs its key's successor (`+ 0x00`) — the same adjustment the
+            // refill below makes for `after`.
             let initial_lower = match &start_bound {
                 Bound::Included(start) => Some(start.clone()),
                 Bound::Unbounded => None,
-                Bound::Excluded(_) => unreachable!("start bound is never Excluded"),
+                Bound::Excluded(start) => Some({
+                    let mut succ = start.clone();
+                    succ.push(0);
+                    succ
+                }),
             };
             let end_bound_for_chunk = end_bound.clone();
             let prefix = opts.prefix().map(|p| p.to_vec());
