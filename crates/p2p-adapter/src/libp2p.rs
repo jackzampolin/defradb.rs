@@ -893,7 +893,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()> {
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+        timeout: Option<std::time::Duration>,
+    ) -> P2PResult<()> {
         let pusher = self
             .doc_pusher
             .as_ref()
@@ -922,7 +927,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 Arc::new(self.handle.clone()),
                 event_bus.as_ref(),
                 doc_ids,
-                std::time::Duration::from_secs(30),
+                timeout.unwrap_or(std::time::Duration::from_secs(30)),
                 1,
             )
             .await;
@@ -935,20 +940,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             return Err(P2PError::transport("no connected peers to sync with"));
         }
 
-        let sync_peer_count = self
-            .handle
-            .topic_peers(DefraTopic::DocSync)
-            .await
-            .map_err(|error| {
-                P2PError::transport(format!("failed to get doc-sync topic peers: {error}"))
-            })?
-            .len();
-        if sync_peer_count == 0 {
-            return Ok(());
-        }
-
         let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
-        let overall_timeout = std::time::Duration::from_secs(30);
+        // A caller deadline covers the whole operation, as Go's single wait
+        // context does. `start` is taken before the publish, so the merge loop
+        // below gets whatever the reply wait leaves rather than a second full
+        // budget.
+        let overall_timeout = timeout.unwrap_or(std::time::Duration::from_secs(30));
         let start = std::time::Instant::now();
         let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
 
@@ -956,22 +953,32 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .sync_coordinator
             .as_ref()
             .expect("pubsub readiness requires a coordinator");
+        // Go's `activePeers` (`sync_doc.go:97-109`) is the connected set, so
+        // that is what a reply is expected from — not the doc-sync topic's
+        // subscriber list.
+        let expected_peers = connected_peers.len();
+        let response_wait = timeout.unwrap_or(std::time::Duration::from_secs(8));
         let replies = coord
-            .pubsub_sync_documents(
-                doc_ids,
-                Some(std::time::Duration::from_secs(8)),
-                Some(sync_peer_count),
-            )
+            .pubsub_sync_documents(doc_ids, Some(response_wait), Some(expected_peers))
             .await
             .map_err(|error| {
                 event_bus.unsubscribe(sub.id());
                 P2PError::transport(format!("pubsub_rpc doc-sync failed: {error}"))
             })?;
-        let heads = replies
-            .into_iter()
-            .flat_map(|(_, reply)| reply.results)
-            .flat_map(|item| item.heads)
-            .filter_map(|head| cid::Cid::try_from(head.as_slice()).ok());
+        // Evaluated on the raw advertisement, before the merged-head filter
+        // below: a peer offering a head we already hold is a reply Go counts,
+        // and filtering first would turn it into a spurious timeout.
+        let heads = match crate::doc_sync::pubsub_replies::advertised_heads(
+            expected_peers,
+            &doc_set,
+            &replies,
+        ) {
+            Ok(heads) => heads,
+            Err(error) => {
+                event_bus.unsubscribe(sub.id());
+                return Err(error);
+            }
+        };
         let mut pending_heads = unmerged_doc_sync_heads(coord.blockstore().as_ref(), heads).await;
 
         while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
@@ -1140,6 +1147,41 @@ mod tests {
         assert_eq!(pending, HashSet::from([unmerged]));
     }
 
+    /// #1299 regression guard for the ordering of the two steps the pubsub
+    /// branch runs: a silent peer plus a head we have already merged is a
+    /// success in Go (its `result` map holds the head), so the timeout check
+    /// must read the raw advertisement and only then drop merged heads.
+    #[tokio::test]
+    async fn already_merged_head_from_one_peer_is_not_a_timeout() {
+        let blockstore = DefraBlockstore::new(Arc::new(MemoryStore::new()), true);
+        let merged =
+            cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                .unwrap();
+        blockstore.put(&merged, b"merged").await.unwrap();
+        blockstore.mark_as_merged(&merged).await.unwrap();
+
+        let doc_set = HashSet::from(["bae-doc-1".to_string()]);
+        let replies = [(
+            "peer-a".to_string(),
+            p2p::message::pubsub::DocSyncReply {
+                results: vec![p2p::message::pubsub::DocSyncItem {
+                    doc_id: "bae-doc-1".to_string(),
+                    heads: vec![merged.to_bytes()],
+                }],
+                sender: "peer-a".to_string(),
+            },
+        )];
+
+        let heads = crate::doc_sync::pubsub_replies::advertised_heads(2, &doc_set, &replies)
+            .expect("an advertised head is a result even when a peer stays silent");
+        let pending = unmerged_doc_sync_heads(&blockstore, heads).await;
+
+        assert!(
+            pending.is_empty(),
+            "the advertised head is already merged, so nothing is left to wait for"
+        );
+    }
+
     /// The adapter under test carries no sync coordinator, so the blockstore
     /// generic is never exercised; a do-nothing implementation satisfies it.
     struct NoopBlockstore;
@@ -1251,7 +1293,7 @@ mod tests {
         connect_hosts(&handle_a, &handle_b).await;
 
         let result = adapter
-            .sync_documents("Users", vec!["bae-does-not-matter".to_string()])
+            .sync_documents("Users", vec!["bae-does-not-matter".to_string()], None)
             .await;
 
         assert!(

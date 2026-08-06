@@ -211,7 +211,16 @@ pub trait P2POperations: Send + Sync {
     async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()>;
 
     /// Sync specific documents from connected peers.
-    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()>;
+    ///
+    /// `timeout` is the caller's deadline for the whole operation; `None` leaves
+    /// the transport's default in place, matching Go, where an absent body
+    /// `timeout` leaves the context without a deadline.
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+        timeout: Option<std::time::Duration>,
+    ) -> P2PResult<()>;
 
     /// Sync a branchable collection from connected peers.
     async fn sync_branchable_collection(&self, collection_id: &str) -> P2PResult<()>;
@@ -260,6 +269,10 @@ pub struct SyncDocumentsRequest {
     pub collection_name: String,
     #[serde(rename = "docIDs")]
     pub doc_ids: Vec<String>,
+    /// Go duration string (`"5s"`, `"1m30s"`). Go's client sends this whenever
+    /// the caller's context carries a deadline.
+    #[serde(rename = "timeout", default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
 }
 
 /// Request body for branchable collection sync (Go-compatible).

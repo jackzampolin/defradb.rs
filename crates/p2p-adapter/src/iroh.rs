@@ -819,7 +819,12 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()> {
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+        timeout: Option<std::time::Duration>,
+    ) -> P2PResult<()> {
         let pusher = self
             .doc_pusher
             .as_ref()
@@ -835,7 +840,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             Arc::new(self.transport.clone()),
             event_bus.as_ref(),
             doc_ids,
-            std::time::Duration::from_secs(10),
+            timeout.unwrap_or(std::time::Duration::from_secs(10)),
             DOC_SYNC_DISPATCH_PARALLELISM,
         )
         .await
@@ -1109,18 +1114,20 @@ mod tests {
         );
     }
 
-    /// #1299, against a real transport: with a peer that accepts the connection
-    /// but never replies, the send blocks on iroh's ~30s request-response
-    /// timeout and then fails, so nothing reached any peer and the sync must
-    /// report an error.
+    /// #1299, against a real transport: with a peer that never replies, iroh's
+    /// send awaits a reply that never comes and fails, so nothing reached any
+    /// peer and the sync must report an error.
     ///
-    /// Ignored by default because that 30s timeout is unavoidable here. The
-    /// same branch is covered deterministically in under a millisecond by
-    /// `doc_sync::sync::tests::all_sends_failing_is_an_error`; this one exists
-    /// to confirm the fake still matches a real transport, so run it on demand
-    /// with `cargo test -p defra-p2p-adapter -- --ignored`.
+    /// The peer is made unresponsive by dropping its `DocSyncRequest` event —
+    /// and with it the reply token, the peer's half of the bidirectional
+    /// stream. That resets the stream, so the sender's await fails in
+    /// milliseconds rather than waiting out iroh's 30s request-response
+    /// timeout, which keeps this runnable by default.
+    ///
+    /// This fails if iroh's send ever becomes fire-and-forget like libp2p's: a
+    /// one-way send ignores what the peer does with the stream and returns
+    /// `Ok`, which would turn this sync into a silent success.
     #[tokio::test]
-    #[ignore = "takes ~30s: waits out iroh's real request-response timeout"]
     async fn doc_sync_with_unresponsive_peer_errors() {
         let key_a = load_or_generate_secret_key(None).await.expect("key a");
         let key_b = load_or_generate_secret_key(None).await.expect("key b");
@@ -1128,7 +1135,7 @@ mod tests {
             spawn_endpoint(test_endpoint_config(key_a.clone()))
                 .await
                 .expect("endpoint a");
-        let (command_tx_b, _events_b, _replicators_b, _task_b) =
+        let (command_tx_b, mut events_b, _replicators_b, _task_b) =
             spawn_endpoint(test_endpoint_config(key_b.clone()))
                 .await
                 .expect("endpoint b");
@@ -1149,12 +1156,19 @@ mod tests {
 
         // Endpoint B has no coordinator behind it, so it accepts the doc-sync
         // request at the transport layer and never produces a reply or a merge.
+        // Dropping each event drops the reply token with it.
+        let drain_b = tokio::spawn(async move { while events_b.recv().await.is_some() {} });
+
         let dial_addr = dialable_ticket(&transport_b).await;
         adapter.connect_peer(&dial_addr).await.expect("dial b");
 
-        let result = adapter
-            .sync_documents("Users", vec!["bae-does-not-matter".to_string()])
-            .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            adapter.sync_documents("Users", vec!["bae-does-not-matter".to_string()], None),
+        )
+        .await
+        .expect("sync must fail on the reset stream, not wait out the 30s response timeout");
+        drain_b.abort();
 
         let error = result.expect_err("no request reached a peer, so sync must fail");
         assert!(

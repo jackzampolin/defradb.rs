@@ -176,6 +176,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     );
                 }
                 out.push((peer_str, parsed));
+            } else {
+                // Go's `handleDocSyncResponse` returns `resp.From` for both an
+                // error reply and a decode failure, so the peer is cleared from
+                // `pendingPeers` either way. It contributes no heads but it did
+                // answer, and a caller counting replies to decide whether the
+                // request timed out would otherwise mistake it for silence.
+                out.push((
+                    resp.from.to_string(),
+                    wire::DocSyncReply {
+                        results: Vec::new(),
+                        sender: resp.from.to_string(),
+                    },
+                ));
             }
         }
         Ok(out)
