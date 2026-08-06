@@ -74,7 +74,7 @@ impl Store for MemoryStore {
             || self.conflict_tracker.current_version(),
             |snapshot| snapshot.version(),
         );
-        let snapshot = data.clone();
+        let snapshot = Arc::new(data.clone());
 
         Ok(Box::new(MemoryTxn {
             store: Arc::clone(&self.data),

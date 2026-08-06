@@ -1,12 +1,15 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::iterator::MemoryIterator;
+use super::compute_range_bounds;
+use super::iterator::MergingIterator;
 use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
+use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -32,8 +35,11 @@ pub(crate) struct MemoryTxn {
     /// Version at which this transaction's snapshot was taken
     pub(crate) read_version: u64,
 
-    /// Snapshot of store at transaction start (for reads)
-    pub(crate) snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Snapshot of store at transaction start (for reads).
+    ///
+    /// `Arc`-wrapped so `iterator()` can hand a cheap handle to a `'static`
+    /// chunk-reading closure instead of cloning the whole map per call.
+    pub(crate) snapshot: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
 
     /// Pending changes (Some(value) = set, None = delete)
     pub(crate) pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
@@ -129,22 +135,82 @@ impl Reader for MemoryTxn {
         }
 
         self.read_set.lock().record_iter_options(&opts);
+        let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let keys_only = opts.keys_only();
+        let matches_prefix =
+            |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
-        // Merge snapshot and pending changes
-        let mut merged = self.snapshot.clone();
-        let pending = self.pending.lock();
-        for (key, value) in pending.iter() {
-            match value {
-                Some(v) => {
-                    merged.insert(key.clone(), v.clone());
-                }
-                None => {
-                    merged.remove(key);
-                }
-            }
-        }
+        let snapshot = if opts.reverse() {
+            // Chunked forward reads cannot be reversed after the fact, and
+            // reverse scans are not on the limit hot path: read everything
+            // matching eagerly, exactly as before.
+            let mut items: Vec<(Vec<u8>, Vec<u8>)> = self
+                .snapshot
+                .range((start_bound.clone(), end_bound.clone()))
+                .filter(|(k, _)| matches_prefix(k))
+                .map(|(k, v)| (k.clone(), if keys_only { Vec::new() } else { v.clone() }))
+                .collect();
+            items.reverse();
+            let chunk_size = items.len().max(1);
+            ChunkedSnapshot::new(chunk_size, move |after| {
+                // Already fully materialized: the whole (reversed) result is
+                // one window, and any later refill is the empty terminator.
+                let batch = if after.is_none() {
+                    items.clone()
+                } else {
+                    Vec::new()
+                };
+                async move { Ok(batch) }
+            })
+        } else {
+            let end_bound_for_chunk = end_bound.clone();
+            let start_bound_for_chunk = start_bound.clone();
+            let prefix = opts.prefix().map(|p| p.to_vec());
+            let snapshot = Arc::clone(&self.snapshot);
+            ChunkedSnapshot::new(DEFAULT_CHUNK_SIZE, move |after: Option<Vec<u8>>| {
+                // Resume strictly after the last key yielded: `last_key + 0x00`
+                // is its exclusive successor, so nothing sorts between them.
+                let lower_bound = match &after {
+                    Some(k) => {
+                        let mut succ = k.clone();
+                        succ.push(0);
+                        Bound::Included(succ)
+                    }
+                    None => start_bound_for_chunk.clone(),
+                };
+                let items: Vec<(Vec<u8>, Vec<u8>)> = snapshot
+                    .range((lower_bound, end_bound_for_chunk.clone()))
+                    .filter(|(k, _)| prefix.as_deref().is_none_or(|p| k.starts_with(p)))
+                    .take(DEFAULT_CHUNK_SIZE)
+                    .map(|(k, v)| (k.clone(), if keys_only { Vec::new() } else { v.clone() }))
+                    .collect();
+                async move { Ok(items) }
+            })
+        };
 
-        Ok(Box::new(MemoryIterator::new(merged, opts)?))
+        // Extract pending items into Vec (sorted by BTreeMap, with Option for deletions)
+        let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = if self.readonly {
+            Vec::new()
+        } else {
+            let pending = self.pending.lock();
+            pending
+                .range((start_bound, end_bound))
+                .filter(|(k, _)| matches_prefix(k))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_ref()
+                            .map(|value| if keys_only { Vec::new() } else { value.clone() }),
+                    )
+                })
+                .collect()
+        };
+
+        Ok(Box::new(MergingIterator::new(
+            snapshot,
+            pending_items,
+            opts,
+        )))
     }
 }
 
