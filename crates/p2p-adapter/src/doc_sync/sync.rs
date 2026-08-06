@@ -47,12 +47,17 @@ where
             return Err(error);
         }
 
-        // Track whether any request was dispatched. If none were, further
-        // attempts cannot produce merges — exit instead of burning the full
-        // overall timeout.
+        // No request reached any peer, so nothing can arrive. Unlike a merge
+        // shortfall — where a peer legitimately has nothing newer to send —
+        // this has no benign reading, so it is an error rather than a silent
+        // success. Go reports its equivalent (a failed topic publish) the same
+        // way.
         let any_sent = send_requests(&dispatch, &connected_peers, request, parallelism).await;
         if !any_sent {
-            break;
+            event_bus.unsubscribe(sub.id());
+            return Err(P2PError::transport(
+                "no doc-sync request could be sent to any connected peer",
+            ));
         }
 
         // Idle completion: exit after `idle_timeout` with no MergeComplete
@@ -144,12 +149,12 @@ mod tests {
 
     use crate::doc_sync::test_support::FailingDispatch;
 
-    /// With peers present and every send failing, the sync reaches the
-    /// `!any_sent` branch. It currently returns `Ok`; #1299's remaining rows
-    /// change that to an error, and this test is the seam that makes the
-    /// change testable.
+    /// #1299: with peers present and every send failing, the sync must report
+    /// an error rather than success. The attempt count is asserted first — it
+    /// is what proves the dispatch loop actually tried every peer instead of
+    /// short-circuiting somewhere earlier.
     #[tokio::test]
-    async fn all_sends_failing_reaches_the_no_send_branch() {
+    async fn all_sends_failing_is_an_error() {
         let dispatch = Arc::new(FailingDispatch::with_peers(2));
         let bus = Arc::new(events::ChannelBus::default());
 
@@ -166,9 +171,12 @@ mod tests {
             dispatch.send_attempts.load(Ordering::SeqCst) >= 2,
             "every connected peer should have been attempted"
         );
+        let error = result.expect_err("no request reached a peer, so sync must fail");
         assert!(
-            result.is_ok(),
-            "current contract returns Ok when nothing was sent, got: {result:?}"
+            error
+                .to_string()
+                .contains("no doc-sync request could be sent"),
+            "expected a no-send error, got: {error}"
         );
     }
 }

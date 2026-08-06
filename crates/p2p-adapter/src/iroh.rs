@@ -1109,13 +1109,19 @@ mod tests {
         );
     }
 
-    /// Characterization: with a peer that accepts the connection but never
-    /// replies, the send itself blocks on iroh's ~30s request-response timeout,
-    /// then fails; `sync_documents` treats that as "nothing sent," breaks out of
-    /// its retry loop on the first attempt, and still reports success. Locks in
-    /// today's behaviour so the doc-sync extraction is provably behaviour-preserving.
+    /// #1299, against a real transport: with a peer that accepts the connection
+    /// but never replies, the send blocks on iroh's ~30s request-response
+    /// timeout and then fails, so nothing reached any peer and the sync must
+    /// report an error.
+    ///
+    /// Ignored by default because that 30s timeout is unavoidable here. The
+    /// same branch is covered deterministically in under a millisecond by
+    /// `doc_sync::sync::tests::all_sends_failing_is_an_error`; this one exists
+    /// to confirm the fake still matches a real transport, so run it on demand
+    /// with `cargo test -p defra-p2p-adapter -- --ignored`.
     #[tokio::test]
-    async fn doc_sync_with_unresponsive_peer_returns_ok() {
+    #[ignore = "takes ~30s: waits out iroh's real request-response timeout"]
+    async fn doc_sync_with_unresponsive_peer_errors() {
         let key_a = load_or_generate_secret_key(None).await.expect("key a");
         let key_b = load_or_generate_secret_key(None).await.expect("key b");
         let (command_tx_a, _events_a, _replicators_a, _task_a) =
@@ -1150,9 +1156,12 @@ mod tests {
             .sync_documents("Users", vec!["bae-does-not-matter".to_string()])
             .await;
 
+        let error = result.expect_err("no request reached a peer, so sync must fail");
         assert!(
-            result.is_ok(),
-            "unresponsive peer should currently return Ok after the send times out, got: {result:?}"
+            error
+                .to_string()
+                .contains("no doc-sync request could be sent"),
+            "expected a no-send error, got: {error}"
         );
     }
 }
