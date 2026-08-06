@@ -13,19 +13,44 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         &self,
         cid: &Cid,
         block: &Block,
+        depth: usize,
     ) -> std::result::Result<String, MergeError> {
-        // A genesis composite (no heads) seeds its own DocID from its CID, so
-        // the ownership index could only ever hold that same derived value.
-        // Short-circuit before opening a read txn — this is the hot path for
-        // freshly created documents arriving over replication.
+        self.ensure_merge_depth(cid, depth)?;
+
+        // Avoid opening a read transaction for freshly created documents.
         if block.heads.as_deref().is_none_or(<[Cid]>::is_empty) {
             return Ok(db_blocks::derive_doc_id(cid));
         }
 
         let txn = self.db.new_txn(true).await?;
         let systemstore = txn.systemstore().map_err(MergeError::Database)?;
+        self.resolve_composite_doc_id_in_txn(&systemstore, cid, block, depth)
+            .await
+    }
+
+    /// Resolve a composite's DocID through an existing transaction view.
+    ///
+    /// Batch merges must use this entrypoint so identity lookups observe
+    /// ownership mappings staged earlier in the shared transaction.
+    pub(crate) async fn resolve_composite_doc_id_in_txn(
+        &self,
+        systemstore: &NamespaceView,
+        cid: &Cid,
+        block: &Block,
+        depth: usize,
+    ) -> std::result::Result<String, MergeError> {
+        self.ensure_merge_depth(cid, depth)?;
+
+        // A genesis composite (no heads) seeds its own DocID from its CID, so
+        // the ownership index could only ever hold that same derived value.
+        // This is the hot path for freshly created documents arriving over
+        // replication.
+        if block.heads.as_deref().is_none_or(<[Cid]>::is_empty) {
+            return Ok(db_blocks::derive_doc_id(cid));
+        }
+
         let mut visited = HashSet::new();
-        self.resolve_composite_doc_id_inner(&systemstore, cid, block, &mut visited)
+        self.resolve_composite_doc_id_inner(systemstore, cid, block, depth, &mut visited)
             .await
     }
 
@@ -47,6 +72,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         systemstore: &NamespaceView,
         cid: &Cid,
         block: &Block,
+        initial_depth: usize,
         visited: &mut HashSet<Cid>,
     ) -> std::result::Result<String, MergeError> {
         // A head's owner lookup, blockstore read, and decode are all DEFERRED
@@ -59,18 +85,25 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             /// The entry composite, already decoded by the caller. Boxed:
             /// the worklist is Pending-dominated and this variant occurs
             /// exactly once (the seed).
-            Loaded(Cid, Box<Block>),
+            Loaded(Cid, Box<Block>, usize),
             /// A discovered head; nothing has been probed yet.
-            Pending(Cid),
+            Pending(Cid, usize),
         }
 
-        let mut worklist: Vec<IdentityFrame> =
-            vec![IdentityFrame::Loaded(*cid, Box::new(block.clone()))];
+        let mut worklist: Vec<IdentityFrame> = vec![IdentityFrame::Loaded(
+            *cid,
+            Box::new(block.clone()),
+            initial_depth,
+        )];
 
         while let Some(frame) = worklist.pop() {
-            let (node_cid, node_block) = match frame {
-                IdentityFrame::Loaded(node_cid, node_block) => (node_cid, *node_block),
-                IdentityFrame::Pending(head_cid) => {
+            let (node_cid, node_block, depth) = match frame {
+                IdentityFrame::Loaded(node_cid, node_block, depth) => {
+                    self.ensure_merge_depth(&node_cid, depth)?;
+                    (node_cid, *node_block, depth)
+                }
+                IdentityFrame::Pending(head_cid, depth) => {
+                    self.ensure_merge_depth(&head_cid, depth)?;
                     if !visited.insert(head_cid) {
                         continue;
                     }
@@ -99,7 +132,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     if !matches!(head_block.delta, CrdtDelta::Composite(_)) {
                         continue;
                     }
-                    (head_cid, head_block)
+                    (head_cid, head_block, depth)
                 }
             };
 
@@ -125,7 +158,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             // Reversed so the FIRST head is popped — and only then probed —
             // first: DFS parity with the recursive predecessor.
             for head_cid in heads.iter().rev() {
-                worklist.push(IdentityFrame::Pending(*head_cid));
+                worklist.push(IdentityFrame::Pending(*head_cid, depth + 1));
             }
         }
 

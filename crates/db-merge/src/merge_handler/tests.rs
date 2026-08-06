@@ -10,10 +10,82 @@ use defra_core::block::{
 };
 use events::{Bus, ChannelBus, EventName};
 use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::CollectionID;
 use tokio::time::{timeout, Duration};
+
+struct CountingBlockstore<B> {
+    inner: Arc<B>,
+    gets: AtomicUsize,
+}
+
+impl<B> CountingBlockstore<B> {
+    fn new(inner: Arc<B>) -> Self {
+        Self {
+            inner,
+            gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn get_count(&self) -> usize {
+        self.gets.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<B: blockstore::Blockstore> blockstore::Blockstore for CountingBlockstore<B> {
+    async fn get(&self, cid: &Cid) -> blockstore::Result<Option<bytes::Bytes>> {
+        self.gets.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(cid).await
+    }
+
+    async fn put(&self, cid: &Cid, data: &[u8]) -> blockstore::Result<()> {
+        self.inner.put(cid, data).await
+    }
+
+    async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> blockstore::Result<()> {
+        self.inner.put_many(blocks).await
+    }
+
+    async fn has(&self, cid: &Cid) -> blockstore::Result<bool> {
+        self.inner.has(cid).await
+    }
+
+    async fn delete(&self, cid: &Cid) -> blockstore::Result<()> {
+        self.inner.delete(cid).await
+    }
+
+    async fn get_size(&self, cid: &Cid) -> blockstore::Result<Option<usize>> {
+        self.inner.get_size(cid).await
+    }
+
+    async fn all_cids(&self) -> blockstore::Result<Vec<Cid>> {
+        self.inner.all_cids().await
+    }
+
+    fn hash_on_read(&self, enabled: bool) {
+        self.inner.hash_on_read(enabled);
+    }
+
+    async fn is_merged(&self, cid: &Cid) -> blockstore::Result<bool> {
+        self.inner.is_merged(cid).await
+    }
+
+    async fn mark_as_merged(&self, cid: &Cid) -> blockstore::Result<()> {
+        self.inner.mark_as_merged(cid).await
+    }
+
+    async fn mark_batch_as_merged(&self, cids: &[Cid]) -> blockstore::Result<()> {
+        self.inner.mark_batch_as_merged(cids).await
+    }
+
+    async fn get_unmerged(&self) -> blockstore::Result<Vec<Cid>> {
+        self.inner.get_unmerged().await
+    }
+}
 
 async fn register_test_block_owner(
     handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
@@ -143,6 +215,28 @@ async fn make_handler_with_schema_and_bus() -> (
     (handler, blockstore, bus)
 }
 
+async fn make_counting_handler_with_schema() -> (
+    DbMergeHandler<MemoryStore, CountingBlockstore<DefraBlockstore<MemoryStore>>>,
+    Arc<DefraBlockstore<MemoryStore>>,
+    Arc<CountingBlockstore<DefraBlockstore<MemoryStore>>>,
+) {
+    let store = Arc::new(MemoryStore::new());
+    let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+    db.create_collection(CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+    ))
+    .await
+    .unwrap();
+
+    let inner = Arc::new(DefraBlockstore::new(store, false));
+    let blockstore = Arc::new(CountingBlockstore::new(inner.clone()));
+    let handler = DbMergeHandler::new(db, blockstore.clone());
+    (handler, inner, blockstore)
+}
+
 async fn make_handler_with_counter_schema() -> (
     DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
     Arc<DefraBlockstore<MemoryStore>>,
@@ -211,6 +305,20 @@ async fn build_merge_block(
         doc_id: result.doc_id,
         collection_id: "col-users".to_string(),
         creator: "did:key:z6MkrBatchMergeTest".to_string(),
+        sender_peer: Some("peer1".to_string()),
+        is_explicit_replicator: false,
+        explicit_replay_authorization: None,
+        verified_creator: None,
+    }
+}
+
+fn composite_merge_block(cid: Cid, block: &Block, doc_id: &str) -> MergeBlock {
+    MergeBlock {
+        cid,
+        block_data: bytes::Bytes::from(block.to_dag_cbor().unwrap()),
+        doc_id: doc_id.to_string(),
+        collection_id: "col-users".to_string(),
+        creator: "did:key:z6MkrBatchIdentityTest".to_string(),
         sender_peer: Some("peer1".to_string()),
         is_explicit_replicator: false,
         explicit_replay_authorization: None,
@@ -3151,6 +3259,163 @@ async fn batch_merge_unique_violation_first_still_merges_valid_sibling() {
     );
 }
 
+/// Ownership recorded by an earlier block in a shared batch transaction must
+/// be visible when the next composite resolves its identity. Neither block is
+/// placed in the blockstore: the child can resolve only through the parent's
+/// staged owner mapping, not by opening a separate read transaction and
+/// walking the parent block.
+#[tokio::test]
+async fn batch_composite_identity_observes_staged_parent_ownership() {
+    let (handler, _blockstore, _bus) = make_handler_with_schema_and_bus().await;
+
+    let payload = |priority| CompositeDeltaPayload {
+        schema_version_id: "v1".to_string(),
+        priority,
+        status: 1,
+    };
+    let genesis = Block::new(CrdtDelta::Composite(payload(1)), vec![], vec![]);
+    let genesis_cid = genesis.generate_cid().unwrap();
+    let doc_id = db_blocks::derive_doc_id(&genesis_cid);
+    let child = Block::new(CrdtDelta::Composite(payload(2)), vec![genesis_cid], vec![]);
+    let child_cid = child.generate_cid().unwrap();
+
+    let blocks = [
+        composite_merge_block(genesis_cid, &genesis, &doc_id),
+        composite_merge_block(child_cid, &child, &doc_id),
+    ];
+    let results = handler
+        .try_batch_merge(&blocks)
+        .await
+        .expect("child identity must observe the genesis owner staged by the same batch");
+
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result, Ok(MergeOutcome::Merged))),
+        "both staged parent and child must merge: {results:?}"
+    );
+}
+
+/// A batch ancestry replay resolves the root identity once and carries it
+/// through every explicit merge frame. Counting blockstore reads makes the
+/// complexity regression deterministic: resolving every ancestor afresh costs
+/// O(N^2), while one identity walk plus one merge walk is O(N).
+#[tokio::test]
+async fn batch_composite_identity_walk_is_linear_in_ancestry_depth() {
+    let (handler, inner_blockstore, counting_blockstore) =
+        make_counting_handler_with_schema().await;
+
+    const DEPTH: usize = 64;
+    let mut parent_cid = None;
+    let mut genesis_cid = None;
+    let mut tip = None;
+
+    for priority in 1..=DEPTH as u64 {
+        let block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "v1".to_string(),
+                priority,
+                status: 1,
+            }),
+            parent_cid.into_iter().collect(),
+            vec![],
+        );
+        let cid = block.generate_cid().unwrap();
+        inner_blockstore
+            .put(&cid, &block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        genesis_cid.get_or_insert(cid);
+        parent_cid = Some(cid);
+        tip = Some((cid, block));
+    }
+
+    let (tip_cid, tip_block) = tip.expect("chain has a tip");
+    let doc_id = db_blocks::derive_doc_id(&genesis_cid.expect("chain has a genesis"));
+    let results = handler
+        .try_batch_merge(&[composite_merge_block(tip_cid, &tip_block, &doc_id)])
+        .await
+        .unwrap();
+    assert!(matches!(results.as_slice(), [Ok(MergeOutcome::Merged)]));
+
+    let get_count = counting_blockstore.get_count();
+    assert!(
+        get_count <= DEPTH * 3,
+        "depth-{DEPTH} replay performed {get_count} block reads; expected linear work"
+    );
+}
+
+#[test]
+fn merge_depth_policy_accepts_last_supported_depth_and_rejects_limit() {
+    let (handler, _) = make_handler();
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let cid = block.generate_cid().unwrap();
+
+    assert!(handler
+        .ensure_merge_depth(&cid, DEFAULT_MAX_MERGE_DEPTH - 1)
+        .is_ok());
+    assert!(matches!(
+        handler.ensure_merge_depth(&cid, DEFAULT_MAX_MERGE_DEPTH),
+        Err(MergeError::DepthExceeded {
+            cid: error_cid,
+            depth: DEFAULT_MAX_MERGE_DEPTH,
+        }) if error_cid == cid
+    ));
+
+    let custom_handler = DbMergeHandler::new_with_max_merge_depth(
+        handler.db.clone(),
+        handler.blockstore.clone(),
+        17,
+    );
+    assert!(custom_handler.ensure_merge_depth(&cid, 16).is_ok());
+    assert!(matches!(
+        custom_handler.ensure_merge_depth(&cid, 17),
+        Err(MergeError::DepthExceeded { depth: 17, .. })
+    ));
+}
+
+#[tokio::test]
+async fn composite_identity_uses_merge_depth_policy() {
+    let (handler, blockstore) = make_handler();
+    let handler = DbMergeHandler::new_with_max_merge_depth(
+        handler.db.clone(),
+        handler.blockstore.clone(),
+        17,
+    );
+    let payload = |priority| CompositeDeltaPayload {
+        schema_version_id: "v1".to_string(),
+        priority,
+        status: 1,
+    };
+    let genesis = Block::new(CrdtDelta::Composite(payload(1)), vec![], vec![]);
+    let genesis_cid = genesis.generate_cid().unwrap();
+    blockstore
+        .put(&genesis_cid, &genesis.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+    let child = Block::new(CrdtDelta::Composite(payload(2)), vec![genesis_cid], vec![]);
+    let child_cid = child.generate_cid().unwrap();
+
+    assert!(matches!(
+        handler
+            .resolve_composite_doc_id(&child_cid, &child, 16)
+            .await,
+        Err(MergeError::DepthExceeded {
+            cid: error_cid,
+            depth: 17,
+        }) if error_cid == genesis_cid
+    ));
+}
+
 /// Regression: resolving a composite's DocID walks its full ancestry, and
 /// that ancestry is as deep as the document's update history. The recursive
 /// predecessor of `resolve_composite_doc_id_inner` burned one async frame
@@ -3211,7 +3476,7 @@ fn resolve_composite_doc_id_walks_deep_ancestry_on_a_small_stack() {
                 // No owner-index entries anywhere: the resolver must walk
                 // the entire chain to the genesis and derive from its CID.
                 let resolved = handler
-                    .resolve_composite_doc_id(&parent_cid, &tip_block)
+                    .resolve_composite_doc_id(&parent_cid, &tip_block, 0)
                     .await
                     .expect("deep ancestry must resolve without overflowing the stack");
                 assert_eq!(resolved, db_blocks::derive_doc_id(&genesis_cid));
@@ -3277,7 +3542,7 @@ async fn resolve_composite_doc_id_explores_first_head_before_probing_later_sibli
     register_test_block_owner(&handler, 7, "doc-of-later-head", &later_head_cid).await;
 
     let resolved = handler
-        .resolve_composite_doc_id(&tip_cid, &tip)
+        .resolve_composite_doc_id(&tip_cid, &tip, 0)
         .await
         .unwrap();
     assert_eq!(

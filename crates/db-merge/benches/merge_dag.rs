@@ -10,8 +10,8 @@
 //! separate source store) and copied into the target blockstore, so the blocks
 //! are wire-identical to replicated ones.
 //!
-//! `MAX_MERGE_DEPTH` (1024) caps the walk; the depths benched here stay under it
-//! so the measurement is of the walk itself rather than the guard.
+//! The merge-depth policy caps the walk; the depths benched here stay under the
+//! default so the measurement is of the walk itself rather than the guard.
 
 use std::collections::HashSet;
 use std::hint::black_box;

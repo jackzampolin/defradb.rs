@@ -181,7 +181,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_connections_per_peer: Option<u32>,
 
-    /// Max DAG recursion depth for merge operations (default: 1024)
+    /// Maximum DAG traversal depth for merge operations
     #[arg(long)]
     pub max_merge_depth: Option<usize>,
 
