@@ -161,6 +161,18 @@ macro_rules! generate_backend_tests {
         }
 
         #[tokio::test]
+        async fn shared_test_iterator_bounded_scan_across_chunks() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_bounded_scan_across_chunks(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_prefix_scan_across_chunks() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_prefix_scan_across_chunks(&store).await;
+        }
+
+        #[tokio::test]
         async fn shared_test_iterator_reverse_with_prefix() {
             let store = $store_fn().await;
             test_suite::test_iterator_reverse_with_prefix(&store).await;

@@ -50,11 +50,12 @@ pub async fn test_iterator_sees_pending_deletes<S: Store>(store: &S) {
 /// is the case most likely to drop or duplicate a key, because it is the one
 /// place a refill happens mid-merge.
 ///
-/// The window is 256 pairs, so this seeds 600 committed keys and then, in an
-/// uncommitted transaction, inserts into the 255/256 seam, deletes the first
-/// key of the second window, and overrides the key after it.
+/// Indices are derived from `DEFAULT_CHUNK_SIZE` so that retuning the window
+/// moves the seam this exercises instead of silently leaving it untested.
 pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S) {
-    let committed: Vec<Vec<u8>> = (0..600)
+    let chunk = crate::chunked::DEFAULT_CHUNK_SIZE;
+    let last_of_window = chunk - 1;
+    let committed: Vec<Vec<u8>> = (0..chunk * 2 + 88)
         .map(|i| format!("key_{:05}", i).into_bytes())
         .collect();
 
@@ -64,22 +65,26 @@ pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S)
     }
     txn.commit().await.unwrap();
 
-    // Sorts after key_00255 and before key_00256, i.e. into the seam.
-    let seam_key = b"key_00255x".to_vec();
+    // Suffixed so it sorts after the last key of the first window and before
+    // the first key of the second, i.e. into the seam.
+    let mut seam_key = committed[last_of_window].clone();
+    seam_key.push(b'x');
 
     let mut txn = store.new_txn(false).await.unwrap();
     txn.set(&seam_key, b"new").await.unwrap();
-    txn.delete(&committed[256]).await.unwrap();
-    txn.set(&committed[257], b"override").await.unwrap();
+    txn.delete(&committed[chunk]).await.unwrap();
+    txn.set(&committed[chunk + 1], b"override").await.unwrap();
 
     let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (i, key) in committed.iter().enumerate() {
-        match i {
-            256 => continue, // deleted in this transaction
-            257 => expected.push((key.clone(), b"override".to_vec())),
-            _ => expected.push((key.clone(), b"v".to_vec())),
+        if i == chunk {
+            continue; // deleted in this transaction
+        } else if i == chunk + 1 {
+            expected.push((key.clone(), b"override".to_vec()));
+        } else {
+            expected.push((key.clone(), b"v".to_vec()));
         }
-        if i == 255 {
+        if i == last_of_window {
             expected.push((seam_key.clone(), b"new".to_vec()));
         }
     }
@@ -96,6 +101,100 @@ pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S)
         "one insert and one delete across the seam must net out"
     );
     assert_eq!(seen, expected, "merged order or values wrong at the seam");
+}
+
+/// Seed `doc/00000…` spanning three chunks, flanked by a neighbouring
+/// keyspace on each side so an over-wide scan has something to pick up.
+/// Returns the number of `doc/` keys written.
+async fn seed_flanked_keyspace<S: Store>(store: &S) -> usize {
+    let total = crate::chunked::DEFAULT_CHUNK_SIZE * 3;
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    for i in 0..total {
+        txn.set(format!("doc/{:05}", i).as_bytes(), b"v")
+            .await
+            .unwrap();
+        // Sorts after every `doc/` key.
+        txn.set(format!("docz/{:05}", i).as_bytes(), b"v")
+            .await
+            .unwrap();
+    }
+    // Sorts before every `doc/` key.
+    txn.set(b"dob/zzz", b"v").await.unwrap();
+    txn.commit().await.unwrap();
+
+    total
+}
+
+/// Test that `start`/`end` survive chunk refills.
+///
+/// Backends reading in bounded windows re-derive the lower bound on every
+/// refill, so the range is re-applied per chunk rather than once for the scan.
+/// A refill that drops the upper bound overruns the range; one that widens its
+/// lower bound re-yields keys. Neither shows up in a scan that fits in a
+/// single window, so this one spans three.
+pub async fn test_iterator_bounded_scan_across_chunks<S: Store>(store: &S) {
+    let chunk = crate::chunked::DEFAULT_CHUNK_SIZE;
+    seed_flanked_keyspace(store).await;
+
+    // Off a chunk multiple, so the bounds fall inside windows rather than on
+    // their seams.
+    let start = chunk + 7;
+    let end = chunk * 2 + 133;
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_start(format!("doc/{:05}", start).into_bytes())
+        .with_end(format!("doc/{:05}", end).into_bytes());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    while let Some(kv) = iter.next().await.unwrap() {
+        seen.push(kv.key);
+    }
+
+    let expected: Vec<Vec<u8>> = (start..end)
+        .map(|i| format!("doc/{:05}", i).into_bytes())
+        .collect();
+
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "bounded scan spanning several chunks returned the wrong count"
+    );
+    assert_eq!(seen, expected, "start/end not held across a refill");
+}
+
+/// Test that a prefix survives chunk refills.
+///
+/// Separate from the `start`/`end` case because bounds that sit inside the
+/// prefix make it redundant: every key between two `doc/…` bounds already
+/// carries the prefix. Only a scan with no explicit range puts the prefix
+/// itself under test, and it has to span several windows for a refill that
+/// forgets the prefix to have anything to run into.
+pub async fn test_iterator_prefix_scan_across_chunks<S: Store>(store: &S) {
+    let total = seed_flanked_keyspace(store).await;
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new().with_prefix(b"doc/".to_vec());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    while let Some(kv) = iter.next().await.unwrap() {
+        seen.push(kv.key);
+    }
+
+    let expected: Vec<Vec<u8>> = (0..total)
+        .map(|i| format!("doc/{:05}", i).into_bytes())
+        .collect();
+
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "prefix scan spanning {} chunks returned the wrong count",
+        total / crate::chunked::DEFAULT_CHUNK_SIZE
+    );
+    assert_eq!(seen, expected, "prefix not held across a refill");
 }
 
 /// Test iterator boundary: single item at exact start bound
