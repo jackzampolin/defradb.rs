@@ -16,6 +16,7 @@ use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::plan::{self, ScanSource};
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
@@ -123,19 +124,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             self.query_limits,
         )?;
 
-        // Execute the plan and collect results
-        plan.init().await?;
-        plan.start().await?;
+        let outcome = async {
+            plan.init().await?;
+            plan.start().await?;
 
-        let mut results = Vec::new();
+            let mut results = Vec::new();
 
-        while plan.next().await? {
-            let doc = plan.value();
-            let json = self.doc_to_json(doc, &mapping)?;
-            results.push(json);
+            while plan.next().await? {
+                let doc = plan.value();
+                let json = self.doc_to_json(doc, &mapping)?;
+                results.push(json);
+            }
+
+            Ok(results)
         }
+        .await;
 
-        plan.close().await?;
+        let results = plan_drive::close_after(plan.as_mut(), outcome).await?;
 
         Ok(JsonValue::Array(results))
     }

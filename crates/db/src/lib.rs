@@ -96,6 +96,8 @@ pub(crate) use db_nac as nac;
 mod nac_guard;
 pub mod node_access_checker;
 pub(crate) mod patch;
+#[cfg(test)]
+mod plan_close_tests;
 pub mod schema_loader;
 pub mod txn;
 pub(crate) mod txn_context;
