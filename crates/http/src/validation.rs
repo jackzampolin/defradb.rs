@@ -93,8 +93,20 @@ pub fn parse_timeout(timeout: Option<&str>) -> Result<Option<std::time::Duration
         .ok_or_else(|| HttpError::BadRequest(format!("time: invalid duration {raw:?}")))
 }
 
+/// Go's `1<<63`: one past the largest positive `time.Duration`. Go bounds its
+/// running total against this rather than `i64::MAX` so the most negative
+/// duration stays representable.
+const MAX_DURATION_NANOS: u64 = 1 << 63;
+
 /// Go `time.ParseDuration`: a signed sequence of decimal numbers, each with a
-/// unit suffix. `None` on anything Go would reject.
+/// unit suffix. `None` on anything Go would reject, which the caller turns into
+/// a 400.
+///
+/// Transcribed from Go rather than approximated, so each of its three overflow
+/// checks has a counterpart here: per-unit, after the fractional part, and on
+/// the running total. One deliberate divergence — Go accumulates in a wrapping
+/// `uint64`, so two terms summing to exactly `1<<64` wrap to zero there and
+/// parse as `0s`; we reject that instead.
 fn parse_go_duration(value: &str) -> Option<std::time::Duration> {
     let (negative, mut rest) = match value.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -108,40 +120,141 @@ fn parse_go_duration(value: &str) -> Option<std::time::Duration> {
         return None;
     }
 
-    let mut total_nanos = 0.0_f64;
+    let mut total: u64 = 0;
     while !rest.is_empty() {
-        let digits_end = rest
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .unwrap_or(rest.len());
-        if digits_end == 0 {
+        let leading = rest.as_bytes()[0];
+        if leading != b'.' && !leading.is_ascii_digit() {
             return None;
         }
-        let amount: f64 = rest[..digits_end].parse().ok()?;
-        rest = &rest[digits_end..];
+
+        let before_int = rest.len();
+        let (mut amount, remainder) = leading_int(rest)?;
+        rest = remainder;
+        let had_int = rest.len() != before_int;
+
+        let mut fraction = 0_u64;
+        let mut scale = 1.0_f64;
+        let mut had_fraction = false;
+        if let Some(after_point) = rest.strip_prefix('.') {
+            let before_fraction = after_point.len();
+            let (parsed, parsed_scale, remainder) = leading_fraction(after_point);
+            fraction = parsed;
+            scale = parsed_scale;
+            rest = remainder;
+            had_fraction = rest.len() != before_fraction;
+        }
+        if !had_int && !had_fraction {
+            return None;
+        }
 
         let unit_end = rest
-            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .find(|c: char| c == '.' || c.is_ascii_digit())
             .unwrap_or(rest.len());
-        let nanos_per_unit = match &rest[..unit_end] {
-            "ns" => 1.0,
-            "us" | "µs" | "μs" => 1e3,
-            "ms" => 1e6,
-            "s" => 1e9,
-            "m" => 6e10,
-            "h" => 3.6e12,
-            _ => return None,
-        };
+        if unit_end == 0 {
+            return None;
+        }
+        let unit = unit_nanos(&rest[..unit_end])?;
         rest = &rest[unit_end..];
 
-        total_nanos += amount * nanos_per_unit;
+        if amount > MAX_DURATION_NANOS / unit {
+            return None;
+        }
+        amount *= unit;
+        if fraction > 0 {
+            // `f64` is what Go uses here too, and is exact enough because the
+            // product is bounded by 3.6e12, the nanoseconds in one hour.
+            amount = amount.checked_add((fraction as f64 * (unit as f64 / scale)) as u64)?;
+            if amount > MAX_DURATION_NANOS {
+                return None;
+            }
+        }
+        total = total.checked_add(amount)?;
+        if total > MAX_DURATION_NANOS {
+            return None;
+        }
     }
 
     // `Duration` is unsigned, and a negative timeout yields an already-expired
     // deadline in Go. Zero reproduces that: the operation gives up immediately.
+    // The overflow checks above have already run, so an oversized negative is
+    // rejected rather than collapsing to zero.
     if negative {
         return Some(std::time::Duration::ZERO);
     }
-    Some(std::time::Duration::from_nanos(total_nanos as u64))
+    if total > MAX_DURATION_NANOS - 1 {
+        return None;
+    }
+    Some(std::time::Duration::from_nanos(total))
+}
+
+/// Go's `leadingInt`: consume `[0-9]*`, refusing anything that would carry the
+/// accumulator past `1<<63`.
+fn leading_int(value: &str) -> Option<(u64, &str)> {
+    let mut amount: u64 = 0;
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        if amount > MAX_DURATION_NANOS / 10 {
+            return None;
+        }
+        amount = amount * 10 + u64::from(byte - b'0');
+        if amount > MAX_DURATION_NANOS {
+            return None;
+        }
+        index += 1;
+    }
+    Some((amount, &value[index..]))
+}
+
+/// Go's `leadingFraction`: consume `[0-9]*` after a decimal point, returning
+/// the digits and the power of ten they were scaled by. Overflow drops the
+/// remaining digits rather than failing, because they cannot change the value
+/// at nanosecond resolution — Go does the same.
+fn leading_fraction(value: &str) -> (u64, f64, &str) {
+    let mut amount: u64 = 0;
+    let mut scale = 1.0_f64;
+    let mut overflowed = false;
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        index += 1;
+        if overflowed {
+            continue;
+        }
+        if amount > (MAX_DURATION_NANOS - 1) / 10 {
+            overflowed = true;
+            continue;
+        }
+        let next = amount * 10 + u64::from(byte - b'0');
+        if next > MAX_DURATION_NANOS {
+            overflowed = true;
+            continue;
+        }
+        amount = next;
+        scale *= 10.0;
+    }
+    (amount, scale, &value[index..])
+}
+
+/// Go's `unitMap`.
+fn unit_nanos(unit: &str) -> Option<u64> {
+    match unit {
+        "ns" => Some(1),
+        "us" | "µs" | "μs" => Some(1_000),
+        "ms" => Some(1_000_000),
+        "s" => Some(1_000_000_000),
+        "m" => Some(60_000_000_000),
+        "h" => Some(3_600_000_000_000),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +429,35 @@ mod tests {
     #[test]
     fn timeout_treats_negative_as_already_expired() {
         assert_eq!(parse_timeout(Some("-5s")).unwrap(), Some(Duration::ZERO));
+    }
+
+    /// Go's `time.ParseDuration` errors on anything past `int64` nanoseconds
+    /// instead of clamping, so these are 400s. The `f64` accumulator this
+    /// replaced turned them into ~584-year deadlines, and a 584-year deadline
+    /// on the pubsub path is a request that never returns.
+    #[test]
+    fn timeout_rejects_durations_go_cannot_represent() {
+        for rejected in [
+            "9999999h",
+            "9223372036854775808ns",
+            "2562047h47m16.854775808s",
+            "-9999999h",
+        ] {
+            assert!(
+                parse_timeout(Some(rejected)).is_err(),
+                "{rejected:?} overflows Go's int64 nanoseconds and must be a 400"
+            );
+        }
+    }
+
+    /// `time.Duration`'s exact maximum, in the form `Duration.String()` emits.
+    /// Doubles as the precision guard: an `f64` accumulator rounds this up by
+    /// one nanosecond, off the boundary it is meant to sit exactly on.
+    #[test]
+    fn timeout_accepts_gos_maximum_exactly() {
+        assert_eq!(
+            parse_timeout(Some("2562047h47m16.854775807s")).unwrap(),
+            Some(Duration::from_nanos(9_223_372_036_854_775_807)),
+        );
     }
 }

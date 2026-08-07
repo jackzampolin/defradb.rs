@@ -124,7 +124,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let wait = timeout.unwrap_or(DEFAULT_PUBSUB_SYNC_TIMEOUT);
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(wait)
+            .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400 * 365));
         let mut out = Vec::new();
         loop {
             if expected_responses.is_some_and(|expected| out.len() >= expected) {
