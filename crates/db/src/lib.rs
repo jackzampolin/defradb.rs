@@ -65,6 +65,8 @@ pub(crate) mod collection_snapshot;
 pub(crate) mod collection_stream;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
+#[cfg(test)]
+mod counting_store;
 pub mod database;
 // Definition validation moved to the `schema` crate (was #791 substitute
 // slice) — see `schema::definition_validation`.
