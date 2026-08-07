@@ -248,7 +248,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
     timeout-minutes: 45
     env:
-      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release/defra
+      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release-fast/defra
       DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
       # The conformance harness waits on INFO-level node readiness/P2P log lines.
       # Pin the child-node filter so an inherited runner-level RUST_LOG=warn
@@ -267,9 +267,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # release-fast (thin LTO, 16 CGUs) exists exactly for this: measured
+      # 1m40s cold vs 6m44s for the fat-LTO release profile, and this binary
+      # is test-only — release.yml still ships full-release artifacts.
       - name: Build release binary under test
         run: |
-          cargo build --release -p cli
+          cargo build --profile release-fast -p cli
           "$DEFRA_CONFORMANCE_BINARY" version --format json
 
       # The behavioral conformance tests drive real `defra` subprocesses. Run
@@ -301,6 +304,7 @@ jobs:
           git checkout -- .
           git clean -fd
           rm -rf target/e2e
+          pkill -f "target/release-fast/defra" || true
           pkill -f "target/release/defra" || true
           pkill -f "target/debug/defra" || true
 
