@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::compute_range_bounds;
 use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
@@ -13,7 +12,9 @@ use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::empty_iterator::EmptyIterator;
 use crate::merging::MergingIterator;
+use crate::range_bounds::compute_range_bounds;
 
 /// Fjall transaction with snapshot isolation and buffered writes.
 pub(crate) struct FjallTxn {
@@ -142,7 +143,9 @@ impl Reader for FjallTxn {
         }
 
         self.read_set.lock().record_iter_options(&opts);
-        let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
+            return Ok(Box::new(EmptyIterator));
+        };
         let keys_only = opts.keys_only();
 
         let matches_prefix =

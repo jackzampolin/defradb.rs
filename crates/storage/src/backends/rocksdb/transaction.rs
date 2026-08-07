@@ -14,7 +14,9 @@ use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::empty_iterator::EmptyIterator;
 use crate::merging::MergingIterator;
+use crate::range_bounds::compute_range_bounds;
 
 /// Owned snapshot that holds an `Arc<DB>` to ensure the DB outlives the snapshot.
 ///
@@ -227,7 +229,9 @@ impl Reader for RocksDbTxn {
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
         // Compute range bounds
-        let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
+            return Ok(Box::new(EmptyIterator));
+        };
 
         let snapshot = if opts.reverse() {
             // Chunked forward reads cannot be reversed after the fact, and
@@ -358,60 +362,6 @@ fn set_upper_bound(read_opts: &mut rocksdb::ReadOptions, end_bound: &Bound<Vec<u
         }
         Bound::Unbounded => {}
     }
-}
-
-/// Compute the start and end bounds for a range query from IterOptions.
-fn compute_range_bounds(opts: &IterOptions) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-    let start_bound = match (opts.prefix(), opts.start()) {
-        (Some(prefix), Some(start)) => {
-            if prefix > start {
-                Bound::Included(prefix.to_vec())
-            } else {
-                Bound::Included(start.to_vec())
-            }
-        }
-        (Some(prefix), None) => Bound::Included(prefix.to_vec()),
-        (None, Some(start)) => Bound::Included(start.to_vec()),
-        (None, None) => Bound::Unbounded,
-    };
-
-    let end_bound = match (opts.prefix(), opts.end()) {
-        (Some(prefix), Some(end)) => {
-            let prefix_end = prefix_to_end_bound(prefix);
-            if let Some(pe) = prefix_end {
-                if pe.as_slice() < end {
-                    Bound::Excluded(pe)
-                } else {
-                    Bound::Excluded(end.to_vec())
-                }
-            } else {
-                Bound::Excluded(end.to_vec())
-            }
-        }
-        (Some(prefix), None) => match prefix_to_end_bound(prefix) {
-            Some(end) => Bound::Excluded(end),
-            None => Bound::Unbounded,
-        },
-        (None, Some(end)) => Bound::Excluded(end.to_vec()),
-        (None, None) => Bound::Unbounded,
-    };
-
-    (start_bound, end_bound)
-}
-
-fn prefix_to_end_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    if prefix.is_empty() {
-        return None;
-    }
-
-    let mut end = prefix.to_vec();
-    while let Some(last) = end.pop() {
-        if last < 0xFF {
-            end.push(last + 1);
-            return Some(end);
-        }
-    }
-    None
 }
 
 #[async_trait]

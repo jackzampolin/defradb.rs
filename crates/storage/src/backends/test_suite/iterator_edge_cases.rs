@@ -355,3 +355,69 @@ pub async fn test_iterator_empty_values<S: Store>(store: &S) {
     assert_eq!(kv.key_bytes(), b"k3");
     assert_eq!(kv.value_bytes(), b"v3");
 }
+
+/// A range whose start sits above its end yields nothing rather than panicking.
+pub async fn test_iterator_inverted_bounds_yield_empty<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"m", b"2").await.unwrap();
+    txn.set(b"z", b"3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_start(b"z".to_vec())
+        .with_end(b"a".to_vec());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// The same, in reverse: reverse scans take a different code path in every
+/// chunked backend.
+pub async fn test_iterator_inverted_bounds_yield_empty_reverse<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"z", b"2").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_start(b"z".to_vec())
+        .with_end(b"a".to_vec())
+        .with_reverse(true);
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// A start key past the end of the requested prefix cannot match anything.
+pub async fn test_iterator_start_beyond_prefix_yields_empty<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"foo1", b"1").await.unwrap();
+    txn.set(b"foo2", b"2").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_prefix(b"foo".to_vec())
+        .with_start(b"z".to_vec());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// Uncommitted writes go through a second, separately-bounded range in every
+/// backend; an inverted range must not panic there either.
+pub async fn test_iterator_inverted_bounds_with_pending_writes<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"z", b"2").await.unwrap();
+
+    let opts = IterOptions::new()
+        .with_start(b"z".to_vec())
+        .with_end(b"a".to_vec());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    assert!(iter.next().await.unwrap().is_none());
+}

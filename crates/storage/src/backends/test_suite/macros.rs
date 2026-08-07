@@ -372,6 +372,30 @@ macro_rules! generate_backend_tests {
             let store = $store_fn().await;
             test_suite::test_iterator_empty_values(&store).await;
         }
+
+        #[tokio::test]
+        async fn shared_test_iterator_inverted_bounds_yield_empty() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_inverted_bounds_yield_empty(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_inverted_bounds_yield_empty_reverse() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_inverted_bounds_yield_empty_reverse(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_start_beyond_prefix_yields_empty() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_start_beyond_prefix_yields_empty(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_inverted_bounds_with_pending_writes() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_inverted_bounds_with_pending_writes(&store).await;
+        }
     };
 }
 

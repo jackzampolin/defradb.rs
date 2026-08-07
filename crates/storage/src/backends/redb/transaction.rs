@@ -9,7 +9,7 @@ use tracing::instrument;
 
 use super::config::DurabilityMode;
 use super::group_commit::{GroupCommitBuffer, PendingCommit};
-use super::{bound_as_ref, compute_range_bounds, KV_TABLE};
+use super::{bound_as_ref, KV_TABLE};
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
 };
@@ -17,7 +17,9 @@ use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::empty_iterator::EmptyIterator;
 use crate::merging::MergingIterator;
+use crate::range_bounds::compute_range_bounds;
 
 /// Redb transaction with snapshot isolation and buffered writes.
 ///
@@ -207,10 +209,12 @@ impl Reader for RedbTxn {
             return Err(Error::DiscardedTxn);
         }
 
-        // Compute the effective range bounds for efficient range queries
-        let (start_bound, end_bound) = compute_range_bounds(&opts);
-        let keys_only = opts.keys_only();
         self.read_set.lock().record_iter_options(&opts);
+        // Compute the effective range bounds for efficient range queries
+        let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
+            return Ok(Box::new(EmptyIterator));
+        };
+        let keys_only = opts.keys_only();
 
         // Helper to check prefix
         let matches_prefix =

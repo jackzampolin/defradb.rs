@@ -105,6 +105,11 @@ pub mod backends;
 mod chunked;
 pub mod corekv;
 pub mod dyn_store;
+/// Iterator over a range that cannot contain any key.
+///
+/// Gated identically to `chunked`, whose readers are its only consumers.
+#[cfg(not(target_arch = "wasm32"))]
+mod empty_iterator;
 pub mod encoding;
 pub mod encrypted_store;
 pub mod field_value;
@@ -115,6 +120,12 @@ pub mod keys;
 #[cfg(not(target_arch = "wasm32"))]
 mod merging;
 pub mod namespace;
+/// Computes range-query bounds shared by every backend, guarding against
+/// disjoint start/end bounds.
+///
+/// Gated identically to `chunked`, whose readers are its only consumers.
+#[cfg(not(target_arch = "wasm32"))]
+mod range_bounds;
 
 pub mod index;
 pub mod stores;

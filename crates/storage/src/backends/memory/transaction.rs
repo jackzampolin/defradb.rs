@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::compute_range_bounds;
 use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
 use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::empty_iterator::EmptyIterator;
 use crate::merging::MergingIterator;
+use crate::range_bounds::compute_range_bounds;
 
 /// In-memory transaction with snapshot isolation and conflict detection.
 ///
@@ -135,7 +136,9 @@ impl Reader for MemoryTxn {
         }
 
         self.read_set.lock().record_iter_options(&opts);
-        let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
+            return Ok(Box::new(EmptyIterator));
+        };
         let keys_only = opts.keys_only();
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
