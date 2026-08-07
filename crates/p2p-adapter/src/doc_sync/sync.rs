@@ -130,8 +130,12 @@ struct DispatchOutcome {
     unanswered: usize,
 }
 
-/// Sends `request` to every peer, at most `parallelism` at a time and none of
-/// them outliving `remaining`, and reports what the round achieved.
+/// Sends `request` to every peer, at most `parallelism` at a time, and reports
+/// what the round achieved.
+///
+/// `remaining` bounds the round as a whole. It is converted to one absolute
+/// deadline before the first spawn, because refills spawn after a `join_next`
+/// and a relative timeout would hand each wave a fresh budget.
 async fn send_requests<D>(
     dispatch: &Arc<D>,
     peers: &[D::Peer],
@@ -145,6 +149,10 @@ where
 {
     let mut peer_iter = peers.iter().cloned();
     let mut tasks = tokio::task::JoinSet::new();
+    let now = tokio::time::Instant::now();
+    let deadline = now
+        .checked_add(remaining)
+        .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
     let mut outcome = DispatchOutcome {
         any_sent: false,
         unanswered: 0,
@@ -158,9 +166,11 @@ where
             let dispatch = Arc::clone(dispatch);
             let request = request.clone();
             tasks.spawn(async move {
-                let result =
-                    tokio::time::timeout(remaining, dispatch.send_doc_sync_request(&peer, request))
-                        .await;
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    dispatch.send_doc_sync_request(&peer, request),
+                )
+                .await;
                 (peer, result)
             });
         }
@@ -257,6 +267,34 @@ mod tests {
             started.elapsed()
         );
         result.expect_err("no send completed inside the budget, so sync must fail");
+    }
+
+    /// #1314 review: the budget is one deadline for the whole round, not a
+    /// fresh one per peer. Refills spawn after a `join_next`, so a relative
+    /// timeout would restart the budget on every wave — with iroh's
+    /// parallelism of 16, any node with more peers than that overruns the
+    /// caller's deadline by roughly one budget per wave. Three peers at
+    /// parallelism 1 is the smallest shape that has waves at all.
+    #[tokio::test]
+    async fn the_deadline_covers_the_whole_round_not_each_wave() {
+        let dispatch = Arc::new(SlowDispatch::new(3, Duration::from_millis(500)));
+        let bus = Arc::new(events::ChannelBus::default());
+        let started = std::time::Instant::now();
+
+        let _ = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(600),
+            1,
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "each wave restarted the budget, taking {:?}",
+            started.elapsed()
+        );
     }
 
     /// #1314 review: one peer answered, one stayed silent, nothing merged.
