@@ -14,23 +14,35 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Two defradb.rs runner slots per studio host can now co-run jobs (plus
+  # other repos' runners on the same hosts). Bound each Cargo process so two
+  # simultaneous compiles fit inside a 32-core host with room for linking and
+  # sibling services — same allocation the gents fleet runs. Override without
+  # a workflow edit: gh variable set CARGO_BUILD_JOBS --body <n>
+  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS || '12' }}
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
-  # Studio jobs are pinned to a host so each job's incremental target state
-  # stays warm on one machine (a suite that bounces between hosts turns a
-  # small rebuild into a full one) and so same-host exclusivity is
-  # deterministic: each host runs ONE defradb.rs runner process, which takes
-  # one job at a time, so two node-spawning jobs can only co-run on DIFFERENT
-  # hosts — where they cannot contend on localhost ports. Layout balances the
-  # measured serial chains: studio-1 carries build → rust → signed-docs
-  # (consumers of build's host-local binary cache); studio-2 carries lint,
-  # conformance, go-compat, and iroh (each self-builds on cache miss). If a
-  # host is offline its jobs queue until the runner returns — deliberate
-  # tradeoff, same as the gents fleet.
+  # Studio jobs are pinned to a runner slot so each job's incremental target
+  # state stays warm on one machine (a suite that bounces between hosts turns
+  # a small rebuild into a full one) and so same-host exclusivity is
+  # deterministic. Each host runs two defradb.rs runner processes:
+  #
+  #   primary (labels ...,studio,studio-N) — one job at a time, so two
+  #   node-spawning jobs can only co-run on DIFFERENT hosts, where they
+  #   cannot contend on localhost ports. studio-1 carries build → rust →
+  #   signed-docs (consumers of build's host-local binary cache); studio-2
+  #   carries conformance, go-compat, and iroh (each self-builds on miss).
+  #
+  #   light (labels ...,defra-light,studio-N-b) — deliberately NOT labeled
+  #   `studio`/`studio-N`, so node-spawning jobs can never land there. Serves
+  #   the non-node jobs: lint (studio-1-b) and artifacts (studio-2-b).
+  #
+  # If a slot is offline its jobs queue until an operator restores the runner
+  # or moves its label — deliberate tradeoff, same as the gents fleet.
   lint:
     name: Lint
-    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
+    runs-on: [self-hosted, macOS, ARM64, defra-light, studio-1-b]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -627,9 +639,9 @@ jobs:
 
   artifacts:
     name: Release Artifacts
-    # studio-2: shares warm target/release state with the conformance job's
-    # release build on the same host.
-    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
+    # Light slot: no nodes spawned here, and running beside (not behind) the
+    # studio-2 primary chain gets main-push artifacts out without queueing.
+    runs-on: [self-hosted, macOS, ARM64, defra-light, studio-2-b]
     needs: [build]
     if: github.event_name == 'push'
     steps:
