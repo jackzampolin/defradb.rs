@@ -13,7 +13,7 @@
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{MetricExporter, SpanExporter};
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithHttpConfig};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
@@ -72,8 +72,15 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_attribute(KeyValue::new("process.executable.name", executable_name))
         .build();
 
+    // let http_client = reqwest::blocking::Client::new();
+    // necessary to build the blocking client off the async thread, like opentelemetry-otlp does
+    let http_client = std::thread::spawn(reqwest::blocking::Client::new)
+        .join()
+        .expect("build telemetry HTTP client");
+
     let span_exporter = SpanExporter::builder()
         .with_http()
+        .with_http_client(http_client.clone())
         .build()
         .map_err(|e| InitError::SpanExporter(Box::new(e)))?;
 
@@ -84,8 +91,10 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
 
     let metric_exporter = MetricExporter::builder()
         .with_http()
+        .with_http_client(http_client.clone())
         .build()
         .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
+
     let meter_provider = SdkMeterProvider::builder()
         .with_periodic_exporter(metric_exporter)
         .with_resource(resource)
