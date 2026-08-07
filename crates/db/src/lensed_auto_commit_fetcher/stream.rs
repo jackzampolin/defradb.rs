@@ -106,7 +106,9 @@ impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
     /// The write-back flush runs even if closing the inner stream errored,
     /// since it persists migrations already computed from documents already
     /// read - discarding that work on a cleanup failure would be worse than
-    /// surfacing the close error afterward.
+    /// surfacing the close error afterward. If both the close and the flush
+    /// fail, neither error is dropped: they are joined into one, matching
+    /// Go's `errors.Join` in this same situation (`versioned.go`, `indexer.go`).
     async fn close(&mut self) -> query::error::Result<()> {
         let write_backs = std::mem::take(&mut self.write_backs);
         let closed = match self.inner.take() {
@@ -118,8 +120,17 @@ impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
             .fetcher
             .persist_migrated_documents(&self.collection, write_backs)
             .await;
-        closed?;
-        persisted
+        match (closed, persisted) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), Ok(())) => Err(e),
+            (Ok(()), Err(e)) => Err(e),
+            (Err(close_err), Err(persist_err)) => {
+                Err(query::error::QueryError::execution(format!(
+                    "failed to close inner stream: {}; failed to persist migrated documents: {}",
+                    close_err, persist_err
+                )))
+            }
+        }
     }
 }
 
