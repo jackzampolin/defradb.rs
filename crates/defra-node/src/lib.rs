@@ -42,7 +42,7 @@ pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybr
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
-pub use query::{QueryExecutor, QueryRequest, QueryResponse};
+pub use query::{QueryExecutor, QueryRequest, QueryResponse, TransactionHandle};
 pub use schema::CollectionVersion;
 pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
 #[cfg(feature = "otel")]
@@ -181,6 +181,40 @@ impl EmbeddedNode {
         execute_with_signing_context(
             self.runner.clone(),
             request,
+            None,
+            signing_config,
+            node_identity_did.to_string(),
+        )
+        .await
+    }
+
+    /// Execute a prepared query request within an existing transaction.
+    ///
+    /// When the node has a configured identity, the same signing and ambient
+    /// identity context used by [`Self::execute`] is applied to this request.
+    pub async fn execute_request_in_txn(
+        &self,
+        request: QueryRequest,
+        handle: &TransactionHandle,
+    ) -> QueryResponse {
+        let handle = handle.clone();
+        let Some(node_identity_did) = self.node_identity_did.as_deref() else {
+            return self.runner.execute_in_txn(request, &handle).await;
+        };
+
+        let signing_config = defra_core::signing::resolve_signing_config_with_flag(
+            None,
+            Some(node_identity_did),
+            true,
+        );
+        let Some(signing_config) = signing_config else {
+            return self.runner.execute_in_txn(request, &handle).await;
+        };
+
+        execute_with_signing_context(
+            self.runner.clone(),
+            request,
+            Some(handle),
             signing_config,
             node_identity_did.to_string(),
         )
@@ -441,6 +475,7 @@ where
 async fn execute_with_signing_context(
     executor: Arc<dyn QueryExecutor>,
     request: QueryRequest,
+    txn_handle: Option<TransactionHandle>,
     signing_config: SigningConfig,
     node_did: String,
 ) -> QueryResponse {
@@ -454,7 +489,12 @@ async fn execute_with_signing_context(
         // NAC checks resolve to the node itself. The pool thread is reused, so
         // the guard clears it when the closure ends to prevent cross-request leak.
         let _id_guard = defra_core::current_identity::scoped_current_identity(Some(node_did));
-        handle.block_on(async { executor.execute(request).await })
+        handle.block_on(async {
+            match txn_handle {
+                Some(txn_handle) => executor.execute_in_txn(request, &txn_handle).await,
+                None => executor.execute(request).await,
+            }
+        })
     })
     .await
     {
