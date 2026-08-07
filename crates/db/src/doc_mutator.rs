@@ -16,7 +16,7 @@ use crate::database::DB;
 use crate::event_emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use db_blocks::DocStorageIdentity;
-use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
+use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
@@ -258,10 +258,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
             if collection.schema().is_branchable {
                 let short_id = collection.resolved_root_id();
@@ -476,8 +472,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config()
-                .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
+            let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
             let kms = self.db.kms();
 
