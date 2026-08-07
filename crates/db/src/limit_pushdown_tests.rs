@@ -7,7 +7,10 @@
 //! fetcher can't show it either: a fetcher that materializes the whole
 //! collection internally and hands back a `LIMIT`-sized slice still looks
 //! proportional from up there. [`CountingStore`] sits below the fetcher, at
-//! the storage layer, and counts what the query actually pulled off disk.
+//! the `Store` API boundary, and counts keys pulled through that trait.
+//! Whatever a backend does to refill its own window (chunked snapshots,
+//! buffered scans, ...) happens inside its `Iterator` implementation, below
+//! this boundary, and is not observed here.
 
 use document::Document;
 use query::{DocMutator, QueryExecutor, QueryRequest};
@@ -93,7 +96,7 @@ async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'sta
     assert!(
         keys <= LIMIT * 2,
         "a limit-{LIMIT} query read {keys} keys from storage across a \
-         {COLLECTION_SIZE}-document collection (observed: 11 on memory, far \
+         {COLLECTION_SIZE}-document collection (observed: 11 on all four backends, far \
          short of even one {CHUNK_SIZE}-key chunk); a lazy scan reads a \
          number of keys proportional to the limit"
     );
@@ -102,8 +105,8 @@ async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'sta
     assert!(
         gets <= LIMIT * 3,
         "a limit-{LIMIT} query performed {gets} point lookups (observed: 23 \
-         on memory); document assembly must scale with the limit, not the \
-         collection"
+         on all four backends); document assembly must scale with the \
+         limit, not the collection"
     );
 }
 
@@ -172,7 +175,7 @@ async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 
         keys <= LIMIT * 2,
         "explain(execute) on a limit-{LIMIT} query read {keys} keys from \
          storage across a {COLLECTION_SIZE}-document collection (observed: \
-         11 on memory, far short of even one {CHUNK_SIZE}-key chunk); a lazy \
+         11 on all four backends, far short of even one {CHUNK_SIZE}-key chunk); a lazy \
          scan reads a number of keys proportional to the limit"
     );
 
@@ -180,7 +183,7 @@ async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 
     assert!(
         gets <= LIMIT * 3,
         "explain(execute) on a limit-{LIMIT} query performed {gets} point \
-         lookups (observed: 23 on memory); document assembly must scale \
+         lookups (observed: 23 on all four backends); document assembly must scale \
          with the limit, not the collection"
     );
 }
