@@ -1,4 +1,4 @@
-//! A limited query must read documents proportional to the limit, not to the
+//! A limited query must read keys proportional to the limit, not to the
 //! collection.
 //!
 //! `docFetches` in `explain(execute)` cannot show this: it counts documents
@@ -9,17 +9,10 @@
 //! proportional from up there. [`CountingStore`] sits below the fetcher, at
 //! the storage layer, and counts what the query actually pulled off disk.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use document::Document;
-use query::doc_stream::DocStream;
-use query::error::Result;
-use query::fetcher::CommitsQueryOptions;
-use query::planner::index_selection::IndexScanParams;
-use query::{DocFetcher, DocMutator, FetchByIdsResult, QueryExecutor, QueryRequest};
+use query::{DocMutator, QueryExecutor, QueryRequest};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
+use std::sync::Arc;
 use storage::MemoryStore;
 
 use crate::counting_store::CountingStore;
@@ -30,111 +23,6 @@ const LIMIT: usize = 10;
 /// `chunked::DEFAULT_CHUNK_SIZE`. A lazy scan refills in chunks, so a
 /// limit-10 query reads one chunk, not one document.
 const CHUNK_SIZE: usize = 256;
-
-/// Counts the documents a query pulls out of the inner storage-backed fetcher,
-/// whether it streams them or materializes them.
-struct CountingFetcher {
-    inner: LensedAutoCommitFetcher<CountingStore<MemoryStore>>,
-    documents_read: Arc<AtomicUsize>,
-}
-
-/// Counts documents as the query pulls them, one per `next`.
-struct CountingStream {
-    inner: Box<dyn DocStream>,
-    documents_read: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl DocStream for CountingStream {
-    async fn next(&mut self) -> Result<Option<(Document, bool)>> {
-        let pulled = self.inner.next().await?;
-        if pulled.is_some() {
-            self.documents_read.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(pulled)
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.inner.close().await
-    }
-}
-
-#[async_trait]
-impl DocFetcher for CountingFetcher {
-    async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
-        let docs = self.inner.get_all(collection_name).await?;
-        self.documents_read.fetch_add(docs.len(), Ordering::SeqCst);
-        Ok(docs)
-    }
-
-    async fn get_all_with_deleted(
-        &self,
-        collection_name: &str,
-        show_deleted: bool,
-    ) -> Result<Vec<(Document, bool)>> {
-        let docs = self
-            .inner
-            .get_all_with_deleted(collection_name, show_deleted)
-            .await?;
-        self.documents_read.fetch_add(docs.len(), Ordering::SeqCst);
-        Ok(docs)
-    }
-
-    async fn stream_all_with_deleted(
-        &self,
-        collection_name: &str,
-        show_deleted: bool,
-    ) -> Result<Box<dyn DocStream>> {
-        Ok(Box::new(CountingStream {
-            inner: self
-                .inner
-                .stream_all_with_deleted(collection_name, show_deleted)
-                .await?,
-            documents_read: self.documents_read.clone(),
-        }))
-    }
-
-    async fn get_by_ids(
-        &self,
-        collection_name: &str,
-        doc_ids: &[String],
-    ) -> Result<FetchByIdsResult> {
-        let result = self.inner.get_by_ids(collection_name, doc_ids).await?;
-        self.documents_read
-            .fetch_add(result.docs().len(), Ordering::SeqCst);
-        Ok(result)
-    }
-
-    async fn get_by_field_value(
-        &self,
-        collection_name: &str,
-        field_name: &str,
-        value: &str,
-    ) -> Result<Vec<Document>> {
-        let docs = self
-            .inner
-            .get_by_field_value(collection_name, field_name, value)
-            .await?;
-        self.documents_read.fetch_add(docs.len(), Ordering::SeqCst);
-        Ok(docs)
-    }
-
-    async fn get_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
-        self.inner.get_commits(options).await
-    }
-
-    async fn get_by_index_scan(
-        &self,
-        collection_name: &str,
-        params: &IndexScanParams,
-    ) -> Result<query::fetcher::IndexScanResult> {
-        self.inner.get_by_index_scan(collection_name, params).await
-    }
-
-    fn supports_index_queries(&self) -> bool {
-        self.inner.supports_index_queries()
-    }
-}
 
 fn users_schema() -> CollectionVersion {
     let mut schema = CollectionVersion::new(
@@ -176,19 +64,15 @@ async fn seeded_db() -> Arc<DB<CountingStore<MemoryStore>>> {
 /// document assembly, which does a couple of point lookups (`is_deleted`,
 /// `load_version`) per document.
 #[tokio::test]
-async fn limit_query_reads_documents_proportional_to_the_limit() {
+async fn limit_query_reads_keys_proportional_to_the_limit() {
     let db = seeded_db().await;
     let keys_before = db.store().keys_read();
     let gets_before = db.store().point_gets();
-    let documents_read = Arc::new(AtomicUsize::new(0));
 
     // `with_provider` rather than a registry: an implicit read transaction
     // would route the query to the registry's own fetcher, past the counter.
     let runner = query::QueryRunner::with_provider(
-        CountingFetcher {
-            inner: LensedAutoCommitFetcher::new(db.clone()),
-            documents_read: documents_read.clone(),
-        },
+        LensedAutoCommitFetcher::new(db.clone()),
         crate::DbCollectionProvider::new_arc(db.clone()),
     );
 
@@ -231,17 +115,13 @@ async fn limit_query_reads_documents_proportional_to_the_limit() {
 /// the fetcher, at the storage layer, so they observe what explain actually
 /// pulled off disk.
 #[tokio::test]
-async fn explain_execute_reads_documents_proportional_to_the_limit() {
+async fn explain_execute_reads_keys_proportional_to_the_limit() {
     let db = seeded_db().await;
     let keys_before = db.store().keys_read();
     let gets_before = db.store().point_gets();
-    let documents_read = Arc::new(AtomicUsize::new(0));
 
     let runner = query::QueryRunner::with_provider(
-        CountingFetcher {
-            inner: LensedAutoCommitFetcher::new(db.clone()),
-            documents_read: documents_read.clone(),
-        },
+        LensedAutoCommitFetcher::new(db.clone()),
         crate::DbCollectionProvider::new_arc(db.clone()),
     );
 
