@@ -99,8 +99,8 @@ name = "cursor"
 path = "tests/cursor.rs"
 
 [dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "d141721" }
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "d141721" }
+hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "d14172101436e5a3f62c967c34e7db8bc230aa79" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "d14172101436e5a3f62c967c34e7db8bc230aa79" }
 document = { path = "../../crates/document" }
 tokio = { version = "1.35", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
