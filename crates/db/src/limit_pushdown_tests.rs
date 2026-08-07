@@ -24,9 +24,6 @@ use crate::{AutoCommitMutator, LensedAutoCommitFetcher, DB};
 
 const COLLECTION_SIZE: usize = 2000;
 const LIMIT: usize = 10;
-/// `chunked::DEFAULT_CHUNK_SIZE`. A lazy scan refills in chunks, so a
-/// limit-10 query reads one chunk, not one document.
-const CHUNK_SIZE: usize = 256;
 
 fn users_schema() -> CollectionVersion {
     let mut schema = CollectionVersion::new(
@@ -63,9 +60,9 @@ async fn seeded_db<S: Store + 'static>(store: S) -> Arc<DB<CountingStore<S>>> {
 /// A `limit` query must not read the whole collection from storage.
 ///
 /// `keys_read` bounds the scan: a lazy iterator stops pulling keys once the
-/// limit is satisfied, well short of even one `CHUNK_SIZE` refill, let alone
-/// the rest of a `COLLECTION_SIZE`-document collection. `point_gets` bounds
-/// document assembly, which does a couple of point lookups (`is_deleted`,
+/// limit is satisfied, well short of the rest of a
+/// `COLLECTION_SIZE`-document collection. `point_gets` bounds document
+/// assembly, which does a couple of point lookups (`is_deleted`,
 /// `load_version`) per document.
 async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'static>(store: S) {
     let db = seeded_db(store).await;
@@ -96,8 +93,7 @@ async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'sta
     assert!(
         keys <= LIMIT * 2,
         "a limit-{LIMIT} query read {keys} keys from storage across a \
-         {COLLECTION_SIZE}-document collection (observed: 11 on all four backends, far \
-         short of even one {CHUNK_SIZE}-key chunk); a lazy scan reads a \
+         {COLLECTION_SIZE}-document collection (observed: 11 on all four backends); a lazy scan reads a \
          number of keys proportional to the limit"
     );
 
@@ -176,7 +172,7 @@ async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 
         keys <= LIMIT * 2,
         "explain(execute) on a limit-{LIMIT} query read {keys} keys from \
          storage across a {COLLECTION_SIZE}-document collection (observed: \
-         11 on all four backends, far short of even one {CHUNK_SIZE}-key chunk); a lazy \
+         11 on all four backends); a lazy \
          scan reads a number of keys proportional to the limit"
     );
 
