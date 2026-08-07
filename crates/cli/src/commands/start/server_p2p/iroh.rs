@@ -128,10 +128,11 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let replication = db_merge::create_replication_stack(
+        let replication = db_merge::create_replication_stack_with_max_merge_depth(
             database.clone(),
             merge_blockstore,
             coordinator.clone(),
+            config.datastore.max_merge_depth,
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();

@@ -55,10 +55,12 @@ use db::database::DB;
 use db::index_manager::IndexManager;
 use hook::CompositeMergeHook;
 
-/// Maximum parent-chain depth for merge operations.
+/// Default maximum parent-chain depth for merge operations.
 ///
-/// Bounds the work and heap used while traversing a malicious or corrupt DAG.
-pub(crate) const MAX_MERGE_DEPTH: usize = 1024;
+/// Bounds the work and heap used while traversing a malicious or corrupt DAG,
+/// while leaving room for long-lived documents with thousands of updates.
+/// Valid depths are `0..DEFAULT_MAX_MERGE_DEPTH`.
+pub const DEFAULT_MAX_MERGE_DEPTH: usize = 8192;
 
 /// Encode a priority value as a varint (matches Go's binary.PutUvarint).
 pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
@@ -81,6 +83,8 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     pub(crate) db: Arc<DB<S>>,
     /// Reference to the blockstore for loading linked blocks.
     pub(crate) blockstore: Arc<B>,
+    /// Shared parent-chain depth policy for identity and merge traversals.
+    max_merge_depth: usize,
     /// Optional merge hook for policy-specific behavior around composite merges.
     composite_merge_hook: std::sync::OnceLock<Arc<dyn CompositeMergeHook>>,
     /// Tracks composite CIDs that have already been merged, preventing
@@ -114,10 +118,20 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Create a new database merge handler.
     pub fn new(db: Arc<DB<S>>, blockstore: Arc<B>) -> Self {
+        Self::new_with_max_merge_depth(db, blockstore, DEFAULT_MAX_MERGE_DEPTH)
+    }
+
+    /// Create a merge handler with an explicit parent-chain depth limit.
+    pub fn new_with_max_merge_depth(
+        db: Arc<DB<S>>,
+        blockstore: Arc<B>,
+        max_merge_depth: usize,
+    ) -> Self {
         let merge_queue = db.doc_write_queue();
         Self {
             db,
             blockstore,
+            max_merge_depth,
             composite_merge_hook: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
             merged_collections: std::sync::Mutex::new(HashSet::new()),
@@ -126,6 +140,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             merge_queue,
             prefetched_dek_cids: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Enforce the same parent-chain depth policy for every merge traversal.
+    fn ensure_merge_depth(&self, cid: &Cid, depth: usize) -> std::result::Result<(), MergeError> {
+        if depth >= self.max_merge_depth {
+            return Err(MergeError::depth_exceeded(cid, depth));
+        }
+        Ok(())
     }
 
     /// Set the composite merge hook after construction.
