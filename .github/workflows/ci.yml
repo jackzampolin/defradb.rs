@@ -6,14 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+# Superseded PR pushes release the studio fleet immediately; main pushes are
+# never cancelled so every main commit gets full validation and artifacts.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
+  # Studio jobs are pinned to a host so each job's incremental target state
+  # stays warm on one machine (a suite that bounces between hosts turns a
+  # small rebuild into a full one) and so same-host exclusivity is
+  # deterministic: each host runs ONE defradb.rs runner process, which takes
+  # one job at a time, so two node-spawning jobs can only co-run on DIFFERENT
+  # hosts — where they cannot contend on localhost ports. Layout balances the
+  # measured serial chains: studio-1 carries build → rust → signed-docs
+  # (consumers of build's host-local binary cache); studio-2 carries lint,
+  # conformance, go-compat, and iroh (each self-builds on cache miss). If a
+  # host is offline its jobs queue until the runner returns — deliberate
+  # tradeoff, same as the gents fleet.
   lint:
     name: Lint
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,7 +119,7 @@ jobs:
 
   build:
     name: Build & Test
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,15 +206,14 @@ jobs:
 
   conformance:
     name: Conformance
-    # Serialized after `integration` (not just `build`) so it never co-runs
-    # with the integration matrix on the single studio host. Both jobs spawn
-    # real `defra` nodes and the studio harness port allocator has a TOCTOU
-    # bind race ("failed to start rust-0") when node-spawning jobs run
-    # concurrently — the same reason the integration matrix pins
-    # `max-parallel: 1`. The dependency edge is the strict-ordering fix; it
-    # does not affect correctness, only scheduling.
-    needs: [build, integration]
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    # Spawns real `defra` nodes, so it must never co-run with another
+    # node-spawning job on the SAME host (harness port allocator TOCTOU bind
+    # race — "failed to start rust-0"). Host pinning provides that: this job
+    # runs on studio-2, whose single runner process serializes it against the
+    # go-compat/iroh suites, while the studio-1 suites run on a different
+    # host and cannot contend on its localhost ports. No `needs` edge — the
+    # job builds its own release binary and starts as soon as a slot frees.
+    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
     timeout-minutes: 45
     env:
       DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release/defra
@@ -255,21 +271,28 @@ jobs:
   integration:
     name: Integration (${{ matrix.suite }})
     needs: build
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: [self-hosted, macOS, ARM64, studio, "${{ matrix.host }}"]
     strategy:
       fail-fast: false
       # The harness still allocates localhost ports via a release-then-spawn
-      # sequence, so matrix fan-out multiplies bind races on the same studio
-      # host. Keep integration suites single-file until the allocator is fixed.
-      max-parallel: 1
+      # sequence, so two suites on the SAME host can hit a bind race. Each
+      # host runs one defradb.rs runner process (one job at a time), so
+      # pinning suites to hosts serializes same-host suites for free while
+      # letting the two hosts run in parallel — replacing the old
+      # `max-parallel: 1` whole-matrix serialization. studio-1 suites consume
+      # the binary cache the `build` job (also studio-1) populated; studio-2
+      # suites self-build on miss into their own host-local cache.
       matrix:
         include:
           - suite: rust
             needs_go: false
+            host: studio-1
           - suite: go-compat
             needs_go: true
+            host: studio-2
           - suite: iroh
             needs_go: false
+            host: studio-2
           # #978: re-run the rust integration suite with
           # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
           # .with_signing() auto-applied. Catches regressions in
@@ -278,6 +301,7 @@ jobs:
           - suite: signed-docs
             needs_go: false
             multipliers: signed-docs
+            host: studio-1
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
@@ -305,11 +329,17 @@ jobs:
             cp "$CACHE_DIR/defra" target/ci/defra
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
           else
+            # The build job populates this cache on studio-1 only; suites
+            # pinned to the other host self-build once per commit and
+            # populate their own host-local cache so the sibling suite and
+            # any re-run hit it.
             echo "Cache miss — building binaries"
             cargo build -p cli
             cp target/debug/defra target/ci/defra
+            cp target/debug/defra "$CACHE_DIR/defra"
             cargo build -p cli --features iroh
             cp target/debug/defra target/ci/defra-iroh
+            cp target/debug/defra "$CACHE_DIR/defra-iroh"
           fi
 
           chmod +x target/ci/defra target/ci/defra-iroh
@@ -597,7 +627,9 @@ jobs:
 
   artifacts:
     name: Release Artifacts
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    # studio-2: shares warm target/release state with the conformance job's
+    # release build on the same host.
+    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
     needs: [build]
     if: github.event_name == 'push'
     steps:

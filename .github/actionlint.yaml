@@ -1,0 +1,11 @@
+self-hosted-runner:
+  # Self-hosted fleet labels (see amygdala infra/services/github-runners):
+  # studio-N are Apple Silicon Mac Studio hosts; spark/vps are Linux.
+  labels:
+    - studio
+    - studio-1
+    - studio-2
+    - ARM64
+    - X64
+    - macOS
+    - Linux
