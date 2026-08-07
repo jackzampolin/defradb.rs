@@ -3,9 +3,11 @@
 //!
 //! `docFetches` in `explain(execute)` cannot show this: it counts documents
 //! yielded by `ScanNode`, which a `LimitNode` already capped before the scan
-//! became lazy. The counter here sits between the plan and the storage-backed
-//! fetcher instead, so it observes what the query actually pulled out of the
-//! store.
+//! became lazy. A document-level counter sitting between the plan and the
+//! fetcher can't show it either: a fetcher that materializes the whole
+//! collection internally and hands back a `LIMIT`-sized slice still looks
+//! proportional from up there. [`CountingStore`] sits below the fetcher, at
+//! the storage layer, and counts what the query actually pulled off disk.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,15 +22,19 @@ use query::{DocFetcher, DocMutator, FetchByIdsResult, QueryExecutor, QueryReques
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::MemoryStore;
 
+use crate::counting_store::CountingStore;
 use crate::{AutoCommitMutator, LensedAutoCommitFetcher, DB};
 
-const COLLECTION_SIZE: usize = 300;
+const COLLECTION_SIZE: usize = 2000;
 const LIMIT: usize = 10;
+/// `chunked::DEFAULT_CHUNK_SIZE`. A lazy scan refills in chunks, so a
+/// limit-10 query reads one chunk, not one document.
+const CHUNK_SIZE: usize = 256;
 
 /// Counts the documents a query pulls out of the inner storage-backed fetcher,
 /// whether it streams them or materializes them.
 struct CountingFetcher {
-    inner: LensedAutoCommitFetcher<MemoryStore>,
+    inner: LensedAutoCommitFetcher<CountingStore<MemoryStore>>,
     documents_read: Arc<AtomicUsize>,
 }
 
@@ -144,8 +150,8 @@ fn users_schema() -> CollectionVersion {
     schema
 }
 
-async fn seeded_db() -> Arc<DB<MemoryStore>> {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+async fn seeded_db() -> Arc<DB<CountingStore<MemoryStore>>> {
+    let db = Arc::new(DB::new(CountingStore::new(MemoryStore::new())).unwrap());
     db.create_collection(users_schema()).await.unwrap();
 
     let docs = (0..COLLECTION_SIZE)
@@ -162,14 +168,18 @@ async fn seeded_db() -> Arc<DB<MemoryStore>> {
     db
 }
 
-/// A `limit` query must not read the whole collection.
+/// A `limit` query must not read the whole collection from storage.
 ///
-/// The bound is deliberately loose (twice the limit): the point is the gap
-/// between "proportional to the limit" and "proportional to the collection",
-/// not an exact read count, which chunked storage reads may round up.
+/// `keys_read` bounds the scan: a lazy iterator stops pulling keys once the
+/// limit is satisfied, well short of even one `CHUNK_SIZE` refill, let alone
+/// the rest of a `COLLECTION_SIZE`-document collection. `point_gets` bounds
+/// document assembly, which does a couple of point lookups (`is_deleted`,
+/// `load_version`) per document.
 #[tokio::test]
 async fn limit_query_reads_documents_proportional_to_the_limit() {
     let db = seeded_db().await;
+    let keys_before = db.store().keys_read();
+    let gets_before = db.store().point_gets();
     let documents_read = Arc::new(AtomicUsize::new(0));
 
     // `with_provider` rather than a registry: an implicit read transaction
@@ -195,24 +205,36 @@ async fn limit_query_reads_documents_proportional_to_the_limit() {
         .len();
     assert_eq!(returned, LIMIT);
 
-    let read = documents_read.load(Ordering::SeqCst);
+    let keys = db.store().keys_read() - keys_before;
     assert!(
-        read <= LIMIT * 2,
-        "a limit-{LIMIT} query read {read} of {COLLECTION_SIZE} documents; \
-         it must read a number proportional to the limit, not to the collection"
+        keys <= LIMIT * 2,
+        "a limit-{LIMIT} query read {keys} keys from storage across a \
+         {COLLECTION_SIZE}-document collection (observed: 11, far short of \
+         even one {CHUNK_SIZE}-key chunk); a lazy scan reads a number of \
+         keys proportional to the limit"
+    );
+
+    let gets = db.store().point_gets() - gets_before;
+    assert!(
+        gets <= LIMIT * 3,
+        "a limit-{LIMIT} query performed {gets} point lookups (observed: 23); \
+         document assembly must scale with the limit, not the collection"
     );
 }
 
-/// `explain(execute)` must not materialize the collection either.
+/// `explain(execute)` must not materialize the collection from storage
+/// either.
 ///
 /// `docFetches` cannot show this: it counts documents yielded by `ScanNode`,
 /// which `LimitNode` already capped, so it reads the same whether the source
-/// streams or was pre-materialized. The counter here sits between the plan
-/// and the storage-backed fetcher, so it observes what explain actually
-/// pulled out of the store.
+/// streams or was pre-materialized. `keys_read` and `point_gets` sit below
+/// the fetcher, at the storage layer, so they observe what explain actually
+/// pulled off disk.
 #[tokio::test]
 async fn explain_execute_reads_documents_proportional_to_the_limit() {
     let db = seeded_db().await;
+    let keys_before = db.store().keys_read();
+    let gets_before = db.store().point_gets();
     let documents_read = Arc::new(AtomicUsize::new(0));
 
     let runner = query::QueryRunner::with_provider(
@@ -230,11 +252,20 @@ async fn explain_execute_reads_documents_proportional_to_the_limit() {
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
 
-    let read = documents_read.load(Ordering::SeqCst);
+    let keys = db.store().keys_read() - keys_before;
     assert!(
-        read <= LIMIT * 2,
-        "explain(execute) on a limit-{LIMIT} query read {read} of {COLLECTION_SIZE} \
-         documents; it must read a number proportional to the limit, not to the \
-         collection"
+        keys <= LIMIT * 2,
+        "explain(execute) on a limit-{LIMIT} query read {keys} keys from \
+         storage across a {COLLECTION_SIZE}-document collection (observed: \
+         11, far short of even one {CHUNK_SIZE}-key chunk); a lazy scan \
+         reads a number of keys proportional to the limit"
+    );
+
+    let gets = db.store().point_gets() - gets_before;
+    assert!(
+        gets <= LIMIT * 3,
+        "explain(execute) on a limit-{LIMIT} query performed {gets} point \
+         lookups (observed: 23); document assembly must scale with the \
+         limit, not the collection"
     );
 }
