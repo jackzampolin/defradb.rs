@@ -20,6 +20,13 @@ async fn stores() -> (NamespaceView, NamespaceView) {
     )
 }
 
+fn delta_data(block: &Block) -> Vec<u8> {
+    match &block.delta {
+        CrdtDelta::Lww(payload) => payload.data.clone(),
+        other => panic!("expected an LWW delta, got {:?}", other),
+    }
+}
+
 async fn field_block(blockstore: &NamespaceView, cid: &Cid) -> Block {
     let bytes = blockstore
         .get(&cid.to_bytes())
@@ -353,21 +360,19 @@ async fn inheritance_is_per_field() {
     );
 }
 
-/// KNOWN GAP, deliberately matching Go: a field first written by an update
-/// has no heads of its own, so there is nothing to inherit from and the
-/// delta is written in plaintext — even on a document created with
-/// `encrypt_doc: true`.
+/// A field first written by an update has no heads of its own, so field-level
+/// inheritance finds nothing. On a document encrypted as a whole it must still
+/// be encrypted, under the document-level policy the composite head records.
 ///
-/// Go behaves identically. `addDelta` builds its head set from the field's
-/// own prefix (`internal/core/block/store.go:82-86`,
+/// **Deliberate divergence from Go.** Go's `addDelta` builds its head set from
+/// the field's own prefix (`internal/core/block/store.go:82-86`,
 /// `NewHeadSet(txn.Headstore(), crdtData.HeadstorePrefix())`), so
-/// `determineBlockEncryption` sees no heads and attaches no encryption.
-///
-/// This is a characterization test, not an endorsement: it pins the
-/// behaviour so a future change cannot alter it silently. To be disclosed
-/// upstream to the Go team.
+/// `determineBlockEncryption` sees no heads and writes the new field in
+/// plaintext. Matching that would regress our own pre-#1292 behaviour, which
+/// encrypted this field, and would reopen the silent-plaintext hazard this
+/// derivation exists to close.
 #[tokio::test]
-async fn field_added_by_update_is_written_plaintext_matching_go() {
+async fn field_added_by_update_inherits_document_encryption() {
     let (blockstore, headstore) = stores().await;
     let identity = DocStorageIdentity::new(7, 7);
 
@@ -412,13 +417,16 @@ async fn field_added_by_update_is_written_plaintext_matching_go() {
     .expect("update should succeed");
 
     assert_eq!(updated.field_cids.len(), 1, "only `bio` should get a block");
-    assert_eq!(
-        field_block(&blockstore, &updated.field_cids[0])
-            .await
-            .encryption,
-        None,
-        "matches Go: a field with no prior head has nothing to inherit. \
-         Changing this is a deliberate divergence, not a bug fix."
+    let bio = field_block(&blockstore, &updated.field_cids[0]).await;
+    assert!(
+        bio.encryption.is_some(),
+        "a field introduced on an `encrypt_doc` document must be encrypted \
+         under the document-level policy, not written in plaintext"
+    );
+    assert_ne!(
+        delta_data(&bio),
+        encode_value_as_cbor(&NormalValue::String("ssn 123-45-6789".to_string())).unwrap(),
+        "the delta must hold ciphertext, not the plaintext value"
     );
 }
 
@@ -530,5 +538,190 @@ async fn delete_block_inherits_composite_encryption() {
         field_block(&blockstore, &deleted.cid).await.encryption,
         Some(created_enc_cid),
         "delete tombstone must inherit the composite's encryption link"
+    );
+}
+
+/// The document-level fallback must key off whole-document encryption only.
+/// A document with `encrypt_fields` leaves its composite unencrypted, so a
+/// field that was never in that list stays in the clear when introduced later.
+#[tokio::test]
+async fn field_added_to_field_encrypted_document_stays_plaintext() {
+    let (blockstore, headstore) = stores().await;
+    let identity = DocStorageIdentity::new(9, 9);
+
+    let mut doc = Document::new();
+    doc.set("secret", NormalValue::String("classified".to_string()));
+
+    let enc = EncryptionConfig {
+        encrypt_doc: false,
+        encrypt_fields: vec!["secret".to_string()],
+    };
+
+    let created = write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        None,
+        Some(&enc),
+        None,
+        None,
+    )
+    .await
+    .expect("create should succeed");
+
+    doc.set_id(document::DocID::from_string(&created.doc_id).unwrap());
+    doc.set("bio", NormalValue::String("public".to_string()));
+    let modified: HashSet<String> = ["bio".to_string()].into_iter().collect();
+
+    let updated = write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        Some(&modified),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("update should succeed");
+
+    assert_eq!(
+        field_block(&blockstore, &updated.field_cids[0])
+            .await
+            .encryption,
+        None,
+        "`bio` was never in `encrypt_fields`, so nothing should encrypt it"
+    );
+}
+
+/// Derivation must not invent encryption for a field either: a document
+/// created in the clear stays in the clear when a field is added to it.
+#[tokio::test]
+async fn field_added_to_unencrypted_document_stays_plaintext() {
+    let (blockstore, headstore) = stores().await;
+    let identity = DocStorageIdentity::new(10, 10);
+
+    let mut doc = Document::new();
+    doc.set("name", NormalValue::String("Alice".to_string()));
+
+    let created = write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create should succeed");
+
+    doc.set_id(document::DocID::from_string(&created.doc_id).unwrap());
+    doc.set("bio", NormalValue::String("public".to_string()));
+    let modified: HashSet<String> = ["bio".to_string()].into_iter().collect();
+
+    let updated = write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        Some(&modified),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("update should succeed");
+
+    assert_eq!(
+        field_block(&blockstore, &updated.field_cids[0])
+            .await
+            .encryption,
+        None,
+        "an unencrypted document must not acquire encryption from a new field"
+    );
+}
+
+/// The fallback is not gated on the field being brand new. A field whose
+/// history predates the document being encrypted has heads, but none of them
+/// carry an encryption link, so field-level inheritance finds nothing — the
+/// document-level policy must still cover it.
+#[tokio::test]
+async fn document_policy_covers_field_whose_history_predates_encryption() {
+    let (blockstore, headstore) = stores().await;
+    let identity = DocStorageIdentity::new(11, 11);
+
+    let mut doc = Document::new();
+    doc.set("name", NormalValue::String("Alice".to_string()));
+    doc.set("bio", NormalValue::String("public".to_string()));
+
+    let created = write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create should succeed");
+
+    doc.set_id(document::DocID::from_string(&created.doc_id).unwrap());
+
+    // Turn on whole-document encryption while touching only `bio`.
+    doc.set("bio", NormalValue::String("still public".to_string()));
+    let enc = EncryptionConfig {
+        encrypt_doc: true,
+        encrypt_fields: vec![],
+    };
+    write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        Some(&["bio".to_string()].into_iter().collect()),
+        Some(&enc),
+        None,
+        None,
+    )
+    .await
+    .expect("encrypting update should succeed");
+
+    // `name` still has only its unencrypted create block as a head.
+    doc.set("name", NormalValue::String("Bob".to_string()));
+    let updated = write_document_blocks(
+        &blockstore,
+        &headstore,
+        &doc,
+        "schema-v1",
+        identity,
+        Some(&["name".to_string()].into_iter().collect()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("update should succeed");
+
+    let name = field_block(&blockstore, &updated.field_cids[0]).await;
+    assert!(
+        name.encryption.is_some(),
+        "the document is encrypted as a whole, so `name` must be too"
+    );
+    assert_ne!(
+        delta_data(&name),
+        encode_value_as_cbor(&NormalValue::String("Bob".to_string())).unwrap(),
+        "the delta must hold ciphertext, not the plaintext value"
     );
 }

@@ -21,10 +21,12 @@
 //! `inherited_encryption`, mirroring Go's `determineBlockEncryption` in
 //! `internal/core/block/store.go`.
 //!
-//! Inheritance is per field and requires a previous head, so a field first
-//! written by an update inherits nothing and is stored in plaintext even on a
-//! document created with `encrypt_doc`. Go behaves the same way; see
-//! `db-blocks`' `field_added_by_update_is_written_plaintext_matching_go`.
+//! Inheritance is per field and requires a previous head. A field first
+//! written by an update has none, so on a document encrypted as a whole it
+//! falls back to the document-level policy recorded by the composite block's
+//! encryption link, which mints it a key rather than leaving it in the clear.
+//! Go writes that field in plaintext instead (its head set is per-field,
+//! `internal/core/block/store.go`); this is a deliberate divergence.
 //!
 //! Reusing one key across a field's history is sound because every delta is
 //! sealed with a fresh random 96-bit nonce (see `crypto::encryption::nonce`).
