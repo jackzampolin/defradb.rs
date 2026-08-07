@@ -1,4 +1,3 @@
-mod iterator;
 /// In-memory backend implementation using BTreeMap.
 ///
 /// This backend provides a simple, fast, in-memory key-value store suitable for

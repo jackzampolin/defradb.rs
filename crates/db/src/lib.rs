@@ -62,8 +62,11 @@ pub(crate) mod collection_ops;
 pub(crate) mod collection_provider;
 mod collection_retriever;
 pub(crate) mod collection_snapshot;
+pub(crate) mod collection_stream;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
+#[cfg(test)]
+mod counting_store;
 pub mod database;
 // Definition validation moved to the `schema` crate (was #791 substitute
 // slice) — see `schema::definition_validation`.
@@ -87,12 +90,16 @@ pub mod kms_adapters;
 pub(crate) mod lens_utils;
 pub(crate) mod lensed_auto_commit_fetcher;
 pub(crate) mod lensed_fetcher;
+#[cfg(test)]
+mod limit_pushdown_tests;
 pub(crate) mod migration;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
 mod nac_guard;
 pub mod node_access_checker;
 pub(crate) mod patch;
+#[cfg(test)]
+mod plan_close_tests;
 pub mod schema_loader;
 pub mod txn;
 pub(crate) mod txn_context;

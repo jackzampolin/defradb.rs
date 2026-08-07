@@ -188,7 +188,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan::build_mapping(select, collection)?;
 
         // Create an empty plan with no documents for explanation purposes
-        let plan = plan::build_plan(select, vec![], mapping, collection, None, self.query_limits)?;
+        let plan = plan::build_plan(
+            select,
+            plan::ScanSource::Docs(vec![]),
+            mapping,
+            collection,
+            None,
+            self.query_limits,
+        )?;
 
         // Get the plan explanation based on type
         let explain = match explain_type {

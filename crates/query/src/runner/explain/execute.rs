@@ -5,7 +5,7 @@ use serde_json::{Map, Value as JsonValue};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs};
+use crate::document::documents_to_plan_docs;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
@@ -18,6 +18,7 @@ use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::plan;
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
@@ -282,22 +283,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             // Execute the plan and count iterations
-            plan.init().await?;
-            plan.start().await?;
+            let outcome = async {
+                plan.init().await?;
+                plan.start().await?;
 
-            // Go counts ALL next() calls (including the final false) for planExecutions
-            let mut plan_executions: u64 = 0;
-            let mut result_count: usize = 0;
+                // Go counts ALL next() calls (including the final false) for planExecutions
+                let mut plan_executions: u64 = 0;
+                let mut result_count: usize = 0;
 
-            loop {
-                plan_executions += 1;
-                if !plan.next().await? {
-                    break;
+                loop {
+                    plan_executions += 1;
+                    if !plan.next().await? {
+                        break;
+                    }
+                    result_count += 1;
                 }
-                result_count += 1;
-            }
 
-            plan.close().await?;
+                Ok((result_count, plan_executions))
+            }
+            .await;
+
+            let (result_count, plan_executions) =
+                plan_drive::close_after(plan.as_mut(), outcome).await?;
 
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
@@ -307,13 +314,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Standard path: fetch all docs and build scan-based plan
             let mapping = plan::build_mapping(select, &collection)?;
 
-            // When show_deleted is true, we need to use get_all_with_deleted to include
-            // logically deleted documents. The doc_ids filter will be applied by the SelectNode.
-            let plan_docs = if select.show_deleted {
-                let docs_with_status = fetcher
-                    .get_all_with_deleted(&select.collection_name, true)
-                    .await?;
-                documents_with_status_to_plan_docs(&docs_with_status, &mapping)?
+            // A fetcher-backed scan streams documents one at a time, so it honours
+            // show_deleted, the scan filter, and a downstream limit without ever
+            // materializing the collection. doc_ids fetches specific documents
+            // rather than scanning, so it stays materialized.
+            let source = if select.show_deleted {
+                plan::ScanSource::Fetcher(Arc::new(FetcherWrapper::new(fetcher)))
             } else if let Some(ref doc_ids) = select.doc_ids {
                 // Deduplicate doc_ids while preserving order (Go compatibility)
                 let mut seen = HashSet::new();
@@ -325,12 +331,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let result = fetcher
                     .get_by_ids(&select.collection_name, &unique_ids)
                     .await?;
-                documents_to_plan_docs(&result.into_docs(), &mapping)?
+                plan::ScanSource::Docs(documents_to_plan_docs(&result.into_docs(), &mapping)?)
             } else {
-                let docs = fetcher.get_all(&select.collection_name).await?;
-                documents_to_plan_docs(&docs, &mapping)?
+                plan::ScanSource::Fetcher(Arc::new(FetcherWrapper::new(fetcher)))
             };
-            let _doc_count = plan_docs.len();
 
             // Build ACP filter config if collection has policy and ACP is configured
             let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
@@ -343,7 +347,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Build the plan (ACP filter is inserted inside, after Select but before aggregates)
             let mut plan = plan::build_plan(
                 select,
-                plan_docs.clone(),
+                source,
                 mapping.clone(),
                 &collection,
                 acp_filter,
@@ -351,22 +355,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             )?;
 
             // Execute the plan and count iterations
-            plan.init().await?;
-            plan.start().await?;
+            let outcome = async {
+                plan.init().await?;
+                plan.start().await?;
 
-            // Go counts ALL next() calls (including the final false) for planExecutions
-            let mut plan_executions: u64 = 0;
-            let mut result_count: usize = 0;
+                // Go counts ALL next() calls (including the final false) for planExecutions
+                let mut plan_executions: u64 = 0;
+                let mut result_count: usize = 0;
 
-            loop {
-                plan_executions += 1;
-                if !plan.next().await? {
-                    break;
+                loop {
+                    plan_executions += 1;
+                    if !plan.next().await? {
+                        break;
+                    }
+                    result_count += 1;
                 }
-                result_count += 1;
-            }
 
-            plan.close().await?;
+                Ok((result_count, plan_executions))
+            }
+            .await;
+
+            let (result_count, plan_executions) =
+                plan_drive::close_after(plan.as_mut(), outcome).await?;
 
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();

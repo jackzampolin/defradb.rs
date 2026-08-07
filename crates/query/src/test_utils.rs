@@ -48,6 +48,18 @@ impl DocFetcher for MockFetcher {
         Ok(docs.get(collection_name).cloned().unwrap_or_default())
     }
 
+    /// In-memory mock: there is no storage to stream from.
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+        Ok(Box::new(crate::doc_stream::VecStream::new(
+            self.get_all_with_deleted(collection_name, show_deleted)
+                .await?,
+        )))
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,

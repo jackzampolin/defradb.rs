@@ -4,15 +4,17 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::compute_range_bounds;
-use super::iterator::MergingIterator;
 use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
 };
+use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::empty_iterator::EmptyIterator;
+use crate::merging::MergingIterator;
+use crate::range_bounds::compute_range_bounds;
 
 /// Fjall transaction with snapshot isolation and buffered writes.
 pub(crate) struct FjallTxn {
@@ -141,15 +143,20 @@ impl Reader for FjallTxn {
         }
 
         self.read_set.lock().record_iter_options(&opts);
-        let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
+            return Ok(Box::new(EmptyIterator::new()));
+        };
         let keys_only = opts.keys_only();
 
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
-        // Read matching items from the fjall snapshot
         use fjall::Readable;
-        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = {
+
+        let snapshot = if opts.reverse() {
+            // Chunked forward reads cannot be reversed after the fact, and
+            // reverse scans are not on the limit hot path: read everything
+            // matching eagerly, exactly as before.
             let iter = match (&start_bound, &end_bound) {
                 (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded) => {
                     self.snapshot.iter(&self.keyspace)
@@ -178,7 +185,64 @@ impl Reader for FjallTxn {
                     }
                 }
             }
-            items
+            items.reverse();
+            // Already fully materialized: the whole (reversed) result is
+            // handed over as the one and only window.
+            ChunkedSnapshot::from_window(items)
+        } else {
+            let start_bound_for_chunk = start_bound.clone();
+            let end_bound_for_chunk = end_bound.clone();
+            let prefix = opts.prefix().map(|p| p.to_vec());
+            let snapshot = self.snapshot.clone();
+            let keyspace = self.keyspace.clone();
+            ChunkedSnapshot::new(DEFAULT_CHUNK_SIZE, move |after: Option<Vec<u8>>| {
+                // Resume strictly after the last key yielded: `last_key + 0x00`
+                // is its exclusive successor, so nothing sorts between them.
+                let lower_bound = match &after {
+                    Some(k) => {
+                        let mut succ = k.clone();
+                        succ.push(0);
+                        std::ops::Bound::Included(succ)
+                    }
+                    None => start_bound_for_chunk.clone(),
+                };
+                let result = (|| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+                    let iter = match (&lower_bound, &end_bound_for_chunk) {
+                        (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded) => {
+                            snapshot.iter(&keyspace)
+                        }
+                        _ => snapshot.range::<&[u8], _>(
+                            &keyspace,
+                            (
+                                bound_as_ref(&lower_bound),
+                                bound_as_ref(&end_bound_for_chunk),
+                            ),
+                        ),
+                    };
+                    let mut items = Vec::new();
+                    for guard in iter {
+                        match guard.into_inner() {
+                            Ok((k, v)) => {
+                                let key_bytes = k.as_ref();
+                                if prefix.as_deref().is_none_or(|p| key_bytes.starts_with(p)) {
+                                    items.push((
+                                        key_bytes.to_vec(),
+                                        if keys_only { Vec::new() } else { v.to_vec() },
+                                    ));
+                                    if items.len() >= DEFAULT_CHUNK_SIZE {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return Err(Error::Backend(format!("fjall iterator error: {}", e)));
+                            }
+                        }
+                    }
+                    Ok(items)
+                })();
+                async move { result }
+            })
         };
 
         // Extract pending items in range
@@ -196,7 +260,7 @@ impl Reader for FjallTxn {
             .collect();
 
         Ok(Box::new(MergingIterator::new(
-            snapshot_items,
+            snapshot,
             pending_items,
             opts,
         )))

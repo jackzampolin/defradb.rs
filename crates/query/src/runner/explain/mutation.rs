@@ -7,6 +7,7 @@ use crate::mapper::{Mutation, Select};
 use crate::query_parse::ExplainType;
 use crate::txn::TransactionRegistry;
 
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
@@ -224,10 +225,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             };
 
             // Execute the mutation plan (ignore results, we just need the side effects)
-            plan.init().await?;
-            plan.start().await?;
-            while plan.next().await? {}
-            plan.close().await?;
+            let outcome = async {
+                plan.init().await?;
+                plan.start().await?;
+                while plan.next().await? {}
+                Ok(())
+            }
+            .await;
+
+            plan_drive::close_after(plan.as_mut(), outcome).await?;
         }
 
         // Phase 2: Collect metrics AFTER mutation (create, update, upsert).

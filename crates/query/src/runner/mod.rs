@@ -31,6 +31,7 @@ mod mutation;
 mod mutation_inputs;
 mod plan;
 mod plan_aggregates;
+mod plan_drive;
 mod plan_formatting;
 mod plan_validation;
 mod query;

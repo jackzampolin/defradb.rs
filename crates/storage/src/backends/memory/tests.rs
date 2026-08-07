@@ -1,6 +1,8 @@
 use super::*;
-use crate::corekv::Store;
+use crate::corekv::{IterOptions, Store};
 use std::sync::Arc;
+
+mod chunked_scan;
 
 // ============================================================================
 // SHARED TEST SUITE - Run same tests against all backends

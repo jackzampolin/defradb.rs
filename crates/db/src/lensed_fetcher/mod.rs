@@ -20,6 +20,7 @@
 mod fetcher;
 mod index_scan;
 mod migration;
+mod stream;
 
 #[cfg(test)]
 mod tests;
@@ -57,7 +58,7 @@ pub struct LensedDocFetcher<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     defer_readonly_write_back: bool,
-    pending_write_backs: TokioMutex<PendingMigrationWriteBacks>,
+    pending_write_backs: Arc<TokioMutex<PendingMigrationWriteBacks>>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
     /// Cache of collection version histories keyed by collection name.
@@ -83,8 +84,23 @@ impl<S: Store> LensedDocFetcher<S> {
             db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
             defer_readonly_write_back,
-            pending_write_backs: TokioMutex::new(PendingMigrationWriteBacks::default()),
+            pending_write_backs: Arc::new(TokioMutex::new(PendingMigrationWriteBacks::default())),
             lens_store,
+            history_cache: async_lock::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Build a lightweight fetcher sharing this one's transaction and pending
+    /// write-back queue, for use by a `DocStream` that outlives a single
+    /// `&self` call. `history_cache` starts fresh rather than shared: it is
+    /// pure memoization, so recomputing it costs nothing correctness-wise.
+    pub(super) fn stream_clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            txn: self.txn.clone(),
+            defer_readonly_write_back: self.defer_readonly_write_back,
+            pending_write_backs: self.pending_write_backs.clone(),
+            lens_store: self.lens_store.clone(),
             history_cache: async_lock::RwLock::new(HashMap::new()),
         }
     }
@@ -166,6 +182,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Vec<(Document, bool)>> {
         self.get_all_with_deleted_impl(collection_name, show_deleted)
+            .await
+    }
+
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
+        self.stream_all_with_deleted_impl(collection_name, show_deleted)
             .await
     }
 
