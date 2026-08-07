@@ -35,12 +35,27 @@ where
     let total_expected = connected_peers.len() * doc_ids.len();
     let mut total_received = 0;
     let mut last_unanswered = 0;
+    let mut dispatched = false;
     let idle_timeout = std::time::Duration::from_secs(3);
     let start = std::time::Instant::now();
     let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
 
     for _attempt in 0..3 {
-        if total_received >= total_expected || start.elapsed() >= overall_timeout {
+        // Completion first: an empty `doc_ids` makes `total_expected` zero, and
+        // asking for nothing is not a timeout.
+        if total_received >= total_expected {
+            break;
+        }
+        // Go builds an already-expired context from a zero or negative timeout
+        // and reports `ErrTimeoutDocSync` rather than success
+        // (`sync_doc.go:155-158`). Once requests have gone out, a quiet peer is
+        // indistinguishable from one with nothing to send, so only the
+        // never-dispatched exit is an error.
+        if start.elapsed() >= overall_timeout {
+            if !dispatched {
+                event_bus.unsubscribe(sub.id());
+                return Err(P2PError::transport("timeout while syncing doc"));
+            }
             break;
         }
 
@@ -65,6 +80,7 @@ where
             ));
         }
         last_unanswered = outcome.unanswered;
+        dispatched = true;
 
         // Idle completion: exit after `idle_timeout` with no MergeComplete
         // events, even when zero merges arrived. Requiring a minimum merge
@@ -284,5 +300,69 @@ mod tests {
         )
         .await
         .expect("libp2p cannot tell silence from a failed send");
+    }
+
+    /// #1314 review: `timeout: "0"` is valid Go input. With peers and
+    /// documents present it leaves the deadline already expired, so no request
+    /// is ever sent — the deadline-expired-with-no-response case, not a
+    /// success.
+    #[tokio::test]
+    async fn already_expired_deadline_is_a_timeout() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(1, 0));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        let error = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::ZERO,
+            1,
+        )
+        .await
+        .expect_err("an expired deadline dispatches nothing, so it is a timeout");
+
+        assert!(
+            error.to_string().contains("timeout while syncing doc"),
+            "expected a timeout, got: {error}"
+        );
+    }
+
+    /// Completion is checked before the deadline so an empty `docIDs` — which
+    /// the handler does not reject — keeps returning `Ok` instead of becoming
+    /// a timeout for having dispatched nothing.
+    #[tokio::test]
+    async fn empty_doc_ids_is_not_a_timeout() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(1, 0));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            Vec::new(),
+            Duration::ZERO,
+            1,
+        )
+        .await
+        .expect("nothing was asked for, so nothing failed");
+    }
+
+    /// The benign case the narrow rule protects: requests went out, peers had
+    /// nothing newer to send, and the deadline expired. Go's loop succeeds
+    /// when its peers answer with empty results, so this must not become an
+    /// error.
+    #[tokio::test]
+    async fn deadline_after_a_successful_dispatch_is_not_a_timeout() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(1, 0));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(200),
+            1,
+        )
+        .await
+        .expect("dispatch succeeded and the peer had nothing to send");
     }
 }
