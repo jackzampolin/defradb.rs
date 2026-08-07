@@ -102,11 +102,22 @@ trait SchemaOps: Send + Sync {
     async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
 }
 
+#[async_trait::async_trait]
+trait BlockOps: Send + Sync {
+    async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String>;
+    async fn verified_signer_did_in_txn(
+        &self,
+        cid: &str,
+        transaction: &TransactionHandle,
+    ) -> anyhow::Result<String>;
+}
+
 /// An embedded DefraDB node with query execution and event subscription.
 pub struct EmbeddedNode {
     runner: Arc<dyn QueryExecutor>,
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
+    block_ops: Arc<dyn BlockOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -236,6 +247,29 @@ impl EmbeddedNode {
     /// DID used as the embedded node identity for signing, when configured.
     pub fn node_identity_did(&self) -> Option<&str> {
         self.node_identity_did.as_deref()
+    }
+
+    /// Cryptographically verify a committed block and return its signer DID.
+    ///
+    /// This reads the signature linked by `cid`, verifies it over the
+    /// canonical DAG-CBOR block bytes, and derives the DID from the verified
+    /// public key. Unsigned, malformed, missing, or invalid blocks fail closed.
+    pub async fn verified_block_signer_did(&self, cid: &str) -> anyhow::Result<String> {
+        self.block_ops.verified_signer_did(cid).await
+    }
+
+    /// Cryptographically verify a block visible inside an active transaction.
+    ///
+    /// This variant can verify uncommitted blocks before the caller commits or
+    /// rolls back the transaction.
+    pub async fn verified_block_signer_did_in_txn(
+        &self,
+        cid: &str,
+        transaction: &TransactionHandle,
+    ) -> anyhow::Result<String> {
+        self.block_ops
+            .verified_signer_did_in_txn(cid, transaction)
+            .await
     }
 
     /// Add a schema from a GraphQL SDL type definition.
@@ -1268,7 +1302,7 @@ impl NodeBuilder {
 
         // Assemble query runner
         let query_runner =
-            query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry)
+            query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry.clone())
                 .with_mutator(mutator)
                 .with_acp(document_acp.clone())
                 .with_node_did(database.node_did())
@@ -1284,8 +1318,10 @@ impl NodeBuilder {
         let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
             database.clone(),
             query_limits,
-            document_acp,
+            document_acp.clone(),
         ));
+        let block_ops: Arc<dyn BlockOps> =
+            Arc::new(db_impls::DbBlockOps::new(database, document_acp, registry));
 
         #[cfg(feature = "p2p")]
         let (p2p_ops, p2p_lifecycle) = match p2p_result {
@@ -1297,6 +1333,7 @@ impl NodeBuilder {
             runner,
             event_bus,
             schema_ops,
+            block_ops,
             embedding_config,
             node_identity_did,
             #[cfg(not(target_arch = "wasm32"))]

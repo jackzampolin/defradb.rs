@@ -6,7 +6,60 @@ use identity::Did;
 use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
 
-use crate::SchemaOps;
+use crate::{BlockOps, SchemaOps};
+
+pub(crate) struct DbBlockOps<S: storage::corekv::Store + 'static> {
+    database: Arc<db::DB<S>>,
+    document_acp: Arc<dyn acp::DocumentACP>,
+    transaction_registry: Arc<db::DbTransactionRegistry<S>>,
+    caller_identity: acp::Identity,
+}
+
+impl<S: storage::corekv::Store + 'static> DbBlockOps<S> {
+    pub(crate) fn new(
+        database: Arc<db::DB<S>>,
+        document_acp: Arc<dyn acp::DocumentACP>,
+        transaction_registry: Arc<db::DbTransactionRegistry<S>>,
+    ) -> Self {
+        let caller_identity = database.node_did().into();
+        Self {
+            database,
+            document_acp,
+            transaction_registry,
+            caller_identity,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
+    async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String> {
+        db::block_verify::verified_block_signer_did(
+            &self.database,
+            self.document_acp.as_ref(),
+            cid,
+            &self.caller_identity,
+        )
+        .await
+        .map_err(anyhow::Error::msg)
+    }
+
+    async fn verified_signer_did_in_txn(
+        &self,
+        cid: &str,
+        transaction: &query::TransactionHandle,
+    ) -> anyhow::Result<String> {
+        self.transaction_registry
+            .verified_block_signer_did_in_txn(
+                transaction.as_str(),
+                self.document_acp.as_ref(),
+                cid,
+                &self.caller_identity,
+            )
+            .await
+            .map_err(anyhow::Error::new)
+    }
+}
 
 pub(crate) struct DbSchemaOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
