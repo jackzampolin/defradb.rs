@@ -151,8 +151,9 @@ async fn limit_query_reads_keys_proportional_to_the_limit_fjall() {
 /// `docFetches` cannot show this: it counts documents yielded by `ScanNode`,
 /// which `LimitNode` already capped, so it reads the same whether the source
 /// streams or was pre-materialized. `keys_read` and `point_gets` sit below
-/// the fetcher, at the storage layer, so they observe what explain actually
-/// pulled off disk.
+/// the fetcher, at the `Store` API boundary, so they observe what explain
+/// actually pulled through that trait — not what any backend read from
+/// disk internally.
 async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 'static>(store: S) {
     let db = seeded_db(store).await;
     let keys_before = db.store().keys_read();
