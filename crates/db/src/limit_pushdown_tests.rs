@@ -13,6 +13,7 @@ use document::Document;
 use query::{DocMutator, QueryExecutor, QueryRequest};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use std::sync::Arc;
+use storage::corekv::Store;
 use storage::MemoryStore;
 
 use crate::counting_store::CountingStore;
@@ -38,8 +39,8 @@ fn users_schema() -> CollectionVersion {
     schema
 }
 
-async fn seeded_db() -> Arc<DB<CountingStore<MemoryStore>>> {
-    let db = Arc::new(DB::new(CountingStore::new(MemoryStore::new())).unwrap());
+async fn seeded_db<S: Store + 'static>(store: S) -> Arc<DB<CountingStore<S>>> {
+    let db = Arc::new(DB::new(CountingStore::new(store)).unwrap());
     db.create_collection(users_schema()).await.unwrap();
 
     let docs = (0..COLLECTION_SIZE)
@@ -63,9 +64,8 @@ async fn seeded_db() -> Arc<DB<CountingStore<MemoryStore>>> {
 /// the rest of a `COLLECTION_SIZE`-document collection. `point_gets` bounds
 /// document assembly, which does a couple of point lookups (`is_deleted`,
 /// `load_version`) per document.
-#[tokio::test]
-async fn limit_query_reads_keys_proportional_to_the_limit() {
-    let db = seeded_db().await;
+async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'static>(store: S) {
+    let db = seeded_db(store).await;
     let keys_before = db.store().keys_read();
     let gets_before = db.store().point_gets();
 
@@ -93,17 +93,53 @@ async fn limit_query_reads_keys_proportional_to_the_limit() {
     assert!(
         keys <= LIMIT * 2,
         "a limit-{LIMIT} query read {keys} keys from storage across a \
-         {COLLECTION_SIZE}-document collection (observed: 11, far short of \
-         even one {CHUNK_SIZE}-key chunk); a lazy scan reads a number of \
-         keys proportional to the limit"
+         {COLLECTION_SIZE}-document collection (observed: 11 on memory, far \
+         short of even one {CHUNK_SIZE}-key chunk); a lazy scan reads a \
+         number of keys proportional to the limit"
     );
 
     let gets = db.store().point_gets() - gets_before;
     assert!(
         gets <= LIMIT * 3,
-        "a limit-{LIMIT} query performed {gets} point lookups (observed: 23); \
-         document assembly must scale with the limit, not the collection"
+        "a limit-{LIMIT} query performed {gets} point lookups (observed: 23 \
+         on memory); document assembly must scale with the limit, not the \
+         collection"
     );
+}
+
+#[tokio::test]
+async fn limit_query_reads_keys_proportional_to_the_limit() {
+    assert_limit_query_reads_keys_proportional_to_the_limit(MemoryStore::new()).await;
+}
+
+#[cfg(feature = "redb")]
+#[tokio::test]
+async fn limit_query_reads_keys_proportional_to_the_limit_redb() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_limit_query_reads_keys_proportional_to_the_limit(
+        storage::RedbStore::open(dir.path()).unwrap(),
+    )
+    .await;
+}
+
+#[cfg(feature = "rocksdb")]
+#[tokio::test]
+async fn limit_query_reads_keys_proportional_to_the_limit_rocksdb() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_limit_query_reads_keys_proportional_to_the_limit(
+        storage::RocksDbStore::open(dir.path()).unwrap(),
+    )
+    .await;
+}
+
+#[cfg(feature = "fjall")]
+#[tokio::test]
+async fn limit_query_reads_keys_proportional_to_the_limit_fjall() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_limit_query_reads_keys_proportional_to_the_limit(
+        storage::FjallStore::open(dir.path()).unwrap(),
+    )
+    .await;
 }
 
 /// `explain(execute)` must not materialize the collection from storage
@@ -114,9 +150,8 @@ async fn limit_query_reads_keys_proportional_to_the_limit() {
 /// streams or was pre-materialized. `keys_read` and `point_gets` sit below
 /// the fetcher, at the storage layer, so they observe what explain actually
 /// pulled off disk.
-#[tokio::test]
-async fn explain_execute_reads_keys_proportional_to_the_limit() {
-    let db = seeded_db().await;
+async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 'static>(store: S) {
+    let db = seeded_db(store).await;
     let keys_before = db.store().keys_read();
     let gets_before = db.store().point_gets();
 
@@ -137,15 +172,50 @@ async fn explain_execute_reads_keys_proportional_to_the_limit() {
         keys <= LIMIT * 2,
         "explain(execute) on a limit-{LIMIT} query read {keys} keys from \
          storage across a {COLLECTION_SIZE}-document collection (observed: \
-         11, far short of even one {CHUNK_SIZE}-key chunk); a lazy scan \
-         reads a number of keys proportional to the limit"
+         11 on memory, far short of even one {CHUNK_SIZE}-key chunk); a lazy \
+         scan reads a number of keys proportional to the limit"
     );
 
     let gets = db.store().point_gets() - gets_before;
     assert!(
         gets <= LIMIT * 3,
         "explain(execute) on a limit-{LIMIT} query performed {gets} point \
-         lookups (observed: 23); document assembly must scale with the \
-         limit, not the collection"
+         lookups (observed: 23 on memory); document assembly must scale \
+         with the limit, not the collection"
     );
+}
+
+#[tokio::test]
+async fn explain_execute_reads_keys_proportional_to_the_limit() {
+    assert_explain_execute_reads_keys_proportional_to_the_limit(MemoryStore::new()).await;
+}
+
+#[cfg(feature = "redb")]
+#[tokio::test]
+async fn explain_execute_reads_keys_proportional_to_the_limit_redb() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_explain_execute_reads_keys_proportional_to_the_limit(
+        storage::RedbStore::open(dir.path()).unwrap(),
+    )
+    .await;
+}
+
+#[cfg(feature = "rocksdb")]
+#[tokio::test]
+async fn explain_execute_reads_keys_proportional_to_the_limit_rocksdb() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_explain_execute_reads_keys_proportional_to_the_limit(
+        storage::RocksDbStore::open(dir.path()).unwrap(),
+    )
+    .await;
+}
+
+#[cfg(feature = "fjall")]
+#[tokio::test]
+async fn explain_execute_reads_keys_proportional_to_the_limit_fjall() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_explain_execute_reads_keys_proportional_to_the_limit(
+        storage::FjallStore::open(dir.path()).unwrap(),
+    )
+    .await;
 }
