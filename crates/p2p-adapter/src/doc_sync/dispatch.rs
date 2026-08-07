@@ -19,6 +19,14 @@ pub(crate) trait DocSyncDispatch: Send + Sync {
     /// `p2p::transport::PeerId`, libp2p uses `libp2p::PeerId`.
     type Peer: Send + Sync;
 
+    /// Whether `Ok` from `send_doc_sync_request` proves the peer answered.
+    ///
+    /// True on iroh, whose send is a request-response: `Err` there means the
+    /// peer stayed silent, which is Go's `pendingPeers` condition. False on
+    /// libp2p, whose send is fire-and-forget: a failure means the bytes did
+    /// not leave, not that the peer would have declined to reply.
+    const SEND_CONFIRMS_REPLY: bool;
+
     async fn connected_peers(&self) -> P2PResult<Vec<Self::Peer>>;
 
     /// Signs in place using whatever identity the transport already uses.
@@ -35,6 +43,8 @@ pub(crate) trait DocSyncDispatch: Send + Sync {
 #[async_trait]
 impl DocSyncDispatch for p2p::iroh::IrohTransport {
     type Peer = p2p::transport::PeerId;
+
+    const SEND_CONFIRMS_REPLY: bool = true;
 
     async fn connected_peers(&self) -> P2PResult<Vec<Self::Peer>> {
         p2p::P2PTransport::connected_peers(self)
@@ -62,6 +72,8 @@ impl DocSyncDispatch for p2p::iroh::IrohTransport {
 #[async_trait]
 impl DocSyncDispatch for p2p::P2PHostHandle {
     type Peer = libp2p::PeerId;
+
+    const SEND_CONFIRMS_REPLY: bool = false;
 
     async fn connected_peers(&self) -> P2PResult<Vec<Self::Peer>> {
         p2p::P2PHostHandle::connected_peers(self)
