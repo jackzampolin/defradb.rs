@@ -335,6 +335,29 @@ async fn sync_without_peers_test(cluster: TestCluster) {
         "peerless doc sync should answer 500, body: {}",
         response.text().await.unwrap_or_default()
     );
+
+    // #1314: the body `timeout` is parsed as a Go duration, so a bare number is
+    // a 400 rather than a silent reading as seconds, and a well-formed one is
+    // carried through to the transport instead of being ignored.
+    for (timeout, expected) in [("5", 400), ("1s", 500)] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/v0/p2p/documents/sync", cluster.api_url(0)))
+            .json(&serde_json::json!({
+                "collectionName": "Users",
+                "docIDs": [doc_id],
+                "timeout": timeout,
+            }))
+            .send()
+            .await
+            .expect("sync request");
+
+        assert_eq!(
+            response.status().as_u16(),
+            expected,
+            "timeout {timeout:?} should answer {expected}, body: {}",
+            response.text().await.unwrap_or_default()
+        );
+    }
 }
 
 for_each_runtime!(p2p_sync_without_peers, sync_without_peers_test, .with_p2p());

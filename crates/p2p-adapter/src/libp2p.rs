@@ -957,9 +957,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // that is what a reply is expected from — not the doc-sync topic's
         // subscriber list.
         let expected_peers = connected_peers.len();
-        let response_wait = timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT);
         let replies = coord
-            .pubsub_sync_documents(doc_ids, Some(response_wait), Some(expected_peers))
+            .pubsub_sync_documents(doc_ids, Some(overall_timeout), Some(expected_peers))
             .await
             .map_err(|error| {
                 event_bus.unsubscribe(sub.id());
@@ -1259,11 +1258,9 @@ mod tests {
 
     /// Characterization, libp2p counterpart of the iroh test: a peer that
     /// accepts the request but never replies leaves `sync_documents` exiting
-    /// Ok. libp2p's send is fire-and-forget (unlike iroh's, which awaits a
-    /// reply and fails against an unresponsive peer), so every one of the
-    /// three retry attempts sends successfully and rides out the 3s idle
-    /// timeout waiting for a `MergeComplete` that never comes (~9s total),
-    /// rather than exiting after one attempt via the `!any_sent` branch.
+    /// Ok. libp2p's send is fire-and-forget, unlike iroh's, which awaits a
+    /// reply and so fails against an unresponsive peer and exits via the
+    /// `!any_sent` branch instead.
     #[tokio::test]
     async fn doc_sync_with_unresponsive_peer_returns_ok() {
         let (host_a, handle_a, _events_a, _replicators_a) =

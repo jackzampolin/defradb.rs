@@ -212,9 +212,9 @@ pub trait P2POperations: Send + Sync {
 
     /// Sync specific documents from connected peers.
     ///
-    /// `timeout` is the caller's deadline for the whole operation; `None` leaves
-    /// the transport's default in place, matching Go, where an absent body
-    /// `timeout` leaves the context without a deadline.
+    /// `timeout` is the caller's deadline for the whole operation. `None` means
+    /// `DEFAULT_DOC_SYNC_TIMEOUT`, matching the 5s Go falls back to when its
+    /// inherited context carries no deadline.
     async fn sync_documents(
         &self,
         collection_name: &str,
