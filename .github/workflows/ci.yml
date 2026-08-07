@@ -77,6 +77,10 @@ jobs:
       - run: cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
       - run: cargo clippy -p db --features p2p --all-targets -- -D warnings
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
@@ -84,7 +88,12 @@ jobs:
 
   wasm-check:
     name: WASM Build Check
-    runs-on: [self-hosted, Linux, X64]
+    # spark-1: the wasm32 target doesn't care about host arch, and pinning
+    # here takes this job off the vps (which now serves release.yml's x86_64
+    # builds only) and out of p2p-linux's way. No GitHub-hosted rust-cache:
+    # the runner workspace persists between jobs, so the warm target dir plus
+    # host-local sccache beat cache download/upload round-trips.
+    runs-on: [self-hosted, Linux, ARM64, spark, spark-1]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,11 +106,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-ci"
-          shared-key: "wasm32"
 
       - name: Install system dependencies
         # clang is needed because lz4-sys (transitive C dep) builds
@@ -123,6 +127,10 @@ jobs:
       - name: Build WASM
         run: CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
@@ -132,6 +140,18 @@ jobs:
   build:
     name: Build & Test
     runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
+    env:
+      # Warm-incremental beats sccache for the hot edit path (gents A/B on
+      # these hosts: 14.6s vs 5m54s for a representative source edit). The
+      # host-wide sccache rejects incremental invocations, and an empty
+      # RUSTC_WRAPPER falls back to host config, so route rustc through the
+      # pass-through wrapper. CARGO_BUILD_RUSTC_WRAPPER covers recursive
+      # Cargo invocations from build scripts. The rust/signed-docs suites on
+      # this runner use the same settings so the shared target tree never
+      # flip-flops flags.
+      CARGO_INCREMENTAL: "1"
+      RUSTC_WRAPPER: .github/scripts/rustc-direct.sh
+      CARGO_BUILD_RUSTC_WRAPPER: .github/scripts/rustc-direct.sh
     steps:
       - uses: actions/checkout@v4
         with:
@@ -270,6 +290,10 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
@@ -296,15 +320,25 @@ jobs:
       # suites self-build on miss into their own host-local cache.
       matrix:
         include:
+          # studio-1 suites share the build job's incremental target tree, so
+          # they carry the same incremental + pass-through wrapper settings;
+          # studio-2 suites stay on the host sccache (incremental off) so the
+          # target tree they share with conformance keeps consistent flags.
           - suite: rust
             needs_go: false
             host: studio-1
+            cargo_incremental: "1"
+            rustc_wrapper: .github/scripts/rustc-direct.sh
           - suite: go-compat
             needs_go: true
             host: studio-2
+            cargo_incremental: "0"
+            rustc_wrapper: sccache
           - suite: iroh
             needs_go: false
             host: studio-2
+            cargo_incremental: "0"
+            rustc_wrapper: sccache
           # #978: re-run the rust integration suite with
           # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
           # .with_signing() auto-applied. Catches regressions in
@@ -314,10 +348,15 @@ jobs:
             needs_go: false
             multipliers: signed-docs
             host: studio-1
+            cargo_incremental: "1"
+            rustc_wrapper: .github/scripts/rustc-direct.sh
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
       DEFRA_MULTIPLIERS: ${{ matrix.multipliers || '' }}
+      CARGO_INCREMENTAL: ${{ matrix.cargo_incremental }}
+      RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
+      CARGO_BUILD_RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -553,11 +592,16 @@ jobs:
     # The macOS `integration` matrix above only runs the P2P suite on the studio
     # host. Several P2P sync races are exposed only by Linux's socket/thread
     # scheduling (e.g. duplicate connections that form under multi-core
-    # kqueue-vs-epoll timing), so mirror the pure-Rust P2P leg on the self-hosted
+    # kqueue-vs-epoll timing), so mirror the pure-Rust P2P leg on a self-hosted
     # Linux runner. Builds its own binary — the `build` job caches Mach-O
     # binaries that cannot run here.
+    #
+    # spark-2: dedicated host so this node-spawning job runs in parallel with
+    # wasm-check (spark-1) instead of serializing behind it on the vps, which
+    # now serves release.yml's x86_64 builds only. Still Linux/epoll — the
+    # scheduling-race coverage is arch-independent.
     name: P2P Integration (Linux)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, ARM64, spark, spark-2]
     timeout-minutes: 45
     env:
       # The workflow-level PROTOC points at a macOS Homebrew path; override it
@@ -581,11 +625,6 @@ jobs:
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-ci"
-          shared-key: "p2p-linux"
 
       - name: Install system dependencies
         # protobuf-compiler: prost-build. clang/libclang-dev: bindgen (rocksdb).
@@ -627,6 +666,10 @@ jobs:
           path: target/e2e/**/logs/*.log
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
 
       - name: Cleanup
         if: always()

@@ -8,6 +8,9 @@ self-hosted-runner:
     - studio-1-b
     - studio-2-b
     - defra-light
+    - spark
+    - spark-1
+    - spark-2
     - ARM64
     - X64
     - macOS
