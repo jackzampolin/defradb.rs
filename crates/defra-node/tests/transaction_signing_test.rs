@@ -127,8 +127,48 @@ async fn embedded_transaction_mutation_uses_node_signer() {
         .expect("verify embedded block signature");
     assert_eq!(verified_did, did);
 
-    node.shutdown().await;
     defra_core::signing::clear_identity_store();
+    let create_without_signer = node
+        .execute(r#"mutation { create_Widget(input: {name: "must-fail"}) { _docID } }"#)
+        .await;
+    assert!(
+        create_without_signer.has_errors()
+            && create_without_signer.errors[0]
+                .message
+                .contains("configured node signing identity")
+            && create_without_signer.errors[0]
+                .message
+                .contains("is unavailable"),
+        "configured node must fail closed when its signer disappears: {:?}",
+        create_without_signer.errors
+    );
+
+    let txn_without_signer = node.runner().begin_txn(false).await.expect("begin txn");
+    let create_in_txn_without_signer = node
+        .execute_request_in_txn(
+            QueryRequest::new(
+                r#"mutation { create_Widget(input: {name: "must-also-fail"}) { _docID } }"#,
+            ),
+            &txn_without_signer,
+        )
+        .await;
+    assert!(
+        create_in_txn_without_signer.has_errors()
+            && create_in_txn_without_signer.errors[0]
+                .message
+                .contains("configured node signing identity")
+            && create_in_txn_without_signer.errors[0]
+                .message
+                .contains("is unavailable"),
+        "configured transactional execute must fail closed when its signer disappears: {:?}",
+        create_in_txn_without_signer.errors
+    );
+    node.runner()
+        .rollback_txn(&txn_without_signer)
+        .await
+        .expect("rollback txn");
+
+    node.shutdown().await;
 
     let node = EmbeddedNode::builder()
         .build()

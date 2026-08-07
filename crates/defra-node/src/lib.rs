@@ -186,7 +186,7 @@ impl EmbeddedNode {
             true,
         );
         let Some(signing_config) = signing_config else {
-            return self.runner.execute(request).await;
+            return unavailable_node_signer_response(node_identity_did);
         };
 
         execute_with_signing_context(
@@ -219,7 +219,7 @@ impl EmbeddedNode {
             true,
         );
         let Some(signing_config) = signing_config else {
-            return self.runner.execute_in_txn(request, &handle).await;
+            return unavailable_node_signer_response(node_identity_did);
         };
 
         execute_with_signing_context(
@@ -519,19 +519,11 @@ async fn execute_with_signing_context(
 
     match tokio::task::spawn_blocking(move || {
         #[cfg(not(target_arch = "wasm32"))]
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
+        let runtime = match signed_query_runtime() {
             Ok(runtime) => runtime,
-            Err(error) => {
-                return QueryResponse::error(format!(
-                    "failed to create signed query runtime: {error}"
-                ));
-            }
+            Err(error) => return QueryResponse::error(error),
         };
-        defra_core::signing::set_signing_config(Some(signing_config));
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
+        let _signing_guard = ThreadSigningContextGuard::install(signing_config, batch_session_key);
         // Install the node identity as the ambient acting identity so DB-layer
         // NAC checks resolve to the node itself. The pool thread is reused, so
         // the guard clears it when the closure ends to prevent cross-request leak.
@@ -562,6 +554,55 @@ async fn execute_with_signing_context(
             QueryResponse::error(format!("query execution task failed: {join_error}"))
         }
     }
+}
+
+fn unavailable_node_signer_response(node_did: &str) -> QueryResponse {
+    QueryResponse::error(format!(
+        "configured node signing identity {node_did} is unavailable"
+    ))
+}
+
+struct ThreadSigningContextGuard {
+    previous_signing_config: Option<SigningConfig>,
+    previous_batch_session_key: Option<String>,
+}
+
+impl ThreadSigningContextGuard {
+    fn install(signing_config: SigningConfig, batch_session_key: Option<String>) -> Self {
+        let previous_signing_config = defra_core::signing::get_signing_config();
+        let previous_batch_session_key = defra_core::batch_signing::get_batch_session_key();
+        defra_core::signing::set_signing_config(Some(signing_config));
+        defra_core::batch_signing::set_batch_session_key(batch_session_key);
+        Self {
+            previous_signing_config,
+            previous_batch_session_key,
+        }
+    }
+}
+
+impl Drop for ThreadSigningContextGuard {
+    fn drop(&mut self) {
+        defra_core::signing::set_signing_config(self.previous_signing_config.take());
+        defra_core::batch_signing::set_batch_session_key(self.previous_batch_session_key.take());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn signed_query_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("defra-signed-query")
+                .enable_all()
+                .build()
+                .map_err(|error| format!("failed to create signed query runtime: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn is_transaction_conflict_response(response: &QueryResponse) -> bool {
@@ -1557,6 +1598,71 @@ mod tests {
         completed: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     }
 
+    struct SpawningSigningExecutor {
+        completed: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl QueryExecutor for SpawningSigningExecutor {
+        async fn execute(&self, _request: QueryRequest) -> query::QueryResponse {
+            let completed = self
+                .completed
+                .lock()
+                .expect("completion sender poisoned")
+                .take()
+                .expect("completion sender missing");
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                completed.send(()).expect("completion receiver dropped");
+            });
+            query::QueryResponse::success(serde_json::json!({"ok": true}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> query::QueryResponse {
+            self.execute(request).await
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> query::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn test_signing_config() -> SigningConfig {
+        SigningConfig {
+            key_type: SigningKeyType::Secp256r1,
+            private_key_bytes: vec![1],
+            public_key_bytes: vec![2],
+            public_key_hex: "02".to_string(),
+            remote_signer: None,
+            signing_authorization: None,
+        }
+    }
+
     #[async_trait::async_trait]
     impl QueryExecutor for SlowSigningExecutor {
         async fn execute(&self, _request: QueryRequest) -> query::QueryResponse {
@@ -1625,14 +1731,7 @@ mod tests {
                     executor,
                     QueryRequest::new("{ delayed }"),
                     None,
-                    SigningConfig {
-                        key_type: SigningKeyType::Secp256r1,
-                        private_key_bytes: vec![1],
-                        public_key_bytes: vec![2],
-                        public_key_hex: "02".to_string(),
-                        remote_signer: None,
-                        signing_authorization: None,
-                    },
+                    test_signing_config(),
                     "did:key:zCancellationTest".to_string(),
                 )
                 .await
@@ -1648,6 +1747,36 @@ mod tests {
         completed_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("signed query must complete after its caller runtime is dropped");
+    }
+
+    #[test]
+    fn signed_query_runtime_keeps_spawned_work_alive_after_query_returns() {
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let executor: Arc<dyn QueryExecutor> = Arc::new(SpawningSigningExecutor {
+            completed: std::sync::Mutex::new(Some(completed_tx)),
+        });
+        let caller_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("caller runtime");
+
+        let response = caller_runtime.block_on(super::execute_with_signing_context(
+            executor,
+            QueryRequest::new("{ spawnBackgroundWork }"),
+            None,
+            test_signing_config(),
+            "did:key:zSpawnTest".to_string(),
+        ));
+        assert!(
+            !response.has_errors(),
+            "query failed: {:?}",
+            response.errors
+        );
+        drop(caller_runtime);
+
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("work spawned by a signed query must outlive query completion");
     }
 
     #[tokio::test]
