@@ -2,6 +2,7 @@ use super::*;
 use document::NormalValue;
 use query::mutator::DocMutator;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use storage::backends::MemoryStore;
 
 use crate::doc_mutator::DbDocMutator;
@@ -76,4 +77,74 @@ async fn stream_may_be_dropped_after_partial_consumption() {
         assert!(stream.next().await.unwrap().is_some());
     }
     drop(stream);
+}
+
+struct RecordingStream {
+    inner: Box<dyn DocStream>,
+    closed: Arc<AtomicBool>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocStream for RecordingStream {
+    async fn next(&mut self) -> query::error::Result<Option<(Document, bool)>> {
+        self.inner.next().await
+    }
+
+    async fn close(&mut self) -> query::error::Result<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        self.inner.close().await
+    }
+}
+
+/// Draining a stream to exhaustion must close the storage iterator, not just
+/// drop it: `release_read_txn` clears `inner`, so a later `ScanNode::close`
+/// cannot reach it.
+#[tokio::test]
+async fn exhaustion_closes_the_inner_stream() {
+    let db = fixture_with_docs(3).await;
+    let closed = Arc::new(AtomicBool::new(false));
+
+    let inner = AutoCommitFetcher::new(db.clone())
+        .stream_all_with_deleted("Users", false)
+        .await
+        .unwrap();
+    let mut stream = AutoCommitDocStream::<MemoryStore> {
+        inner: Some(Box::new(RecordingStream {
+            inner,
+            closed: closed.clone(),
+        })),
+        txn: std::sync::Mutex::new(None),
+    };
+
+    while stream.next().await.unwrap().is_some() {}
+
+    assert!(
+        closed.load(Ordering::SeqCst),
+        "exhaustion dropped the inner stream without closing it"
+    );
+}
+
+/// An explicit close before exhaustion must also reach it.
+#[tokio::test]
+async fn explicit_close_closes_the_inner_stream() {
+    let db = fixture_with_docs(3).await;
+    let closed = Arc::new(AtomicBool::new(false));
+
+    let inner = AutoCommitFetcher::new(db.clone())
+        .stream_all_with_deleted("Users", false)
+        .await
+        .unwrap();
+    let mut stream = AutoCommitDocStream::<MemoryStore> {
+        inner: Some(Box::new(RecordingStream {
+            inner,
+            closed: closed.clone(),
+        })),
+        txn: std::sync::Mutex::new(None),
+    };
+
+    stream.next().await.unwrap();
+    stream.close().await.unwrap();
+
+    assert!(closed.load(Ordering::SeqCst));
 }

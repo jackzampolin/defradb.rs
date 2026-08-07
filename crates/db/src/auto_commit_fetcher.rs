@@ -436,6 +436,20 @@ impl<S: Store + 'static> AutoCommitDocStream<S> {
             }
         }
     }
+
+    /// Close the inner stream, then release the transaction whether or not the
+    /// close succeeded. Go propagates iterator-close errors from its
+    /// exhaustion path (`fetcher/prefix.go`, `fetcher/multi.go`); the release
+    /// is unconditional because a leaked read transaction is worse than a
+    /// swallowed cleanup error.
+    async fn close_inner_then_release(&mut self) -> query::error::Result<()> {
+        let closed = match self.inner.take() {
+            Some(mut inner) => inner.close().await,
+            None => Ok(()),
+        };
+        self.release_read_txn();
+        closed
+    }
 }
 
 impl<S: Store + 'static> Drop for AutoCommitDocStream<S> {
@@ -453,17 +467,13 @@ impl<S: Store + 'static> DocStream for AutoCommitDocStream<S> {
             None => None,
         };
         if pulled.is_none() {
-            self.release_read_txn();
+            self.close_inner_then_release().await?;
         }
         Ok(pulled)
     }
 
     async fn close(&mut self) -> query::error::Result<()> {
-        if let Some(inner) = self.inner.as_mut() {
-            inner.close().await?;
-        }
-        self.release_read_txn();
-        Ok(())
+        self.close_inner_then_release().await
     }
 }
 
