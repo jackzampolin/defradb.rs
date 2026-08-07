@@ -97,17 +97,29 @@ impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
         Ok(Some((processed, is_deleted)))
     }
 
-    /// Release the read transaction and flush whatever partial write-back
-    /// batch remains, matching the eager path's final
-    /// `persist_migrated_documents` call after its loop. Called both on
+    /// Close the inner stream, release the read transaction, then flush
+    /// whatever partial write-back batch remains, matching the eager path's
+    /// final `persist_migrated_documents` call after its loop. Called both on
     /// exhaustion and by consumers that stop pulling early; taking the buffer
     /// first makes a second call a no-op.
+    ///
+    /// The write-back flush runs even if closing the inner stream errored,
+    /// since it persists migrations already computed from documents already
+    /// read - discarding that work on a cleanup failure would be worse than
+    /// surfacing the close error afterward.
     async fn close(&mut self) -> query::error::Result<()> {
         let write_backs = std::mem::take(&mut self.write_backs);
+        let closed = match self.inner.take() {
+            Some(mut inner) => inner.close().await,
+            None => Ok(()),
+        };
         self.release_read_txn();
-        self.fetcher
+        let persisted = self
+            .fetcher
             .persist_migrated_documents(&self.collection, write_backs)
-            .await
+            .await;
+        closed?;
+        persisted
     }
 }
 
@@ -169,3 +181,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests;
