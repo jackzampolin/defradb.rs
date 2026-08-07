@@ -230,7 +230,7 @@ impl Reader for RocksDbTxn {
 
         // Compute range bounds
         let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
-            return Ok(Box::new(EmptyIterator));
+            return Ok(Box::new(EmptyIterator::new()));
         };
 
         let snapshot = if opts.reverse() {

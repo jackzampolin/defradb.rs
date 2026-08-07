@@ -319,7 +319,7 @@ impl Reader for LarkTxn {
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
         let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
-            return Ok(Box::new(EmptyIterator));
+            return Ok(Box::new(EmptyIterator::new()));
         };
         let snapshot_iter = self.snapshot.owned_iter();
 

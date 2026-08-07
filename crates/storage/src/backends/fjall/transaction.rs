@@ -144,7 +144,7 @@ impl Reader for FjallTxn {
 
         self.read_set.lock().record_iter_options(&opts);
         let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
-            return Ok(Box::new(EmptyIterator));
+            return Ok(Box::new(EmptyIterator::new()));
         };
         let keys_only = opts.keys_only();
 
