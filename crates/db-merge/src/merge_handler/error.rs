@@ -58,9 +58,9 @@ pub enum MergeError {
     #[error("batch gate contended")]
     GateContended,
 
-    /// DAG recursion depth limit exceeded.
+    /// DAG traversal depth limit exceeded.
     ///
-    /// A maliciously crafted deeply-nested DAG could otherwise cause a stack overflow.
+    /// A maliciously crafted deeply-nested DAG could otherwise consume unbounded resources.
     #[error("DAG merge depth limit exceeded at cid={cid} depth={depth}")]
     DepthExceeded {
         /// CID that triggered the depth check.

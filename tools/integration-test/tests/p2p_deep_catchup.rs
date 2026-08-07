@@ -1,15 +1,13 @@
-//! #1088 W4 liveness: a deep full-DAG push must complete under intake rate
-//! limiting instead of sawtoothing against a lockout ladder.
+//! #1088 W4 / source-inc/gents#1049 liveness: initial replay and live deep-DAG
+//! pushes must complete under intake rate limiting instead of abandoning the
+//! document or sawtoothing against a lockout ladder.
 //!
-//! Filtered replicators receive the full transitive DAG on every update with
-//! no client-side pacer (unlike the initial-replay path, whose ReplayPushGate
-//! self-paces). With the pre-split limiter, the first over-budget block armed
-//! a 30s lockout: the pusher's ~2.3s of in-batch retries all fell inside it,
-//! the batch aborted, and every ladder-spaced re-push restarted from block one
-//! — re-burning the burst on already-sent blocks — so any DAG deeper than
-//! roughly the burst never converged. The request-intake limiter now paces at
-//! the token-refill horizon, so the push throttles to the refill rate and
-//! completes.
+//! Initial replay has a client-side pacer, but its defaults can exceed a
+//! receiver's configured bucket or start with stale credit after unrelated
+//! resync traffic. A `RATE_LIMITED_MESSAGE` nack must therefore pause the
+//! peer-wide replay gate and retry the rejected block. This test asserts that
+//! initial replay itself converges; a later mutation must not be required to
+//! rescue a silently stale document.
 //!
 //! Own test binary: the burst/rate env overrides must not leak into other
 //! tests' clusters.
@@ -55,9 +53,9 @@ fn add_filtered_replicator(cluster: &TestCluster, node: usize, addr: &str) {
 }
 
 #[tokio::test]
-async fn deep_dag_push_completes_under_intake_rate_limiting() {
-    // Hub bucket far smaller than the DAG so the live full-DAG push must be
-    // paced across many refill windows: ~150 blocks vs a 50-token burst.
+async fn initial_replay_completes_under_intake_rate_limiting() {
+    // Hub bucket far smaller than the DAG and slower than ReplayPushGate's
+    // defaults: ~150 blocks vs a 50-token burst at 20 tokens/s.
     std::env::set_var("DEFRA_P2P_RATE_LIMIT_BURST", "50");
     std::env::set_var("DEFRA_P2P_RATE_LIMIT_RATE", "20");
 
@@ -107,18 +105,6 @@ async fn deep_dag_push_completes_under_intake_rate_limiting() {
     }
 
     add_filtered_replicator(&cluster, 0, &hub_addr);
-    // Let the initial replay attempt (client-paced at defaults, which exceed
-    // this hub's shrunken bucket) finish nacking and the bucket refill.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // One live update pushes the ENTIRE transitive DAG (~3 blocks per update
-    // deep by now) through send_ordered_pushlogs_via_transport: it must pace
-    // through the limiter and converge, not wedge.
-    let final_age = 999;
-    let mutation = format!(
-        r#"mutation {{ update_User(docID: "{doc_id}", input: {{age: {final_age}}}) {{ _docID }} }}"#
-    );
-    pusher.query(&mutation).expect("final update");
 
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
@@ -128,7 +114,7 @@ async fn deep_dag_push_completes_under_intake_rate_limiting() {
         let converged = result["User"].as_array().is_some_and(|rows| {
             rows.iter().any(|row| {
                 row["_docID"].as_str() == Some(doc_id.as_str())
-                    && row["age"].as_i64() == Some(final_age)
+                    && row["age"].as_i64() == Some(UPDATES as i64)
             })
         });
         if converged {
@@ -136,7 +122,7 @@ async fn deep_dag_push_completes_under_intake_rate_limiting() {
         }
         assert!(
             Instant::now() < deadline,
-            "deep-DAG push did not converge under intake rate limiting (sawtooth/wedge): {}",
+            "initial replay did not converge under intake rate limiting: {}",
             serde_json::to_string_pretty(&result).unwrap()
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
