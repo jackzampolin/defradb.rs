@@ -595,7 +595,6 @@ fn signed_query_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     RUNTIME
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
                 .thread_name("defra-signed-query")
                 .enable_all()
                 .build()
