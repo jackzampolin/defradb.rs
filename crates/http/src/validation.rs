@@ -450,6 +450,16 @@ mod tests {
         }
     }
 
+    /// The one input where we knowingly disagree with Go. Go accumulates in a
+    /// wrapping `uint64`, so these two terms sum to exactly `1<<64`, wrap to
+    /// zero, and parse as `0s` — verified against go1.26.5. Reproducing that
+    /// would turn a duration far past the maximum into "give up immediately",
+    /// so we reject it instead.
+    #[test]
+    fn timeout_rejects_the_pair_go_wraps_to_zero() {
+        assert!(parse_timeout(Some("9223372036854775808ns9223372036854775808ns")).is_err());
+    }
+
     /// `time.Duration`'s exact maximum, in the form `Duration.String()` emits.
     /// Doubles as the precision guard: an `f64` accumulator rounds this up by
     /// one nanosecond, off the boundary it is meant to sit exactly on.
