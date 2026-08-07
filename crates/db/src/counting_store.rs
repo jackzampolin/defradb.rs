@@ -1,10 +1,14 @@
 //! A test-only [`Store`] decorator that counts real storage reads.
 //!
 //! Unlike counting documents handed to the query plan, this counts what a
-//! query actually pulls out of the underlying store: keys yielded by an
-//! iterator, and point `get`s. A fetcher that materializes an entire
-//! collection before yielding a `LIMIT`-bounded slice cannot hide behind
-//! plan-level document counts when instrumented with this decorator.
+//! query pulls through the [`Store`] API: keys yielded by an iterator, and
+//! single-key reads. A fetcher that materializes an entire collection before
+//! yielding a `LIMIT`-bounded slice cannot hide behind plan-level document
+//! counts when instrumented with this decorator.
+//!
+//! The measurement point is the `Store` trait boundary. Whatever a backend
+//! does to refill its own window happens inside its `Iterator` implementation,
+//! below this decorator, and is not counted here.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -40,7 +44,8 @@ impl<S: Store> CountingStore<S> {
         self.counts.keys_read.load(Ordering::SeqCst)
     }
 
-    /// Single-key lookups, which document assembly performs per document.
+    /// Single-key reads — `get`, `has` and `get_size` — which document
+    /// assembly performs per document.
     pub(crate) fn point_gets(&self) -> usize {
         self.counts.point_gets.load(Ordering::SeqCst)
     }
@@ -86,10 +91,12 @@ impl Reader for CountingTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.counts.point_gets.fetch_add(1, Ordering::SeqCst);
         self.inner.has(key).await
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        self.counts.point_gets.fetch_add(1, Ordering::SeqCst);
         self.inner.get_size(key).await
     }
 

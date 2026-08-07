@@ -143,8 +143,46 @@ async fn explicit_close_closes_the_inner_stream() {
         txn: std::sync::Mutex::new(None),
     };
 
-    stream.next().await.unwrap();
+    assert!(
+        stream.next().await.unwrap().is_some(),
+        "the stream must yield a document, or exhaustion closes it before the explicit close does"
+    );
     stream.close().await.unwrap();
 
     assert!(closed.load(Ordering::SeqCst));
+}
+
+struct FailingCloseStream;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocStream for FailingCloseStream {
+    async fn next(&mut self) -> query::error::Result<Option<(Document, bool)>> {
+        Ok(None)
+    }
+
+    async fn close(&mut self) -> query::error::Result<()> {
+        Err(query::error::QueryError::execution("boom-close"))
+    }
+}
+
+/// The read transaction is released even when closing the inner stream fails.
+/// A leaked read transaction is worse than a surfaced cleanup error, so the
+/// release is unconditional and the error is returned afterwards.
+#[tokio::test]
+async fn close_releases_the_txn_even_when_the_inner_close_fails() {
+    let db = fixture_with_docs(1).await;
+    let txn = db.new_txn(true).await.unwrap();
+
+    let mut stream = AutoCommitDocStream {
+        inner: Some(Box::new(FailingCloseStream)),
+        txn: std::sync::Mutex::new(Some(txn)),
+    };
+
+    let err = stream.close().await.unwrap_err();
+    assert!(format!("{err}").contains("boom-close"));
+    assert!(
+        stream.txn.lock().unwrap().is_none(),
+        "the read transaction must be released even when the inner close fails"
+    );
 }
