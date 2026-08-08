@@ -732,7 +732,11 @@ impl SignedQueryRuntime {
             .name("defra-signed-query-owner".to_string())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
+                    // Root signed queries run on this runtime's blocking pool
+                    // and drive their futures with `Handle::block_on`; one
+                    // async worker is therefore reserved for spawned query/P2P
+                    // work without multiplying threads for every embedded node.
+                    .worker_threads(1)
                     .thread_name("defra-signed-query")
                     .enable_all()
                     .build()
