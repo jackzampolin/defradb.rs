@@ -121,6 +121,8 @@ pub struct EmbeddedNode {
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
+    signed_query_runtime: Option<SignedQueryRuntime>,
+    #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "rocksdb")]
     rocksdb_stats: Option<storage::RocksDbStatsHandle>,
@@ -188,6 +190,15 @@ impl EmbeddedNode {
         let Some(signing_config) = signing_config else {
             return unavailable_node_signer_response(node_identity_did);
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(signed_query_permit) = self
+            .signed_query_runtime
+            .as_ref()
+            .expect("signed node owns a query runtime")
+            .admit()
+        else {
+            return QueryResponse::error("signed query runtime is shutting down");
+        };
 
         execute_with_signing_context(
             self.runner.clone(),
@@ -195,6 +206,13 @@ impl EmbeddedNode {
             None,
             signing_config,
             node_identity_did.to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            self.signed_query_runtime
+                .as_ref()
+                .expect("signed node owns a query runtime")
+                .handle(),
+            #[cfg(not(target_arch = "wasm32"))]
+            signed_query_permit,
         )
         .await
     }
@@ -221,6 +239,15 @@ impl EmbeddedNode {
         let Some(signing_config) = signing_config else {
             return unavailable_node_signer_response(node_identity_did);
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(signed_query_permit) = self
+            .signed_query_runtime
+            .as_ref()
+            .expect("signed node owns a query runtime")
+            .admit()
+        else {
+            return QueryResponse::error("signed query runtime is shutting down");
+        };
 
         execute_with_signing_context(
             self.runner.clone(),
@@ -228,6 +255,13 @@ impl EmbeddedNode {
             Some(handle),
             signing_config,
             node_identity_did.to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            self.signed_query_runtime
+                .as_ref()
+                .expect("signed node owns a query runtime")
+                .handle(),
+            #[cfg(not(target_arch = "wasm32"))]
+            signed_query_permit,
         )
         .await
     }
@@ -439,9 +473,28 @@ impl EmbeddedNode {
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(runtime) = &self.signed_query_runtime {
+            if !runtime
+                .close_admission_and_wait_for(SIGNED_QUERY_DRAIN_TIMEOUT)
+                .await
+            {
+                tracing::warn!(
+                    active_queries = runtime.active_queries(),
+                    timeout_secs = SIGNED_QUERY_DRAIN_TIMEOUT.as_secs(),
+                    "timed out draining signed queries during node shutdown"
+                );
+            }
+        }
+
         #[cfg(feature = "p2p")]
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(runtime) = &self.signed_query_runtime {
+            runtime.shutdown().await;
         }
 
         // Flush buffered spans / metrics. Done after P2P shutdown so trailing
@@ -512,17 +565,18 @@ async fn execute_with_signing_context(
     txn_handle: Option<TransactionHandle>,
     signing_config: SigningConfig,
     node_did: String,
+    #[cfg(not(target_arch = "wasm32"))] runtime_handle: tokio::runtime::Handle,
+    #[cfg(not(target_arch = "wasm32"))] signed_query_permit: SignedQueryPermit,
 ) -> QueryResponse {
     #[cfg(target_arch = "wasm32")]
-    let handle = tokio::runtime::Handle::current();
+    let runtime_handle = tokio::runtime::Handle::current();
+    #[cfg(not(target_arch = "wasm32"))]
+    let spawn_handle = runtime_handle.clone();
     let batch_session_key = Some(signing_config.public_key_hex.clone());
 
-    match tokio::task::spawn_blocking(move || {
+    let run_query = move || {
         #[cfg(not(target_arch = "wasm32"))]
-        let runtime = match signed_query_runtime() {
-            Ok(runtime) => runtime,
-            Err(error) => return QueryResponse::error(error),
-        };
+        let _signed_query_permit = signed_query_permit;
         let _signing_guard = ThreadSigningContextGuard::install(signing_config, batch_session_key);
         // Install the node identity as the ambient acting identity so DB-layer
         // NAC checks resolve to the node itself. The pool thread is reused, so
@@ -530,7 +584,7 @@ async fn execute_with_signing_context(
         let _id_guard = defra_core::current_identity::scoped_current_identity(Some(node_did));
         #[cfg(not(target_arch = "wasm32"))]
         {
-            runtime.block_on(async {
+            runtime_handle.block_on(async {
                 match txn_handle {
                     Some(txn_handle) => executor.execute_in_txn(request, &txn_handle).await,
                     None => executor.execute(request).await,
@@ -539,16 +593,20 @@ async fn execute_with_signing_context(
         }
         #[cfg(target_arch = "wasm32")]
         {
-            handle.block_on(async {
+            runtime_handle.block_on(async {
                 match txn_handle {
                     Some(txn_handle) => executor.execute_in_txn(request, &txn_handle).await,
                     None => executor.execute(request).await,
                 }
             })
         }
-    })
-    .await
-    {
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let result = spawn_handle.spawn_blocking(run_query).await;
+    #[cfg(target_arch = "wasm32")]
+    let result = tokio::task::spawn_blocking(run_query).await;
+
+    match result {
         Ok(response) => response,
         Err(join_error) => {
             QueryResponse::error(format!("query execution task failed: {join_error}"))
@@ -588,20 +646,274 @@ impl Drop for ThreadSigningContextGuard {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn signed_query_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
-    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
-        std::sync::OnceLock::new();
+struct SignedQueryRuntime {
+    handle: tokio::runtime::Handle,
+    state: Arc<SignedQueryRuntimeState>,
+    shutdown_tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    owner_thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
 
-    RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .thread_name("defra-signed-query")
-                .enable_all()
-                .build()
-                .map_err(|error| format!("failed to create signed query runtime: {error}"))
+#[cfg(not(target_arch = "wasm32"))]
+struct SignedQueryRuntimeState {
+    closing: std::sync::atomic::AtomicBool,
+    active_queries: std::sync::atomic::AtomicUsize,
+    active_queries_drained: tokio::sync::Notify,
+    active_queries_mutex: std::sync::Mutex<()>,
+    active_queries_changed: std::sync::Condvar,
+    closed: std::sync::atomic::AtomicBool,
+    closed_notify: tokio::sync::Notify,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const SIGNED_QUERY_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(not(target_arch = "wasm32"))]
+const SIGNED_QUERY_DROP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(not(target_arch = "wasm32"))]
+const SIGNED_QUERY_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SignedQueryPermit {
+    state: Arc<SignedQueryRuntimeState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SignedQueryPermit {
+    fn drop(&mut self) {
+        let _active_queries_guard = self
+            .state
+            .active_queries_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self
+            .state
+            .active_queries
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.state.active_queries_drained.notify_waiters();
+        }
+        self.state.active_queries_changed.notify_all();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SignedQueryRuntimeClosedGuard {
+    state: Arc<SignedQueryRuntimeState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SignedQueryRuntimeClosedGuard {
+    fn drop(&mut self) {
+        self.state
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.state.closed_notify.notify_waiters();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SignedQueryRuntime {
+    fn new() -> Result<Self, String> {
+        let state = Arc::new(SignedQueryRuntimeState {
+            closing: std::sync::atomic::AtomicBool::new(false),
+            active_queries: std::sync::atomic::AtomicUsize::new(0),
+            active_queries_drained: tokio::sync::Notify::new(),
+            active_queries_mutex: std::sync::Mutex::new(()),
+            active_queries_changed: std::sync::Condvar::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            closed_notify: tokio::sync::Notify::new(),
+        });
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
+        let owner_state = state.clone();
+        let owner_thread = std::thread::Builder::new()
+            .name("defra-signed-query-owner".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("defra-signed-query")
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = startup_tx.send(Err(format!(
+                            "failed to create signed query runtime: {error}"
+                        )));
+                        return;
+                    }
+                };
+                if startup_tx.send(Ok(runtime.handle().clone())).is_err() {
+                    runtime.shutdown_background();
+                    return;
+                }
+                let _closed_guard = SignedQueryRuntimeClosedGuard {
+                    state: owner_state.clone(),
+                };
+                let _ = shutdown_rx.recv();
+                wait_for_active_signed_queries(&owner_state, SIGNED_QUERY_DROP_DRAIN_TIMEOUT);
+                runtime.shutdown_timeout(SIGNED_QUERY_RUNTIME_SHUTDOWN_TIMEOUT);
+            })
+            .map_err(|error| format!("failed to start signed query runtime owner: {error}"))?;
+        let handle = match startup_rx.recv() {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(error)) => {
+                let _ = owner_thread.join();
+                return Err(error);
+            }
+            Err(error) => {
+                let _ = owner_thread.join();
+                return Err(format!(
+                    "signed query runtime owner exited during startup: {error}"
+                ));
+            }
+        };
+        Ok(Self {
+            handle,
+            state,
+            shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+            owner_thread: std::sync::Mutex::new(Some(owner_thread)),
         })
-        .as_ref()
-        .map_err(Clone::clone)
+    }
+
+    fn handle(&self) -> tokio::runtime::Handle {
+        self.handle.clone()
+    }
+
+    fn admit(&self) -> Option<SignedQueryPermit> {
+        if self
+            .state
+            .closing
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        self.state
+            .active_queries
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if self
+            .state
+            .closing
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            drop(SignedQueryPermit {
+                state: self.state.clone(),
+            });
+            return None;
+        }
+        Some(SignedQueryPermit {
+            state: self.state.clone(),
+        })
+    }
+
+    fn active_queries(&self) -> usize {
+        self.state
+            .active_queries
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn close_admission(&self) {
+        self.state
+            .closing
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn wait_for_active_queries(&self) {
+        loop {
+            let notified = self.state.active_queries_drained.notified();
+            if self.active_queries() == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn close_admission_and_wait_for(&self, timeout: Duration) -> bool {
+        self.close_admission();
+        tokio::time::timeout(timeout, self.wait_for_active_queries())
+            .await
+            .is_ok()
+    }
+
+    async fn shutdown(&self) {
+        self.signal_shutdown();
+        let owner_thread = self
+            .owner_thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(owner_thread) = owner_thread {
+            let _ = tokio::task::spawn_blocking(move || owner_thread.join()).await;
+        } else {
+            loop {
+                let notified = self.state.closed_notify.notified();
+                if self.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    fn signal_shutdown(&self) {
+        self.close_admission();
+        let shutdown_tx = self
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SignedQueryRuntime {
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        // Dropping a Tokio runtime from an async context panics because shutdown
+        // may block. The owner thread owns the runtime and performs shutdown;
+        // detaching here keeps ordinary EmbeddedNode drop non-blocking.
+        self.owner_thread
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_for_active_signed_queries(state: &SignedQueryRuntimeState, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut guard = state
+        .active_queries_mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        if state
+            .active_queries
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return false;
+        };
+        let (next_guard, wait_result) = state
+            .active_queries_changed
+            .wait_timeout(guard, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard = next_guard;
+        if wait_result.timed_out() {
+            return state
+                .active_queries
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 0;
+        }
+    }
 }
 
 fn is_transaction_conflict_response(response: &QueryResponse) -> bool {
@@ -1301,6 +1613,16 @@ impl NodeBuilder {
             database.set_nac_manager(nac_manager);
         }
 
+        // Build the node-owned signed-query runtime before starting P2P. If
+        // runtime construction fails, the builder can return without leaving
+        // already-started network tasks behind.
+        #[cfg(not(target_arch = "wasm32"))]
+        let signed_query_runtime = node_identity_did
+            .as_ref()
+            .map(|_| SignedQueryRuntime::new())
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
+
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
         let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
@@ -1401,6 +1723,8 @@ impl NodeBuilder {
             block_ops,
             embedding_config,
             node_identity_did,
+            #[cfg(not(target_arch = "wasm32"))]
+            signed_query_runtime,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "rocksdb")]
@@ -1601,6 +1925,68 @@ mod tests {
         completed: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     }
 
+    struct ContextObservingSigningExecutor {
+        expected_did: String,
+        expected_public_key_hex: String,
+    }
+
+    #[async_trait::async_trait]
+    impl QueryExecutor for ContextObservingSigningExecutor {
+        async fn execute(&self, _request: QueryRequest) -> query::QueryResponse {
+            for _ in 0..3 {
+                let signing_config = defra_core::signing::get_signing_config();
+                let current_identity = defra_core::current_identity::get_current_identity();
+                let batch_session_key = defra_core::batch_signing::get_batch_session_key();
+                if signing_config
+                    .as_ref()
+                    .map(|config| config.public_key_hex.as_str())
+                    != Some(self.expected_public_key_hex.as_str())
+                    || current_identity.as_deref() != Some(self.expected_did.as_str())
+                    || batch_session_key.as_deref() != Some(self.expected_public_key_hex.as_str())
+                {
+                    return query::QueryResponse::error(
+                        "signed query context did not survive an await boundary",
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+            query::QueryResponse::success(serde_json::json!({"ok": true}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> query::QueryResponse {
+            self.execute(request).await
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> query::Result<String> {
+            Ok(String::new())
+        }
+    }
+
     #[async_trait::async_trait]
     impl QueryExecutor for SpawningSigningExecutor {
         async fn execute(&self, _request: QueryRequest) -> query::QueryResponse {
@@ -1723,6 +2109,9 @@ mod tests {
             .enable_all()
             .build()
             .expect("caller runtime");
+        let signed_runtime = super::SignedQueryRuntime::new().expect("signed runtime");
+        let signed_runtime_handle = signed_runtime.handle();
+        let signed_query_permit = signed_runtime.admit().expect("query admission");
 
         caller_runtime.block_on(async {
             let task = tokio::spawn(async move {
@@ -1732,6 +2121,8 @@ mod tests {
                     None,
                     test_signing_config(),
                     "did:key:zCancellationTest".to_string(),
+                    signed_runtime_handle,
+                    signed_query_permit,
                 )
                 .await
             });
@@ -1742,10 +2133,11 @@ mod tests {
             let _ = task.await;
         });
         drop(caller_runtime);
+        drop(signed_runtime);
 
         completed_rx
             .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("signed query must complete after its caller runtime is dropped");
+            .expect("signed query must complete after its caller and node runtimes are dropped");
     }
 
     #[test]
@@ -1758,6 +2150,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("caller runtime");
+        let signed_runtime = super::SignedQueryRuntime::new().expect("signed runtime");
 
         let response = caller_runtime.block_on(super::execute_with_signing_context(
             executor,
@@ -1765,6 +2158,8 @@ mod tests {
             None,
             test_signing_config(),
             "did:key:zSpawnTest".to_string(),
+            signed_runtime.handle(),
+            signed_runtime.admit().expect("query admission"),
         ));
         assert!(
             !response.has_errors(),
@@ -1776,6 +2171,156 @@ mod tests {
         completed_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("work spawned by a signed query must outlive query completion");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signed_query_context_survives_awaits_on_node_owned_runtime() {
+        let expected_did = "did:key:zContextTest".to_string();
+        let signing_config = test_signing_config();
+        let executor: Arc<dyn QueryExecutor> = Arc::new(ContextObservingSigningExecutor {
+            expected_did: expected_did.clone(),
+            expected_public_key_hex: signing_config.public_key_hex.clone(),
+        });
+        let signed_runtime = super::SignedQueryRuntime::new().expect("signed runtime");
+
+        let response = super::execute_with_signing_context(
+            executor,
+            QueryRequest::new("{ observeContext }"),
+            None,
+            signing_config,
+            expected_did,
+            signed_runtime.handle(),
+            signed_runtime.admit().expect("query admission"),
+        )
+        .await;
+
+        assert!(
+            !response.has_errors(),
+            "signed query context failed: {:?}",
+            response.errors
+        );
+        assert!(
+            signed_runtime
+                .close_admission_and_wait_for(std::time::Duration::from_secs(2))
+                .await,
+            "signed query context permit did not drain"
+        );
+        signed_runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signed_query_runtime_closes_admission_and_drains_in_flight_queries() {
+        let runtime = Arc::new(super::SignedQueryRuntime::new().expect("signed runtime"));
+        let permit = runtime.admit().expect("initial query admission");
+        let closing_runtime = runtime.clone();
+        let mut close_task = tokio::spawn(async move {
+            closing_runtime
+                .close_admission_and_wait_for(std::time::Duration::from_secs(2))
+                .await
+        });
+
+        while !runtime.state.closing.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            runtime.admit().is_none(),
+            "queries that race shutdown must fail admission"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut close_task)
+                .await
+                .is_err(),
+            "shutdown admission drain returned while a query permit was live"
+        );
+
+        drop(permit);
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(2), close_task)
+            .await
+            .expect("admission drain timed out")
+            .expect("admission drain task panicked");
+        assert!(drained, "admission drain reported a timeout");
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn signed_query_runtime_admission_drain_has_a_deadline() {
+        let runtime = super::SignedQueryRuntime::new().expect("signed runtime");
+        let permit = runtime.admit().expect("query admission");
+
+        assert!(
+            !runtime
+                .close_admission_and_wait_for(std::time::Duration::from_millis(25))
+                .await,
+            "admission drain ignored its deadline"
+        );
+
+        drop(permit);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signed_query_runtime_shutdown_is_idempotent_and_node_scoped() {
+        let runtime_a = Arc::new(super::SignedQueryRuntime::new().expect("runtime A"));
+        let runtime_b = Arc::new(super::SignedQueryRuntime::new().expect("runtime B"));
+        assert!(
+            runtime_a
+                .close_admission_and_wait_for(std::time::Duration::from_secs(2))
+                .await
+        );
+
+        let first = {
+            let runtime = runtime_a.clone();
+            tokio::spawn(async move { runtime.shutdown().await })
+        };
+        let second = {
+            let runtime = runtime_a.clone();
+            tokio::spawn(async move { runtime.shutdown().await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            first.await.expect("first shutdown caller panicked");
+            second.await.expect("second shutdown caller panicked");
+        })
+        .await
+        .expect("concurrent shutdown callers did not converge");
+
+        let permit_b = runtime_b
+            .admit()
+            .expect("shutting down runtime A must not close runtime B");
+        drop(permit_b);
+        assert!(
+            runtime_b
+                .close_admission_and_wait_for(std::time::Duration::from_secs(2))
+                .await
+        );
+        runtime_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn signed_query_runtime_drop_is_nonblocking_inside_async_context() {
+        let runtime = super::SignedQueryRuntime::new().expect("signed runtime");
+        let state = runtime.state.clone();
+        let permit = runtime.admit().expect("query admission");
+        drop(runtime);
+        assert!(
+            state.closing.load(Ordering::Acquire),
+            "drop must close query admission"
+        );
+        assert!(
+            !state.closed.load(Ordering::Acquire),
+            "runtime closed while an admitted query was still live"
+        );
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notified = state.closed_notify.notified();
+                if state.closed.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("dropped signed runtime did not close after its query drained");
     }
 
     #[tokio::test]
