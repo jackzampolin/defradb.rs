@@ -689,7 +689,7 @@ impl Drop for SignedQueryPermit {
         if self
             .state
             .active_queries
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
             == 1
         {
             self.state.active_queries_drained.notify_waiters();
@@ -708,7 +708,7 @@ impl Drop for SignedQueryRuntimeClosedGuard {
     fn drop(&mut self) {
         self.state
             .closed
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.state.closed_notify.notify_waiters();
     }
 }
@@ -783,21 +783,13 @@ impl SignedQueryRuntime {
     }
 
     fn admit(&self) -> Option<SignedQueryPermit> {
-        if self
-            .state
-            .closing
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.state.closing.load(std::sync::atomic::Ordering::SeqCst) {
             return None;
         }
         self.state
             .active_queries
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        if self
-            .state
-            .closing
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.state.closing.load(std::sync::atomic::Ordering::SeqCst) {
             drop(SignedQueryPermit {
                 state: self.state.clone(),
             });
@@ -811,13 +803,13 @@ impl SignedQueryRuntime {
     fn active_queries(&self) -> usize {
         self.state
             .active_queries
-            .load(std::sync::atomic::Ordering::Acquire)
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn close_admission(&self) {
         self.state
             .closing
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn wait_for_active_queries(&self) {
@@ -849,7 +841,7 @@ impl SignedQueryRuntime {
         } else {
             loop {
                 let notified = self.state.closed_notify.notified();
-                if self.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+                if self.state.closed.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
                 notified.await;
@@ -894,7 +886,7 @@ fn wait_for_active_signed_queries(state: &SignedQueryRuntimeState, timeout: Dura
     loop {
         if state
             .active_queries
-            .load(std::sync::atomic::Ordering::Acquire)
+            .load(std::sync::atomic::Ordering::SeqCst)
             == 0
         {
             return true;
@@ -910,7 +902,7 @@ fn wait_for_active_signed_queries(state: &SignedQueryRuntimeState, timeout: Dura
         if wait_result.timed_out() {
             return state
                 .active_queries
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::SeqCst)
                 == 0;
         }
     }
