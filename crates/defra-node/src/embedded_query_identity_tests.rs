@@ -106,6 +106,32 @@ fn no_retry() -> ExecuteRetryPolicy {
 }
 
 #[tokio::test]
+async fn builder_rejects_invalid_node_identity_did() {
+    let _serial = SIGNING_STORE_GUARD.lock().await;
+    defra_core::signing::clear_identity_store();
+    let invalid_did = "invalid:key:zNode";
+    register_test_remote_node_identity(invalid_did);
+
+    let result = EmbeddedNode::builder()
+        .with_node_identity_did(invalid_did)
+        .build()
+        .await;
+    let error = match result {
+        Ok(node) => {
+            node.shutdown().await;
+            panic!("invalid node identity DID must be rejected")
+        }
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("invalid node identity DID"),
+        "{error:#}"
+    );
+    defra_core::signing::clear_identity_store();
+}
+
+#[tokio::test]
 async fn embedded_execute_defaults_node_identity_and_preserves_explicit_actor() {
     let _serial = SIGNING_STORE_GUARD.lock().await;
     defra_core::signing::clear_identity_store();
