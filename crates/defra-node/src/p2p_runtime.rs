@@ -23,6 +23,8 @@ struct P2PLifecycleInner {
     event_handler_task: tokio::task::JoinHandle<()>,
     failure_recorder_task: tokio::task::JoinHandle<()>,
     retry_loop_task: tokio::task::JoinHandle<()>,
+    pending_dag_resync_task: tokio::task::JoinHandle<()>,
+    pending_dag_retry_task: tokio::task::JoinHandle<()>,
 }
 
 impl P2PLifecycle {
@@ -55,6 +57,8 @@ impl P2PLifecycleInner {
             event_handler_task,
             failure_recorder_task,
             retry_loop_task,
+            pending_dag_resync_task,
+            pending_dag_retry_task,
         } = self;
 
         let retry_started = std::time::Instant::now();
@@ -63,6 +67,9 @@ impl P2PLifecycleInner {
             elapsed_ms = retry_started.elapsed().as_millis(),
             "P2P shutdown: retry loop stopped"
         );
+
+        abort_background_task("pending DAG resync", pending_dag_resync_task).await;
+        abort_background_task("pending DAG retry clock", pending_dag_retry_task).await;
 
         let coordinator_started = std::time::Instant::now();
         coordinator.shutdown().await;
@@ -265,7 +272,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     // drain for records skipped at capacity or TTL-evicted (#1099).
     // Spawned so the sync-event channel already has its consumer above.
     let coord_for_restore = coordinator.clone();
-    tokio::spawn(async move {
+    let pending_dag_resync_task = tokio::spawn(async move {
         coord_for_restore
             .run_pending_dag_resync(std::time::Duration::from_secs(60))
             .await;
@@ -274,7 +281,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
     // roots at a tight cadence. Sibling of the resync sweep above.
     let coord_for_retry_clock = coordinator.clone();
-    tokio::spawn(async move {
+    let pending_dag_retry_task = tokio::spawn(async move {
         coord_for_retry_clock
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
@@ -329,6 +336,8 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
             event_handler_task,
             failure_recorder_task,
             retry_loop_task,
+            pending_dag_resync_task,
+            pending_dag_retry_task,
         })),
         mutator,
         wire_document_acp: Some(Box::new(move |acp, strict| {

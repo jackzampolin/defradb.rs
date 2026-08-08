@@ -1399,6 +1399,26 @@ async fn p2p_document_subscriptions_survive_restart_and_delete() {
 }
 
 #[tokio::test]
+async fn p2p_shutdown_releases_persistent_store_for_immediate_reopen() {
+    init_tracing();
+
+    let data_path = unique_data_path("p2p-shutdown-reopen");
+    let secret_key_path = data_path.join("p2p.key");
+
+    let node = build_persistent_p2p_node(data_path.clone(), secret_key_path.clone()).await;
+    wait_for_listen_addr(&node).await;
+    node.shutdown().await;
+    drop(node);
+
+    let reopened = build_persistent_p2p_node(data_path.clone(), secret_key_path).await;
+    wait_for_listen_addr(&reopened).await;
+    reopened.shutdown().await;
+    drop(reopened);
+
+    let _ = tokio::fs::remove_dir_all(data_path).await;
+}
+
+#[tokio::test]
 async fn p2p_replicator_survives_embedded_restart() {
     init_tracing();
 
