@@ -15,6 +15,8 @@ pub mod coding_search;
 pub mod config;
 mod db_impls;
 pub mod dense_search;
+#[cfg(test)]
+mod embedded_query_identity_tests;
 mod node_acp;
 #[cfg(feature = "p2p")]
 mod p2p_runtime;
@@ -120,6 +122,7 @@ pub struct EmbeddedNode {
     block_ops: Arc<dyn BlockOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
+    node_query_identity: Option<identity::Did>,
     #[cfg(not(target_arch = "wasm32"))]
     signed_query_runtime: Option<SignedQueryRuntime>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -150,12 +153,18 @@ impl EmbeddedNode {
     }
 
     /// Execute a GraphQL query or mutation.
+    ///
+    /// A configured node identity is used as the document ACP actor. Prepared
+    /// requests with an explicit identity retain that actor instead.
     pub async fn execute(&self, query_str: &str) -> QueryResponse {
         self.execute_request_once(QueryRequest::new(query_str))
             .await
     }
 
     /// Execute a GraphQL query or mutation, retrying transient transaction conflicts.
+    ///
+    /// A configured node identity is used as the document ACP actor on every
+    /// attempt.
     pub async fn execute_with_retry(
         &self,
         query_str: &str,
@@ -166,6 +175,9 @@ impl EmbeddedNode {
     }
 
     /// Execute a prepared query request, retrying transient transaction conflicts.
+    ///
+    /// Requests without an identity use the configured node identity for
+    /// document ACP. An explicit request identity takes precedence.
     pub async fn execute_request_with_retry(
         &self,
         request: QueryRequest,
@@ -178,6 +190,7 @@ impl EmbeddedNode {
     }
 
     async fn execute_request_once(&self, request: QueryRequest) -> QueryResponse {
+        let request = self.with_default_query_identity(request);
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
             return self.runner.execute(request).await;
         };
@@ -221,11 +234,13 @@ impl EmbeddedNode {
     ///
     /// When the node has a configured identity, the same signing and ambient
     /// identity context used by [`Self::execute`] is applied to this request.
+    /// It is also the document ACP actor unless the request supplies one.
     pub async fn execute_request_in_txn(
         &self,
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
+        let request = self.with_default_query_identity(request);
         let handle = handle.clone();
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
             return self.runner.execute_in_txn(request, &handle).await;
@@ -264,6 +279,13 @@ impl EmbeddedNode {
             signed_query_permit,
         )
         .await
+    }
+
+    fn with_default_query_identity(&self, mut request: QueryRequest) -> QueryRequest {
+        if request.identity.is_none() {
+            request.identity.clone_from(&self.node_query_identity);
+        }
+        request
     }
 
     /// Run `op` with the node's own identity installed as the ambient acting
@@ -1565,6 +1587,12 @@ impl NodeBuilder {
             telemetry_handle,
         } = args;
 
+        let node_query_identity = node_identity_did
+            .as_ref()
+            .map(|did| identity::Did::new(did.clone()))
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("invalid node identity DID: {error}"))?;
+
         let embedding_config = db_options.embedding_config();
         #[cfg(not(target_arch = "wasm32"))]
         let transaction_stats = store.transaction_stats_handle();
@@ -1719,6 +1747,7 @@ impl NodeBuilder {
             block_ops,
             embedding_config,
             node_identity_did,
+            node_query_identity,
             #[cfg(not(target_arch = "wasm32"))]
             signed_query_runtime,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1764,7 +1793,7 @@ mod tests {
     #[cfg(feature = "http")]
     use super::HttpConfig;
 
-    static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    pub(super) static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     #[cfg(feature = "rocksdb")]
     static ROCKS_ENV_GUARD: LazyLock<std::sync::Mutex<()>> =
         LazyLock::new(|| std::sync::Mutex::new(()));
@@ -2407,7 +2436,7 @@ mod tests {
         defra_core::signing::clear_identity_store();
     }
 
-    struct TestRemoteSigner;
+    pub(super) struct TestRemoteSigner;
 
     impl RemoteSigner for TestRemoteSigner {
         fn sign_sync(
