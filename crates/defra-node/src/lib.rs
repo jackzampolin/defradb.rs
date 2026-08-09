@@ -106,6 +106,11 @@ trait SchemaOps: Send + Sync {
 
 #[async_trait::async_trait]
 trait BlockOps: Send + Sync {
+    async fn signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)>;
     async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String>;
     async fn verified_signer_did_in_txn(
         &self,
@@ -312,6 +317,17 @@ impl EmbeddedNode {
     /// public key. Unsigned, malformed, missing, or invalid blocks fail closed.
     pub async fn verified_block_signer_did(&self, cid: &str) -> anyhow::Result<String> {
         self.block_ops.verified_signer_did(cid).await
+    }
+
+    /// Load canonical signed-block material after applying document ACP for
+    /// the supplied caller. The caller must independently verify both CIDs and
+    /// the detached signature before trusting the returned signer.
+    pub async fn authorized_signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        self.block_ops.signed_block_bytes(cid, caller_did).await
     }
 
     /// Cryptographically verify a block visible inside an active transaction.
