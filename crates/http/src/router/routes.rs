@@ -193,8 +193,9 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
         .route("/import", post(handlers::backup::import));
 
     // Block routes
-    let block_routes =
-        Router::new().route("/verify-signature", get(handlers::block::verify_signature));
+    let block_routes = Router::new()
+        .route("/verify-signature", get(handlers::block::verify_signature))
+        .route("/signed", get(handlers::block::signed_block));
 
     // Lens migration routes
     let lens_routes = Router::new()

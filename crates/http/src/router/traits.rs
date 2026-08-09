@@ -548,6 +548,15 @@ pub struct EncryptedIndexInfo {
 /// DAG-CBOR blocks stored in the blockstore.
 #[async_trait::async_trait]
 pub trait BlockOperations: Send + Sync {
+    /// Return canonical bytes for an authorized signed block and its detached
+    /// signature so clients can verify content addressing and authorship
+    /// locally.
+    async fn signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> Result<(Vec<u8>, Vec<u8>), String>;
+
     /// Verify the signature of a block.
     ///
     /// Loads a block by CID, checks its signature, and verifies using the

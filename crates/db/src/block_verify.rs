@@ -39,6 +39,43 @@ pub async fn verified_block_signer_did<S: Store>(
     .await
 }
 
+/// Load one authorized signed block and its detached signature block as
+/// canonical DAG-CBOR bytes. Remote clients use this to verify CID integrity
+/// and authorship locally instead of trusting a server-side yes/no verdict.
+pub async fn authorized_signed_block_bytes<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    cid_str: &str,
+    caller_identity: &acp::Identity,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let txn = database
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("failed to create transaction: {}", e))?;
+    let blockstore = txn
+        .blockstore()
+        .map_err(|e| format!("failed to get blockstore: {}", e))?;
+    let systemstore = txn
+        .systemstore()
+        .map_err(|e| format!("failed to get systemstore: {}", e))?;
+    let (block, signature) = load_authorized_block_signature(
+        database,
+        document_acp,
+        blockstore,
+        systemstore,
+        cid_str,
+        caller_identity,
+    )
+    .await?;
+    let block_bytes = block
+        .to_dag_cbor()
+        .map_err(|error| format!("failed to encode authorized block: {error}"))?;
+    let signature_bytes = signature
+        .to_dag_cbor()
+        .map_err(|error| format!("failed to encode authorized signature block: {error}"))?;
+    Ok((block_bytes, signature_bytes))
+}
+
 /// Verify a block visible inside an active transaction and return its signer DID.
 pub async fn verified_block_signer_did_in_txn<S: Store>(
     database: &Arc<DB<S>>,

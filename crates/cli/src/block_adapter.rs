@@ -26,6 +26,23 @@ impl<S: Store + 'static> BlockAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
+    async fn signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let caller_identity: acp::Identity = caller_did
+            .and_then(|did| identity::Did::try_from(did.to_string()).ok())
+            .into();
+        db::block_verify::authorized_signed_block_bytes(
+            &self.database,
+            self.document_acp.as_ref(),
+            cid,
+            &caller_identity,
+        )
+        .await
+    }
+
     async fn verify_signature(
         &self,
         cid: &str,

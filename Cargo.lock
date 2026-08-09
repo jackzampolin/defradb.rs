@@ -3571,6 +3571,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "cid",
  "criterion 0.6.0",
  "crypto",
