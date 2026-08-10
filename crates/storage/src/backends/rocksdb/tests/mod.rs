@@ -1,5 +1,7 @@
 use super::*;
-use crate::corekv::{Dropable, Store, Txn};
+use crate::corekv::{Dropable, IterOptions, Reader, Store, Txn};
+
+mod chunked_scan;
 
 mod shared_tests {
     use super::*;

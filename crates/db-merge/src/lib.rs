@@ -39,7 +39,7 @@ pub use browser_sync::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use head_provider::DbHeadProvider;
-pub use merge_handler::{DbMergeHandler, MergeError};
+pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};
 #[cfg(not(target_arch = "wasm32"))]
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
@@ -60,7 +60,8 @@ pub use push_docs_transport::{
 pub use replication::{
     attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,
     create_head_provider, create_merge_handler, create_replication_stack,
-    load_document_head_blocks, load_persisted_collections, ReplicationStack,
+    create_replication_stack_with_max_merge_depth, load_document_head_blocks,
+    load_persisted_collections, ReplicationStack,
 };
 pub use se::{
     fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts, FieldQuery,

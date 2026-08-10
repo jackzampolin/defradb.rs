@@ -155,6 +155,24 @@ macro_rules! generate_backend_tests {
         }
 
         #[tokio::test]
+        async fn shared_test_iterator_pending_writes_at_chunk_boundary() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_pending_writes_at_chunk_boundary(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_bounded_scan_across_chunks() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_bounded_scan_across_chunks(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_prefix_scan_across_chunks() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_prefix_scan_across_chunks(&store).await;
+        }
+
+        #[tokio::test]
         async fn shared_test_iterator_reverse_with_prefix() {
             let store = $store_fn().await;
             test_suite::test_iterator_reverse_with_prefix(&store).await;
@@ -353,6 +371,30 @@ macro_rules! generate_backend_tests {
         async fn shared_test_iterator_empty_values() {
             let store = $store_fn().await;
             test_suite::test_iterator_empty_values(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_inverted_bounds_yield_empty() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_inverted_bounds_yield_empty(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_inverted_bounds_yield_empty_reverse() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_inverted_bounds_yield_empty_reverse(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_start_beyond_prefix_yields_empty() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_start_beyond_prefix_yields_empty(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_inverted_bounds_with_pending_writes() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_inverted_bounds_with_pending_writes(&store).await;
         }
     };
 }

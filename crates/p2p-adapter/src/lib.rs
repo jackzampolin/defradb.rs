@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use zeroize::Zeroizing;
 
+mod doc_sync;
 #[cfg(feature = "iroh")]
 mod iroh;
 #[cfg(feature = "libp2p")]

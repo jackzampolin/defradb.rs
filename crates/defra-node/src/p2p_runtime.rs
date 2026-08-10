@@ -264,8 +264,11 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     // shutdown/crash, then keep sweeping periodically as the bounded
     // drain for records skipped at capacity or TTL-evicted (#1099).
     // Spawned so the sync-event channel already has its consumer above.
+    // Spawned through the coordinator so shutdown drains them before the
+    // coordinator (and through it the store) is dropped; a bare tokio::spawn
+    // here outlives shutdown and keeps the data path locked (#1309).
     let coord_for_restore = coordinator.clone();
-    tokio::spawn(async move {
+    coordinator.spawn_background_task("pending_dag_resync", async move {
         coord_for_restore
             .run_pending_dag_resync(std::time::Duration::from_secs(60))
             .await;
@@ -274,7 +277,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
     // roots at a tight cadence. Sibling of the resync sweep above.
     let coord_for_retry_clock = coordinator.clone();
-    tokio::spawn(async move {
+    coordinator.spawn_background_task("pending_dag_retry_clock", async move {
         coord_for_retry_clock
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;

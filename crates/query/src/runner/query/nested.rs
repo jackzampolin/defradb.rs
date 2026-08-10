@@ -14,6 +14,7 @@ use crate::planner::Planner;
 use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 use super::nested_profile::{NestedQueryProfile, ScopedFulltextProfile};
 
@@ -82,57 +83,66 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan.document_map().clone();
 
         // Execute the plan and collect results
-        let plan_init_start = Instant::now();
-        plan.init().await?;
-        profile.plan_init_elapsed = plan_init_start.elapsed();
-        let plan_start_start = Instant::now();
-        plan.start().await?;
-        profile.plan_start_elapsed = plan_start_start.elapsed();
+        let outcome = async {
+            let plan_init_start = Instant::now();
+            plan.init().await?;
+            profile.plan_init_elapsed = plan_init_start.elapsed();
+            let plan_start_start = Instant::now();
+            plan.start().await?;
+            profile.plan_start_elapsed = plan_start_start.elapsed();
 
-        let mut results = Vec::new();
+            let mut results = Vec::new();
 
-        loop {
-            let plan_iteration_start = Instant::now();
-            let has_next = plan.next().await?;
-            profile.plan_iteration_elapsed += plan_iteration_start.elapsed();
-            if !has_next {
-                break;
-            }
+            loop {
+                let plan_iteration_start = Instant::now();
+                let has_next = plan.next().await?;
+                profile.plan_iteration_elapsed += plan_iteration_start.elapsed();
+                if !has_next {
+                    break;
+                }
 
-            let doc = plan.value();
+                let doc = plan.value();
 
-            let doc_render_start = Instant::now();
-            let mut json = self.doc_to_json(doc, &mapping)?;
-            profile.doc_render_elapsed += doc_render_start.elapsed();
+                let doc_render_start = Instant::now();
+                let mut json = self.doc_to_json(doc, &mapping)?;
+                profile.doc_render_elapsed += doc_render_start.elapsed();
 
-            // Strip ordering-only fields from nested objects.
-            // These fields were added for ORDER BY but shouldn't appear in output.
-            let ordering_only_strip_start = Instant::now();
-            for (relation_field, nested_field) in &ordering_only_fields {
-                if let Some(obj) = json.as_object_mut() {
-                    if let Some(relation_value) = obj.get_mut(relation_field) {
-                        if let Some(nested_obj) = relation_value.as_object_mut() {
-                            nested_obj.remove(nested_field);
+                // Strip ordering-only fields from nested objects.
+                // These fields were added for ORDER BY but shouldn't appear in output.
+                let ordering_only_strip_start = Instant::now();
+                for (relation_field, nested_field) in &ordering_only_fields {
+                    if let Some(obj) = json.as_object_mut() {
+                        if let Some(relation_value) = obj.get_mut(relation_field) {
+                            if let Some(nested_obj) = relation_value.as_object_mut() {
+                                nested_obj.remove(nested_field);
+                            }
                         }
                     }
                 }
+                profile.ordering_only_strip_elapsed += ordering_only_strip_start.elapsed();
+
+                results.push(json);
             }
-            profile.ordering_only_strip_elapsed += ordering_only_strip_start.elapsed();
 
-            results.push(json);
+            Ok((
+                results,
+                plan.exec_info(),
+                // Capture cursor page-info BEFORE close() releases plan resources.
+                // Non-cursor selects don't need it, so skip the wrapper-node
+                // traversal entirely — it would just return `None` after walking
+                // the plan tree.
+                if select.is_cursor {
+                    plan.page_info()
+                } else {
+                    None
+                },
+            ))
         }
+        .await;
 
-        let plan_exec_info = plan.exec_info();
-        // Capture cursor page-info BEFORE close() releases plan resources.
-        // Non-cursor selects don't need it, so skip the wrapper-node traversal
-        // entirely — it would just return `None` after walking the plan tree.
-        let cursor_page_info = if select.is_cursor {
-            plan.page_info()
-        } else {
-            None
-        };
         let plan_close_start = Instant::now();
-        plan.close().await?;
+        let (results, plan_exec_info, cursor_page_info) =
+            plan_drive::close_after(plan.as_mut(), outcome).await?;
         profile.plan_close_elapsed = plan_close_start.elapsed();
 
         // Post-process relation-based aggregates

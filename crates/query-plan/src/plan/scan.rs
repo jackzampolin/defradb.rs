@@ -7,9 +7,10 @@ use schema::CollectionVersion;
 
 use tracing::debug;
 
+use crate::doc_stream::DocStream;
 use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::{documents_with_status_to_plan_docs, DocumentMapping};
+use query_types::document::{document_to_plan_doc_with_status, DocumentMapping};
 use query_types::error::Result;
 use query_types::mapper::Filter;
 
@@ -21,11 +22,14 @@ use query_types::mapper::Filter;
 /// # Data Loading
 ///
 /// ScanNode can obtain documents in two ways:
-/// 1. Pre-loaded via `with_docs()` - for testing or when data is already available
-/// 2. On-demand via a `DocFetcher` - fetches during `init()` if docs are empty
+/// 1. Pre-loaded via `with_docs()` - for testing, or when an earlier stage
+///    (a docID lookup, an index scan) already produced the document set
+/// 2. Streamed from a `DocFetcher` - `init()` opens a stream and each
+///    `next()` pulls a single document from it
 ///
-/// When a fetcher is provided and no docs are pre-loaded, the node will
-/// automatically fetch all documents from the collection during initialization.
+/// The streaming path is what keeps a `LIMIT` cheap: nothing below reads
+/// further once the parent stops pulling, so the cost is proportional to the
+/// documents actually consumed rather than to collection size.
 pub struct ScanNode {
     /// Collection schema
     collection: CollectionVersion,
@@ -43,6 +47,8 @@ pub struct ScanNode {
     docs: Vec<Doc>,
     /// Current position in docs
     position: usize,
+    /// Streaming source, used when no docs were pre-provided.
+    stream: Option<Box<dyn DocStream>>,
     /// Whether the node has been initialized
     initialized: bool,
     /// Optional fetcher for loading documents on-demand
@@ -76,6 +82,7 @@ impl ScanNode {
             current_doc: Doc::default(),
             docs: Vec::new(),
             position: 0,
+            stream: None,
             initialized: false,
             fetcher: None,
             docs_provided: false,
@@ -147,19 +154,16 @@ impl PlanNode for ScanNode {
         // Reset execution stats
         self.exec_info = ExecInfo::default();
 
-        // If docs weren't provided and we have a fetcher, load documents from storage
+        // If docs weren't provided and we have a fetcher, open a stream over the
+        // collection instead of materializing it - callers that stop pulling
+        // (e.g. a satisfied LimitNode) stop the underlying fetch.
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
-                // Use get_all_with_deleted to get documents with their deletion status.
-                // When show_deleted is true, we get all documents including deleted ones.
-                // The deletion status is used to:
-                // 1. Set DocStatus on the plan Doc for filtering in next()
-                // 2. Populate the _deleted field if it's in the document mapping
-                let docs_with_status = fetcher
-                    .get_all_with_deleted(&self.collection.name, self.show_deleted)
-                    .await?;
-                self.docs =
-                    documents_with_status_to_plan_docs(&docs_with_status, &self.document_mapping)?;
+                self.stream = Some(
+                    fetcher
+                        .stream_all_with_deleted(&self.collection.name, self.show_deleted)
+                        .await?,
+                );
             } else {
                 // No docs provided and no fetcher - this is a programming error.
                 // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
@@ -174,7 +178,6 @@ impl PlanNode for ScanNode {
         self.initialized = true;
         debug!(
             collection = %self.collection.name,
-            doc_count = self.docs.len(),
             "ScanNode initialized"
         );
         Ok(())
@@ -193,6 +196,53 @@ impl PlanNode for ScanNode {
 
         // Track iteration (Go counts each call to next, including final false)
         self.exec_info.iterations += 1;
+
+        // The stream branch already yields an owned `Doc` per pull, so it moves
+        // straight into `current_doc` on a match. The Vec branch instead holds a
+        // borrow through the skip checks and only clones the document that
+        // actually passes them - cloning eagerly here would pay for every
+        // examined document instead of only the returned ones.
+        if let Some(ref mut stream) = self.stream {
+            loop {
+                let doc = match stream.next().await? {
+                    Some((document, is_deleted)) => document_to_plan_doc_with_status(
+                        &document,
+                        &self.document_mapping,
+                        is_deleted,
+                    )?,
+                    None => return Ok(false),
+                };
+
+                // Track document fetch
+                self.exec_info.docs_fetched += 1;
+                // Track field fetches (actual stored fields in this document)
+                self.exec_info.fields_fetched += doc.stored_field_count as u64;
+
+                // Skip deleted docs if not showing deleted
+                if !self.show_deleted && doc.is_deleted() {
+                    continue;
+                }
+
+                if let Some(doc_ids) = &self.doc_ids {
+                    let Some(doc_id) = doc.doc_id() else {
+                        continue;
+                    };
+                    if !doc_ids.iter().any(|id| id == doc_id) {
+                        continue;
+                    }
+                }
+
+                // Apply filter if present
+                if let Some(ref filter) = self.filter {
+                    if !filter.matches(doc.fields(), &self.document_mapping)? {
+                        continue;
+                    }
+                }
+
+                self.current_doc = doc;
+                return Ok(true);
+            }
+        }
 
         loop {
             if self.position >= self.docs.len() {
@@ -239,6 +289,11 @@ impl PlanNode for ScanNode {
 
     async fn close(&mut self) -> Result<()> {
         self.docs.clear();
+        // Close before dropping: a scan stopped early by a satisfied LimitNode
+        // gets no other chance to flush work it deferred per document.
+        if let Some(mut stream) = self.stream.take() {
+            stream.close().await?;
+        }
         self.initialized = false;
         Ok(())
     }
@@ -414,5 +469,150 @@ mod tests {
         assert!(scan.next().await.unwrap());
         assert_eq!(scan.value().doc_id(), Some("doc-1"));
         assert!(!scan.next().await.unwrap());
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use crate::fetcher::FetchByIdsResult;
+    use document::Document;
+    use schema::{FieldDescription, FieldKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn collection_fixture() -> CollectionVersion {
+        CollectionVersion::new(
+            "users",
+            "v1",
+            "users-v1",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        )
+    }
+
+    fn mapping_fixture() -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "name");
+        mapping
+    }
+
+    fn plan_docs_fixture(n: usize) -> Vec<Doc> {
+        (0..n)
+            .map(|i| {
+                let mut doc = Doc::new(2);
+                doc.set_doc_id(format!("doc-{i}"));
+                doc
+            })
+            .collect()
+    }
+
+    /// A stream that records how many documents were pulled from it.
+    struct CountingStream {
+        pairs: std::vec::IntoIter<(Document, bool)>,
+        pulled: Arc<AtomicUsize>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl DocStream for CountingStream {
+        async fn next(&mut self) -> Result<Option<(Document, bool)>> {
+            match self.pairs.next() {
+                Some(pair) => {
+                    self.pulled.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(pair))
+                }
+                None => Ok(None),
+            }
+        }
+    }
+
+    /// A fetcher that records how many documents were pulled.
+    struct CountingFetcher {
+        docs: Vec<(Document, bool)>,
+        pulled: Arc<AtomicUsize>,
+    }
+
+    impl CountingFetcher {
+        fn with_docs(n: usize, pulled: Arc<AtomicUsize>) -> Self {
+            let docs = (0..n).map(|_| (Document::new(), false)).collect();
+            Self { docs, pulled }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl DocFetcher for CountingFetcher {
+        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
+            Ok(self.docs.iter().map(|(doc, _)| doc.clone()).collect())
+        }
+
+        async fn get_by_ids(
+            &self,
+            _collection_name: &str,
+            _doc_ids: &[String],
+        ) -> Result<FetchByIdsResult> {
+            Ok(FetchByIdsResult::all_found(Vec::new()))
+        }
+
+        async fn get_by_field_value(
+            &self,
+            _collection_name: &str,
+            _field_name: &str,
+            _value: &str,
+        ) -> Result<Vec<Document>> {
+            Ok(Vec::new())
+        }
+
+        async fn stream_all_with_deleted(
+            &self,
+            _collection_name: &str,
+            _show_deleted: bool,
+        ) -> Result<Box<dyn DocStream>> {
+            Ok(Box::new(CountingStream {
+                pairs: self.docs.clone().into_iter(),
+                pulled: self.pulled.clone(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_node_pulls_only_what_is_consumed() {
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let fetcher = Arc::new(CountingFetcher::with_docs(1000, pulled.clone()));
+        let mut node = ScanNode::new(collection_fixture(), mapping_fixture()).with_fetcher(fetcher);
+
+        node.init().await.unwrap();
+        assert_eq!(
+            pulled.load(Ordering::SeqCst),
+            0,
+            "init() must not pull any document"
+        );
+
+        for _ in 0..10 {
+            assert!(node.next().await.unwrap());
+        }
+        assert_eq!(pulled.load(Ordering::SeqCst), 10);
+    }
+
+    #[tokio::test]
+    async fn scan_node_with_docs_path_still_works() {
+        let mut node =
+            ScanNode::new(collection_fixture(), mapping_fixture()).with_docs(plan_docs_fixture(3));
+
+        node.init().await.unwrap();
+        let mut seen = 0;
+        while node.next().await.unwrap() {
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
+    }
+
+    #[tokio::test]
+    async fn scan_node_without_docs_or_fetcher_still_errors() {
+        let mut node = ScanNode::new(collection_fixture(), mapping_fixture());
+        assert!(node.init().await.is_err());
     }
 }

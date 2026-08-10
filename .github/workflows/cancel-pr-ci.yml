@@ -1,0 +1,47 @@
+name: Cancel PR CI on close
+
+# When a PR is merged or closed without merge, any still-queued / in-progress
+# CI runs for that head branch keep holding self-hosted slots forever — GitHub
+# does not invalidate them. Cancel them so the fleet is free for tip-of-main
+# and open PRs. Complements concurrency.cancel-in-progress on ci.yml (which
+# only covers same-ref supersession while the PR is open).
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    name: Cancel outstanding CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel queued and in-progress CI runs for this branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BRANCH" ]; then
+            echo "No head_ref; nothing to cancel"
+            exit 0
+          fi
+          cancelled=0
+          for status in in_progress queued; do
+            ids=$(gh run list \
+              --repo "$REPO" \
+              --branch "$BRANCH" \
+              --workflow CI \
+              --status "$status" \
+              --limit 50 \
+              --json databaseId \
+              --jq '.[].databaseId' || true)
+            for id in $ids; do
+              echo "Cancelling $status run $id on $BRANCH"
+              gh run cancel "$id" --repo "$REPO" || true
+              cancelled=$((cancelled + 1))
+            done
+          done
+          echo "Cancelled $cancelled run(s) for branch $BRANCH"

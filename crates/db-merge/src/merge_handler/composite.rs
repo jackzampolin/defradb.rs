@@ -120,7 +120,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             }
         }
 
-        let doc_id_str = self.resolve_composite_doc_id(cid, block).await?;
+        let doc_id_str = self.resolve_composite_doc_id(cid, block, depth).await?;
         let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         self.process_composite_delta_locked(
@@ -281,9 +281,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     depth,
                     is_root,
                 } => {
-                    if depth >= super::MAX_MERGE_DEPTH {
-                        return Err(MergeError::depth_exceeded(&cid, depth));
-                    }
+                    self.ensure_merge_depth(&cid, depth)?;
                     if self.has_merged_composite(&cid) {
                         if is_root {
                             return Ok(MergeOutcome::terminal_skip("already merged"));
@@ -655,6 +653,19 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        self.ensure_merge_depth(cid, depth)?;
+        if self.has_merged_composite(cid) || Self::has_batch_merged_composite(batch_merged, cid) {
+            return Ok(MergeOutcome::terminal_skip("already merged"));
+        }
+
+        // Every composite in a valid ancestry belongs to the root document;
+        // the standalone path likewise carries one root identity through all
+        // frames. Resolve it against the shared transaction so mappings staged
+        // earlier in the batch are visible. Resolving every Enter frame afresh
+        // turns a depth-N replay into O(N^2) ancestry reads.
+        let doc_id = self
+            .resolve_composite_doc_id_in_txn(systemstore, cid, block, depth)
+            .await?;
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
             block: Some(block.clone()),
@@ -674,9 +685,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     depth,
                     is_root,
                 } => {
-                    if depth >= super::MAX_MERGE_DEPTH {
-                        return Err(MergeError::depth_exceeded(&cid, depth));
-                    }
+                    self.ensure_merge_depth(&cid, depth)?;
                     if self.has_merged_composite(&cid)
                         || Self::has_batch_merged_composite(batch_merged, &cid)
                     {
@@ -710,7 +719,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                             payload.clone()
                         }
                     };
-                    let doc_id = self.resolve_composite_doc_id(&cid, &block).await?;
+                    let doc_id = doc_id.clone();
 
                     match self
                         .prepare_composite_merge(

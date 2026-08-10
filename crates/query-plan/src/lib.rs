@@ -22,6 +22,7 @@
 //! Shared identifier/mapper/error/document types come from the
 //! [`query_types`] crate, not from here.
 
+pub mod doc_stream;
 pub mod fetcher;
 pub mod mutator;
 pub mod plan;
@@ -29,6 +30,7 @@ pub mod planner;
 pub mod txn;
 
 // Re-export the most commonly used items at crate root for ergonomic access.
+pub use doc_stream::{DocStream, VecStream};
 pub use fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
 pub use mutator::{BroadcastStatus, CreateResult, DeleteResult, DocMutator, UpdateResult};
 pub use plan::{LensNode, PermissionFilterNode, SEFilterNode, ScanNode, SelectNode};

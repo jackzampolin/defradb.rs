@@ -213,10 +213,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
             write_local_create(
                 &datastore,
                 &collection,

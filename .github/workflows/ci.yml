@@ -6,21 +6,58 @@ on:
   pull_request:
     branches: [main]
 
+# Only the tip of each ref keeps a run. Superseded PR pushes and main merge
+# trains cancel prior work so intermediate SHAs cannot stack the self-hosted
+# fleet. PR close is handled by cancel-pr-ci.yml (closed events do not re-enter
+# this concurrency group once the merge ref is gone).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # Two defradb.rs runner slots per studio host can now co-run jobs (plus
+  # other repos' runners on the same hosts). Bound each Cargo process so two
+  # simultaneous compiles fit inside a 32-core host with room for linking and
+  # sibling services — same allocation the gents fleet runs. Override without
+  # a workflow edit: gh variable set CARGO_BUILD_JOBS --body <n>
+  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS || '12' }}
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
+  # Studio jobs are pinned to a runner slot so each job's incremental target
+  # state stays warm on one machine (a suite that bounces between hosts turns
+  # a small rebuild into a full one) and so same-host exclusivity is
+  # deterministic. Each host runs two defradb.rs runner processes:
+  #
+  #   primary (labels ...,studio,studio-N) — one job at a time, so two
+  #   node-spawning jobs can only co-run on DIFFERENT hosts, where they
+  #   cannot contend on localhost ports. studio-1 carries build → rust →
+  #   signed-docs (consumers of build's host-local binary cache); studio-2
+  #   carries conformance, go-compat, and iroh (each self-builds on miss).
+  #
+  #   light (labels ...,defra-light,studio-N-b) — deliberately NOT labeled
+  #   `studio`/`studio-N`, so node-spawning jobs can never land there. Serves
+  #   the non-node jobs: lint (studio-1-b) and artifacts (studio-2-b).
+  #
+  # If a slot is offline its jobs queue until an operator restores the runner
+  # or moves its label — deliberate tradeoff, same as the gents fleet.
   lint:
     name: Lint
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: [self-hosted, macOS, ARM64, defra-light, studio-1-b]
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -48,31 +85,42 @@ jobs:
       - run: cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
       - run: cargo clippy -p db --features p2p --all-targets -- -D warnings
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
 
   wasm-check:
     name: WASM Build Check
-    runs-on: [self-hosted, Linux, X64]
+    # spark-1: the wasm32 target doesn't care about host arch, and pinning
+    # here takes this job off the vps (which now serves release.yml's x86_64
+    # builds only) and out of p2p-linux's way. No GitHub-hosted rust-cache:
+    # the runner workspace persists between jobs, so the warm target dir plus
+    # host-local sccache beat cache download/upload round-trips.
+    runs-on: [self-hosted, Linux, ARM64, spark, spark-1]
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-ci"
-          shared-key: "wasm32"
 
       - name: Install system dependencies
         # clang is needed because lz4-sys (transitive C dep) builds
@@ -82,8 +130,10 @@ jobs:
           bash .github/scripts/apt-update-without-nodesource.sh
           sudo apt-get install -y protobuf-compiler clang
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+      - name: Exclude packages that pull private/public git harness deps
+        # wasm doesn't need integration-test, ffi-test, or proofs (defra-harness).
+        # Stripping them keeps cargo from resolving backbone during wasm clippy.
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Clippy (wasm32)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
@@ -94,22 +144,45 @@ jobs:
       - name: Build WASM
         run: CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- Cargo.toml
 
   build:
     name: Build & Test
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
+    env:
+      # Warm-incremental beats sccache for the hot edit path (gents A/B on
+      # these hosts: 14.6s vs 5m54s for a representative source edit). The
+      # host-wide sccache rejects incremental invocations, and an empty
+      # RUSTC_WRAPPER falls back to host config, so route rustc through the
+      # pass-through wrapper. CARGO_BUILD_RUSTC_WRAPPER covers recursive
+      # Cargo invocations from build scripts. The rust/signed-docs suites on
+      # this runner use the same settings so the shared target tree never
+      # flip-flops flags.
+      CARGO_INCREMENTAL: "1"
+      RUSTC_WRAPPER: .github/scripts/rustc-direct.sh
+      CARGO_BUILD_RUSTC_WRAPPER: .github/scripts/rustc-direct.sh
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -144,10 +217,21 @@ jobs:
       - run: cargo test -p telemetry --features otlp
       - run: cargo test -p cli --features otel --test telemetry_dedup
 
+      # defra-node's p2p suite is feature-gated, so the default-feature
+      # `cargo test --workspace` above skips it entirely and the only other
+      # reference to it is a clippy compile. Its restart/shutdown tests were
+      # therefore type-checked and discarded, which is how #1309 (sweep tasks
+      # outliving shutdown and holding the store lock) shipped green. Runs
+      # after caching, with the other feature-on steps, so a feature build
+      # never becomes the cached "standard" binary. Nodes bind port 0, so this
+      # is safe on the shared studio-1 slot.
+      - run: cargo test -p defra-node --features p2p
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           pkill -f "target/debug/defra" || true
@@ -163,6 +247,8 @@ jobs:
         run: |
           git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
           git config --global --add url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "ssh://git@github.com/sourcenetwork/"
+          # Public backbone: keep unauthenticated (see comment on other jobs).
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -185,22 +271,23 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
 
   conformance:
     name: Conformance
-    # Serialized after `integration` (not just `build`) so it never co-runs
-    # with the integration matrix on the single studio host. Both jobs spawn
-    # real `defra` nodes and the studio harness port allocator has a TOCTOU
-    # bind race ("failed to start rust-0") when node-spawning jobs run
-    # concurrently — the same reason the integration matrix pins
-    # `max-parallel: 1`. The dependency edge is the strict-ordering fix; it
-    # does not affect correctness, only scheduling.
-    needs: [build, integration]
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    # Spawns real `defra` nodes, so it must never co-run with another
+    # node-spawning job on the SAME host (harness port allocator TOCTOU bind
+    # race — "failed to start rust-0"). Host pinning provides that: this job
+    # runs on studio-2, whose single runner process serializes it against the
+    # go-compat/iroh suites, while the studio-1 suites run on a different
+    # host and cannot contend on its localhost ports. No `needs` edge — the
+    # job builds its own release binary and starts as soon as a slot frees.
+    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
     timeout-minutes: 45
     env:
-      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release/defra
+      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release-fast/defra
       DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
       # The conformance harness waits on INFO-level node readiness/P2P log lines.
       # Pin the child-node filter so an inherited runner-level RUST_LOG=warn
@@ -215,13 +302,22 @@ jobs:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # release-fast (thin LTO, 16 CGUs) exists exactly for this: measured
+      # 1m40s cold vs 6m44s for the fat-LTO release profile, and this binary
+      # is test-only — release.yml still ships full-release artifacts.
       - name: Build release binary under test
         run: |
-          cargo build --release -p cli
+          cargo build --profile release-fast -p cli
           "$DEFRA_CONFORMANCE_BINARY" version --format json
 
       # The behavioral conformance tests drive real `defra` subprocesses. Run
@@ -242,34 +338,57 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           rm -rf target/e2e
+          pkill -f "target/release-fast/defra" || true
           pkill -f "target/release/defra" || true
           pkill -f "target/debug/defra" || true
 
   integration:
     name: Integration (${{ matrix.suite }})
     needs: build
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: [self-hosted, macOS, ARM64, studio, "${{ matrix.host }}"]
     strategy:
       fail-fast: false
       # The harness still allocates localhost ports via a release-then-spawn
-      # sequence, so matrix fan-out multiplies bind races on the same studio
-      # host. Keep integration suites single-file until the allocator is fixed.
-      max-parallel: 1
+      # sequence, so two suites on the SAME host can hit a bind race. Each
+      # host runs one defradb.rs runner process (one job at a time), so
+      # pinning suites to hosts serializes same-host suites for free while
+      # letting the two hosts run in parallel — replacing the old
+      # `max-parallel: 1` whole-matrix serialization. studio-1 suites consume
+      # the binary cache the `build` job (also studio-1) populated; studio-2
+      # suites self-build on miss into their own host-local cache.
       matrix:
         include:
+          # studio-1 suites share the build job's incremental target tree, so
+          # they carry the same incremental + pass-through wrapper settings;
+          # studio-2 suites stay on the host sccache (incremental off) so the
+          # target tree they share with conformance keeps consistent flags.
           - suite: rust
             needs_go: false
+            host: studio-1
+            cargo_incremental: "1"
+            rustc_wrapper: .github/scripts/rustc-direct.sh
           - suite: go-compat
             needs_go: true
+            host: studio-2
+            cargo_incremental: "0"
+            rustc_wrapper: sccache
           - suite: iroh
             needs_go: false
+            host: studio-2
+            cargo_incremental: "0"
+            rustc_wrapper: sccache
           # #978: re-run the rust integration suite with
           # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
           # .with_signing() auto-applied. Catches regressions in
@@ -278,17 +397,29 @@ jobs:
           - suite: signed-docs
             needs_go: false
             multipliers: signed-docs
+            host: studio-1
+            cargo_incremental: "1"
+            rustc_wrapper: .github/scripts/rustc-direct.sh
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
       DEFRA_MULTIPLIERS: ${{ matrix.multipliers || '' }}
+      CARGO_INCREMENTAL: ${{ matrix.cargo_incremental }}
+      RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
+      CARGO_BUILD_RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -298,18 +429,24 @@ jobs:
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          mkdir -p target/ci
+          mkdir -p target/ci "$CACHE_DIR"
 
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
             echo "Cache hit — restoring from $CACHE_DIR"
             cp "$CACHE_DIR/defra" target/ci/defra
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
           else
+            # The build job populates this cache on studio-1 only; suites
+            # pinned to the other host self-build once per commit and
+            # populate their own host-local cache so the sibling suite and
+            # any re-run hit it.
             echo "Cache miss — building binaries"
             cargo build -p cli
             cp target/debug/defra target/ci/defra
+            cp target/debug/defra "$CACHE_DIR/defra"
             cargo build -p cli --features iroh
             cp target/debug/defra target/ci/defra-iroh
+            cp target/debug/defra "$CACHE_DIR/defra-iroh"
           fi
 
           chmod +x target/ci/defra target/ci/defra-iroh
@@ -503,6 +640,7 @@ jobs:
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           pkill -f "target/(debug|ci)/defra" || true
@@ -511,11 +649,16 @@ jobs:
     # The macOS `integration` matrix above only runs the P2P suite on the studio
     # host. Several P2P sync races are exposed only by Linux's socket/thread
     # scheduling (e.g. duplicate connections that form under multi-core
-    # kqueue-vs-epoll timing), so mirror the pure-Rust P2P leg on the self-hosted
+    # kqueue-vs-epoll timing), so mirror the pure-Rust P2P leg on a self-hosted
     # Linux runner. Builds its own binary — the `build` job caches Mach-O
     # binaries that cannot run here.
+    #
+    # spark-2: dedicated host so this node-spawning job runs in parallel with
+    # wasm-check (spark-1) instead of serializing behind it on the vps, which
+    # now serves release.yml's x86_64 builds only. Still Linux/epoll — the
+    # scheduling-race coverage is arch-independent.
     name: P2P Integration (Linux)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, ARM64, spark, spark-2]
     timeout-minutes: 45
     env:
       # The workflow-level PROTOC points at a macOS Homebrew path; override it
@@ -536,14 +679,15 @@ jobs:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-ci"
-          shared-key: "p2p-linux"
 
       - name: Install system dependencies
         # protobuf-compiler: prost-build. clang/libclang-dev: bindgen (rocksdb).
@@ -586,10 +730,15 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           rm -rf target/e2e
@@ -597,7 +746,9 @@ jobs:
 
   artifacts:
     name: Release Artifacts
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    # Light slot: no nodes spawned here, and running beside (not behind) the
+    # studio-2 primary chain gets main-push artifacts out without queueing.
+    runs-on: [self-hosted, macOS, ARM64, defra-light, studio-2-b]
     needs: [build]
     if: github.event_name == 'push'
     steps:
@@ -606,7 +757,13 @@ jobs:
           clean: false
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          # Org-wide PAT rewrite for private sourcenetwork deps.
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          # backbone is public. Fine-grained PATs that omit it make GitHub
+          # treat authenticated fetches as "not our ref" for new commits;
+          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
+          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -636,5 +793,6 @@ jobs:
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd

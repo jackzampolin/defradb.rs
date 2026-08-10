@@ -63,7 +63,29 @@ pub fn create_replication_stack<
     blockstore: Arc<B>,
     sync: Arc<SyncCoordinator<B, T>>,
 ) -> ReplicationStack<S, B, T> {
-    let merge_handler_inner = Arc::new(create_merge_handler(db.clone(), blockstore));
+    create_replication_stack_with_max_merge_depth(
+        db,
+        blockstore,
+        sync,
+        crate::DEFAULT_MAX_MERGE_DEPTH,
+    )
+}
+
+pub fn create_replication_stack_with_max_merge_depth<
+    S: Store,
+    B: Blockstore + Send + Sync + 'static,
+    T: P2PTransport + 'static,
+>(
+    db: Arc<DB<S>>,
+    blockstore: Arc<B>,
+    sync: Arc<SyncCoordinator<B, T>>,
+    max_merge_depth: usize,
+) -> ReplicationStack<S, B, T> {
+    let merge_handler_inner = Arc::new(DbMergeHandler::new_with_max_merge_depth(
+        db.clone(),
+        blockstore,
+        max_merge_depth,
+    ));
     let merge_handler = Arc::new(create_acp_merge_handler(merge_handler_inner.clone()));
     let broadcast_mutator = Arc::new(create_broadcast_mutator(db, sync.clone()));
     let txn_broadcaster: Arc<dyn TxnBroadcaster> = Arc::new(SyncTxnBroadcaster::new(sync));

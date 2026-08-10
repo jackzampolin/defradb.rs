@@ -19,7 +19,7 @@ use super::migration::MigrationWriteBack;
 use super::LensedAutoCommitFetcher;
 
 impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
-    async fn process_document_with_bounded_write_back(
+    pub(super) async fn process_document_with_bounded_write_back(
         &self,
         doc: Document,
         collection: &Collection,

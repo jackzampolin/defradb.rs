@@ -1,6 +1,5 @@
 pub mod config;
 mod errors;
-mod iterator;
 mod metrics;
 mod store;
 mod transaction;

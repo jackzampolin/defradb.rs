@@ -216,7 +216,7 @@ pub struct DatastoreConfig {
     /// - `eventual`: defer fsync to OS for higher write throughput
     #[serde(default)]
     pub durability: DurabilityMode,
-    /// Max DAG recursion depth for merge operations. Default: 1024.
+    /// Maximum DAG traversal depth for merge operations.
     #[serde(default = "default_max_merge_depth")]
     pub max_merge_depth: usize,
     /// Enable transparent at-rest value encryption for the storage backend.
@@ -231,7 +231,7 @@ pub struct DatastoreConfig {
 }
 
 fn default_max_merge_depth() -> usize {
-    1024
+    db_merge::DEFAULT_MAX_MERGE_DEPTH
 }
 
 impl Default for DatastoreConfig {

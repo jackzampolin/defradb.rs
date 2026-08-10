@@ -237,11 +237,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
-                    // Get encryption config: first try thread-local (explicit in mutation),
-                    // then fall back to per-document stored config (from create with encryption).
-                    // This matches Go's behavior where encryption propagates through the DAG.
-                    let enc_config = get_encryption_config()
-                        .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
+                    // Explicit config from the mutation only. A document created
+                    // encrypted keeps its encryption because the block writer
+                    // inherits it from the previous block, matching Go's
+                    // determineBlockEncryption.
+                    let enc_config = get_encryption_config();
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
 

@@ -13,6 +13,8 @@ default = ["p2p", "native", "wasmtime-runtime"]
 p2p = ["dep:p2p", "dep:libp2p", "p2p/libp2p-transport"]
 native = ["dep:tokio", "events/channel", "acp/native"]
 redb = ["storage/redb", "acp/redb", "db-nac/redb"]
+rocksdb = ["storage/rocksdb"]
+fjall = ["storage/fjall"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
 
 [dependencies]
@@ -94,6 +96,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 proptest.workspace = true
 blst = "0.3"
 getrandom = "0.2"
+tempfile = "3"
 
 [lints]
 workspace = true
