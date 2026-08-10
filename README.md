@@ -24,13 +24,30 @@ Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API,
 
 ## Building
 
+Install [`just`](https://github.com/casey/just), then let it install everything else:
+
 ```bash
-cargo build                            # Build all crates
-cargo build --release -p cli           # Release binary
-cargo test                             # Unit tests
-cargo clippy --all -- -D warnings      # Lint
-cargo fmt --all                        # Format
+cargo install just    # one time
+just setup            # Rust, protoc, Go, a JDK, Lean/lake, the TLC jar, wasm tooling
 ```
+
+`just setup` needs no root and no package manager: every tool is fetched from its
+official release into a git-ignored `.tooling/` inside the repo and put on `PATH`,
+so it behaves identically on any Linux distribution and on macOS, x86_64 or arm64.
+Versions are pinned to the ones CI uses. `just doctor` reports what resolved and
+what is missing.
+
+```bash
+just build             # Build all crates
+just build-release     # Release binary
+just test              # Unit tests
+just lint              # Lint (every clippy invocation CI runs)
+just fmt               # Format
+just gate              # fmt + lint + docs + tests, before asking for a review
+just ci                # Reproduce the CI pipeline locally
+```
+
+Run `just` on its own to list every target, grouped.
 
 ## Configuration
 
