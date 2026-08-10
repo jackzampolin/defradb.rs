@@ -69,31 +69,19 @@ fn test_json_to_graphql_string_with_tabs() {
 
 #[test]
 fn test_json_to_graphql_string_with_backspace() {
-    assert_eq!(
-        json_to_graphql_input(&json!("a\u{0008}b")),
-        "\"a\\bb\""
-    );
+    assert_eq!(json_to_graphql_input(&json!("a\u{0008}b")), "\"a\\bb\"");
 }
 
 #[test]
 fn test_json_to_graphql_string_with_form_feed() {
-    assert_eq!(
-        json_to_graphql_input(&json!("a\u{000c}b")),
-        "\"a\\fb\""
-    );
+    assert_eq!(json_to_graphql_input(&json!("a\u{000c}b")), "\"a\\fb\"");
 }
 
 #[test]
 fn test_json_to_graphql_string_with_other_controls() {
     // JSON (and Go valueToGQL) use \uXXXX for controls without a short escape.
-    assert_eq!(
-        json_to_graphql_input(&json!("a\u{0000}b")),
-        "\"a\\u0000b\""
-    );
-    assert_eq!(
-        json_to_graphql_input(&json!("a\u{0007}b")),
-        "\"a\\u0007b\""
-    );
+    assert_eq!(json_to_graphql_input(&json!("a\u{0000}b")), "\"a\\u0000b\"");
+    assert_eq!(json_to_graphql_input(&json!("a\u{0007}b")), "\"a\\u0007b\"");
 }
 
 #[test]

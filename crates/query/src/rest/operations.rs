@@ -24,8 +24,9 @@ pub(super) fn json_to_graphql_input(value: &JsonValue) -> String {
         JsonValue::Null => "null".to_string(),
         JsonValue::Bool(b) => b.to_string(),
         JsonValue::Number(n) => n.to_string(),
-        JsonValue::String(s) => serde_json::to_string(s)
-            .expect("serializing a string to JSON cannot fail"),
+        JsonValue::String(s) => {
+            serde_json::to_string(s).expect("serializing a string to JSON cannot fail")
+        }
         JsonValue::Array(arr) => {
             let items: Vec<String> = arr.iter().map(json_to_graphql_input).collect();
             format!("[{}]", items.join(", "))
