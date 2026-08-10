@@ -477,6 +477,10 @@ jobs:
       needs.docker.result == 'success'
     runs-on: [self-hosted, Linux, X64]
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -506,6 +510,37 @@ jobs:
           path: artifacts
           pattern: defra-wasm
           merge-multiple: true
+
+      - name: Report release artifact sizes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! command -v brotli >/dev/null 2>&1; then
+            bash .github/scripts/apt-update-without-nodesource.sh
+            sudo apt-get install -y brotli
+          fi
+
+          PREVIOUS_TAG=$(git describe "${GITHUB_REF_NAME}^" --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          mkdir -p previous-artifacts
+          if [ -n "$PREVIOUS_TAG" ]; then
+            for archive in artifacts/*.tar.gz; do
+              name=${archive##*/}
+              case "$name" in
+                defra-ffi-*ios_xcframework*) continue ;;
+              esac
+              previous_name=${name/"$GITHUB_REF_NAME"/"$PREVIOUS_TAG"}
+              url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PREVIOUS_TAG}/${previous_name}"
+              if ! curl --fail --location --silent --show-error --retry 3 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --output "previous-artifacts/$previous_name" "$url"; then
+                rm -f "previous-artifacts/$previous_name"
+                echo "::warning::No previous artifact found for $name"
+              fi
+            done
+          fi
+
+          bash .github/scripts/report-release-sizes.sh \
+            artifacts previous-artifacts "$GITHUB_REF_NAME" "$PREVIOUS_TAG"
 
       - name: List release artifacts
         run: find artifacts -type f | sort
