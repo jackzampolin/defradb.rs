@@ -111,7 +111,7 @@ where
         )
         .await
         .map_err(|error| anyhow!("failed to create P2P host: {error}"))?;
-    tokio::spawn(async move {
+    let host_task = tokio::spawn(async move {
         host.run().await;
     });
 
@@ -302,6 +302,7 @@ where
             handle.clone(),
             coordinator.shutdown_handle(),
             vec![
+                host_task,
                 host_event_task,
                 replication_task,
                 failure_recorder_task,
