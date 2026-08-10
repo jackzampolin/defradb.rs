@@ -44,7 +44,7 @@ struct FileEntry {
 /// In-memory filesystem with change tracking for OPFS persistence.
 struct InMemoryFS {
     files: HashMap<String, FileEntry>,
-    dirty: HashSet<String>,
+    dirty: Rc<RefCell<HashSet<String>>>,
     deleted: HashSet<String>,
 }
 
@@ -52,7 +52,7 @@ impl InMemoryFS {
     fn new() -> Self {
         Self {
             files: HashMap::new(),
-            dirty: HashSet::new(),
+            dirty: Rc::new(RefCell::new(HashSet::new())),
             deleted: HashSet::new(),
         }
     }
@@ -86,7 +86,7 @@ impl InMemoryFS {
                 locked: false,
             },
         );
-        self.dirty.insert(path.to_string());
+        self.dirty.borrow_mut().insert(path.to_string());
         self.deleted.remove(path);
         Ok(data)
     }
@@ -102,8 +102,13 @@ impl InMemoryFS {
             data.borrow_mut().clear();
         }
         let offset = if append { data.borrow().len() } else { 0 };
-        self.dirty.insert(path.to_string());
-        Ok(Box::new(MemFileWriter { data, offset }))
+        self.dirty.borrow_mut().insert(path.to_string());
+        Ok(Box::new(MemFileWriter {
+            data,
+            offset,
+            path: path.to_string(),
+            dirty: Rc::clone(&self.dirty),
+        }))
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -137,7 +142,7 @@ impl InMemoryFS {
 
     fn delete(&mut self, path: &str) -> Result<()> {
         if self.files.remove(path).is_some() {
-            self.dirty.remove(path);
+            self.dirty.borrow_mut().remove(path);
             self.deleted.insert(path.to_string());
             Ok(())
         } else {
@@ -151,9 +156,9 @@ impl InMemoryFS {
     fn rename(&mut self, from: &str, to: &str) -> Result<()> {
         if let Some(entry) = self.files.remove(from) {
             self.files.insert(to.to_string(), entry);
-            self.dirty.remove(from);
+            self.dirty.borrow_mut().remove(from);
             self.deleted.insert(from.to_string());
-            self.dirty.insert(to.to_string());
+            self.dirty.borrow_mut().insert(to.to_string());
             Ok(())
         } else {
             Err(Status::new(
@@ -259,10 +264,15 @@ impl RandomAccess for MemRandomAccess {
 struct MemFileWriter {
     data: FileData,
     offset: usize,
+    path: String,
+    dirty: Rc<RefCell<HashSet<String>>>,
 }
 
 impl Write for MemFileWriter {
     fn write(&mut self, src: &[u8]) -> io::Result<usize> {
+        // XXX Mark on every write, not just at open: this writer outlives any
+        // number of persist() calls, each of which clears the set.
+        self.dirty.borrow_mut().insert(self.path.clone());
         let mut buf = self.data.borrow_mut();
         if self.offset == buf.len() {
             buf.extend_from_slice(src);
@@ -353,7 +363,7 @@ impl OpfsEnv {
 
         {
             let fs = self.fs.borrow();
-            dirty = fs.dirty.iter().cloned().collect();
+            dirty = fs.dirty.borrow().iter().cloned().collect();
             deleted = fs.deleted.iter().cloned().collect();
 
             // Collect data for dirty files
@@ -391,7 +401,7 @@ impl OpfsEnv {
 
         // Clear tracking sets
         let mut fs = self.fs.borrow_mut();
-        fs.dirty.clear();
+        fs.dirty.borrow_mut().clear();
         fs.deleted.clear();
 
         Ok(())
@@ -400,7 +410,7 @@ impl OpfsEnv {
     /// Check if there are unpersisted changes.
     pub fn has_pending_changes(&self) -> bool {
         let fs = self.fs.borrow();
-        !fs.dirty.is_empty() || !fs.deleted.is_empty()
+        !fs.dirty.borrow().is_empty() || !fs.deleted.is_empty()
     }
 }
 
