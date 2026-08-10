@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, write_branchable_collection_block};
 use super::*;
 
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -94,8 +94,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let existed = true;
 
                 // Build delete block (composite with status=2) in a scoped block
-                let mut ownership_error: Option<String> = None;
-                let commit_result: Option<CommitArtifacts> = {
+                let commit_result: CommitArtifacts = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -114,7 +113,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
 
-                    match write_delete_block(
+                    let block_result = write_delete_block(
                         &blockstore,
                         &headstore,
                         &doc_id_str,
@@ -123,69 +122,40 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         sign_config.as_ref(),
                     )
                     .await
-                    {
-                        Ok(block_result) => {
-                            let composite_cid = block_result.cid;
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to write delete block for collection {}: {}",
+                            collection_name, e
+                        ))
+                    })?;
+                    let composite_cid = block_result.cid;
 
-                            match txn.systemstore() {
-                                Ok(systemstore) => {
-                                    if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
-                                        &systemstore,
-                                        &composite_cid.to_string(),
-                                        &doc_id_str,
-                                    )
-                                    .await
-                                    {
-                                        ownership_error = Some(e.to_string());
-                                    }
-                                }
-                                Err(e) => ownership_error = Some(e.to_string()),
-                            }
+                    let systemstore = txn.systemstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get systemstore: {}",
+                            e
+                        ))
+                    })?;
+                    crate::doc_id_map::set_block_doc_id_mapping(
+                        &systemstore,
+                        &composite_cid.to_string(),
+                        &doc_id_str,
+                    )
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                            if collection.schema().is_branchable {
-                                let short_id = collection.resolved_root_id();
-                                match write_collection_block(
-                                    &blockstore,
-                                    &headstore,
-                                    short_id,
-                                    schema_version_id,
-                                    composite_cid,
-                                    sign_config.as_ref(),
-                                )
-                                .await
-                                {
-                                    Ok((col_cid, col_bytes)) => {
-                                        col_block_data = Some((col_cid, col_bytes));
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            collection = %collection_name,
-                                            error = %e,
-                                            "Failed to write collection block for branchable delete"
-                                        );
-                                    }
-                                }
-                            }
+                    let col_block_data = write_branchable_collection_block(
+                        collection_name,
+                        &collection,
+                        &blockstore,
+                        &headstore,
+                        composite_cid,
+                        sign_config.as_ref(),
+                    )
+                    .await?;
 
-                            Some((composite_cid, block_result.block, col_block_data))
-                        }
-                        Err(e) => {
-                            warn!(
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to write delete block - commits queries may not work"
-                            );
-                            None
-                        }
-                    }
+                    (composite_cid, block_result.block, col_block_data)
                 }; // blockstore and headstore dropped here
-
-                if let Some(e) = ownership_error {
-                    return Err(query::error::QueryError::execution(format!(
-                        "failed to record block ownership mapping for delete: {e}"
-                    )));
-                }
 
                 // Commit the transaction (datastore reference is now dropped)
                 if let Err(e) = txn.commit().await {
@@ -197,33 +167,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     return Err(crate::error::commit_query_error(e));
                 }
 
-                // Emit update event for subscriptions when blocks were written.
-                if let Some((cid, block, col_data)) = commit_result.as_ref() {
-                    self.emit_update_events(
-                        &collection,
-                        &canonical_doc_id.to_string(),
-                        *cid,
-                        block.clone(),
-                        col_data.clone(),
-                    );
-                }
+                let (cid, block, col_data) = commit_result;
+                self.emit_update_events(
+                    &collection,
+                    &canonical_doc_id.to_string(),
+                    cid,
+                    block.clone(),
+                    col_data.clone(),
+                );
 
-                match commit_result {
-                    Some((cid, block, col_data)) => {
-                        let mut result = DeleteResult::with_commit(
-                            canonical_doc_id.clone(),
-                            existed,
-                            cid,
-                            block,
-                        );
-                        if let Some((col_cid, col_bytes)) = col_data {
-                            result.broadcast_cid = Some(col_cid);
-                            result.broadcast_block = Some(col_bytes);
-                        }
-                        Ok(result)
-                    }
-                    None => Ok(DeleteResult::new(canonical_doc_id, existed)),
+                let mut result = DeleteResult::with_commit(canonical_doc_id, existed, cid, block);
+                if let Some((col_cid, col_bytes)) = col_data {
+                    result.broadcast_cid = Some(col_cid);
+                    result.broadcast_block = Some(col_bytes);
                 }
+                Ok(result)
             }
             Err(e) => {
                 // Discard the transaction on error

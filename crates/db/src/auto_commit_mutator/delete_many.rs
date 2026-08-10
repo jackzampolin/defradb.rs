@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, write_branchable_collection_block};
 use super::*;
 
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -49,10 +49,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        // Block-ownership registration is correctness-critical; a failure must
-        // abort the whole batch rather than commit a tombstone with no owner
-        // (which would break P2P serve, KMS, and ACP resolution).
-        let mut ownership_error: Option<String> = None;
         let mut results: Vec<(DocID, bool, Option<CommitArtifacts>)> =
             Vec::with_capacity(doc_ids.len());
 
@@ -122,7 +118,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     query::error::QueryError::execution(format!("failed to get headstore: {}", e))
                 })?;
 
-                match write_delete_block(
+                let block_result = write_delete_block(
                     &blockstore,
                     &headstore,
                     &canonical_doc_id.to_string(),
@@ -131,73 +127,39 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     sign_config.as_ref(),
                 )
                 .await
-                {
-                    Ok(block_result) => {
-                        let composite_cid = block_result.cid;
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to write delete block for collection {}: {}",
+                        collection_name, e
+                    ))
+                })?;
+                let composite_cid = block_result.cid;
 
-                        match txn.systemstore() {
-                            Ok(systemstore) => {
-                                if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
-                                    &systemstore,
-                                    &composite_cid.to_string(),
-                                    &canonical_doc_id.to_string(),
-                                )
-                                .await
-                                {
-                                    ownership_error = Some(e.to_string());
-                                }
-                            }
-                            Err(e) => ownership_error = Some(e.to_string()),
-                        }
+                let systemstore = txn.systemstore().map_err(|e| {
+                    query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+                })?;
+                crate::doc_id_map::set_block_doc_id_mapping(
+                    &systemstore,
+                    &composite_cid.to_string(),
+                    &canonical_doc_id.to_string(),
+                )
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-                        let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                        if collection.schema().is_branchable {
-                            match write_collection_block(
-                                &blockstore,
-                                &headstore,
-                                short_id,
-                                &schema_version_id,
-                                composite_cid,
-                                sign_config.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok((col_cid, col_bytes)) => {
-                                    col_block_data = Some((col_cid, col_bytes));
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        collection = %collection_name,
-                                        error = %e,
-                                        "Failed to write collection block for branchable delete"
-                                    );
-                                }
-                            }
-                        }
+                let col_block_data = write_branchable_collection_block(
+                    collection_name,
+                    &collection,
+                    &blockstore,
+                    &headstore,
+                    composite_cid,
+                    sign_config.as_ref(),
+                )
+                .await?;
 
-                        Some((composite_cid, block_result.block, col_block_data))
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            doc_id = %canonical_doc_id,
-                            error = %e,
-                            "Failed to write delete block in batch"
-                        );
-                        None
-                    }
-                }
+                Some((composite_cid, block_result.block, col_block_data))
             };
 
             results.push((canonical_doc_id, existed, commit_result));
-        }
-
-        // A failed ownership registration must not commit a partial index for
-        // the batch; drop the txn (rolls back) and surface the error.
-        if let Some(e) = ownership_error {
-            return Err(query::error::QueryError::execution(format!(
-                "failed to record block ownership mapping for delete: {e}"
-            )));
         }
 
         // Single commit for entire batch
