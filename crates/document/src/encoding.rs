@@ -409,6 +409,46 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<serde_json::Value> {
     }
 }
 
+/// Env var for the #1294 e2e harness: store Blob inputs as hex-decoded
+/// [`NormalValue::Bytes`] so create/query response converters are exercised.
+///
+/// Production paths leave this unset; Blob fields remain hex **strings**.
+pub const TEST_BLOB_AS_BYTES_ENV: &str = "DEFRA_TEST_BLOB_AS_BYTES";
+
+/// True when [`TEST_BLOB_AS_BYTES_ENV`] is `1` or `true`.
+pub fn test_blob_as_bytes_enabled() -> bool {
+    matches!(
+        std::env::var(TEST_BLOB_AS_BYTES_ENV).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+/// Decode a hex string (mixed case, even length) to raw bytes.
+pub fn decode_hex_blob(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = from_hex_digit(bytes[i])?;
+        let lo = from_hex_digit(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
+}
+
+fn from_hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Convert a f64 to a JSON value, returning an error for non-finite values.
 ///
 /// This matches Go's encoding/json behavior which rejects NaN and Infinity.

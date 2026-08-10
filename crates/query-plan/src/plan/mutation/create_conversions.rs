@@ -190,6 +190,28 @@ pub fn json_to_normal_value_with_kind_and_time(
                         },
                     )
                 }
+                // Blob: production stores hex text as String (Go parity). When
+                // DEFRA_TEST_BLOB_AS_BYTES is set, hex-decode into Bytes so e2e
+                // tests can exercise NormalValue::Bytes JSON converters (#1294).
+                ScalarKind::Blob => {
+                    if document::encoding::test_blob_as_bytes_enabled() {
+                        let s = value.as_str().ok_or_else(|| {
+                            QueryError::execution(format!(
+                                "Expected hex string for Blob field, got: {:?}",
+                                value
+                            ))
+                        })?;
+                        let bytes = document::encoding::decode_hex_blob(s).ok_or_else(|| {
+                            QueryError::execution(format!(
+                                "Invalid hex Blob value '{}': expected even-length hex",
+                                s
+                            ))
+                        })?;
+                        Ok(NormalValue::Bytes(bytes))
+                    } else {
+                        json_to_normal_value(value)
+                    }
+                }
                 // For other scalar types, fall through to default conversion.
                 _ => json_to_normal_value(value),
             },
