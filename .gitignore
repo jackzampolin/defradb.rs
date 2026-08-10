@@ -29,3 +29,8 @@ tools/otel-smoke/output/
 
 # Claude (user-specific)
 .claude/
+.mcp.json
+AGENTS.md
+
+# Local docs
+docs/
