@@ -26,8 +26,7 @@ async fn bytes_create_and_query_return_lowercase_hex() {
 
     let create_data = &created["add_BlobUser"][0]["data"];
     assert_eq!(
-        create_data,
-        "00ff",
+        create_data, "00ff",
         "create mutation must JSON-encode NormalValue::Bytes as lowercase hex \
          (not a number array and not base64); got {create_data:?}"
     );
@@ -38,8 +37,7 @@ async fn bytes_create_and_query_return_lowercase_hex() {
 
     let query_data = &queried["BlobUser"][0]["data"];
     assert_eq!(
-        query_data,
-        "00ff",
+        query_data, "00ff",
         "query must JSON-encode NormalValue::Bytes as lowercase hex; got {query_data:?}"
     );
 
