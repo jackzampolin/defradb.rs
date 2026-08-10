@@ -50,7 +50,7 @@ async fn two_embedded_iroh_nodes_connect_and_replicate() -> Result<()> {
 
     p2p_b
         .ops()
-        .sync_documents("Book", vec![doc_id])
+        .sync_documents("Book", vec![doc_id], None)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 

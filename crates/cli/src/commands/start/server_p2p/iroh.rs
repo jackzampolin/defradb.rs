@@ -81,21 +81,6 @@ impl Node {
         coordinator
             .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
             .await;
-        let coordinator_for_restore = coordinator.clone();
-        tokio::spawn(async move {
-            coordinator_for_restore
-                .run_pending_dag_resync(std::time::Duration::from_secs(60))
-                .await;
-        });
-
-        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
-        // roots at a tight cadence. Sibling of the resync sweep above.
-        let coordinator_for_retry_clock = coordinator.clone();
-        tokio::spawn(async move {
-            coordinator_for_retry_clock
-                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
-                .await;
-        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let database_for_acp = database.clone();
@@ -174,6 +159,28 @@ impl Node {
             )
             .await;
             info!("Replication loop stopped (iroh)");
+        });
+
+        // Started here, not earlier, for two reasons (#1309). These are managed
+        // tasks: nothing can drain them until the caller owns a shutdown handle,
+        // so spawning them before the last fallible step above would leak both
+        // sweeps (and through them the store) on any early return. And the sync
+        // event channel only has its consumer once the replication loop above is
+        // running, which is the same ordering defra-node's setup_p2p documents.
+        let coordinator_for_restore = coordinator.clone();
+        coordinator.spawn_background_task("pending_dag_resync", async move {
+            coordinator_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
+        });
+
+        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
+        // roots at a tight cadence. Sibling of the resync sweep above.
+        let coordinator_for_retry_clock = coordinator.clone();
+        coordinator.spawn_background_task("pending_dag_retry_clock", async move {
+            coordinator_for_retry_clock
+                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
+                .await;
         });
 
         let coordinator_for_events = coordinator.clone();

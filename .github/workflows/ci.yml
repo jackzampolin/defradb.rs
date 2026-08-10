@@ -217,6 +217,16 @@ jobs:
       - run: cargo test -p telemetry --features otlp
       - run: cargo test -p cli --features otel --test telemetry_dedup
 
+      # defra-node's p2p suite is feature-gated, so the default-feature
+      # `cargo test --workspace` above skips it entirely and the only other
+      # reference to it is a clippy compile. Its restart/shutdown tests were
+      # therefore type-checked and discarded, which is how #1309 (sweep tasks
+      # outliving shutdown and holding the store lock) shipped green. Runs
+      # after caching, with the other feature-on steps, so a feature build
+      # never becomes the cached "standard" binary. Nodes bind port 0, so this
+      # is safe on the shared studio-1 slot.
+      - run: cargo test -p defra-node --features p2p
+
       - name: Cleanup
         if: always()
         run: |
@@ -419,7 +429,7 @@ jobs:
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          mkdir -p "$CACHE_DIR" target/ci
+          mkdir -p target/ci "$CACHE_DIR"
 
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
             echo "Cache hit — restoring from $CACHE_DIR"

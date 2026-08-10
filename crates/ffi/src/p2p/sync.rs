@@ -57,7 +57,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
                 rt.block_on(async move {
                     p2p.system
                         .ops()
-                        .sync_documents(&collection_name, doc_ids)
+                        .sync_documents(&collection_name, doc_ids, None)
                         .await
                         .map_err(FfiP2PError::from)
                 })
