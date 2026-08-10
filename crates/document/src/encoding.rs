@@ -351,10 +351,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<serde_json::Value> {
         NormalValue::Float64(f) => float64_to_json(*f),
         NormalValue::Float32(f) => float64_to_json(*f as f64),
         NormalValue::String(s) => Ok(serde_json::Value::String(s.clone())),
-        NormalValue::Bytes(b) => {
-            // Encode bytes as base64
-            Ok(serde_json::Value::String(base64_encode(b)))
-        }
+        NormalValue::Bytes(b) => Ok(bytes_to_json(b)),
         NormalValue::Time(t) => Ok(serde_json::Value::String(format_time_rfc3339_nano(t))),
         NormalValue::Json(v) => Ok(v.clone()),
         NormalValue::IntArray(arr) => Ok(serde_json::Value::Array(
@@ -468,9 +465,23 @@ fn float64_to_json(f: f64) -> Result<serde_json::Value> {
         .ok_or_else(|| Error::NonFiniteFloat(format!("{}", f)))
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+/// Encode raw bytes as a lowercase hex JSON string.
+///
+/// Canonical wire form for [`NormalValue::Bytes`] (#1294). Matches Go's GraphQL
+/// Blob scalar when values are raw bytes, and aligns document / query-types /
+/// mutation converters on one representation.
+pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut buf = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(buf, "{:02x}", byte);
+    }
+    buf
+}
+
+/// JSON value for raw bytes: lowercase hex string.
+pub fn bytes_to_json(bytes: &[u8]) -> serde_json::Value {
+    serde_json::Value::String(bytes_to_hex_string(bytes))
 }
 
 /// Canonical CBOR key ordering (RFC 7049 Section 3.9, RFC 8949).

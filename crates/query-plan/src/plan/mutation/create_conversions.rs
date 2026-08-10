@@ -478,9 +478,7 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
             }
         }
         NormalValue::String(s) => JsonValue::String(s.clone()),
-        NormalValue::Bytes(b) => {
-            JsonValue::Array(b.iter().map(|byte| JsonValue::Number((*byte).into())).collect())
-        }
+        NormalValue::Bytes(b) => document::encoding::bytes_to_json(b),
         NormalValue::Json(j) => j.clone(),
         NormalValue::BoolArray(arr) => {
             JsonValue::Array(arr.iter().map(|b| JsonValue::Bool(*b)).collect())
@@ -521,9 +519,7 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
         ),
         NormalValue::BytesArray(arr) => JsonValue::Array(
             arr.iter()
-                .map(|bytes| {
-                    JsonValue::Array(bytes.iter().map(|b| JsonValue::Number((*b).into())).collect())
-                })
+                .map(|bytes| document::encoding::bytes_to_json(bytes))
                 .collect(),
         ),
         NormalValue::Time(t) => {
