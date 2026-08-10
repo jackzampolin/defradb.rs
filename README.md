@@ -24,13 +24,40 @@ Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API,
 
 ## Building
 
+Install [`just`](https://github.com/casey/just), then let it install everything else:
+
 ```bash
-cargo build                            # Build all crates
-cargo build --release -p cli           # Release binary
-cargo test                             # Unit tests
-cargo clippy --all -- -D warnings      # Lint
-cargo fmt --all                        # Format
+cargo install just    # one time, if you already have a Rust toolchain
+just setup            # Rust, protoc, Go, a JDK, Lean/lake, the TLC jar, wasm tooling
 ```
+
+Without Rust yet, install a prebuilt `just` first, since `just setup` is what
+installs the toolchain:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+  | bash -s -- --to ~/.local/bin      # or grab a binary from the just releases page
+```
+
+`just setup` needs no root and no package manager: every tool is fetched from its
+official release into a git-ignored `.tooling/` inside the repo and put on `PATH`.
+It is written for Linux and macOS on x86_64 and arm64, and is currently verified
+on Linux x86_64. Downloads are pinned by version and checked against a SHA-256
+before use. The host needs `bash`, `curl`, `tar`, `unzip` and `git`.
+
+`just doctor` reports what resolved and what is missing.
+
+```bash
+just build             # Build all crates
+just build-release     # Release binary
+just test              # Unit tests
+just lint              # Lint (every clippy invocation CI runs)
+just fmt               # Format
+just gate              # fmt + lint + docs + tests, before asking for a review
+just ci                # Reproduce the CI pipeline locally
+```
+
+Run `just` on its own to list every target, grouped.
 
 ## Configuration
 

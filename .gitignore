@@ -34,3 +34,6 @@ AGENTS.md
 
 # Local docs
 docs/
+
+# Local dev tooling installed by `just setup`
+.tooling/
