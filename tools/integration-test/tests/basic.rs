@@ -6,8 +6,6 @@ mod collection_delete_4657;
 mod collection_management;
 #[path = "basic/document_lifecycle.rs"]
 mod document_lifecycle;
-#[path = "basic/issue1294_bytes_json.rs"]
-mod issue1294_bytes_json;
 #[path = "basic/lark_crash_reopen.rs"]
 mod lark_crash_reopen;
 #[path = "basic/multi_collection.rs"]

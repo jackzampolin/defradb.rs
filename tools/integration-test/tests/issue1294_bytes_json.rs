@@ -1,20 +1,7 @@
 //! #1294 — `NormalValue::Bytes` must render as one JSON shape on create and query.
 //!
-//! Production GraphQL Blob fields are stored as hex **strings**, so the three
-//! `normal_value_to_json` Bytes arms are not hit on the happy path (see L2 spike
-//! in agent-ops worklog). This test enables the harness env
-//! `DEFRA_TEST_BLOB_AS_BYTES=1` so Blob inputs are hex-decoded into
-//! `NormalValue::Bytes`, then asserts create mutation and query both return
-//! lowercase hex (`"00ff"` for input `"00FF"`).
-//!
-//! ## Long-term suite widening (not in this PR)
-//!
-//! - Natural product paths that materialize `Bytes` without a test hook (CBOR
-//!   loads, lens transforms, P2P payload maps via `Document::to_map`).
-//! - Commit `delta` / `signature.value` remain separate contracts; do not fold
-//!   them into the Blob/`Bytes` assertion here.
-//! - Go cross-runtime: Blob hex string already matches; re-check if storage ever
-//!   switches Blob from String to Bytes without a GraphQL scalar change.
+//! Forces Blob as `NormalValue::Bytes` via harness env `DEFRA_TEST_BLOB_AS_BYTES=1`
+//! and asserts create+query both return lowercase hex.
 
 use integration_test::TestCluster;
 
@@ -22,8 +9,8 @@ const HOOK_ENV: &str = "DEFRA_TEST_BLOB_AS_BYTES";
 
 #[tokio::test]
 async fn bytes_create_and_query_return_lowercase_hex() {
-    // Safety: serial within this process; integration tests run as separate
-    // processes per binary. Child `defra` inherits the env for the harness hook.
+    // Isolated binary: process-global env only affects this test process.
+    // Child `defra` inherits the env for the harness hook.
     std::env::set_var(HOOK_ENV, "1");
 
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
