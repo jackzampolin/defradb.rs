@@ -9,13 +9,12 @@ use query::mutator::{
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use storage::corekv::Store;
-use tracing::warn;
 
 use super::helpers::{
     ensure_collection_is_active, register_block_doc_id_mappings, register_created_doc,
-    write_local_create, write_local_update,
+    write_branchable_collection_block, write_local_create, write_local_update,
 };
-use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
+use crate::block_builder::{write_delete_block, write_document_blocks};
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::event_emission::register_update_event_callback;
@@ -253,30 +252,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
 
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write collection block for branchable create"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             (doc_id, block_result.cid, block_result.block, col_block_data)
         };
@@ -403,30 +387,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             )
             .await?;
 
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write collection block for branchable update"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             (block_result.cid, block_result.block, col_block_data)
         };
@@ -484,7 +453,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             return Ok(DeleteResult::new(canonical_doc_id, existed));
         }
 
-        let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let sign_config = get_signing_config();
 
@@ -517,30 +485,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    composite_cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write collection block for branchable delete"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                composite_cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             (composite_cid, block_result.block, col_block_data)
         };

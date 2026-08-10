@@ -3,6 +3,7 @@ use acp::{DocumentACP, LocalDocumentACP, MemoryAcpStore};
 use document::NormalValue;
 use events::{Bus, ChannelBus, EventName};
 use query::mutator::DocMutator;
+use query::runner::DocFetcher;
 use schema::{CType, CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
 use storage::backends::MemoryStore;
 
@@ -23,6 +24,113 @@ fn test_collection() -> CollectionVersion {
             FieldDescription::new("2", "x", FieldKind::int()),
         ],
     )
+}
+
+fn branchable_collection() -> CollectionVersion {
+    CollectionVersion::new(
+        "Branchable",
+        "branchable-v1",
+        "col-branchable",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "x", FieldKind::int()),
+        ],
+    )
+    .as_branchable()
+}
+
+struct FailingCollectionSigner;
+
+impl defra_core::signing::RemoteSigner for FailingCollectionSigner {
+    fn sign_sync(
+        &self,
+        data: &[u8],
+        _authorization: Option<&defra_core::signing::SigningAuthorization>,
+    ) -> Result<Vec<u8>, String> {
+        let block =
+            defra_core::block::Block::from_dag_cbor(data).map_err(|error| error.to_string())?;
+        if matches!(block.delta, defra_core::block::CrdtDelta::Collection(_)) {
+            return Err("injected collection signing failure".to_string());
+        }
+        Ok(vec![0; 64])
+    }
+}
+
+fn failing_collection_signing_config() -> defra_core::signing::SigningConfig {
+    defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Ed25519,
+        private_key_bytes: Vec::new(),
+        public_key_bytes: Vec::new(),
+        public_key_hex: "test".to_string(),
+        remote_signer: Some(Arc::new(FailingCollectionSigner)),
+        signing_authorization: None,
+    }
+}
+
+#[tokio::test]
+async fn branchable_create_rolls_back_when_collection_block_fails() {
+    let (db, _bus) = make_test_db_with_bus().await;
+    db.create_collection(branchable_collection()).await.unwrap();
+    let mutator = crate::AutoCommitMutator::new(Arc::clone(&db));
+
+    defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
+    let result = mutator
+        .create(
+            "Branchable",
+            Document::from_json_str(r#"{"x": 1}"#).unwrap(),
+        )
+        .await;
+    defra_core::signing::set_signing_config(None);
+
+    let error = result.expect_err("collection block failure must fail create");
+    assert!(error
+        .to_string()
+        .contains("injected collection signing failure"));
+
+    let fetcher = crate::LensedAutoCommitFetcher::new(Arc::clone(&db));
+    assert!(fetcher.get_all("Branchable").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn branchable_update_rolls_back_when_collection_block_fails() {
+    let (db, _bus) = make_test_db_with_bus().await;
+    db.create_collection(branchable_collection()).await.unwrap();
+    let mutator = crate::AutoCommitMutator::new(Arc::clone(&db));
+    let created = mutator
+        .create(
+            "Branchable",
+            Document::from_json_str(r#"{"x": 1}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut doc = mutator
+        .get_for_update("Branchable", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    doc.set("x", NormalValue::Int(2));
+
+    defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
+    let result = mutator
+        .update(
+            "Branchable",
+            doc,
+            std::iter::once("x".to_string()).collect(),
+        )
+        .await;
+    defra_core::signing::set_signing_config(None);
+
+    let error = result.expect_err("collection block failure must fail update");
+    assert!(error
+        .to_string()
+        .contains("injected collection signing failure"));
+
+    let persisted = mutator
+        .get_for_update("Branchable", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.get("x"), Some(&NormalValue::Int(1)));
 }
 
 fn counter_collection() -> CollectionVersion {
