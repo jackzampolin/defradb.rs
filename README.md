@@ -27,15 +27,25 @@ Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API,
 Install [`just`](https://github.com/casey/just), then let it install everything else:
 
 ```bash
-cargo install just    # one time
+cargo install just    # one time, if you already have a Rust toolchain
 just setup            # Rust, protoc, Go, a JDK, Lean/lake, the TLC jar, wasm tooling
 ```
 
+Without Rust yet, install a prebuilt `just` first, since `just setup` is what
+installs the toolchain:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+  | bash -s -- --to ~/.local/bin      # or grab a binary from the just releases page
+```
+
 `just setup` needs no root and no package manager: every tool is fetched from its
-official release into a git-ignored `.tooling/` inside the repo and put on `PATH`,
-so it behaves identically on any Linux distribution and on macOS, x86_64 or arm64.
-Versions are pinned to the ones CI uses. `just doctor` reports what resolved and
-what is missing.
+official release into a git-ignored `.tooling/` inside the repo and put on `PATH`.
+It is written for Linux and macOS on x86_64 and arm64, and is currently verified
+on Linux x86_64. Downloads are pinned by version and checked against a SHA-256
+before use. The host needs `bash`, `curl`, `tar`, `unzip` and `git`.
+
+`just doctor` reports what resolved and what is missing.
 
 ```bash
 just build             # Build all crates

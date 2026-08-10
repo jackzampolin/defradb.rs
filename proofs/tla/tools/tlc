@@ -7,6 +7,9 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The v1.8.0 GitHub asset is a long-lived pre-release that upstream can replace
+# in place, so TLA_SHA256 rather than the tag is the authoritative pin. When
+# upgrading, change the version and the checksum together.
 TLA_VERSION="${TLA_VERSION:-1.8.0}"
 TLA_SHA256="${TLA_SHA256:-e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5}"
 JAR="$DIR/tla2tools.jar"
@@ -76,8 +79,10 @@ elif command -v java >/dev/null 2>&1 &&
      { [ "$(uname -s)" != Darwin ] || [ "$(command -v java)" != /usr/bin/java ]; }; then
   JAVA=java
 else
-  echo "error: no usable Java found. Install a JDK ('just setup-jdk', or 'brew install java') or set JAVA=/path/to/java." >&2
-  echo "       (macOS /usr/bin/java is a stub and is intentionally not used.)" >&2
+  echo "error: no usable Java found. Install a JDK ('just setup-jdk') or set JAVA=/path/to/java." >&2
+  if [ "$(uname -s)" = Darwin ]; then
+    echo "       (macOS /usr/bin/java is a stub and is intentionally not used; 'brew install java' also works.)" >&2
+  fi
   exit 1
 fi
 
