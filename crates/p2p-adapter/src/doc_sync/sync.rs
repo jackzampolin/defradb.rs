@@ -1,0 +1,406 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use defra_http::P2PResult;
+
+use crate::doc_sync::dispatch::DocSyncDispatch;
+use crate::{P2PError, P2PErrorExt as _};
+
+/// Explicit document sync: ask every connected peer for `doc_ids`, then wait
+/// for the merges those requests trigger.
+///
+/// `overall_timeout` and `parallelism` are the only points where the two
+/// transports differ: iroh waits 10s and dispatches up to 16 sends at once,
+/// libp2p waits 30s and sends one peer at a time. Returning `Ok` without any
+/// merge is deliberate on a fire-and-forget transport, which cannot tell a
+/// quiet peer from a lost request; where a send confirms a reply, silence with
+/// nothing merged is reported as a timeout instead.
+pub(crate) async fn sync_documents<D>(
+    dispatch: Arc<D>,
+    event_bus: &dyn events::Bus,
+    doc_ids: Vec<String>,
+    overall_timeout: std::time::Duration,
+    parallelism: usize,
+) -> P2PResult<()>
+where
+    D: DocSyncDispatch + 'static,
+    D::Peer: Clone + std::fmt::Display + 'static,
+{
+    let connected_peers = dispatch.connected_peers().await?;
+    if connected_peers.is_empty() {
+        return Err(P2PError::transport("no connected peers to sync with"));
+    }
+
+    let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
+    let total_expected = connected_peers.len() * doc_ids.len();
+    let mut total_received = 0;
+    let mut last_unanswered = 0;
+    let mut dispatched = false;
+    let idle_timeout = std::time::Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
+
+    for _attempt in 0..3 {
+        // Completion first: an empty `doc_ids` makes `total_expected` zero, and
+        // asking for nothing is not a timeout.
+        if total_received >= total_expected {
+            break;
+        }
+        // Go builds an already-expired context from a zero or negative timeout
+        // and reports `ErrTimeoutDocSync` rather than success
+        // (`sync_doc.go:155-158`). Once requests have gone out, a quiet peer is
+        // indistinguishable from one with nothing to send, so only the
+        // never-dispatched exit is an error.
+        if start.elapsed() >= overall_timeout {
+            if !dispatched {
+                event_bus.unsubscribe(sub.id());
+                return Err(P2PError::transport("timeout while syncing doc"));
+            }
+            break;
+        }
+
+        let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+        if let Err(error) = dispatch.sign_request(&mut request) {
+            event_bus.unsubscribe(sub.id());
+            return Err(error);
+        }
+
+        // No request reached any peer, so nothing can arrive. Unlike a merge
+        // shortfall — where a peer legitimately has nothing newer to send —
+        // this has no benign reading, so it is an error rather than a silent
+        // success. Go reports its equivalent (a failed topic publish) the same
+        // way.
+        let remaining = overall_timeout.saturating_sub(start.elapsed());
+        let outcome =
+            send_requests(&dispatch, &connected_peers, request, parallelism, remaining).await;
+        if !outcome.any_sent {
+            event_bus.unsubscribe(sub.id());
+            return Err(P2PError::transport(
+                "no doc-sync request could be sent to any connected peer",
+            ));
+        }
+        last_unanswered = outcome.unanswered;
+        dispatched = true;
+
+        // Idle completion: exit after `idle_timeout` with no MergeComplete
+        // events, even when zero merges arrived. Requiring a minimum merge
+        // count held HTTP handlers for the full overall timeout when peers had
+        // nothing to contribute — e.g. source-side explicit sync while
+        // collection replication delivers the doc out of band.
+        let mut last_merge = std::time::Instant::now();
+        while total_received < total_expected && start.elapsed() < overall_timeout {
+            if last_merge.elapsed() > idle_timeout {
+                break;
+            }
+
+            match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await {
+                Ok(Some(msg)) => {
+                    if let Some(data) = msg.as_merge_complete() {
+                        if doc_set.contains(&data.doc_id) {
+                            total_received += 1;
+                            last_merge = std::time::Instant::now();
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+    }
+
+    event_bus.unsubscribe(sub.id());
+
+    // Go errors when a peer it was waiting on never answered and nothing came
+    // back (`sync_doc.go:155-158`). Only a transport whose send confirms a
+    // reply can tell that from a send that merely left the machine, so libp2p
+    // keeps returning `Ok` here rather than inventing a timeout it cannot see.
+    if D::SEND_CONFIRMS_REPLY && last_unanswered > 0 && total_received == 0 {
+        return Err(P2PError::transport("timeout while syncing doc"));
+    }
+    Ok(())
+}
+
+/// What one dispatch round achieved.
+///
+/// `unanswered` counts peers whose send failed or was cut off by the caller's
+/// deadline. It only carries reply semantics where `SEND_CONFIRMS_REPLY` is
+/// true; elsewhere it is a send-failure count and nothing more.
+struct DispatchOutcome {
+    any_sent: bool,
+    unanswered: usize,
+}
+
+/// Sends `request` to every peer, at most `parallelism` at a time, and reports
+/// what the round achieved.
+///
+/// `remaining` bounds the round as a whole. It is converted to one absolute
+/// deadline before the first spawn, because refills spawn after a `join_next`
+/// and a relative timeout would hand each wave a fresh budget.
+async fn send_requests<D>(
+    dispatch: &Arc<D>,
+    peers: &[D::Peer],
+    request: p2p::message::DocSyncRequest,
+    parallelism: usize,
+    remaining: std::time::Duration,
+) -> DispatchOutcome
+where
+    D: DocSyncDispatch + 'static,
+    D::Peer: Clone + std::fmt::Display + 'static,
+{
+    let mut peer_iter = peers.iter().cloned();
+    let mut tasks = tokio::task::JoinSet::new();
+    let now = tokio::time::Instant::now();
+    let deadline = now
+        .checked_add(remaining)
+        .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
+    let mut outcome = DispatchOutcome {
+        any_sent: false,
+        unanswered: 0,
+    };
+
+    loop {
+        while tasks.len() < parallelism {
+            let Some(peer) = peer_iter.next() else {
+                break;
+            };
+            let dispatch = Arc::clone(dispatch);
+            let request = request.clone();
+            tasks.spawn(async move {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    dispatch.send_doc_sync_request(&peer, request),
+                )
+                .await;
+                (peer, result)
+            });
+        }
+
+        if tasks.is_empty() {
+            break;
+        }
+
+        match tasks.join_next().await {
+            Some(Ok((peer, Ok(Ok(()))))) => {
+                outcome.any_sent = true;
+                tracing::debug!(peer_id = %peer, "sent DocSync request");
+            }
+            Some(Ok((peer, Ok(Err(error))))) => {
+                outcome.unanswered += 1;
+                tracing::warn!(peer_id = %peer, error = %error, "failed to send DocSync request");
+            }
+            Some(Ok((peer, Err(_)))) => {
+                outcome.unanswered += 1;
+                tracing::warn!(peer_id = %peer, "DocSync request outlived the caller deadline");
+            }
+            Some(Err(error)) => {
+                outcome.unanswered += 1;
+                tracing::warn!(error = %error, "DocSync dispatch task failed");
+            }
+            None => break,
+        }
+    }
+
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::doc_sync::test_support::{FailingDispatch, MixedDispatch, SlowDispatch};
+
+    /// #1299: with peers present and every send failing, the sync must report
+    /// an error rather than success. The attempt count is asserted first — it
+    /// is what proves the dispatch loop actually tried every peer instead of
+    /// short-circuiting somewhere earlier.
+    #[tokio::test]
+    async fn all_sends_failing_is_an_error() {
+        let dispatch = Arc::new(FailingDispatch::with_peers(2));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        let result = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(50),
+            2,
+        )
+        .await;
+
+        assert!(
+            dispatch.send_attempts.load(Ordering::SeqCst) >= 2,
+            "every connected peer should have been attempted"
+        );
+        let error = result.expect_err("no request reached a peer, so sync must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("no doc-sync request could be sent"),
+            "expected a no-send error, got: {error}"
+        );
+    }
+
+    /// #1314 review: iroh's send is bounded by its own 30s request/response
+    /// timeout, so an unbounded dispatch outruns any shorter caller deadline.
+    /// The wall clock is the assertion — before the bound this took ~30s
+    /// against a 200ms budget.
+    #[tokio::test]
+    async fn dispatch_is_bounded_by_the_caller_deadline() {
+        let dispatch = Arc::new(SlowDispatch::new(2, Duration::from_secs(30)));
+        let bus = Arc::new(events::ChannelBus::default());
+        let started = std::time::Instant::now();
+
+        let result = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(200),
+            2,
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "dispatch outran the caller deadline, taking {:?}",
+            started.elapsed()
+        );
+        result.expect_err("no send completed inside the budget, so sync must fail");
+    }
+
+    /// #1314 review: the budget is one deadline for the whole round, not a
+    /// fresh one per peer. Refills spawn after a `join_next`, so a relative
+    /// timeout would restart the budget on every wave — with iroh's
+    /// parallelism of 16, any node with more peers than that overruns the
+    /// caller's deadline by roughly one budget per wave. Three peers at
+    /// parallelism 1 is the smallest shape that has waves at all.
+    #[tokio::test]
+    async fn the_deadline_covers_the_whole_round_not_each_wave() {
+        let dispatch = Arc::new(SlowDispatch::new(3, Duration::from_millis(500)));
+        let bus = Arc::new(events::ChannelBus::default());
+        let started = std::time::Instant::now();
+
+        let _ = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(600),
+            1,
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "each wave restarted the budget, taking {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// #1314 review: one peer answered, one stayed silent, nothing merged.
+    /// Where a send confirms a reply that is Go's `pendingPeers` condition
+    /// (`sync_doc.go:155-158`), so it is a timeout, not a success.
+    #[tokio::test]
+    async fn silent_peer_with_no_merges_is_a_timeout_when_sends_confirm_replies() {
+        let dispatch = Arc::new(MixedDispatch::<true>::new(2, 1));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        let error = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(200),
+            2,
+        )
+        .await
+        .expect_err("a silent peer with nothing merged is a timeout");
+
+        assert!(
+            error.to_string().contains("timeout while syncing doc"),
+            "expected a timeout, got: {error}"
+        );
+    }
+
+    /// The mirror on a fire-and-forget transport, where a failed send says the
+    /// bytes did not leave rather than that the peer declined to answer.
+    /// Reporting a timeout here would be a false positive, so this stays `Ok`.
+    #[tokio::test]
+    async fn silent_peer_is_not_a_timeout_when_sends_do_not_confirm_replies() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(2, 1));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(200),
+            2,
+        )
+        .await
+        .expect("libp2p cannot tell silence from a failed send");
+    }
+
+    /// #1314 review: `timeout: "0"` is valid Go input. With peers and
+    /// documents present it leaves the deadline already expired, so no request
+    /// is ever sent — the deadline-expired-with-no-response case, not a
+    /// success.
+    #[tokio::test]
+    async fn already_expired_deadline_is_a_timeout() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(1, 0));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        let error = super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::ZERO,
+            1,
+        )
+        .await
+        .expect_err("an expired deadline dispatches nothing, so it is a timeout");
+
+        assert!(
+            error.to_string().contains("timeout while syncing doc"),
+            "expected a timeout, got: {error}"
+        );
+    }
+
+    /// Completion is checked before the deadline so an empty `docIDs` — which
+    /// the handler does not reject — keeps returning `Ok` instead of becoming
+    /// a timeout for having dispatched nothing.
+    #[tokio::test]
+    async fn empty_doc_ids_is_not_a_timeout() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(1, 0));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            Vec::new(),
+            Duration::ZERO,
+            1,
+        )
+        .await
+        .expect("nothing was asked for, so nothing failed");
+    }
+
+    /// The benign case the narrow rule protects: requests went out, peers had
+    /// nothing newer to send, and the deadline expired. Go's loop succeeds
+    /// when its peers answer with empty results, so this must not become an
+    /// error.
+    #[tokio::test]
+    async fn deadline_after_a_successful_dispatch_is_not_a_timeout() {
+        let dispatch = Arc::new(MixedDispatch::<false>::new(1, 0));
+        let bus = Arc::new(events::ChannelBus::default());
+
+        super::sync_documents(
+            Arc::clone(&dispatch),
+            bus.as_ref(),
+            vec!["bae-does-not-matter".to_string()],
+            Duration::from_millis(200),
+            1,
+        )
+        .await
+        .expect("dispatch succeeded and the peer had nothing to send");
+    }
+}

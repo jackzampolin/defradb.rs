@@ -181,7 +181,12 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
-    async fn sync_documents(&self, _collection_name: &str, _doc_ids: Vec<String>) -> P2PResult<()> {
+    async fn sync_documents(
+        &self,
+        _collection_name: &str,
+        _doc_ids: Vec<String>,
+        _timeout: Option<std::time::Duration>,
+    ) -> P2PResult<()> {
         Ok(())
     }
 
@@ -286,7 +291,12 @@ impl P2POperations for FailingMockP2POperations {
         Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn sync_documents(&self, _collection_name: &str, _doc_ids: Vec<String>) -> P2PResult<()> {
+    async fn sync_documents(
+        &self,
+        _collection_name: &str,
+        _doc_ids: Vec<String>,
+        _timeout: Option<std::time::Duration>,
+    ) -> P2PResult<()> {
         Err(P2PError::Internal(self.error.clone()))
     }
 

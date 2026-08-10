@@ -511,7 +511,7 @@ async fn measure_pull(doc_count: usize) -> PullOutcome {
     let result = receiver
         .p2p()
         .expect("receiver P2P should be enabled")
-        .sync_documents("User", doc_ids)
+        .sync_documents("User", doc_ids, None)
         .await;
     let call = start.elapsed();
 

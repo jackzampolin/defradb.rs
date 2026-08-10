@@ -135,7 +135,9 @@ pub async fn sync_documents(
 
     let p2p = state.require_p2p()?;
 
-    p2p.sync_documents(&body.collection_name, body.doc_ids)
+    let timeout = crate::validation::parse_timeout(body.timeout.as_deref())?;
+
+    p2p.sync_documents(&body.collection_name, body.doc_ids, timeout)
         .await
         .map_err(map_p2p_internal)?;
 
