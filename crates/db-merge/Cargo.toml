@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "P2P merge handler, broadcast mutator, and document pushing for DefraDB"
 
+[package.metadata.cargo-machete]
+ignored = ["futures", "serde_bytes"]
+
 [features]
 default = ["native", "wasmtime-runtime"]
 native = ["db/native"]

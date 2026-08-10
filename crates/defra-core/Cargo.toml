@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["tracing"]
+
 [dependencies]
 # Error handling
 thiserror.workspace = true

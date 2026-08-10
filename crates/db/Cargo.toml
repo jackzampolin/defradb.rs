@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "DefraDB database and collection management"
 
+[package.metadata.cargo-machete]
+ignored = ["anyhow", "bytes", "libp2p", "multihash", "p2p", "rand", "serde", "serde_bytes", "serde_cbor", "zeroize"]
+
 [features]
 default = ["p2p", "native", "wasmtime-runtime"]
 p2p = ["dep:p2p", "dep:libp2p", "p2p/libp2p-transport"]
@@ -53,9 +56,6 @@ sha2.workspace = true
 
 # Random number generation (for Counter CRDT nonces)
 rand.workspace = true
-
-# HTTP client (for embedding generation API calls)
-reqwest = { version = "0.12", features = ["json"] }
 
 # Encoding
 base64.workspace = true
