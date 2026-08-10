@@ -24,9 +24,10 @@ use query::txn::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use storage::corekv::{IterOptions, Key, Store};
 use tracing::{error, warn};
+use web_time::Instant;
 
 use crate::collection::Collection;
 use crate::database::DB;

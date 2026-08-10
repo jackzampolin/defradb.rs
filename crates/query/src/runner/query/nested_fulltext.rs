@@ -9,7 +9,7 @@ use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use crate::error::{QueryError, Result};
 use crate::mapper::{FullTextSearch, Requestable, Select};

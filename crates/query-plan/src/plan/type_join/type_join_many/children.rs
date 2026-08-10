@@ -1,8 +1,8 @@
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 use tracing::{debug, warn};
+use web_time::Instant;
 
 use crate::planner::{Doc, IndexScanParams, IndexScanType};
 use document::NormalValue;

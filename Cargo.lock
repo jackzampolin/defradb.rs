@@ -3435,6 +3435,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "web-time",
  "zeroize",
 ]
 
@@ -9626,6 +9627,7 @@ dependencies = [
  "storage",
  "tokio",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -9665,6 +9667,7 @@ dependencies = [
  "storage",
  "tokio",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -11660,6 +11663,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-time",
  "zeroize",
 ]
 

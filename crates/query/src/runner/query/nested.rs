@@ -5,8 +5,8 @@ use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::{debug, instrument};
+use web_time::Instant;
 
 use crate::error::Result;
 use crate::mapper::{Requestable, Select};
