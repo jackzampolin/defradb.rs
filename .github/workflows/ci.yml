@@ -419,7 +419,7 @@ jobs:
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          mkdir -p target/ci
+          mkdir -p "$CACHE_DIR" target/ci
 
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
             echo "Cache hit — restoring from $CACHE_DIR"
