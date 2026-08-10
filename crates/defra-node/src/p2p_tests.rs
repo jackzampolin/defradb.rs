@@ -1735,3 +1735,59 @@ async fn filtered_backfill_via_transport_pusher_respects_predicate() {
     sender.shutdown().await;
     receiver.shutdown().await;
 }
+
+/// #1309: `shutdown()` must release the store before it returns.
+///
+/// The pending-DAG resync sweep (60s) and retry clock (2s) each held an
+/// `Arc<SyncCoordinator>`, and through it the storage handle, because their
+/// task handles were discarded at spawn. Shutdown could not reach them, so
+/// reopening the same data path failed with the backend reporting the file
+/// locked for up to a sweep interval. No retry and no sleep here on purpose:
+/// a bounded-deadline reopen would pass either way and prove nothing.
+#[tokio::test]
+async fn p2p_shutdown_releases_store_for_immediate_reopen() {
+    init_tracing();
+
+    let data_path = unique_data_path("p2p-shutdown-reopen");
+    let secret_key_path = data_path.join("p2p.key");
+
+    let node = build_persistent_p2p_node(data_path.clone(), secret_key_path.clone()).await;
+
+    // The sweeps must be visible to the coordinator's task registry, which is
+    // what shutdown drains. Before the fix they were spawned bare and appeared
+    // in no accounting at all.
+    let status = node
+        .p2p()
+        .expect("p2p")
+        .sync_status()
+        .await
+        .expect("sync status");
+    let retained = status["retained_background_tasks"]
+        .as_u64()
+        .expect("retained_background_tasks");
+    assert!(
+        retained >= 2,
+        "the resync sweep and retry clock must be registered, got {retained}"
+    );
+
+    node.shutdown().await;
+    drop(node);
+
+    let reopened = EmbeddedNode::builder()
+        .data_path(data_path.clone())
+        .with_p2p(persistent_p2p_config(secret_key_path))
+        .build()
+        .await;
+
+    let reopened = match reopened {
+        Ok(node) => node,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&data_path);
+            panic!("reopen after shutdown must not race the pending-DAG sweeps: {error}");
+        }
+    };
+
+    reopened.shutdown().await;
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&data_path);
+}

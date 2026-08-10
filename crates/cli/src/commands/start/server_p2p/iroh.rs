@@ -81,8 +81,11 @@ impl Node {
         coordinator
             .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
             .await;
+        // Spawned through the coordinator so shutdown drains them before the
+        // coordinator (and through it the store) is dropped; a bare
+        // tokio::spawn here outlives shutdown and keeps the store held (#1309).
         let coordinator_for_restore = coordinator.clone();
-        tokio::spawn(async move {
+        coordinator.spawn_background_task("pending_dag_resync", async move {
             coordinator_for_restore
                 .run_pending_dag_resync(std::time::Duration::from_secs(60))
                 .await;
@@ -91,7 +94,7 @@ impl Node {
         // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
         // roots at a tight cadence. Sibling of the resync sweep above.
         let coordinator_for_retry_clock = coordinator.clone();
-        tokio::spawn(async move {
+        coordinator.spawn_background_task("pending_dag_retry_clock", async move {
             coordinator_for_retry_clock
                 .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
                 .await;
