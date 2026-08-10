@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Every base branch, not just main. The filter matches the PR's *base*, so
+    # limiting it to main means a stacked PR (one targeting the branch below it)
+    # runs no jobs at all and shows an empty, green-looking check list.
+    branches: ['**']
 
 # Only the tip of each ref keeps a run. Superseded PR pushes and main merge
 # trains cancel prior work so intermediate SHAs cannot stack the self-hosted

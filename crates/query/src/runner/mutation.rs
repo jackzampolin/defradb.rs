@@ -4,7 +4,8 @@ use acp::DocumentPermission;
 use chrono::{DateTime, FixedOffset, Utc};
 use identity::Did;
 use serde_json::{Map, Value as JsonValue};
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use web_time::Instant;
 
 use crate::error::{QueryError, Result};
 use crate::mapper::{Mutation, MutationType, Requestable};
