@@ -2,10 +2,7 @@ use integration_test::TestCluster;
 
 #[tokio::test]
 async fn version_json_has_all_fields() {
-    let root = integration_test::workspace_root();
-    let binary = std::env::var_os("DEFRA_RUST_BINARY")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("target/debug/defra"));
+    let binary = integration_test::rust_binary();
 
     let output = std::process::Command::new(&binary)
         .args(["version", "--format", "json"])

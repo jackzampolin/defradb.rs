@@ -61,8 +61,7 @@ fn require_public_key(identity: &integration_test::TestIdentity) -> String {
 #[serial]
 async fn peers_secp256k1_sync() {
     let identity =
-        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate secp256k1 identity");
+        generate_identity(&integration_test::rust_binary()).expect("generate secp256k1 identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(2)
@@ -126,9 +125,8 @@ async fn peers_secp256k1_sync() {
 #[tokio::test]
 #[serial]
 async fn peers_ed25519_sync() {
-    let identity =
-        generate_ed25519_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate ed25519 identity");
+    let identity = generate_ed25519_identity(&integration_test::rust_binary())
+        .expect("generate ed25519 identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(2)
@@ -192,7 +190,7 @@ async fn peers_ed25519_sync() {
 #[tokio::test]
 #[serial]
 async fn peers_different_key_types_sync() {
-    let binary = &integration_test::workspace_root().join("target/debug/defra");
+    let binary = &integration_test::rust_binary();
     let id0 = generate_identity(binary).expect("generate secp256k1 identity");
     let id1 = generate_ed25519_identity(binary).expect("generate ed25519 identity");
 
@@ -279,7 +277,7 @@ async fn peers_different_key_types_sync() {
 #[tokio::test]
 #[serial]
 async fn peers_different_key_types_same_doc_sync() {
-    let binary = &integration_test::workspace_root().join("target/debug/defra");
+    let binary = &integration_test::rust_binary();
     let id0 = generate_identity(binary).expect("generate secp256k1 identity");
     let id1 = generate_ed25519_identity(binary).expect("generate ed25519 identity");
 
@@ -431,9 +429,7 @@ async fn peers_different_key_types_same_doc_sync() {
 #[tokio::test]
 #[serial]
 async fn branchable_collection_signed() {
-    let identity =
-        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate identity");
+    let identity = generate_identity(&integration_test::rust_binary()).expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -506,9 +502,7 @@ async fn branchable_collection_signed() {
 #[tokio::test]
 #[serial]
 async fn verify_valid_data() {
-    let identity =
-        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate identity");
+    let identity = generate_identity(&integration_test::rust_binary()).expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -543,9 +537,8 @@ async fn verify_valid_data() {
 #[tokio::test]
 #[serial]
 async fn verify_different_key_type() {
-    let identity =
-        generate_ed25519_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate ed25519 identity");
+    let identity = generate_ed25519_identity(&integration_test::rust_binary())
+        .expect("generate ed25519 identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -580,9 +573,7 @@ async fn verify_different_key_type() {
 #[tokio::test]
 #[serial]
 async fn verify_wrong_identity_error() {
-    let identity =
-        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate identity");
+    let identity = generate_identity(&integration_test::rust_binary()).expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -620,9 +611,7 @@ async fn verify_wrong_identity_error() {
 #[tokio::test]
 #[serial]
 async fn verify_wrong_cid_error() {
-    let identity =
-        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
-            .expect("generate identity");
+    let identity = generate_identity(&integration_test::rust_binary()).expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
