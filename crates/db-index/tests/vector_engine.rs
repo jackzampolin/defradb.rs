@@ -16,7 +16,10 @@ use db_index::vector::core::Metric;
 use db_index::vector::engine::ann::{IndexKind, VectorIndexEngine};
 use db_index::vector::engine::flat::Flat;
 use db_index::vector::engine::hnsw::{Hnsw, LevelSampler};
-use db_index::vector::params::{Params, DEFAULT_EF_CONSTRUCTION, DEFAULT_EF_SEARCH, DEFAULT_M};
+use db_index::vector::params::{
+    Params, DEFAULT_EF_CONSTRUCTION, DEFAULT_EF_SEARCH, DEFAULT_M, MAX_EF_CONSTRUCTION,
+    MAX_EF_SEARCH, MAX_M,
+};
 use db_index::vector::store::{MemoryNodeStore, Meta, Node, NodeId, VectorNodeStore};
 
 /// Counts node reads, so a recall figure can be reported next to how much of
@@ -679,4 +682,30 @@ fn params_match_the_go_defaults() {
         );
     }
     assert!(Params::new(2).ml.is_finite());
+}
+
+/// The bounds exist because any client can set these when Node Access Control
+/// is off, so an unbounded value makes one write do unbounded work. The
+/// defaults must sit inside them, and anything past them must be refused.
+#[test]
+fn out_of_range_parameters_are_refused() {
+    assert!(Params::new(DEFAULT_M).validate().is_ok());
+    assert!(Params::new(MAX_M).validate().is_ok());
+
+    for over in [
+        Params {
+            m: MAX_M + 1,
+            ..Params::new(DEFAULT_M)
+        },
+        Params {
+            ef_construction: MAX_EF_CONSTRUCTION + 1,
+            ..Params::new(DEFAULT_M)
+        },
+        Params {
+            ef_search: MAX_EF_SEARCH + 1,
+            ..Params::new(DEFAULT_M)
+        },
+    ] {
+        assert!(over.validate().is_err(), "{over:?} should be refused");
+    }
 }

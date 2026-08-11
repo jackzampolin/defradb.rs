@@ -10,6 +10,17 @@ pub const DEFAULT_EF_CONSTRUCTION: usize = 128;
 /// Candidate-list size while searching, when the caller does not override it.
 pub const DEFAULT_EF_SEARCH: usize = 64;
 
+/// Upper bounds, checked where an index is created.
+///
+/// Build cost grows with all three, and any client can set them when Node
+/// Access Control is off, which is the default. An unbounded value therefore
+/// lets one write do unbounded work. Set well above any useful value, and
+/// matching the reference implementation's `MaxHNSW*` so a description that one
+/// runtime accepts is not rejected by the other.
+pub const MAX_M: usize = 512;
+pub const MAX_EF_CONSTRUCTION: usize = 4096;
+pub const MAX_EF_SEARCH: usize = 4096;
+
 /// Tunable parameters of an HNSW graph.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Params {
@@ -40,6 +51,25 @@ impl Params {
             ef_search: DEFAULT_EF_SEARCH,
             ml: 1.0 / (m as f64).ln(),
         }
+    }
+
+    /// Rejects parameters that would let one index creation do unbounded work.
+    ///
+    /// Separate from [`Params::new`] because `new` builds the defaults, which
+    /// are always in range; this is for values that came from a user.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        for (name, value, limit) in [
+            ("m", self.m, MAX_M),
+            ("efConstruction", self.ef_construction, MAX_EF_CONSTRUCTION),
+            ("efSearch", self.ef_search, MAX_EF_SEARCH),
+        ] {
+            if value > limit {
+                return Err(crate::error::Error::Other(format!(
+                    "vector index: {name} is {value}, above the maximum of {limit}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Maximum links allowed at `layer`.
