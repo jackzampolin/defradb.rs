@@ -88,7 +88,7 @@ pub async fn read_message<T: serde::de::DeserializeOwned>(
     max_size: usize,
 ) -> crate::error::Result<T> {
     let payload = read_message_bytes(recv, max_size).await?;
-    serde_cbor::from_slice(&payload).map_err(|e| crate::error::Error::Codec(e.to_string()))
+    defra_core::cbor::from_slice(&payload).map_err(|e| crate::error::Error::Codec(e.to_string()))
 }
 
 /// Read only the length-prefixed payload bytes from a QUIC recv stream.
@@ -122,7 +122,7 @@ pub async fn write_message<T: serde::Serialize>(
     value: &T,
 ) -> crate::error::Result<()> {
     let payload =
-        serde_cbor::to_vec(value).map_err(|e| crate::error::Error::Codec(e.to_string()))?;
+        defra_core::cbor::to_vec(value).map_err(|e| crate::error::Error::Codec(e.to_string()))?;
     let len = (payload.len() as u32).to_be_bytes();
 
     send.write_all(&len)

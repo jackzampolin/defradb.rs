@@ -25,6 +25,7 @@ threshold = ["dep:orbis"]
 sourcehub = ["dep:sourcehub"]
 
 [dependencies]
+ciborium.workspace = true
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
 acp = { path = "../acp" }
@@ -39,7 +40,6 @@ async-lock.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_cbor = { workspace = true }
 serde_bytes = "0.11"
 base64 = "0.22"
 zeroize = "1.8"

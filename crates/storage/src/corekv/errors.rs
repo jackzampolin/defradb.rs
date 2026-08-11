@@ -133,8 +133,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<serde_cbor::Error> for Error {
-    fn from(err: serde_cbor::Error) -> Self {
+impl From<defra_core::cbor::Error> for Error {
+    fn from(err: defra_core::cbor::Error) -> Self {
         Error::Serialization(err.to_string())
     }
 }

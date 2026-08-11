@@ -51,7 +51,7 @@ impl SEFieldQuery {
 ///
 /// Matches Go's QuerySEArtifactsRequest.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.
@@ -310,7 +310,7 @@ impl SEArtifact {
 ///
 /// Matches Go's PushSEArtifactsRequest.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.

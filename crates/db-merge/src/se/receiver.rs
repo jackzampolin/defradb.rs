@@ -16,7 +16,7 @@ use super::validate::validate_artifact;
 /// Deserialize SE artifacts from a CBOR-encoded PushSEArtifactsRequest.
 ///
 /// Returns the collection_id and a vec of crypto::se::Artifact structs.
-/// Uses serde_cbor for deserialization (same format used in P2P messaging).
+/// Uses CBOR for deserialization (same format used in P2P messaging).
 pub fn deserialize_artifacts(data: &[u8]) -> std::result::Result<ReceivedBatch, DeserializeError> {
     #[derive(serde::Deserialize)]
     struct RawArtifact {
@@ -37,7 +37,7 @@ pub fn deserialize_artifacts(data: &[u8]) -> std::result::Result<ReceivedBatch, 
     }
 
     let raw: RawRequest =
-        serde_cbor::from_slice(data).map_err(|e| DeserializeError(e.to_string()))?;
+        defra_core::cbor::from_slice(data).map_err(|e| DeserializeError(e.to_string()))?;
 
     let artifacts = raw
         .artifacts

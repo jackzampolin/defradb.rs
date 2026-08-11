@@ -219,7 +219,7 @@ impl TwoStreamRunner {
                                 tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE request stream");
                             }
                             Ok(Ok(_)) => {
-                                match serde_cbor::from_slice::<crate::message::PushSEArtifactsRequest>(&buf) {
+                                match defra_core::cbor::from_slice::<crate::message::PushSEArtifactsRequest>(&buf) {
                                     Ok(request) => {
                                         tracing::info!(
                                             peer_id = %peer_id,

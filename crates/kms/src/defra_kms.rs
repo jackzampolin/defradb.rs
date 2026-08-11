@@ -267,7 +267,7 @@ impl KmsService for DefraKms {
                     explicit_replay_capability: ctx.explicit_replay_capability().map(str::to_owned),
                 };
                 let payload =
-                    serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
+                    defra_core::cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
                 let encoded = EncodedFetchRequest {
                     payload,
                     request_id: uuid::Uuid::new_v4().to_string(),

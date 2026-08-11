@@ -116,8 +116,8 @@ mod tests {
             ephemeral_public_key: vec![0xee; 32],
             explicit_replay_capability: Some("signed-proof".into()),
         };
-        let bytes = serde_cbor::to_vec(&req).unwrap();
-        let parsed: FetchEncryptionKeyRequest = serde_cbor::from_slice(&bytes).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
+        let parsed: FetchEncryptionKeyRequest = defra_core::cbor::from_slice(&bytes).unwrap();
         assert_eq!(req, parsed);
     }
 
@@ -128,8 +128,8 @@ mod tests {
             blocks: vec![vec![0xff; 100]],
             ephemeral_public_key: vec![0xdd; 32],
         };
-        let bytes = serde_cbor::to_vec(&reply).unwrap();
-        let parsed: FetchEncryptionKeyReply = serde_cbor::from_slice(&bytes).unwrap();
+        let bytes = defra_core::cbor::to_vec(&reply).unwrap();
+        let parsed: FetchEncryptionKeyReply = defra_core::cbor::from_slice(&bytes).unwrap();
         assert_eq!(reply, parsed);
     }
 
@@ -141,16 +141,16 @@ mod tests {
             ephemeral_public_key: vec![3],
             explicit_replay_capability: None,
         };
-        let bytes = serde_cbor::to_vec(&req).unwrap();
-        let val: serde_cbor::Value = serde_cbor::from_slice(&bytes).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
+        let val: ciborium::Value = defra_core::cbor::from_slice(&bytes).unwrap();
         let map = match val {
-            serde_cbor::Value::Map(m) => m,
+            ciborium::Value::Map(m) => m,
             _ => panic!(),
         };
         let keys: Vec<String> = map
-            .into_keys()
-            .filter_map(|k| match k {
-                serde_cbor::Value::Text(s) => Some(s),
+            .into_iter()
+            .filter_map(|(k, _)| match k {
+                ciborium::Value::Text(s) => Some(s),
                 _ => None,
             })
             .collect();
@@ -170,7 +170,7 @@ mod tests {
             ephemeral_public_key: vec![],
             explicit_replay_capability: None,
         };
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         // Find the Links field's value in the encoded bytes. We just check that
         // the byte sequence 0x42, 0x01, 0x02 appears (CBOR byte-string-of-len-2,
         // 0x01, 0x02). The wrong (legacy) encoding would emit 0x82, 0x01, 0x02

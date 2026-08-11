@@ -28,12 +28,12 @@ pub const MAX_MESSAGE_SIZE: u64 = 16 * 1024 * 1024;
 
 /// Encode a message to CBOR bytes.
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
-    serde_cbor::to_vec(msg).map_err(|e| Error::CborSerialization(e.to_string()))
+    defra_core::cbor::to_vec(msg).map_err(|e| Error::CborSerialization(e.to_string()))
 }
 
 /// Decode a message from CBOR bytes.
 pub fn decode<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
-    serde_cbor::from_slice(data).map_err(|e| Error::CborDeserialization(e.to_string()))
+    defra_core::cbor::from_slice(data).map_err(|e| Error::CborDeserialization(e.to_string()))
 }
 
 /// Read a CBOR message from an async reader with size limit.
@@ -52,7 +52,7 @@ where
         ));
     }
 
-    serde_cbor::from_slice(&buf).map_err(|e| {
+    defra_core::cbor::from_slice(&buf).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("CBOR deserialization error: {}", e),
@@ -66,7 +66,7 @@ where
     T: Serialize,
     W: AsyncWrite + Unpin + Send,
 {
-    let data = serde_cbor::to_vec(msg).map_err(|e| {
+    let data = defra_core::cbor::to_vec(msg).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("CBOR serialization error: {}", e),

@@ -131,7 +131,7 @@ fn extract_push_message_id(data: &[u8]) -> Option<String> {
         #[serde(rename = "MessageID")]
         message_id: String,
     }
-    serde_cbor::from_slice::<MsgIdOnly>(data)
+    defra_core::cbor::from_slice::<MsgIdOnly>(data)
         .ok()
         .map(|m| m.message_id)
 }
