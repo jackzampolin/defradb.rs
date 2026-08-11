@@ -413,7 +413,7 @@ impl KeyTransport for FakeTransport {
         "fake"
     }
     async fn send_request(&self, _: EncodedFetchRequest) -> crate::Result<TransportReplyStream> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = crate::transport_reply_channel(1);
         if let Some(r) = self.reply.lock().await.take() {
             let _ = tx.send(r).await;
         }
@@ -437,7 +437,7 @@ impl KeyTransport for RecordingTransport {
         request: EncodedFetchRequest,
     ) -> crate::Result<TransportReplyStream> {
         *self.payload.lock().await = Some(request.payload);
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_tx, rx) = crate::transport_reply_channel(1);
         Ok(rx)
     }
 

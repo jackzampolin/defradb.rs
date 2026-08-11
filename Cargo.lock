@@ -3614,6 +3614,7 @@ dependencies = [
  "bytes",
  "cid",
  "criterion 0.6.0",
+ "futures",
  "ipld-core",
  "multibase",
  "multicodec",
@@ -6576,12 +6577,14 @@ name = "kms"
 version = "0.5.0"
 dependencies = [
  "acp",
+ "async-channel 2.5.0",
  "async-lock",
  "async-trait",
  "base64 0.22.1",
  "cid",
  "crypto",
  "defra-core",
+ "futures",
  "identity",
  "orbis",
  "rand 0.8.5",

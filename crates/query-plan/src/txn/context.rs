@@ -17,8 +17,15 @@ use crate::fetcher::CollectionProvider;
 use crate::fetcher::DocFetcher;
 use crate::mutator::DocMutator;
 
+#[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static TXN_DEFERRED_ACP_MUTATIONS: Arc<DeferredAcpMutations>;
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static TXN_DEFERRED_ACP_MUTATIONS: std::cell::RefCell<Option<Arc<DeferredAcpMutations>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -270,14 +277,20 @@ pub async fn scope_deferred_acp_mutations<Fut, T>(
 where
     Fut: Future<Output = T>,
 {
-    TXN_DEFERRED_ACP_MUTATIONS.scope(mutations, future).await
+    #[cfg(not(target_arch = "wasm32"))]
+    return TXN_DEFERRED_ACP_MUTATIONS.scope(mutations, future).await;
+
+    #[cfg(target_arch = "wasm32")]
+    defra_core::wasm_task_local::scope(&TXN_DEFERRED_ACP_MUTATIONS, mutations, future).await
 }
 
 /// Return the current transaction's deferred ACP projection, if any.
 pub fn current_deferred_acp_mutations() -> Option<Arc<DeferredAcpMutations>> {
-    TXN_DEFERRED_ACP_MUTATIONS
-        .try_with(|mutations| mutations.clone())
-        .ok()
+    #[cfg(not(target_arch = "wasm32"))]
+    return TXN_DEFERRED_ACP_MUTATIONS.try_with(Clone::clone).ok();
+
+    #[cfg(target_arch = "wasm32")]
+    defra_core::wasm_task_local::try_with(&TXN_DEFERRED_ACP_MUTATIONS, Clone::clone)
 }
 
 /// Check document registration while honoring any ACP mutations buffered in the current txn.
