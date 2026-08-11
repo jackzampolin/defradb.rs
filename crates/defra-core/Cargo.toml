@@ -25,7 +25,6 @@ multibase = "0.9"
 # IPLD
 cid.workspace = true
 multihash.workspace = true
-multicodec.workspace = true
 serde_ipld_dagcbor.workspace = true
 ipld-core.workspace = true
 
