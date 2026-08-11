@@ -24,6 +24,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::config::TelemetryConfig;
 use crate::handle::TelemetryHandle;
+use crate::util::{ panic_message, otel_timeout };
 
 pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 
@@ -31,8 +32,18 @@ pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 pub enum InitError {
     #[error("failed to build OTLP span exporter: {0}")]
     SpanExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     #[error("failed to build OTLP metric exporter: {0}")]
     MetricExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("failed to spawn the telemetry HTTP client init thread: {0}")]
+    HttpClientThreadSpawn(#[source] std::io::Error),
+
+    #[error("the telemetry HTTP client init thread panicked: {0}")]
+    HttpClientThreadPanic(String),
+
+    #[error("failed to build the telemetry HTTP client: {0}")]
+    HttpClientBuild(#[source] reqwest::Error),
 }
 
 /// Returns the lifecycle handle and a configured [`SdkTracer`]. The caller
@@ -72,11 +83,13 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_attribute(KeyValue::new("process.executable.name", executable_name))
         .build();
 
-    // let http_client = reqwest::blocking::Client::new();
-    // necessary to build the blocking client off the async thread, like opentelemetry-otlp does
-    let http_client = std::thread::spawn(reqwest::blocking::Client::new)
+    let http_client = std::thread::Builder::new()
+        .name("telemetry-http-client-init".into())
+        .spawn(move || reqwest::blocking::Client::builder().timeout(otel_timeout()).build())
+        .map_err(InitError::HttpClientThreadSpawn)?
         .join()
-        .expect("build telemetry HTTP client");
+        .map_err(|payload| InitError::HttpClientThreadPanic(panic_message(&payload)))?
+        .map_err(InitError::HttpClientBuild)?;
 
     let span_exporter = SpanExporter::builder()
         .with_http()

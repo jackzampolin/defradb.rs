@@ -16,6 +16,8 @@ mod config;
 mod dedup;
 mod handle;
 mod metrics;
+#[cfg(feature = "otlp")]
+mod util;
 
 pub use config::TelemetryConfig;
 pub use dedup::OtelDedupFilter;
