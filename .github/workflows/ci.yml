@@ -88,6 +88,13 @@ jobs:
       - run: cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
       - run: cargo clippy -p db --features p2p --all-targets -- -D warnings
 
+      # Dead-dependency gate (#1329). Matches `just machete`; ignores live in
+      # each crate's [package.metadata.cargo-machete] for known false positives.
+      - name: Unused dependencies (cargo-machete)
+        run: |
+          command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete --locked
+          cargo machete
+
       - name: Show sccache stats
         if: always()
         run: .github/scripts/show-sccache-stats.sh

@@ -6,6 +6,9 @@ description = "Integration test harness for defradb"
 license = "Apache-2.0 OR MIT"
 autotests = false
 
+[package.metadata.cargo-machete]
+ignored = ["anyhow"]
+
 [[test]]
 name = "basic"
 path = "tests/basic.rs"

@@ -14,6 +14,9 @@ description = "Key Management Service for DefraDB — DEK generation, wrapping, 
 # Implementation lands across milestones M1–M7 on separate branches.
 # This crate is a stub at design time.
 
+[package.metadata.cargo-machete]
+ignored = ["orbis", "sourcehub"]
+
 [features]
 default = []
 # Threshold (Orbis) backend. M6.
