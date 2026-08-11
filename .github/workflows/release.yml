@@ -82,9 +82,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -130,14 +127,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
-      - name: Exclude workspace members with private deps
-        run: |
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
-          else
-            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
-          fi
-
       - name: Build
         run: cargo build --release -p cli --target ${{ matrix.target }} ${{ matrix.features }}
 
@@ -161,7 +150,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
 
@@ -170,9 +158,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -187,9 +172,6 @@ jobs:
         run: |
           bash .github/scripts/apt-update-without-nodesource.sh
           sudo apt-get install -y protobuf-compiler
-
-      - name: Exclude workspace members with private deps
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Install wasm-pack
         run: cargo install wasm-pack
@@ -212,7 +194,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
 
@@ -268,9 +249,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -316,14 +294,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
-      - name: Exclude workspace members with private deps
-        run: |
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
-          else
-            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
-          fi
-
       - name: Install cbindgen
         run: cargo install cbindgen
 
@@ -361,7 +331,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
 
@@ -370,9 +339,6 @@ jobs:
     runs-on: ["self-hosted", "macOS", "ARM64", "studio"]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -385,9 +351,6 @@ jobs:
 
       - name: Install system dependencies
         run: brew install protobuf
-
-      - name: Exclude workspace members with private deps
-        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Install cbindgen
         run: cargo install cbindgen
@@ -419,7 +382,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
 

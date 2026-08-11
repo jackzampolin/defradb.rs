@@ -53,15 +53,6 @@ jobs:
         with:
           clean: false
 
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
-
       - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo fmt --all -- --check
@@ -99,12 +90,6 @@ jobs:
         if: always()
         run: .github/scripts/show-sccache-stats.sh
 
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
-
   wasm-check:
     name: WASM Build Check
     # spark-1: the wasm32 target doesn't care about host arch, and pinning
@@ -118,15 +103,6 @@ jobs:
         with:
           clean: false
 
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -139,11 +115,6 @@ jobs:
         run: |
           bash .github/scripts/apt-update-without-nodesource.sh
           sudo apt-get install -y protobuf-compiler clang
-
-      - name: Exclude packages that pull private/public git harness deps
-        # wasm doesn't need integration-test, ffi-test, or proofs (defra-harness).
-        # Stripping them keeps cargo from resolving backbone during wasm clippy.
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Clippy (wasm32)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
@@ -226,13 +197,6 @@ jobs:
         if: always()
         run: .github/scripts/show-sccache-stats.sh
 
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
-          git checkout -- Cargo.toml
-
   build:
     name: Build & Test
     runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
@@ -252,15 +216,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -308,8 +263,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           pkill -f "target/debug/defra" || true
@@ -320,13 +273,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure private repo access
-        run: |
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          git config --global --add url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "ssh://git@github.com/sourcenetwork/"
-          # Public backbone: keep unauthenticated (see comment on other jobs).
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -346,12 +292,6 @@ jobs:
 
       - name: Check Lean-to-Rust conformance
         run: cargo test -p conformance --lib --test lean_conformance
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
 
   conformance:
     name: Conformance
@@ -378,15 +318,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -423,8 +354,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           rm -rf target/e2e
@@ -489,15 +418,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -717,8 +637,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           pkill -f "target/(debug|ci)/defra" || true
@@ -755,15 +673,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -815,8 +724,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           rm -rf target/e2e
@@ -833,15 +740,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-
-      - name: Configure private repo access
-        run: |
-          # Org-wide PAT rewrite for private sourcenetwork deps.
-          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-          # backbone is public. Fine-grained PATs that omit it make GitHub
-          # treat authenticated fetches as "not our ref" for new commits;
-          # longest-prefix insteadOf wins, so this keeps backbone unauthenticated.
-          git config --global url."https://github.com/sourcenetwork/backbone".insteadOf "https://github.com/sourcenetwork/backbone"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -870,7 +768,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git config --global --remove-section "url.https://github.com/sourcenetwork/backbone" 2>/dev/null || true
           git checkout -- .
           git clean -fd
