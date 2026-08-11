@@ -2,8 +2,9 @@
 ///
 /// Tracks the number of retries and the next retry time using exponential
 /// backoff intervals matching Go DefraDB's replicator retry behavior.
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use std::{hash::Hash, hash::Hasher};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Exponential backoff intervals in seconds, matching Go's seconds-to-hours retry ladder.
 pub const RETRY_INTERVALS_SECS: &[u64] = &[

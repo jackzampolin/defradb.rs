@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+web-time.workspace = true
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 schema = { path = "../schema" }

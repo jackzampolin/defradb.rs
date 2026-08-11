@@ -29,3 +29,11 @@ tools/otel-smoke/output/
 
 # Claude (user-specific)
 .claude/
+.mcp.json
+AGENTS.md
+
+# Local docs
+docs/
+
+# Local dev tooling installed by `just setup`
+.tooling/

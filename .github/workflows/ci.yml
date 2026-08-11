@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Every base branch, not just main. The filter matches the PR's *base*, so
+    # limiting it to main means a stacked PR (one targeting the branch below it)
+    # runs no jobs at all and shows an empty, green-looking check list.
+    branches: ['**']
 
 # Only the tip of each ref keeps a run. Superseded PR pushes and main merge
 # trains cancel prior work so intermediate SHAs cannot stack the self-hosted
@@ -144,6 +147,74 @@ jobs:
       - name: Build WASM
         run: CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
 
+      # The wasm tests are browser tests: storage_tests.rs exercises OPFS, which
+      # only exists in a browser, so `wasm_bindgen_test_configure!(run_in_browser)`
+      # is load-bearing and node is not an option. Firefox because Chrome ships
+      # no official Linux arm64 build. Both are pinned and cached on the runner.
+      - name: Install headless browser
+        env:
+          FIREFOX_VERSION: "153.0.3"
+          GECKODRIVER_VERSION: "0.37.1"
+        run: |
+          set -euo pipefail
+          CACHE="$HOME/.cache/defra-wasm-browser/${FIREFOX_VERSION}-${GECKODRIVER_VERSION}"
+          echo "BROWSER_CACHE=$CACHE" >> "$GITHUB_ENV"
+          if [ -x "$CACHE/firefox/firefox" ] && [ -x "$CACHE/geckodriver" ]; then
+            echo "Browser cache hit — $CACHE"
+            exit 0
+          fi
+          sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libasound2t64 || \
+            sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libasound2
+          rm -rf "$CACHE"; mkdir -p "$CACHE"
+          TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+          FF_URL="https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/linux-aarch64/en-US/firefox-${FIREFOX_VERSION}.tar.xz"
+          curl -fsSL -o "$TMP/firefox.tar.xz" "$FF_URL"
+          # Mozilla publishes a digest per release; verify rather than trust.
+          WANT="$(curl -fsSL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/SHA256SUMS" \
+                  | awk -v p="linux-aarch64/en-US/firefox-${FIREFOX_VERSION}.tar.xz" '$2 == p {print $1}')"
+          GOT="$(sha256sum "$TMP/firefox.tar.xz" | awk '{print $1}')"
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::Firefox checksum mismatch (expected $WANT, got $GOT)"; exit 1
+          fi
+          tar -C "$CACHE" -xJf "$TMP/firefox.tar.xz"
+
+          GD_URL="https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-linux-aarch64.tar.gz"
+          curl -fsSL -o "$TMP/gd.tar.gz" "$GD_URL"
+          tar -C "$CACHE" -xzf "$TMP/gd.tar.gz"
+          "$CACHE/firefox/firefox" --version
+          "$CACHE/geckodriver" --version | head -1
+
+      # wasm-bindgen-cli must match the wasm-bindgen crate exactly or the runner
+      # refuses the module ("rust Wasm file schema version" mismatch). Derive it
+      # from the lockfile so it can never drift from what we build against.
+      - name: Install wasm-bindgen-cli (lockfile-matched)
+        run: |
+          set -euo pipefail
+          VER="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[",]/,""); print $3; exit}' Cargo.lock)"
+          if [ -z "$VER" ]; then echo "::error::could not read wasm-bindgen version from Cargo.lock"; exit 1; fi
+          if [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$VER" ]; then
+            cargo install wasm-bindgen-cli --version "$VER" --locked
+          fi
+          echo "wasm-bindgen-cli $VER"
+
+      - name: Run wasm tests (Firefox, headless)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: |
+          set -euo pipefail
+          export GECKODRIVER="$BROWSER_CACHE/geckodriver"
+          export PATH="$BROWSER_CACHE/firefox:$PATH"
+          cargo test -p defra-wasm --target wasm32-unknown-unknown --lib 2>&1 | tee wasm-test.log
+          # A binary that registers no tests prints "running 0 tests" and exits 0,
+          # which is indistinguishable from success. Fail loudly instead.
+          if grep -q "running 0 tests" wasm-test.log; then
+            echo "::error::a wasm test binary registered zero tests"; exit 1
+          fi
+          if ! grep -qE "^test result: ok\. [1-9][0-9]* passed" wasm-test.log; then
+            echo "::error::no passing wasm tests were reported"; exit 1
+          fi
+
       - name: Show sccache stats
         if: always()
         run: .github/scripts/show-sccache-stats.sh
@@ -216,6 +287,16 @@ jobs:
       # `internal-logs` feature. Issue #977 / #1004.
       - run: cargo test -p telemetry --features otlp
       - run: cargo test -p cli --features otel --test telemetry_dedup
+
+      # defra-node's p2p suite is feature-gated, so the default-feature
+      # `cargo test --workspace` above skips it entirely and the only other
+      # reference to it is a clippy compile. Its restart/shutdown tests were
+      # therefore type-checked and discarded, which is how #1309 (sweep tasks
+      # outliving shutdown and holding the store lock) shipped green. Runs
+      # after caching, with the other feature-on steps, so a feature build
+      # never becomes the cached "standard" binary. Nodes bind port 0, so this
+      # is safe on the shared studio-1 slot.
+      - run: cargo test -p defra-node --features p2p
 
       - name: Cleanup
         if: always()
@@ -419,7 +500,7 @@ jobs:
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          mkdir -p "$CACHE_DIR" target/ci
+          mkdir -p target/ci "$CACHE_DIR"
 
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
             echo "Cache hit — restoring from $CACHE_DIR"

@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+web-time.workspace = true
 # Internal crates
 query-types = { path = "../query-types" }
 query-parse = { path = "../query-parse" }

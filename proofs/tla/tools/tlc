@@ -1,10 +1,72 @@
 #!/usr/bin/env bash
 # Run TLC from the specs/ directory: ./tools/tlc -config M1Convergence.cfg M1Convergence.tla
+#
+# The jar is git-ignored and fetched on first use, pinned by version and
+# SHA-256 so every run checks the same tool CI and #1310 refer to. Use
+# `--fetch-only` to download it without running a model (what `just setup` does).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The v1.8.0 GitHub asset is a long-lived pre-release that upstream can replace
+# in place, so TLA_SHA256 rather than the tag is the authoritative pin. When
+# upgrading, change the version and the checksum together.
+TLA_VERSION="${TLA_VERSION:-1.8.0}"
+TLA_SHA256="${TLA_SHA256:-e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5}"
+JAR="$DIR/tla2tools.jar"
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "error: neither sha256sum nor shasum found; cannot verify the jar." >&2
+    exit 1
+  fi
+}
+
+fetch_jar() {
+  local url tmp got
+  url="https://github.com/tlaplus/tlaplus/releases/download/v${TLA_VERSION}/tla2tools.jar"
+  tmp="$(mktemp)"
+  echo "fetching tla2tools ${TLA_VERSION}" >&2
+  if ! curl -fsSL -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    echo "error: failed to download $url" >&2
+    exit 1
+  fi
+  got="$(sha256_of "$tmp")"
+  if [ "$got" != "$TLA_SHA256" ]; then
+    rm -f "$tmp"
+    echo "error: checksum mismatch for tla2tools ${TLA_VERSION}" >&2
+    echo "       expected $TLA_SHA256" >&2
+    echo "       got      $got" >&2
+    exit 1
+  fi
+  mv "$tmp" "$JAR"
+  chmod 0644 "$JAR"
+}
+
+# An existing jar is verified too: a truncated or swapped file must fail loudly
+# rather than produce a misleading model-checking verdict.
+if [ -f "$JAR" ]; then
+  if [ "$(sha256_of "$JAR")" != "$TLA_SHA256" ]; then
+    echo "warning: $JAR does not match the pinned checksum; re-fetching" >&2
+    rm -f "$JAR"
+    fetch_jar
+  fi
+else
+  fetch_jar
+fi
+
+if [ "${1:-}" = "--fetch-only" ]; then
+  echo "tla2tools ${TLA_VERSION}: $JAR"
+  exit 0
+fi
+
 # Resolve java: prefer JAVA env var, then JAVA_HOME, then Homebrew, then PATH.
-# On macOS the /usr/bin/java stub shows a dialog instead of running; bypass it.
+# On macOS the /usr/bin/java stub shows a dialog instead of running; bypass it
+# there only, since on Linux /usr/bin/java is the normal distro location.
 if [ -n "${JAVA:-}" ]; then
   : # use caller-supplied JAVA
 elif [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
@@ -13,12 +75,15 @@ elif [ -x /opt/homebrew/opt/java/bin/java ]; then
   JAVA=/opt/homebrew/opt/java/bin/java
 elif [ -x /usr/local/opt/java/bin/java ]; then
   JAVA=/usr/local/opt/java/bin/java
-elif command -v java >/dev/null 2>&1 && [ "$(command -v java)" != /usr/bin/java ]; then
-  JAVA=java   # a real java on PATH that is not the macOS stub
+elif command -v java >/dev/null 2>&1 &&
+     { [ "$(uname -s)" != Darwin ] || [ "$(command -v java)" != /usr/bin/java ]; }; then
+  JAVA=java
 else
-  echo "error: no usable Java found. Install a JDK (e.g. 'brew install java') or set JAVA=/path/to/java." >&2
-  echo "       (macOS /usr/bin/java is a stub and is intentionally not used.)" >&2
+  echo "error: no usable Java found. Install a JDK ('just setup-jdk') or set JAVA=/path/to/java." >&2
+  if [ "$(uname -s)" = Darwin ]; then
+    echo "       (macOS /usr/bin/java is a stub and is intentionally not used; 'brew install java' also works.)" >&2
+  fi
   exit 1
 fi
 
-exec "$JAVA" -XX:+UseParallelGC -cp "$DIR/tla2tools.jar" tlc2.TLC "$@"
+exec "$JAVA" -XX:+UseParallelGC -cp "$JAR" tlc2.TLC "$@"

@@ -9,6 +9,36 @@ use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};
 
+pub(crate) async fn write_branchable_collection_block(
+    collection_name: &str,
+    collection: &Collection,
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    doc_cid: Cid,
+    signing_config: Option<&defra_core::signing::SigningConfig>,
+) -> query::error::Result<Option<(Cid, Vec<u8>)>> {
+    if !collection.schema().is_branchable {
+        return Ok(None);
+    }
+
+    write_collection_block(
+        blockstore,
+        headstore,
+        collection.resolved_root_id(),
+        collection.version_id(),
+        doc_cid,
+        signing_config,
+    )
+    .await
+    .map(Some)
+    .map_err(|error| {
+        query::error::QueryError::execution(format!(
+            "failed to write collection block for branchable mutation on collection {}: {}",
+            collection_name, error
+        ))
+    })
+}
+
 /// Persist a local UPDATE: apply CRDT field deltas to the authoritative store
 /// (the counter RMW, #1021) and then write the document + maintain indexes. These
 /// are bundled so no mutator can write a document blob without first advancing the

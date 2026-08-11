@@ -1,4 +1,7 @@
-use super::helpers::{ensure_collection_is_active, register_created_doc, write_local_create};
+use super::helpers::{
+    ensure_collection_is_active, register_created_doc, write_branchable_collection_block,
+    write_local_create,
+};
 use super::*;
 
 use db_blocks::DocStorageIdentity;
@@ -140,31 +143,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             // `write_local_create`.
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
 
-            // For branchable collections, create a collection-level block
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write collection block for branchable create"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             Ok((doc_id, block_result.cid, block_result.block, col_block_data))
         }

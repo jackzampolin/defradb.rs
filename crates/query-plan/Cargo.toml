@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Query plan tree, planner, and fetcher/mutator/txn abstractions for DefraDB"
 
 [dependencies]
+web-time.workspace = true
 # Internal crates
 cursor = { path = "../cursor" }
 query-types = { path = "../query-types" }

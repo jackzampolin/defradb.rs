@@ -458,3 +458,41 @@ async fn after_sync_no_auto_subscribe() {
         age
     );
 }
+
+/// Regression for #1299: a sync with zero connected peers must not report success.
+/// Go's `P2P.syncDocuments` returns `ErrTimeoutDocSync` for the same condition.
+#[tokio::test]
+#[serial]
+async fn doc_sync_without_peers_errors() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+
+    cluster
+        .wait_for_log(0, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("node0");
+
+    let node = cluster.client(0);
+    node.schema_add(SCHEMA).expect("schema node0");
+
+    let created = node
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .expect("create John");
+    let doc_id = created["add_Users"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID")
+        .to_string();
+
+    let error = node
+        .p2p_document_sync("Users", &[&doc_id])
+        .expect_err("sync with zero connected peers must fail");
+    let message = error.to_string().to_lowercase();
+    assert!(
+        message.contains("no connected peers"),
+        "expected a no-peers error, got: {error}"
+    );
+}

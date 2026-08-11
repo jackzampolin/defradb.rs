@@ -18,6 +18,7 @@ fjall = ["storage/fjall"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
 
 [dependencies]
+web-time.workspace = true
 # Async runtime
 async-trait.workspace = true
 async-lock.workspace = true
