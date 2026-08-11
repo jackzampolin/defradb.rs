@@ -20,7 +20,11 @@ format_size() {
 format_delta() {
   awk -v current="$1" -v previous="$2" 'BEGIN {
     delta = current - previous
-    printf "%+.2f MiB (%+.1f%%)", delta / 1048576, delta * 100 / previous
+    magnitude = delta < 0 ? -delta : delta
+    if (magnitude >= 1048576) printf "%+.2f MiB", delta / 1048576
+    else printf "%+.2f KiB", delta / 1024
+    if (previous > 0) printf " (%+.1f%%)", delta * 100 / previous
+    else printf " (n/a)"
   }'
 }
 
@@ -47,6 +51,10 @@ previous_archive() {
       printf '%s\n' "$PREVIOUS_DIR/$previous_name"
     fi
   fi
+}
+
+warn_previous() {
+  echo "::warning::Unable to read previous artifact ${1##*/}; skipping comparison" >&2
 }
 
 {
@@ -85,10 +93,13 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       previous_brotli=
       if [ -n "$previous" ]; then
         previous_wasm="$tmp/previous.wasm"
-        tar -xOzf "$previous" defra_wasm_bg.wasm > "$previous_wasm"
-        previous_raw=$(wc -c < "$previous_wasm" | tr -d ' ')
-        previous_gzip=$(gzip -9 -n -c "$previous_wasm" | wc -c | tr -d ' ')
-        previous_brotli=$(brotli --quality=11 --stdout "$previous_wasm" | wc -c | tr -d ' ')
+        if tar -xOzf "$previous" defra_wasm_bg.wasm > "$previous_wasm" 2>/dev/null; then
+          previous_raw=$(wc -c < "$previous_wasm" | tr -d ' ')
+          previous_gzip=$(gzip -9 -n -c "$previous_wasm" | wc -c | tr -d ' ')
+          previous_brotli=$(brotli --quality=11 --stdout "$previous_wasm" | wc -c | tr -d ' ')
+        else
+          warn_previous "$previous"
+        fi
       fi
 
       report_row "$label raw" "$current_raw" "$previous_raw"
@@ -104,9 +115,13 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       current=$(member_size "$archive" "$member")
       previous_size=
       if [ -n "$previous" ]; then
-        previous_member=$(tar -tzf "$previous" | awk '/^libdefra_ffi\.(so|dylib)$/ { member = $0 } END { print member }')
-        [ -n "$previous_member" ] || { echo "No FFI library found in ${previous##*/}" >&2; exit 1; }
-        previous_size=$(member_size "$previous" "$previous_member")
+        previous_member=$(tar -tzf "$previous" 2>/dev/null | awk '/^libdefra_ffi\.(so|dylib)$/ { member = $0 } END { print member }' || true)
+        if [ -n "$previous_member" ] && previous_size=$(member_size "$previous" "$previous_member" 2>/dev/null); then
+          :
+        else
+          previous_size=
+          warn_previous "$previous"
+        fi
       fi
       report_row "$label" "$current" "$previous_size"
       ffi_count=$((ffi_count + 1))
@@ -115,7 +130,10 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       current=$(member_size "$archive" defra)
       previous_size=
       if [ -n "$previous" ]; then
-        previous_size=$(member_size "$previous" defra)
+        if ! previous_size=$(member_size "$previous" defra 2>/dev/null); then
+          previous_size=
+          warn_previous "$previous"
+        fi
       fi
       report_row "$label" "$current" "$previous_size"
       cli_count=$((cli_count + 1))

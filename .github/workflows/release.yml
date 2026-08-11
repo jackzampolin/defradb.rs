@@ -480,6 +480,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -512,8 +513,6 @@ jobs:
           merge-multiple: true
 
       - name: Report release artifact sizes
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if ! command -v brotli >/dev/null 2>&1; then
             bash .github/scripts/apt-update-without-nodesource.sh
@@ -531,7 +530,7 @@ jobs:
               previous_name=${name/"$GITHUB_REF_NAME"/"$PREVIOUS_TAG"}
               url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PREVIOUS_TAG}/${previous_name}"
               if ! curl --fail --location --silent --show-error --retry 3 \
-                --header "Authorization: Bearer $GH_TOKEN" \
+                --connect-timeout 20 --max-time 300 \
                 --output "previous-artifacts/$previous_name" "$url"; then
                 rm -f "previous-artifacts/$previous_name"
                 echo "::warning::No previous artifact found for $name"
