@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["anyhow", "bytes", "futures", "getrandom", "openssl-sys", "rand", "serde_bytes", "serde_ipld_dagcbor"]
+ignored = ["anyhow", "bytes", "futures", "getrandom", "rand", "serde_bytes", "serde_ipld_dagcbor"]
 
 [lib]
 name = "cli"
@@ -101,11 +101,6 @@ url = "2.5"
 # URL encoding for query parameters
 urlencoding = "2.1"
 
-[dependencies.openssl-sys]
-version = "0.9"
-features = ["vendored"]
-optional = true
-
 [dependencies.iroh-net]
 package = "iroh"
 version = "1.0.0-rc.0"
@@ -127,7 +122,6 @@ orbis = ["dep:orbis"]
 redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
-vendored-openssl = ["dep:openssl-sys"]
 iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh", "dep:iroh-net", "dep:rand"]
 profiling = ["dep:tracing-chrome"]
 # OpenTelemetry OTLP exporter. Mirrors Go's `//go:build telemetry`: compile-time
