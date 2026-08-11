@@ -27,7 +27,7 @@ libp2p-stream = { workspace = true, optional = true }
 multiaddr = { workspace = true, optional = true }
 
 # Async
-tokio = { workspace = true, features = ["sync", "rt", "macros", "fs"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "fs", "time"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 
