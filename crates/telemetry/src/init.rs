@@ -24,7 +24,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::config::TelemetryConfig;
 use crate::handle::TelemetryHandle;
-use crate::util::{ panic_message, otel_timeout };
+use crate::util::{otel_timeout, panic_message};
 
 pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 
@@ -85,7 +85,11 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
 
     let http_client = std::thread::Builder::new()
         .name("telemetry-http-client-init".into())
-        .spawn(move || reqwest::blocking::Client::builder().timeout(otel_timeout()).build())
+        .spawn(move || {
+            reqwest::blocking::Client::builder()
+                .timeout(otel_timeout())
+                .build()
+        })
         .map_err(InitError::HttpClientThreadSpawn)?
         .join()
         .map_err(|payload| InitError::HttpClientThreadPanic(panic_message(&payload)))?
