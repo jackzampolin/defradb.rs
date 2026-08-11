@@ -76,7 +76,7 @@ await_holding_refcell_ref = "warn"
 defra-p2p-adapter = { path = "crates/p2p-adapter", default-features = false }
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35" }
 async-trait = "0.1"
 async-lock = "3"
 futures = "0.3"
