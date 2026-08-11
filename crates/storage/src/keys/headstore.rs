@@ -56,7 +56,10 @@ impl HeadstoreDocKey {
         let rest = bytes.strip_prefix(b"/d/")?;
         let (rest, doc_short_id) = decode_doc_short_id_prefix(rest).ok()?;
         let rest = rest.strip_prefix(b"/")?;
-        let text = std::str::from_utf8(rest).ok()?;
+        // SAFETY: `Key::bytes` always writes `field_id` and the CID as UTF-8
+        // (ASCII field names + base32 CID). After the binary short-id segment,
+        // the remainder is only those text fields.
+        let text = unsafe { std::str::from_utf8_unchecked(rest) };
         let (field_id, cid_str) = text.rsplit_once('/')?;
         if field_id.is_empty() || cid_str.is_empty() {
             return None;
