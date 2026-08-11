@@ -116,6 +116,11 @@ jobs:
           bash .github/scripts/apt-update-without-nodesource.sh
           sudo apt-get install -y protobuf-compiler clang
 
+      - name: Isolate the WASM dependency graph
+        # Cargo resolves every workspace member even for a package-specific build.
+        # These test-only members pin Git revisions that the WASM build does not use.
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
+
       - name: Clippy (wasm32)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
@@ -196,6 +201,10 @@ jobs:
       - name: Show sccache stats
         if: always()
         run: .github/scripts/show-sccache-stats.sh
+
+      - name: Cleanup
+        if: always()
+        run: git checkout -- Cargo.toml
 
   build:
     name: Build & Test

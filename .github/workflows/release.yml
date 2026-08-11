@@ -127,6 +127,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
+      - name: Isolate the release dependency graph
+        # Cargo resolves every workspace member even for a package-specific build.
+        # These test-only members pin Git revisions that release builds do not use.
+        run: |
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
+          else
+            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
+          fi
+
       - name: Build
         run: cargo build --release -p cli --target ${{ matrix.target }} ${{ matrix.features }}
 
@@ -172,6 +182,10 @@ jobs:
         run: |
           bash .github/scripts/apt-update-without-nodesource.sh
           sudo apt-get install -y protobuf-compiler
+
+      - name: Isolate the WASM dependency graph
+        # Avoid resolving test-only Git dependencies that this build does not use.
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Install wasm-pack
         run: cargo install wasm-pack
@@ -294,6 +308,15 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
+      - name: Isolate the FFI dependency graph
+        # Avoid resolving test-only Git dependencies that this build does not use.
+        run: |
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
+          else
+            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
+          fi
+
       - name: Install cbindgen
         run: cargo install cbindgen
 
@@ -351,6 +374,10 @@ jobs:
 
       - name: Install system dependencies
         run: brew install protobuf
+
+      - name: Isolate the Apple FFI dependency graph
+        # Avoid resolving test-only Git dependencies that this build does not use.
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Install cbindgen
         run: cargo install cbindgen
