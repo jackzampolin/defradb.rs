@@ -1,10 +1,14 @@
 //! Byte layout of a stored node and of the graph's meta singleton.
 //!
 //! Byte-identical to Go's `hnsw.MarshalNode` / `MarshalMeta`, little-endian
-//! throughout. An index is local state that never crosses the wire, so this is
-//! not a protocol; it is matched anyway because the two runtimes read the same
-//! on-disk file when a node switches between them, and a layout is the one
-//! thing that cannot be renegotiated afterwards.
+//! throughout.
+//!
+//! Not because it has to be: a vector index is local state, it never crosses
+//! the wire, and the two implementations are not required to read each other's
+//! files. It is matched because it costs nothing to match and buys a cheap,
+//! exact oracle -- the fixtures in the tests are bytes Go produced, so a
+//! silent drift in either layout shows up as a failing assertion rather than
+//! as a subtly different graph noticed months later.
 //!
 //! ```text
 //! Node   1  version            4  vector length n

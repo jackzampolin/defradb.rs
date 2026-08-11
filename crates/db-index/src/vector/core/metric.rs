@@ -59,15 +59,23 @@ impl Metric {
     /// Distance for vectors the caller has already normalized.
     ///
     /// For `Cosine` this skips both norms, since `|a| = |b| = 1` makes the
-    /// distance `1 - dot`. That is why Go normalizes once at insert. The other
-    /// metrics are unaffected by normalization.
+    /// distance `1 - dot`. That is why Go normalizes once at insert.
+    ///
+    /// The result is rounded through `f32` and the cosine is *not* clamped,
+    /// both matching the reference implementation's `float32(1 - dot(a, b))`.
+    /// This is the comparison an index walk makes millions of times, and it
+    /// decides which of two near-equidistant candidates wins; rounding it
+    /// differently would build a different graph from the same documents. The
+    /// accumulation inside `dot` is still `f64`, again as the reference does.
+    ///
+    /// The other metrics are unaffected by normalization.
     pub fn distance_normalized<T: Element>(self, a: &[T], b: &[T]) -> f64 {
         match self {
             // The premise is `|a| = |b| = 1`, which is a property of the whole
             // vector. Prefixes of unequal-length vectors are not unit length,
             // so those fall through to the general path.
             Metric::Cosine if a.len() == b.len() => {
-                ordered_cosine(1.0 - kernel::dot(a, b).clamp(-1.0, 1.0))
+                ordered_cosine(f64::from((1.0 - kernel::dot(a, b)) as f32))
             }
             other => other.distance(a, b),
         }

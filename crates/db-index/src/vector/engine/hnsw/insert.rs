@@ -46,17 +46,6 @@ impl<S: VectorNodeStore> Hnsw<S> {
             }
         }
 
-        // Stored before the back-links are added, which is where this diverges
-        // from the reference. `add_link` prunes a neighbor that has hit its cap
-        // by re-running the selection heuristic over its links, and that reads
-        // each link from the store. If this node is not there yet it is read as
-        // absent, dropped from the candidate set, and loses the back-link it
-        // was just given, every time it attaches to a saturated neighbor. The
-        // layers are filled in by the second write below.
-        self.store
-            .put_node(Node::new(id, vector.clone(), top_level))
-            .await?;
-
         let mut layers: Vec<Vec<NodeId>> = vec![Vec::new(); top_level + 1];
         let mut entry_points = vec![current];
         for layer in (0..=meta.top_layer.min(top_level)).rev() {
@@ -67,6 +56,15 @@ impl<S: VectorNodeStore> Hnsw<S> {
             let selected = self.select_neighbors(&found, self.params.m);
             layers[layer] = selected.iter().map(|c| c.id).collect();
 
+            // The node is not stored yet, matching the reference. That has a
+            // consequence worth stating: `add_link` prunes a neighbor at its
+            // cap by re-running the selection heuristic over its links, and
+            // that reads each link from the store, so this node reads as
+            // absent and is dropped from its own back-link. The reference does
+            // the same, and this index is meant to be interchangeable with it,
+            // so the behaviour is matched here rather than corrected. Storing
+            // the node first would fix it, at the cost of building a different
+            // graph from the same documents.
             let max_links = self.params.max_links(layer);
             for neighbor in &selected {
                 self.add_link(neighbor.id, id, layer, max_links).await?;

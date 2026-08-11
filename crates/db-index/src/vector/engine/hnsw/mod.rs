@@ -3,16 +3,17 @@
 //! Ported from Go's `internal/index/hnsw` (PR 5096), which is itself Malkov &
 //! Yashunin, "Efficient and robust approximate nearest neighbor search using
 //! Hierarchical Navigable Small World graphs" (arXiv:1603.09320). Parameter
-//! names, defaults and traversal follow that reference; two things deliberately
-//! do not, and both are marked at the point where they differ:
+//! Parameter names, defaults, traversal order, link maintenance and distance
+//! arithmetic all follow that reference exactly, including where the reference
+//! is arguably wrong: see the note in [`insert`](Hnsw::insert) about a new
+//! node losing a back-link to a saturated neighbor. Given the same level
+//! assignment and the same insert order, this builds the same graph.
 //!
-//! - a new node is stored before its back-links are added, so a neighbor at
-//!   capacity can weigh it against the links it already has (see
-//!   [`insert`](Hnsw::insert));
-//! - distances stay `f64` end to end, where the reference narrows each one to
-//!   `f32`. That changes which candidate wins a near-tie, so the two graphs are
-//!   not bit-identical; it does not change the key layout, the parameters or
-//!   anything else a user or a parity test observes.
+//! The one thing that cannot match is the level assignment itself, which comes
+//! from a pseudo-random draw. The distribution is the reference's,
+//! `floor(-ln(u) * ml)`, but the generator is not Go's `math/rand` and the seed
+//! is the caller's anyway. Node heights are local state that no two nodes ever
+//! compare, so nothing observable depends on it.
 //!
 //! The engine holds no lock. The reference serializes writers with a mutex
 //! because its store is a shared map; here every mutation runs inside a
