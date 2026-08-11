@@ -13,7 +13,10 @@ use document::Document;
 use schema::{CollectionVersion, FieldDescription, IndexDescription, IndexedFieldDescription};
 use std::collections::HashMap;
 use storage::corekv::Key;
-use storage::index::{FullTextIndex, IndexType};
+use storage::index::FullTextIndex;
+
+mod index_type;
+pub use index_type::IndexType;
 use storage::keys::IndexIDSequenceKey;
 
 /// How a live unique conflict was resolved during merge (#1111).

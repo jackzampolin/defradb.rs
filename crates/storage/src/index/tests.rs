@@ -338,18 +338,6 @@ async fn test_composite_index() {
 }
 
 #[tokio::test]
-async fn test_index_type_factory() {
-    let simple_desc = test_index_description(false);
-    let unique_desc = test_index_description(true);
-
-    let simple_index = IndexType::new(1, simple_desc);
-    assert!(!simple_index.description().unique);
-
-    let unique_index = IndexType::new(1, unique_desc);
-    assert!(unique_index.description().unique);
-}
-
-#[tokio::test]
 async fn test_index_sort_order() {
     let store = MemoryStore::new();
     let mut txn = store.new_txn(false).await.unwrap();

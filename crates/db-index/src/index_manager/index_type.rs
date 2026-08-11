@@ -1,14 +1,18 @@
 use document::NormalValue;
 use schema::IndexDescription;
 
-use crate::corekv::{MaybeSend, Reader, Result, Writer};
-
-use super::{
+use storage::corekv::{MaybeSend, Reader, Result, Writer};
+use storage::index::{
     Bound, CollectionIndex, ExactMatchIterator, FullTextIndex, RangeIterator, SimpleIndex,
     UniqueIndex,
 };
 
-/// Enum for index types (avoids dyn trait issues).
+/// Which concrete index a collection entry is, and the dispatch over them.
+///
+/// An enum rather than `dyn CollectionIndex`, because that trait's methods are
+/// generic over the transaction type and so not object-safe. It lives beside
+/// the manager that dispatches on it rather than in `storage` with the
+/// implementations, so a kind whose engine lives here can be a variant.
 #[non_exhaustive]
 pub enum IndexType {
     Simple(SimpleIndex),
@@ -104,7 +108,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.get(txn, values).await,
             IndexType::Unique(idx) => idx.get(txn, values).await,
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+            IndexType::FullText(_) => Err(storage::corekv::Error::Other(
                 "exact match get not supported on full-text indexes".to_string(),
             )),
         }
@@ -119,7 +123,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.scan(txn, reverse).await,
             IndexType::Unique(idx) => idx.scan(txn, reverse).await,
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+            IndexType::FullText(_) => Err(storage::corekv::Error::Other(
                 "scan not supported on full-text indexes".to_string(),
             )),
         }
@@ -135,7 +139,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
             IndexType::Unique(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+            IndexType::FullText(_) => Err(storage::corekv::Error::Other(
                 "scan_prefix not supported on full-text indexes".to_string(),
             )),
         }
@@ -159,7 +163,7 @@ impl IndexType {
                 idx.scan_range(txn, prefix_values, lower, upper, reverse)
                     .await
             }
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+            IndexType::FullText(_) => Err(storage::corekv::Error::Other(
                 "scan_range not supported on full-text indexes".to_string(),
             )),
         }
