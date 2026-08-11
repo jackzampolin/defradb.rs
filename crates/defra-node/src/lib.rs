@@ -15,10 +15,13 @@ pub mod coding_search;
 pub mod config;
 mod db_impls;
 pub mod dense_search;
+#[cfg(test)]
+mod embedded_query_identity_tests;
 mod node_acp;
 #[cfg(feature = "p2p")]
 mod p2p_runtime;
 pub mod search_chunks;
+mod signed_query_runtime;
 pub mod version;
 
 use std::path::PathBuf;
@@ -42,11 +45,17 @@ pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybr
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
-pub use query::{QueryExecutor, QueryRequest, QueryResponse};
+pub use query::{QueryExecutor, QueryRequest, QueryResponse, TransactionHandle};
 pub use schema::CollectionVersion;
 pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
 #[cfg(feature = "otel")]
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
+
+#[cfg(not(target_arch = "wasm32"))]
+use signed_query_runtime::{
+    execute_with_signing_context, unavailable_node_signer_response, SignedQueryRuntime,
+    SIGNED_QUERY_DRAIN_TIMEOUT,
+};
 
 /// Retry policy for [`EmbeddedNode::execute_with_retry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,13 +111,32 @@ trait SchemaOps: Send + Sync {
     async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
 }
 
+#[async_trait::async_trait]
+trait BlockOps: Send + Sync {
+    async fn signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)>;
+    async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String>;
+    async fn verified_signer_did_in_txn(
+        &self,
+        cid: &str,
+        transaction: &TransactionHandle,
+    ) -> anyhow::Result<String>;
+}
+
 /// An embedded DefraDB node with query execution and event subscription.
 pub struct EmbeddedNode {
     runner: Arc<dyn QueryExecutor>,
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
+    block_ops: Arc<dyn BlockOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
+    node_query_identity: Option<identity::Did>,
+    #[cfg(not(target_arch = "wasm32"))]
+    signed_query_runtime: Option<SignedQueryRuntime>,
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "rocksdb")]
@@ -137,12 +165,18 @@ impl EmbeddedNode {
     }
 
     /// Execute a GraphQL query or mutation.
+    ///
+    /// A configured node identity is used as the document ACP actor. Prepared
+    /// requests with an explicit identity retain that actor instead.
     pub async fn execute(&self, query_str: &str) -> QueryResponse {
         self.execute_request_once(QueryRequest::new(query_str))
             .await
     }
 
     /// Execute a GraphQL query or mutation, retrying transient transaction conflicts.
+    ///
+    /// A configured node identity is used as the document ACP actor on every
+    /// attempt.
     pub async fn execute_with_retry(
         &self,
         query_str: &str,
@@ -153,6 +187,9 @@ impl EmbeddedNode {
     }
 
     /// Execute a prepared query request, retrying transient transaction conflicts.
+    ///
+    /// Requests without an identity use the configured node identity for
+    /// document ACP. An explicit request identity takes precedence.
     pub async fn execute_request_with_retry(
         &self,
         request: QueryRequest,
@@ -165,26 +202,79 @@ impl EmbeddedNode {
     }
 
     async fn execute_request_once(&self, request: QueryRequest) -> QueryResponse {
+        self.execute_prepared_request(request, None).await
+    }
+
+    async fn execute_prepared_request(
+        &self,
+        request: QueryRequest,
+        txn_handle: Option<TransactionHandle>,
+    ) -> QueryResponse {
+        let request = self.with_default_query_identity(request);
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
-            return self.runner.execute(request).await;
+            return match txn_handle {
+                Some(handle) => self.runner.execute_in_txn(request, &handle).await,
+                None => self.runner.execute(request).await,
+            };
         };
 
+        #[cfg(target_arch = "wasm32")]
+        return QueryResponse::error(format!(
+            "configured node signing identity {node_identity_did} cannot execute queries on wasm32"
+        ));
+
+        #[cfg(not(target_arch = "wasm32"))]
         let signing_config = defra_core::signing::resolve_signing_config_with_flag(
             None,
             Some(node_identity_did),
             true,
         );
-        let Some(signing_config) = signing_config else {
-            return self.runner.execute(request).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(signing_config) = signing_config
+        else {
+            return unavailable_node_signer_response(node_identity_did);
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(signed_query_runtime) = self.signed_query_runtime.as_ref() else {
+            return unavailable_node_signer_response(node_identity_did);
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(signed_query_permit) = signed_query_runtime.admit() else {
+            return QueryResponse::error("signed query runtime is shutting down");
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         execute_with_signing_context(
             self.runner.clone(),
             request,
+            txn_handle,
             signing_config,
             node_identity_did.to_string(),
+            signed_query_runtime.handle(),
+            signed_query_permit,
         )
         .await
+    }
+
+    /// Execute a prepared query request within an existing transaction.
+    ///
+    /// When the node has a configured identity, the same signing and ambient
+    /// identity context used by [`Self::execute`] is applied to this request.
+    /// It is also the document ACP actor unless the request supplies one.
+    pub async fn execute_request_in_txn(
+        &self,
+        request: QueryRequest,
+        handle: &TransactionHandle,
+    ) -> QueryResponse {
+        self.execute_prepared_request(request, Some(handle.clone()))
+            .await
+    }
+
+    fn with_default_query_identity(&self, mut request: QueryRequest) -> QueryRequest {
+        if request.identity.is_none() {
+            request.identity.clone_from(&self.node_query_identity);
+        }
+        request
     }
 
     /// Run `op` with the node's own identity installed as the ambient acting
@@ -202,6 +292,40 @@ impl EmbeddedNode {
     /// DID used as the embedded node identity for signing, when configured.
     pub fn node_identity_did(&self) -> Option<&str> {
         self.node_identity_did.as_deref()
+    }
+
+    /// Cryptographically verify a committed block and return its signer DID.
+    ///
+    /// This reads the signature linked by `cid`, verifies it over the
+    /// canonical DAG-CBOR block bytes, and derives the DID from the verified
+    /// public key. Unsigned, malformed, missing, or invalid blocks fail closed.
+    pub async fn verified_block_signer_did(&self, cid: &str) -> anyhow::Result<String> {
+        self.block_ops.verified_signer_did(cid).await
+    }
+
+    /// Load canonical signed-block material after applying document ACP for
+    /// the supplied caller. The caller must independently verify both CIDs and
+    /// the detached signature before trusting the returned signer.
+    pub async fn authorized_signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        self.block_ops.signed_block_bytes(cid, caller_did).await
+    }
+
+    /// Cryptographically verify a block visible inside an active transaction.
+    ///
+    /// This variant can verify uncommitted blocks before the caller commits or
+    /// rolls back the transaction.
+    pub async fn verified_block_signer_did_in_txn(
+        &self,
+        cid: &str,
+        transaction: &TransactionHandle,
+    ) -> anyhow::Result<String> {
+        self.block_ops
+            .verified_signer_did_in_txn(cid, transaction)
+            .await
     }
 
     /// Add a schema from a GraphQL SDL type definition.
@@ -304,7 +428,35 @@ impl EmbeddedNode {
         self.event_bus.subscribe(event_names)
     }
 
-    /// Access the underlying query executor for advanced use.
+    /// Begin a transaction owned by this embedded node.
+    pub async fn begin_transaction(
+        &self,
+        readonly: bool,
+    ) -> Result<TransactionHandle, query::TransactionError> {
+        self.runner.begin_txn(readonly).await
+    }
+
+    /// Commit a transaction owned by this embedded node.
+    pub async fn commit_transaction(
+        &self,
+        transaction: &TransactionHandle,
+    ) -> Result<(), query::TransactionError> {
+        self.runner.commit_txn(transaction).await
+    }
+
+    /// Roll back a transaction owned by this embedded node.
+    pub async fn rollback_transaction(
+        &self,
+        transaction: &TransactionHandle,
+    ) -> Result<(), query::TransactionError> {
+        self.runner.rollback_txn(transaction).await
+    }
+
+    /// Access the raw query executor for advanced use.
+    ///
+    /// Calling `execute` or `execute_in_txn` on this executor bypasses the
+    /// node's signing context and default ACP identity. Use [`Self::execute`]
+    /// or [`Self::execute_request_in_txn`] for document reads and writes.
     pub fn runner(&self) -> &Arc<dyn QueryExecutor> {
         &self.runner
     }
@@ -371,9 +523,28 @@ impl EmbeddedNode {
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(runtime) = &self.signed_query_runtime {
+            if !runtime
+                .close_admission_and_wait_for(SIGNED_QUERY_DRAIN_TIMEOUT)
+                .await
+            {
+                tracing::warn!(
+                    active_queries = runtime.active_queries(),
+                    timeout_secs = SIGNED_QUERY_DRAIN_TIMEOUT.as_secs(),
+                    "timed out draining signed queries during node shutdown"
+                );
+            }
+        }
+
         #[cfg(feature = "p2p")]
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(runtime) = &self.signed_query_runtime {
+            runtime.shutdown().await;
         }
 
         // Flush buffered spans / metrics. Done after P2P shutdown so trailing
@@ -435,33 +606,6 @@ where
             tokio::time::sleep(delay).await;
         }
         backoff = next_retry_backoff(backoff, policy.max_backoff);
-    }
-}
-
-async fn execute_with_signing_context(
-    executor: Arc<dyn QueryExecutor>,
-    request: QueryRequest,
-    signing_config: SigningConfig,
-    node_did: String,
-) -> QueryResponse {
-    let handle = tokio::runtime::Handle::current();
-    let batch_session_key = Some(signing_config.public_key_hex.clone());
-
-    match tokio::task::spawn_blocking(move || {
-        defra_core::signing::set_signing_config(Some(signing_config));
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        // Install the node identity as the ambient acting identity so DB-layer
-        // NAC checks resolve to the node itself. The pool thread is reused, so
-        // the guard clears it when the closure ends to prevent cross-request leak.
-        let _id_guard = defra_core::current_identity::scoped_current_identity(Some(node_did));
-        handle.block_on(async { executor.execute(request).await })
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(join_error) => {
-            QueryResponse::error(format!("query execution task failed: {join_error}"))
-        }
     }
 }
 
@@ -1118,6 +1262,12 @@ impl NodeBuilder {
             telemetry_handle,
         } = args;
 
+        let node_query_identity = node_identity_did
+            .as_ref()
+            .map(|did| identity::Did::new(did.clone()))
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("invalid node identity DID: {error}"))?;
+
         let embedding_config = db_options.embedding_config();
         #[cfg(not(target_arch = "wasm32"))]
         let transaction_stats = store.transaction_stats_handle();
@@ -1161,6 +1311,16 @@ impl NodeBuilder {
                 .map_err(|e| anyhow::anyhow!("failed to enable node ACP: {e}"))?;
             database.set_nac_manager(nac_manager);
         }
+
+        // Build the node-owned signed-query runtime before starting P2P. If
+        // runtime construction fails, the builder can return without leaving
+        // already-started network tasks behind.
+        #[cfg(not(target_arch = "wasm32"))]
+        let signed_query_runtime = node_identity_did
+            .as_ref()
+            .map(|_| SignedQueryRuntime::new())
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
 
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
@@ -1228,7 +1388,7 @@ impl NodeBuilder {
 
         // Assemble query runner
         let query_runner =
-            query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry)
+            query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry.clone())
                 .with_mutator(mutator)
                 .with_acp(document_acp.clone())
                 .with_node_did(database.node_did())
@@ -1244,7 +1404,13 @@ impl NodeBuilder {
         let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
             database.clone(),
             query_limits,
+            document_acp.clone(),
+        ));
+        let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
+            database,
             document_acp,
+            registry,
+            node_query_identity.clone(),
         ));
 
         #[cfg(feature = "p2p")]
@@ -1257,8 +1423,12 @@ impl NodeBuilder {
             runner,
             event_bus,
             schema_ops,
+            block_ops,
             embedding_config,
             node_identity_did,
+            node_query_identity,
+            #[cfg(not(target_arch = "wasm32"))]
+            signed_query_runtime,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "rocksdb")]
@@ -1302,7 +1472,7 @@ mod tests {
     #[cfg(feature = "http")]
     use super::HttpConfig;
 
-    static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    pub(super) static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     #[cfg(feature = "rocksdb")]
     static ROCKS_ENV_GUARD: LazyLock<std::sync::Mutex<()>> =
         LazyLock::new(|| std::sync::Mutex::new(()));
@@ -1538,7 +1708,7 @@ mod tests {
         defra_core::signing::clear_identity_store();
     }
 
-    struct TestRemoteSigner;
+    pub(super) struct TestRemoteSigner;
 
     impl RemoteSigner for TestRemoteSigner {
         fn sign_sync(
