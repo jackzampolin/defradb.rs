@@ -32,7 +32,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+ssh://git@github.com/sourcenetwork/backbone.git?rev=086ddadc98bc55183920aa0fe6bc4d3719e0e5e7#086ddadc98bc55183920aa0fe6bc4d3719e0e5e7"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=086ddadc98bc55183920aa0fe6bc4d3719e0e5e7#086ddadc98bc55183920aa0fe6bc4d3719e0e5e7"
 dependencies = [
  "alloy-primitives",
  "borsh",
