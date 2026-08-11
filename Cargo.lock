@@ -32,7 +32,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=086ddadc98bc55183920aa0fe6bc4d3719e0e5e7#086ddadc98bc55183920aa0fe6bc4d3719e0e5e7"
+source = "git+https://github.com/sourcenetwork/backbone.git?tag=defra-harness%2F2026-08-07-port-conflict#d14172101436e5a3f62c967c34e7db8bc230aa79"
 dependencies = [
  "alloy-primitives",
  "borsh",
