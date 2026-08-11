@@ -3,17 +3,22 @@
 //! Ported from Go's `internal/index/hnsw` (PR 5096), which is itself Malkov &
 //! Yashunin, "Efficient and robust approximate nearest neighbor search using
 //! Hierarchical Navigable Small World graphs" (arXiv:1603.09320). Parameter
-//! Parameter names, defaults, traversal order, link maintenance and distance
-//! arithmetic all follow that reference exactly, including where the reference
-//! is arguably wrong: see the note in [`insert`](Hnsw::insert) about a new
-//! node losing a back-link to a saturated neighbor. Given the same level
-//! assignment and the same insert order, this builds the same graph.
+//! Parameter names, defaults, traversal order and link maintenance follow that
+//! reference. Two things deliberately do not, both marked where they occur.
+//! Neither is a compatibility break: a vector index is local state, and the two
+//! implementations are not required to read each other's files, so the
+//! reference is a starting point rather than a specification.
 //!
-//! The one thing that cannot match is the level assignment itself, which comes
-//! from a pseudo-random draw. The distribution is the reference's,
-//! `floor(-ln(u) * ml)`, but the generator is not Go's `math/rand` and the seed
-//! is the caller's anyway. Node heights are local state that no two nodes ever
-//! compare, so nothing observable depends on it.
+//! - **A new node is stored before its back-links are added**, so a neighbor at
+//!   capacity can weigh it against the links it already has. In the reference
+//!   the node is not stored yet, reads as absent during that pruning, and loses
+//!   the back-link it was just given (see [`insert`](Hnsw::insert)).
+//! - **Distances stay `f64`**, where the reference narrows each to `f32`.
+//!
+//! The level assignment also differs, but not by choice: it comes from a
+//! pseudo-random draw. The distribution is the reference's,
+//! `floor(-ln(u) * ml)`, and the seed is the caller's either way. Node heights
+//! are local state that nothing compares across runtimes.
 //!
 //! The engine holds no lock. The reference serializes writers with a mutex
 //! because its store is a shared map; here every mutation runs inside a
