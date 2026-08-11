@@ -132,16 +132,20 @@ x86_tier! {
     extra = {
         /// Every other tier's half-width `ps` load already matches its lane
         /// count. SSE2 is the one place it does not: `_mm_loadu_ps` reads four
-        /// `f32`, eight bytes past the end when only two remain. A 64-bit
-        /// `movsd` of the same bytes reads exactly the two lanes
-        /// `_mm_cvtps_pd` will convert.
+        /// `f32`, eight bytes past the end when only two remain.
+        ///
+        /// `_mm_loadl_epi64` is the 64-bit load that is *unaligned*: it is
+        /// `ptr::read_unaligned` under the hood. `_mm_load_sd` would read the
+        /// same eight bytes but dereferences a `*const f64`, and a pointer into
+        /// an `f32` slice carries only 4-byte alignment, so that is undefined
+        /// behaviour whatever the hardware tolerates.
         ///
         /// # Safety
         /// Caller must have checked [`is_available`]; `p` must be readable for
         /// two `f32`.
         #[target_feature(enable = "sse2")]
         unsafe fn load_two_f32(p: *const f32) -> __m128 {
-            _mm_castpd_ps(_mm_load_sd(p.cast::<f64>()))
+            _mm_castsi128_ps(_mm_loadl_epi64(p.cast::<__m128i>()))
         }
     },
 }
