@@ -43,6 +43,12 @@ pub const NORM_THRESHOLD: f64 = 1e-30;
 impl Metric {
     /// Distance between two vectors, over their shared prefix.
     pub fn distance<T: Element>(self, a: &[T], b: &[T]) -> f64 {
+        // Sliced here, once, rather than left to the kernels. They already stop
+        // at the shorter slice, but a norm does not: cosine over the full `a`
+        // against a shared-prefix dot product would divide by a magnitude the
+        // numerator never saw.
+        let shared = a.len().min(b.len());
+        let (a, b) = (&a[..shared], &b[..shared]);
         match self {
             Metric::Cosine => cosine_distance(a, b),
             Metric::Euclidean => ordered(kernel::squared_euclidean(a, b).sqrt()),
@@ -57,7 +63,12 @@ impl Metric {
     /// metrics are unaffected by normalization.
     pub fn distance_normalized<T: Element>(self, a: &[T], b: &[T]) -> f64 {
         match self {
-            Metric::Cosine => ordered_cosine(1.0 - kernel::dot(a, b).clamp(-1.0, 1.0)),
+            // The premise is `|a| = |b| = 1`, which is a property of the whole
+            // vector. Prefixes of unequal-length vectors are not unit length,
+            // so those fall through to the general path.
+            Metric::Cosine if a.len() == b.len() => {
+                ordered_cosine(1.0 - kernel::dot(a, b).clamp(-1.0, 1.0))
+            }
             other => other.distance(a, b),
         }
     }

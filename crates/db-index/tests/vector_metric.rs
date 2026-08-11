@@ -225,6 +225,11 @@ fn negative_dot_orders_larger_products_as_nearer() {
 }
 
 /// A length mismatch is compared over the shared prefix, not raised.
+///
+/// Cosine is the case that can quietly break the contract: a norm is a property
+/// of a whole vector, so taking it over all of `a` while the dot product only
+/// saw a prefix divides by a magnitude the numerator never included. Identical
+/// prefixes must give distance 0 however long the ignored tail is.
 #[test]
 fn a_length_mismatch_uses_the_shared_prefix() {
     fn check<T: Element>(width: &str) {
@@ -236,8 +241,22 @@ fn a_length_mismatch_uses_the_shared_prefix() {
             (d - 5.0).abs() < tol,
             "{width}: the ignored tail must not contribute, got {d}"
         );
-        assert!(!Metric::Cosine.distance(&long, &short).is_nan());
-        assert!(!Metric::NegativeDot.distance(&long, &short).is_nan());
+
+        let long = vector::<T>(&[3.0, 4.0, 99.0]);
+        let short = vector::<T>(&[3.0, 4.0]);
+        for (a, b) in [(&long, &short), (&short, &long)] {
+            let d = Metric::Cosine.distance(a, b);
+            assert!(
+                d.abs() < tol,
+                "{width}: identical prefixes are the same direction, got {d}"
+            );
+            let d = Metric::Cosine.distance_normalized(a, b);
+            assert!(
+                d.abs() < tol,
+                "{width}: the normalized path must agree, got {d}"
+            );
+            assert!(!Metric::NegativeDot.distance(a, b).is_nan());
+        }
     }
     check::<f32>("f32");
     check::<f64>("f64");
