@@ -3485,6 +3485,7 @@ dependencies = [
  "defra-core",
  "document",
  "schema",
+ "serde",
  "storage",
  "thiserror 2.0.18",
  "tracing",

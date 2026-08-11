@@ -22,6 +22,7 @@ storage = { path = "../storage" }
 
 # Error handling
 thiserror.workspace = true
+serde.workspace = true
 
 # Async
 async-trait.workspace = true
