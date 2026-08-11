@@ -29,6 +29,7 @@ db = { path = "../db", default-features = false, features = ["native"] }
 
 # Encoding
 hex = "0.4"
+base64.workspace = true
 cid.workspace = true
 
 # Async runtime

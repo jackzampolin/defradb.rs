@@ -22,6 +22,9 @@ pub struct NodeIdentityResponse {
     /// The node's peer ID (if P2P is enabled).
     #[serde(rename = "PeerID", skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<String>,
+    /// DID used by the node to sign database mutations, when configured.
+    #[serde(rename = "DID", skip_serializing_if = "Option::is_none")]
+    pub did: Option<String>,
 }
 
 /// GET /api/v0/node/identity
@@ -41,7 +44,10 @@ pub async fn get_node_identity(
         None
     };
 
-    Ok(Json(NodeIdentityResponse { peer_id }))
+    Ok(Json(NodeIdentityResponse {
+        peer_id,
+        did: state.node_identity_did.clone(),
+    }))
 }
 
 /// GET /api/v0/debug/dump
@@ -105,17 +111,24 @@ mod tests {
     fn test_node_identity_response_serialize() {
         let response = NodeIdentityResponse {
             peer_id: Some("12D3KooWtest".to_string()),
+            did: Some("did:key:zNodeSigner".to_string()),
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"PeerID\""));
         assert!(json.contains("12D3KooWtest"));
+        assert!(json.contains("\"DID\""));
+        assert!(json.contains("did:key:zNodeSigner"));
     }
 
     #[test]
     fn test_node_identity_response_empty() {
-        let response = NodeIdentityResponse { peer_id: None };
+        let response = NodeIdentityResponse {
+            peer_id: None,
+            did: None,
+        };
         let json = serde_json::to_string(&response).unwrap();
         // PeerID should be omitted when None
         assert!(!json.contains("PeerID"));
+        assert!(!json.contains("DID"));
     }
 }
