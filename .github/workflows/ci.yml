@@ -210,17 +210,14 @@ jobs:
     name: Build & Test
     runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
     env:
-      # Warm-incremental beats sccache for the hot edit path (gents A/B on
-      # these hosts: 14.6s vs 5m54s for a representative source edit). The
-      # host-wide sccache rejects incremental invocations, and an empty
-      # RUSTC_WRAPPER falls back to host config, so route rustc through the
-      # pass-through wrapper. CARGO_BUILD_RUSTC_WRAPPER covers recursive
-      # Cargo invocations from build scripts. The rust/signed-docs suites on
-      # this runner use the same settings so the shared target tree never
-      # flip-flops flags.
-      CARGO_INCREMENTAL: "1"
-      RUSTC_WRAPPER: .github/scripts/rustc-direct.sh
-      CARGO_BUILD_RUSTC_WRAPPER: .github/scripts/rustc-direct.sh
+      # The full workspace test suite launches roughly 187 test executables.
+      # Incremental artifacts caused a ~25s startup delay per executable on
+      # this macOS host, turning this step from minutes into more than an hour.
+      # Prefer sccache here; the edit-only incremental benchmark does not
+      # represent this test workload.
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      CARGO_BUILD_RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -386,15 +383,13 @@ jobs:
       # suites self-build on miss into their own host-local cache.
       matrix:
         include:
-          # studio-1 suites share the build job's incremental target tree, so
-          # they carry the same incremental + pass-through wrapper settings;
-          # studio-2 suites stay on the host sccache (incremental off) so the
-          # target tree they share with conformance keeps consistent flags.
+          # Each host uses sccache with incremental compilation disabled so
+          # jobs sharing its persistent target tree keep consistent flags.
           - suite: rust
             needs_go: false
             host: studio-1
-            cargo_incremental: "1"
-            rustc_wrapper: .github/scripts/rustc-direct.sh
+            cargo_incremental: "0"
+            rustc_wrapper: sccache
           - suite: go-compat
             needs_go: true
             host: studio-2
@@ -414,8 +409,8 @@ jobs:
             needs_go: false
             multipliers: signed-docs
             host: studio-1
-            cargo_incremental: "1"
-            rustc_wrapper: .github/scripts/rustc-direct.sh
+            cargo_incremental: "0"
+            rustc_wrapper: sccache
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
