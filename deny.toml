@@ -75,7 +75,99 @@ multiple-versions = "warn"
 allow = []
 deny = []
 highlight = "lowest-version"
-skip = []
+
+# ------------------------------------------------------------------
+# Accepted duplicate versions, from the #1333 inventory. Each entry
+# names the version we cannot remove, the path that pulls it, and the
+# condition under which it disappears. Versions absent from this list
+# are still reported as warnings.
+#
+# Measure duplicates per shipped artifact, not with `--workspace`:
+# `--workspace` unifies features across every member including
+# tools/integration-test. Count distinct names, because `cargo tree -d`
+# double-lists some same-version packages:
+#
+#   cargo tree -d -e normal -p cli | grep -E '^[a-zA-Z0-9_-]+ v' \
+#     | awk '{print $1}' | sort -u | wc -l
+#
+# `keyring v0.5.0` alongside `keyring v3.6.3` in that output is our own
+# crates/keyring colliding with the crates.io name. Not a duplicate.
+# ------------------------------------------------------------------
+skip = [
+    # prost 0.11 — iroh-bitswap 0.2 in the sourcenetwork/beetle fork.
+    # Needs a commit in beetle plus a rev bump here; we are already on
+    # the newest line (workspace prost = "0.14").
+    { crate = "prost@0.11.9", reason = "iroh-bitswap (beetle fork) pins prost 0.11; removable only by a beetle commit + rev bump" },
+
+    # prost 0.13 — cosmos-sdk-proto / tendermint / ics23 under cosmrs
+    # 0.22 (crates/sourcehub), and jmt under acp-light-client.
+    # Removable when that stack moves to prost 0.14.
+    { crate = "prost@0.13.5", reason = "hard-pinned by the cosmrs 0.22 / tendermint 0.40 stack; not ours to move" },
+
+    # sha2 0.9 — ed25519-consensus 2.1, via commonware-cryptography and
+    # tendermint. Only present in sourcehub/backbone builds.
+    { crate = "sha2@0.9.9", reason = "ed25519-consensus 2.1 under commonware-cryptography and tendermint" },
+
+    # sha2 0.11 — multihash-codetable 0.2.2 requires sha2 0.11 and sits
+    # in the CID path via crates/blockstore; ed25519-dalek 3.0.0-rc.0
+    # (iroh) pulls it too. The 0.10 floor is held by libp2p-identity
+    # 0.2.13 (requires 0.10.8), and libp2p stays, so the floor for sha2
+    # is 2 versions. Bumping our workspace sha2 to 0.11 would change
+    # hashing under docID/CID and still not remove 0.10.
+    { crate = "sha2@0.11.0", reason = "multihash-codetable 0.2.2 needs 0.11 in the CID path; libp2p-identity 0.2.13 pins 0.10.8 — floor is 2" },
+
+    # ed25519-dalek / curve25519-dalek — iroh-base 1.0.1 uses exact
+    # pins (=3.0.0-rc.0, =5.0.0-rc.0) leaving no semver room, while
+    # libp2p-identity 0.2.13 requires ed25519-dalek 2.1. Unification is
+    # impossible in both directions; moving crates/crypto to the rc
+    # line would put Go-interop signing on a prerelease and still leave
+    # 2.2.0 in the graph. Absent from the default cli and ffi graphs
+    # (iroh is opt-in); dies with #1341.
+    { crate = "ed25519-dalek@3.0.0-rc.0", reason = "exact-pinned by iroh-base 1.0.1; libp2p-identity floor-pins 2.x — dies with #1341" },
+    { crate = "curve25519-dalek@5.0.0-rc.0", reason = "exact-pinned by iroh-base 1.0.1 — dies with #1341" },
+
+    # reqwest 0.11 — one edge: tendermint-rpc 0.40.4 under cosmrs 0.22.
+    # It carries hyper 0.14, h2 0.3, rustls 0.21, tokio-rustls 0.24,
+    # hyper-rustls 0.24, rustls-webpki 0.101, system-configuration 0.5
+    # and untrusted 0.7 with it. cosmrs gates tendermint-rpc behind an
+    # optional `rpc` feature that is not in its defaults, so this may
+    # be removable — tracked separately under #1327.
+    { crate = "reqwest@0.11.27", reason = "tendermint-rpc 0.40.4 under cosmrs 0.22; cosmrs/rpc audit tracked under #1327" },
+
+    # reqwest 0.13 — iroh 1.0.1 / iroh-relay. Dies with #1341.
+    { crate = "reqwest@0.13.3", reason = "iroh 1.0.1 and iroh-relay — dies with #1341" },
+
+    # rand / getrandom — every major has third-party dependents that
+    # pin it: libp2p and ring on getrandom 0.2, hickory/quinn/yamux on
+    # rand 0.9, iroh and hickory 0.26 on rand 0.10. crates/crypto and
+    # defra-core use rand 0.8 for key generation, so our declaration
+    # does not move without a key-generation review.
+    { crate = "rand@0.9.2", reason = "hickory-proto 0.25, quinn-proto, yamux, governor; crates/p2p follows them" },
+    { crate = "rand@0.10.1", reason = "iroh 1.0.1, hickory 0.26, pgwire — largely dies with #1341" },
+    { crate = "getrandom@0.3.4", reason = "rand_core 0.9 under ahash, fastbloom, governor" },
+    { crate = "getrandom@0.4.2", reason = "rand 0.10, tempfile 3.26, uuid 1.23" },
+
+    # unsigned-varint 0.2 — reached only through multicodec 0.1 under
+    # defra-core. Removed for free by #1330.
+    { crate = "unsigned-varint@0.2.3", reason = "multicodec 0.1 under defra-core — removed by #1330" },
+
+    # unsigned-varint 0.7 — multistream-select 0.13 inside libp2p.
+    { crate = "unsigned-varint@0.7.2", reason = "multistream-select 0.13 inside libp2p" },
+
+    # sysinfo 0.37 — commonware-runtime, i.e. sourcehub/backbone builds
+    # only. crates/p2p was moved 0.29 -> 0.33 in #1333 to unify with
+    # libp2p-memory-connection-limits 0.5, which is present in every
+    # Go-interop variant; 0.37 would have unified with commonware
+    # instead and left the default CLI on two versions.
+    { crate = "sysinfo@0.37.2", reason = "commonware-runtime; sourcehub/backbone builds only" },
+
+    # thiserror 1 — graphql-parser 0.4, josekit 0.8, lark-kv,
+    # iroh-bitswap (beetle), cosmrs, jmt, tendermint-rpc,
+    # proc-macro-crate 1.1 and quick-protobuf-codec. No first-party
+    # crate declares v1 as of #1333; the duplicate is entirely
+    # third-party.
+    { crate = "thiserror@1.0.69", reason = "graphql-parser, josekit, lark-kv, iroh-bitswap, cosmrs, jmt — no first-party declaration remains" },
+]
 skip-tree = []
 
 [sources]
