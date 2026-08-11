@@ -23,7 +23,6 @@ lens = { path = "../lens", default-features = false }
 
 # Async runtime
 async-trait.workspace = true
-tokio = { version = "1.35", default-features = false, features = ["rt"] }
 
 # Serialization
 serde.workspace = true
@@ -49,7 +48,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Query timeouts are native-only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.35", default-features = false, features = ["time"] }
+tokio = { version = "1.35", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
 async-lock.workspace = true

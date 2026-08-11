@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeSendSync;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
+use crate::channel;
 use crate::error::Result;
 use crate::service::PeerIdentity;
 use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
@@ -37,7 +37,15 @@ pub struct EncodedFetchRequest {
 ///
 /// Closes when the transport stops listening for replies (timeout
 /// elapsed, peer set exhausted). Callers drain until close.
-pub type TransportReplyStream = mpsc::Receiver<Result<(FetchEncryptionKeyReply, String)>>;
+pub type TransportReplyStream = channel::Receiver<Result<(FetchEncryptionKeyReply, String)>>;
+
+/// Sender paired with a [`TransportReplyStream`].
+pub type TransportReplySender = channel::Sender<Result<(FetchEncryptionKeyReply, String)>>;
+
+/// Create a bounded transport reply stream.
+pub fn transport_reply_channel(buffer: usize) -> (TransportReplySender, TransportReplyStream) {
+    channel::bounded(buffer.max(1))
+}
 
 /// Handler invoked by a transport when an inbound request arrives.
 /// `DefraKms` installs itself as the handler at startup.

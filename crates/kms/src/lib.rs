@@ -20,6 +20,8 @@
 mod error;
 pub use error::{Error, Result};
 
+mod channel;
+
 mod types;
 pub use defra_kms::BlockDocIDResolver;
 pub use types::{EncryptionCid, KeyScope, PolicyDecision};
@@ -46,7 +48,10 @@ mod blockstore_store;
 pub use blockstore_store::{BlockstoreKeyStore, EncBlockStore};
 
 mod transport;
-pub use transport::{EncodedFetchRequest, IncomingHandler, KeyTransport, TransportReplyStream};
+pub use transport::{
+    transport_reply_channel, EncodedFetchRequest, IncomingHandler, KeyTransport,
+    TransportReplySender, TransportReplyStream,
+};
 
 mod ecies_envelope;
 pub use ecies_envelope::{unwrap_with_private, wrap_for_requester};
