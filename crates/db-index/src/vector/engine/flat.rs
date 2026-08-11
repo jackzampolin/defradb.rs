@@ -7,7 +7,7 @@
 
 use super::ann::{IndexKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
-use crate::vector::core::Metric;
+use crate::vector::core::{Element, Metric};
 use crate::vector::store::{Node, NodeId, VectorNodeStore};
 
 /// Every live node, scored and ranked.
@@ -43,8 +43,8 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
     }
 
     /// No graph to maintain, so a node is stored with no layers at all.
-    async fn insert(&mut self, id: NodeId, vector: &[f32]) -> Result<()> {
-        let mut vector = vector.to_vec();
+    async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
+        let mut vector: Vec<f32> = vector.iter().map(|x| f32::narrow(x.widen())).collect();
         if self.metric == Metric::Cosine {
             crate::vector::core::normalize(&mut vector);
         }
@@ -72,16 +72,16 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
 
     /// `effort` is ignored: an exhaustive scan has no accuracy to trade. Holds
     /// `k` results rather than scoring the whole corpus and sorting.
-    async fn search(
+    async fn search<E: Element>(
         &self,
-        query: &[f32],
+        query: &[E],
         k: usize,
         _effort: Option<usize>,
     ) -> Result<Vec<Neighbor>> {
         if k == 0 {
             return Ok(Vec::new());
         }
-        let mut query = query.to_vec();
+        let mut query: Vec<f32> = query.iter().map(|x| f32::narrow(x.widen())).collect();
         if self.metric == Metric::Cosine {
             crate::vector::core::normalize(&mut query);
         }

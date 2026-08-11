@@ -363,6 +363,42 @@ async fn both_kinds_satisfy_the_engine_trait() {
     .await;
 }
 
+/// A query arriving as `f64`, which is what JSON and GraphQL deliver, must rank
+/// identically to the same query as `f32`. The engine narrows to the stored
+/// width once; nothing about the caller's width may change the answer.
+#[tokio::test]
+async fn the_query_width_does_not_change_the_answer() {
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let vectors = corpus.vectors(300, 16);
+
+    // Built from f64 input, which is what a document field carries.
+    let wide: Vec<Vec<f64>> = vectors
+        .iter()
+        .map(|v| v.iter().map(|x| *x as f64).collect())
+        .collect();
+    let mut from_wide = graph(GRAPH_SEED);
+    for (i, vector) in wide.iter().enumerate() {
+        from_wide.insert(NodeId(i as u64), vector).await.unwrap();
+    }
+    let from_narrow = build(&vectors, GRAPH_SEED).await;
+
+    let mut queries = Corpus::new(QUERY_SEED);
+    for _ in 0..25 {
+        let narrow = queries.vector(16);
+        let widened: Vec<f64> = narrow.iter().map(|x| *x as f64).collect();
+        assert_eq!(
+            from_wide.search_with_ef(&widened, 10, 64).await.unwrap(),
+            from_narrow.search_with_ef(&narrow, 10, 64).await.unwrap(),
+            "an f64 round trip through the index changed the ranking"
+        );
+        assert_eq!(
+            from_narrow.search_with_ef(&widened, 10, 64).await.unwrap(),
+            from_narrow.search_with_ef(&narrow, 10, 64).await.unwrap(),
+            "an f64 query ranked differently from the same f32 query"
+        );
+    }
+}
+
 /// The exact kind must agree with a direct scan on every query, or it is not an
 /// oracle.
 #[tokio::test]

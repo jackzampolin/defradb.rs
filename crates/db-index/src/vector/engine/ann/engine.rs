@@ -4,6 +4,7 @@ use defra_core::thread_bounds::MaybeSendSync;
 
 use super::{IndexKind, Neighbor};
 use crate::error::Result;
+use crate::vector::core::Element;
 use crate::vector::store::NodeId;
 
 /// One vector index kind.
@@ -19,17 +20,29 @@ pub trait VectorIndexEngine: MaybeSendSync {
     fn kind(&self) -> IndexKind;
 
     /// Adds `vector` under `id`, replacing any vector already there.
-    async fn insert(&mut self, id: NodeId, vector: &[f32]) -> Result<()>;
+    ///
+    /// Generic over the element width because a vector reaches an index as
+    /// `f64` at least as often as `f32`: JSON and GraphQL have no other number
+    /// type. Narrowing at the call site would make every caller decide how to
+    /// do it; here it happens once, where the stored width is known.
+    async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()>;
 
     /// Removes `id`, returning whether this call was the one that did it.
     async fn delete(&mut self, id: NodeId) -> Result<bool>;
 
     /// Up to `k` nearest live nodes to `query`, nearest first.
     ///
+    /// Takes any element width, for the same reason [`insert`](Self::insert)
+    /// does.
+    ///
     /// `effort` is how hard to look, in the kind's own unit: `ef_search` for
     /// HNSW, probes for an IVF kind, ignored by an exact one. `None` takes the
     /// kind's default. One knob rather than a per-kind options type, because a
     /// planner has to turn it without knowing which kind it holds.
-    async fn search(&self, query: &[f32], k: usize, effort: Option<usize>)
-        -> Result<Vec<Neighbor>>;
+    async fn search<E: Element>(
+        &self,
+        query: &[E],
+        k: usize,
+        effort: Option<usize>,
+    ) -> Result<Vec<Neighbor>>;
 }

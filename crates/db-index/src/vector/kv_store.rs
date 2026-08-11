@@ -51,7 +51,7 @@ impl<'txn, T> KvNodeStore<'txn, T> {
 
 impl<T: Reader + Writer + MaybeSend> KvNodeStore<'_, T> {
     /// Removes every key of this epoch, in batches, so the memory held is
-    /// bounded by [`CLEAR_BATCH`] rather than by the number of nodes.
+    /// bounded by the batch size rather than by the number of nodes.
     pub async fn clear(&mut self) -> Result<()> {
         loop {
             let mut batch = Vec::new();

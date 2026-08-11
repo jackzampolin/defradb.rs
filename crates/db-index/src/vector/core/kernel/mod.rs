@@ -44,7 +44,9 @@ pub use tier::{Tier, ALL_TIERS};
 /// Sealed: a tier's kernels exist per concrete width, so a third implementation
 /// would have nothing to dispatch to. `f32` is what embedding models emit and
 /// what Go stores; `f64` is what JSON and GraphQL carry.
-pub trait Element: Copy + sealed::Sealed {
+///
+/// Shareable because a `&[Self]` is held across the awaits of an index walk.
+pub trait Element: Copy + defra_core::thread_bounds::MaybeSendSync + sealed::Sealed {
     /// Widen to the accumulator width.
     fn widen(self) -> f64;
 

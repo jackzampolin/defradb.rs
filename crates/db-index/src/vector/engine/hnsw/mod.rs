@@ -35,7 +35,7 @@ pub use level::LevelSampler;
 
 use super::ann::{IndexKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
-use crate::vector::core::{metric::normalize, Metric};
+use crate::vector::core::{metric::normalize, Element, Metric};
 use crate::vector::params::Params;
 use crate::vector::store::{Node, NodeId, VectorNodeStore};
 
@@ -81,15 +81,16 @@ impl<S> Hnsw<S> {
         self.store
     }
 
-    /// The form a vector is stored and compared in.
+    /// The form a vector is stored and compared in, and where an incoming
+    /// width becomes the stored one.
     ///
-    /// Cosine compares directions, so magnitude is dropped once here rather
-    /// than on every comparison during a walk. A vector with no usable
-    /// direction is stored unchanged, matching the reference: it cannot be
-    /// scaled, and rejecting it belongs at the index boundary, where there is a
-    /// document to name in the error.
-    fn prepared(&self, vector: &[f32]) -> Vec<f32> {
-        let mut out = vector.to_vec();
+    /// Nodes hold `f32`: it is what embedding models emit and what the
+    /// reference stores, and an `f64` query gains nothing against an `f32`
+    /// corpus. A vector with no usable direction is stored unchanged, matching
+    /// the reference; rejecting it belongs at the index boundary, where there
+    /// is a document to name.
+    fn prepared<E: Element>(&self, vector: &[E]) -> Vec<f32> {
+        let mut out: Vec<f32> = vector.iter().map(|x| f32::narrow(x.widen())).collect();
         if self.metric == Metric::Cosine {
             normalize(&mut out);
         }
@@ -184,7 +185,7 @@ impl<S: VectorNodeStore> VectorIndexEngine for Hnsw<S> {
         IndexKind::Hnsw
     }
 
-    async fn insert(&mut self, id: NodeId, vector: &[f32]) -> Result<()> {
+    async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
         Hnsw::insert(self, id, vector).await
     }
 
@@ -193,9 +194,9 @@ impl<S: VectorNodeStore> VectorIndexEngine for Hnsw<S> {
     }
 
     /// `effort` is `ef_search`, defaulting to the configured value.
-    async fn search(
+    async fn search<E: Element>(
         &self,
-        query: &[f32],
+        query: &[E],
         k: usize,
         effort: Option<usize>,
     ) -> Result<Vec<Neighbor>> {

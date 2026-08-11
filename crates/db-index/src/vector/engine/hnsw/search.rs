@@ -5,6 +5,7 @@ use std::collections::{BinaryHeap, HashSet};
 
 use super::{Candidate, Hnsw};
 use crate::error::Result;
+use crate::vector::core::Element;
 use crate::vector::engine::ann::Neighbor;
 use crate::vector::store::{NodeId, VectorNodeStore};
 
@@ -15,9 +16,9 @@ impl<S: VectorNodeStore> Hnsw<S> {
     /// at the top layer down to layer 1, then search layer 0 with
     /// `ef = max(ef_search, k)`. An empty graph gives an empty result, not an
     /// error.
-    pub async fn search_with_ef(
+    pub async fn search_with_ef<E: Element>(
         &self,
-        query: &[f32],
+        query: &[E],
         k: usize,
         ef_search: usize,
     ) -> Result<Vec<Neighbor>> {

@@ -2,11 +2,12 @@
 
 use super::Hnsw;
 use crate::error::{Error, Result};
+use crate::vector::core::Element;
 use crate::vector::store::{Meta, Node, NodeId, VectorNodeStore};
 
 impl<S: VectorNodeStore> Hnsw<S> {
     /// Adds `vector` under `id`, replacing any node already stored there.
-    pub async fn insert(&mut self, id: NodeId, vector: &[f32]) -> Result<()> {
+    pub async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
         let vector = self.prepared(vector);
         let top_level = self.sampler.level(self.params.ml);
 
