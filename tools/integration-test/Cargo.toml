@@ -58,6 +58,10 @@ name = "issue1211_repro"
 path = "tests/issue1211_repro.rs"
 
 [[test]]
+name = "issue1294_bytes_json"
+path = "tests/issue1294_bytes_json.rs"
+
+[[test]]
 name = "p2p_backlog"
 path = "tests/p2p_backlog.rs"
 

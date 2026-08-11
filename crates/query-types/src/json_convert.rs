@@ -5,7 +5,6 @@
 use chrono::SecondsFormat;
 use document::NormalValue;
 use serde_json::Value as JsonValue;
-use std::fmt::Write;
 
 use crate::error::{QueryError, Result};
 
@@ -266,12 +265,7 @@ fn nillable_float32_element_array_to_json(arr: &[Option<f32>]) -> Result<JsonVal
 }
 
 fn bytes_to_json(b: &[u8]) -> Result<JsonValue> {
-    let mut buf = String::with_capacity(b.len() * 2);
-    for byte in b {
-        write!(buf, "{:02x}", byte)
-            .map_err(|e| QueryError::execution(format!("failed to encode bytes: {}", e)))?;
-    }
-    Ok(JsonValue::String(buf))
+    Ok(document::encoding::bytes_to_json(b))
 }
 
 fn nillable_bytes_to_json(opt: Option<&Vec<u8>>) -> Result<JsonValue> {
