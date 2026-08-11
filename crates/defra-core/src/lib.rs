@@ -25,6 +25,8 @@ pub mod store;
 pub mod thread_bounds;
 pub mod transaction;
 pub mod types;
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod wasm_task_local;
 
 pub use action::{Action, ActionExecution, ActionStatus};
 pub use block::{
