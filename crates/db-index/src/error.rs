@@ -20,6 +20,9 @@ pub enum Error {
     #[error("invalid document: {0}")]
     InvalidDocument(String),
 
+    #[error("vector index entry point {entry_point} is not in the store")]
+    VectorEntryPointNotFound { entry_point: u64 },
+
     #[error("{0}")]
     Other(String),
 }

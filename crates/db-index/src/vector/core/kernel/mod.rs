@@ -78,7 +78,7 @@ pub fn dot<T: Element>(a: &[T], b: &[T]) -> f64 {
 /// Squared euclidean distance, on the best tier this machine has.
 ///
 /// Squared rather than rooted: monotonic in the true distance, so it orders
-/// neighbours identically while avoiding a `sqrt` per comparison.
+/// neighbors identically while avoiding a `sqrt` per comparison.
 #[inline]
 pub fn squared_euclidean<T: Element>(a: &[T], b: &[T]) -> f64 {
     // SAFETY: `Tier::active` only ever returns an available tier.

@@ -1,5 +1,9 @@
 //! Vector indexing.
 //!
-//! Layered so a future index kind supplies only a new engine:
-//! `core` holds metric and distance primitives shared by every kind.
+//! Layered so a future index kind supplies only a new engine: `core` holds the
+//! metric and distance primitives, `store` the persistence port, `engine` the
+//! HNSW graph. Nothing below `store` knows what a database is.
 pub mod core;
+pub mod engine;
+pub mod params;
+pub mod store;
