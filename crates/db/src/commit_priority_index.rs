@@ -1,10 +1,9 @@
 use std::collections::HashSet;
-use std::str::FromStr;
 
 use cid::Cid;
 use defra_core::block::Block;
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::HeadstorePriorityKey;
+use storage::keys::{HeadstoreDocKey, HeadstorePriorityKey};
 
 use crate::{Error, Result, DB};
 
@@ -53,20 +52,11 @@ impl<S: Store> DB<S> {
             let mut root_heads: Vec<(Cid, u64)> = Vec::new();
             let mut seen_root_heads = HashSet::new();
             while let Some(pair) = head_iter.next().await.map_err(Error::Storage)? {
-                let Ok((_, doc_short_id)) =
-                    storage::keys::doc_id_index::decode_doc_short_id_prefix(&pair.key[3..])
-                else {
+                let Some(head_key) = HeadstoreDocKey::parse(&pair.key) else {
                     continue;
                 };
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let Some(cid_str) = key_str.rsplit('/').next() else {
-                    continue;
-                };
-                let Ok(cid) = Cid::from_str(cid_str) else {
-                    continue;
-                };
-                if seen_root_heads.insert((cid, doc_short_id)) {
-                    root_heads.push((cid, doc_short_id));
+                if seen_root_heads.insert((head_key.cid, head_key.doc_short_id)) {
+                    root_heads.push((head_key.cid, head_key.doc_short_id));
                 }
             }
             head_iter.close().await.map_err(Error::Storage)?;
