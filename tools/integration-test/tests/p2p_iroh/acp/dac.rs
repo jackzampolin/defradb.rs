@@ -73,7 +73,7 @@ async fn setup_sourcehub_cluster() -> Option<(TestCluster, String, String)> {
         return None;
     }
 
-    let binary = integration_test::workspace_root().join("target/debug/defra");
+    let binary = integration_test::rust_binary();
     let owner = generate_identity(&binary).expect("generate owner identity");
     let owner_key = owner.private_key_hex.clone();
 
@@ -451,7 +451,7 @@ async fn create_private_sync_after_relationship() {
     let node1 = cluster.client(1);
 
     // Generate a second identity (reader)
-    let binary = integration_test::workspace_root().join("target/debug/defra");
+    let binary = integration_test::rust_binary();
     let reader = generate_identity(&binary).expect("generate reader identity");
 
     // Create private doc as owner
@@ -706,7 +706,7 @@ async fn replicator_permissioned_sourcehub() {
     );
 
     // A different identity cannot read
-    let binary = integration_test::workspace_root().join("target/debug/defra");
+    let binary = integration_test::rust_binary();
     let stranger = generate_identity(&binary).expect("stranger identity");
     let stranger_result = node1
         .query_with_identity("query { User { name } }", &stranger.private_key_hex)
@@ -735,7 +735,7 @@ async fn subscribe_add_get_with_doc_actor_relationship() {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
 
-    let binary = integration_test::workspace_root().join("target/debug/defra");
+    let binary = integration_test::rust_binary();
     let reader = generate_identity(&binary).expect("reader identity");
 
     // Create doc as owner
@@ -807,7 +807,7 @@ async fn replicator_with_doc_actor_relationship() {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
 
-    let binary = integration_test::workspace_root().join("target/debug/defra");
+    let binary = integration_test::rust_binary();
     let reader = generate_identity(&binary).expect("reader identity");
 
     // Create doc

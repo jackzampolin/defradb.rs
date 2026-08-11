@@ -1,15 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("failed to canonicalize workspace root")
-}
-
 fn defra_binary() -> PathBuf {
-    workspace_root().join("target/debug/defra")
+    integration_test::rust_binary()
 }
 
 #[test]
