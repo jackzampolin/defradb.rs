@@ -23,9 +23,8 @@ impl<S: VectorNodeStore> Hnsw<S> {
                 .await;
         };
 
-        // A meta pointing at a node the store does not have is corruption, not
-        // an empty graph. Starting the insert from nothing would silently build
-        // a second disconnected component.
+        // Corruption, not an empty graph: starting from nothing here would
+        // silently build a second disconnected component.
         let Some(entry) = self.store.get_node(meta.entry_point).await? else {
             return Err(Error::VectorEntryPointNotFound {
                 entry_point: meta.entry_point.0,
@@ -46,14 +45,11 @@ impl<S: VectorNodeStore> Hnsw<S> {
             }
         }
 
-        // Stored before the back-links are added, which is one of the two
-        // places this departs from the reference. `add_link` prunes a neighbor
-        // that has hit its cap by re-running the selection heuristic over its
-        // links, and that reads each link from the store. With the node not yet
-        // there it reads as absent, drops out of its own candidate set, and
-        // loses the back-link it was just given, every time it attaches to a
-        // saturated neighbor. The layers are filled in by the second write
-        // below; the cost is one extra write per insert.
+        // Stored before linking, unlike the reference. `add_link` prunes a
+        // saturated neighbor by re-running the heuristic over its links, which
+        // reads each from the store; a node that is not there yet reads as
+        // absent and loses the back-link it was just given. The layers are
+        // filled in by the second write below.
         self.store
             .put_node(Node::new(id, vector.clone(), top_level))
             .await?;
@@ -74,9 +70,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
             }
 
             // Every neighbor found here seeds the next layer down, not just the
-            // closest. Narrowing to a single point too early costs recall, and
-            // all of them exist on the next layer, since a node occupies every
-            // layer up to its own height.
+            // closest: narrowing to one point too early costs recall.
             entry_points = found;
         }
 
@@ -103,11 +97,9 @@ impl<S: VectorNodeStore> Hnsw<S> {
         self.store.put_meta(meta).await
     }
 
-    /// Adds a back-link from `from` to `to` at `layer`, pruning `from` back to
-    /// `max_links` if that pushed it over.
-    ///
-    /// A link can point at a node that is no longer stored; that is skipped
-    /// rather than raised, since one fewer link costs recall and nothing else.
+    /// Adds a back-link from `from` to `to`, pruning `from` back to
+    /// `max_links` if that pushed it over. A link can outlive the node it
+    /// points at; that is skipped, since one fewer link costs only recall.
     async fn add_link(
         &mut self,
         from: NodeId,

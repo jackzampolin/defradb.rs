@@ -10,13 +10,10 @@ pub const DEFAULT_EF_CONSTRUCTION: usize = 128;
 /// Candidate-list size while searching, when the caller does not override it.
 pub const DEFAULT_EF_SEARCH: usize = 64;
 
-/// Upper bounds, checked where an index is created.
-///
-/// Build cost grows with all three, and any client can set them when Node
-/// Access Control is off, which is the default. An unbounded value therefore
-/// lets one write do unbounded work. Set well above any useful value, and
-/// matching the reference implementation's `MaxHNSW*` so a description that one
-/// runtime accepts is not rejected by the other.
+/// Upper bounds, checked where an index is created. Build cost grows with all
+/// three and any client can set them when Node Access Control is off, so
+/// unbounded values let one write do unbounded work. Matching the reference's
+/// `MaxHNSW*`, so a description one runtime accepts the other does not reject.
 pub const MAX_M: usize = 512;
 pub const MAX_EF_CONSTRUCTION: usize = 4096;
 pub const MAX_EF_SEARCH: usize = 4096;
@@ -54,9 +51,7 @@ impl Params {
     }
 
     /// Rejects parameters that would let one index creation do unbounded work.
-    ///
-    /// Separate from [`Params::new`] because `new` builds the defaults, which
-    /// are always in range; this is for values that came from a user.
+    /// Separate from [`Params::new`], whose defaults are always in range.
     pub fn validate(&self) -> crate::error::Result<()> {
         for (name, value, limit) in [
             ("m", self.m, MAX_M),

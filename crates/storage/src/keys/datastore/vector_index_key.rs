@@ -8,17 +8,13 @@
 //! /<collShortID>/<indexID>/<epoch>/n/<nodeID>   one node
 //! ```
 //!
-//! The epoch namespaces one build of the index. A rebuild fills a fresh epoch
-//! that is disjoint from the live one, then the meta pointer moves and the old
-//! epoch is dropped. It is in the layout from the first commit even though
-//! nothing triggers a rebuild yet, because retrofitting it later would mean
-//! migrating every entry of every vector index.
+//! The epoch namespaces one build of the index: a rebuild fills a fresh one,
+//! the meta pointer moves, and the old epoch is dropped. It is in the layout
+//! from the first commit because retrofitting it would migrate every entry.
 //!
-//! Integer components use `encoding::encode_uvarint_ascending`, the
-//! CockroachDB-derived encoder, because that is what Go's `internal/encoding`
-//! uses and these keys are checked against bytes Go produced. Note that this is
-//! *not* the `keys::utils` encoder of the same name that the other key types
-//! reach for: the two disagree for every value, and only this one matches Go.
+//! Integers use `encoding::encode_uvarint_ascending`, **not** the `keys::utils`
+//! function of the same name that the other key types use. The two disagree for
+//! every value and only this one matches Go.
 
 use super::super::utils::SEPARATOR;
 use crate::corekv::Key;
@@ -39,12 +35,9 @@ pub struct VectorIndexKey {
     pub epoch: u32,
     /// True for the meta singleton, false for a node entry.
     pub is_meta: bool,
-    /// Only meaningful when `is_meta` is false.
-    ///
-    /// Node ids come from a sequence starting at 1, so zero never addresses a
-    /// node. It marks the node-prefix key `.../n`, which scans every node of
-    /// the epoch, rather than a full node key `.../n/<id>`. The other key types
-    /// in this crate use a zero component as their prefix the same way.
+    /// Only meaningful when `is_meta` is false. Node ids start at 1, so zero
+    /// marks the node-prefix key `.../n` rather than a node, matching how the
+    /// other key types in this crate use a zero component.
     pub node_id: u64,
 }
 
@@ -71,9 +64,8 @@ impl VectorIndexKey {
         }
     }
 
-    /// Every node of one epoch, and nothing else. A scan from here never
-    /// crosses into another epoch, another index, or the meta key, because the
-    /// discriminator sits above the node id in the key.
+    /// Every node of one epoch and nothing else: the discriminator sits above
+    /// the node id, so a scan cannot reach the meta key or another epoch.
     pub fn node_prefix(collection_short_id: u32, index_id: u32, epoch: u32) -> Self {
         Self {
             collection_short_id,

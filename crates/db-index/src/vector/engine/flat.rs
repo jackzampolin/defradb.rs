@@ -1,13 +1,9 @@
 //! Exhaustive scan: the exact answer, linear in the corpus.
 //!
-//! This is the oracle a differential test needs. An approximate index cannot be
-//! checked against another approximate index, and it is the only way to know
-//! that [`VectorIndexEngine`] describes an index kind rather than describing
-//! HNSW with extra steps.
-//!
-//! It is a legitimate index in its own right below a few thousand vectors,
-//! where a graph costs more to maintain than a scan costs to run, but nothing
-//! exposes it as a user-selectable kind.
+//! The oracle a differential test needs: an approximate index cannot be checked
+//! against another approximate one. It also keeps [`VectorIndexEngine`] honest,
+//! since a trait with one implementor is a guess. Not exposed as a
+//! user-selectable kind.
 
 use super::ann::{IndexKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
@@ -74,11 +70,8 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
         Ok(true)
     }
 
-    /// `effort` is ignored: an exhaustive scan has no accuracy to trade.
-    ///
-    /// Holds `k` results, not the corpus. The scan itself is unavoidably linear
-    /// in the number of nodes, which is what the kind is; what it must not do
-    /// is materialise every node's score to sort at the end.
+    /// `effort` is ignored: an exhaustive scan has no accuracy to trade. Holds
+    /// `k` results rather than scoring the whole corpus and sorting.
     async fn search(
         &self,
         query: &[f32],

@@ -9,13 +9,9 @@ use crate::vector::store::NodeId;
 /// One vector index kind.
 ///
 /// Every method speaks only of a node id and a vector, so a kind never sees a
-/// document, a transaction or a collection. That is what keeps a kind testable
-/// with no database, and what makes the next one cheap.
-///
-/// Deliberately not a port of pulsejetdb's `ANNIndex`, which is
-/// build-then-query, holds its nodes in memory, and panics on a dimension
-/// mismatch. Same idea, our shape: incremental, transactional, and
-/// storage-free through [`VectorNodeStore`](crate::vector::store::VectorNodeStore).
+/// document, a transaction or a collection, and stays testable with no
+/// database. Same idea as pulsejetdb's `ANNIndex` but not its shape, which is
+/// build-then-query, in-memory, and panics on a dimension mismatch.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait VectorIndexEngine: MaybeSendSync {
@@ -30,12 +26,10 @@ pub trait VectorIndexEngine: MaybeSendSync {
 
     /// Up to `k` nearest live nodes to `query`, nearest first.
     ///
-    /// `effort` is how hard to look, in whatever unit the kind uses: HNSW reads
-    /// it as `ef_search`, an IVF kind would read it as probes, an exact kind
-    /// ignores it. `None` takes the kind's configured default. One knob rather
-    /// than a per-kind options type because every kind's knob answers the same
-    /// question, and a planner has to turn it without knowing which kind it is
-    /// talking to.
+    /// `effort` is how hard to look, in the kind's own unit: `ef_search` for
+    /// HNSW, probes for an IVF kind, ignored by an exact one. `None` takes the
+    /// kind's default. One knob rather than a per-kind options type, because a
+    /// planner has to turn it without knowing which kind it holds.
     async fn search(&self, query: &[f32], k: usize, effort: Option<usize>)
         -> Result<Vec<Neighbor>>;
 }

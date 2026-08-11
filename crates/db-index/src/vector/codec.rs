@@ -1,14 +1,9 @@
 //! Byte layout of a stored node and of the graph's meta singleton.
 //!
 //! Byte-identical to Go's `hnsw.MarshalNode` / `MarshalMeta`, little-endian
-//! throughout.
-//!
-//! Not because it has to be: a vector index is local state, it never crosses
-//! the wire, and the two implementations are not required to read each other's
-//! files. It is matched because it costs nothing to match and buys a cheap,
-//! exact oracle -- the fixtures in the tests are bytes Go produced, so a
-//! silent drift in either layout shows up as a failing assertion rather than
-//! as a subtly different graph noticed months later.
+//! throughout. Not required -- an index never crosses the wire -- but free, and
+//! it makes the test fixtures bytes Go produced rather than bytes we agree
+//! with ourselves about.
 //!
 //! ```text
 //! Node   1  version            4  vector length n
@@ -25,13 +20,11 @@
 use crate::error::{Error, Result};
 use crate::vector::store::{Meta, Node, NodeId};
 
-/// Bumped when the layout changes, so an old value is rejected rather than
-/// misread. Written as the first byte of both encodings.
+/// First byte of both encodings, so a layout change is rejected not misread.
 const NODE_VERSION: u8 = 0x01;
 const META_VERSION: u8 = 0x01;
 
-/// Widths of the fixed-size components. Named so the size arithmetic and the
-/// offset advances cannot drift apart from the layout above.
+/// Named so the size arithmetic and the offset advances cannot drift apart.
 const VERSION_WIDTH: usize = 1;
 const FLAG_WIDTH: usize = 1;
 const COUNT_WIDTH: usize = 4;
@@ -41,8 +34,7 @@ const TOP_LAYER_WIDTH: usize = 4;
 
 const META_LEN: usize = VERSION_WIDTH + NODE_ID_WIDTH + TOP_LAYER_WIDTH;
 
-/// The smallest valid encoded node: version, id, deleted, vector length and
-/// layer count, before any vector element or layer.
+/// Smallest valid encoded node, before any vector element or layer.
 const NODE_HEADER_LEN: usize = VERSION_WIDTH + NODE_ID_WIDTH + FLAG_WIDTH + COUNT_WIDTH * 2;
 
 /// Encodes `node` for storage as a single value.
@@ -72,9 +64,8 @@ pub fn encode_node(node: &Node) -> Vec<u8> {
 
 /// Decodes a value written by [`encode_node`].
 ///
-/// Every length read from the buffer is checked against what remains before it
-/// is used to allocate, so a corrupt or truncated value is an error rather than
-/// a huge allocation or a panic.
+/// Every length is checked against what remains before it is used to allocate,
+/// so a corrupt value is an error rather than a huge allocation.
 pub fn decode_node(bytes: &[u8]) -> Result<Node> {
     let mut cursor = Cursor::new(bytes);
 
@@ -92,8 +83,7 @@ pub fn decode_node(bytes: &[u8]) -> Result<Node> {
     }
 
     let layer_count = cursor.take_u32()? as usize;
-    // Each layer carries at least its count prefix, so this bounds the
-    // allocation before it happens.
+    // Each layer carries at least a count prefix, which bounds the allocation.
     cursor.ensure(layer_count.saturating_mul(COUNT_WIDTH))?;
     let mut layers = Vec::with_capacity(layer_count);
     for _ in 0..layer_count {
@@ -133,8 +123,7 @@ pub fn decode_meta(bytes: &[u8]) -> Result<Meta> {
         return Err(invalid("unsupported meta encoding version"));
     }
     let entry_point = NodeId(cursor.take_u64()?);
-    // Go stores this as an int32; a negative value would be a layer that cannot
-    // exist, so it is rejected rather than wrapped into a huge `usize`.
+    // Stored as an int32; negative would wrap into a huge `usize`.
     let top_layer = cursor.take_u32()? as i32;
     if top_layer < 0 {
         return Err(invalid("meta has a negative top layer"));

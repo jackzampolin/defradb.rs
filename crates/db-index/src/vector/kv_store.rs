@@ -1,9 +1,8 @@
 //! [`VectorNodeStore`] over a transaction.
 //!
-//! Borrows the transaction rather than owning it, so an engine built on this
-//! lives exactly as long as the operation that needs it and every write lands
-//! in the caller's transaction. That is also what provides the single-writer
-//! discipline the engine deliberately has no lock for.
+//! Borrows the transaction rather than owning it, so every write lands in the
+//! caller's transaction. That is also what gives the engine its single-writer
+//! discipline without a lock.
 
 use defra_core::thread_bounds::MaybeSend;
 use storage::corekv::{IterOptions, Key, Reader, Writer};
@@ -51,11 +50,8 @@ impl<'txn, T> KvNodeStore<'txn, T> {
 }
 
 impl<T: Reader + Writer + MaybeSend> KvNodeStore<'_, T> {
-    /// Removes every key of this epoch: its nodes and its meta.
-    ///
-    /// Deletes as it scans rather than collecting the keys first, so the memory
-    /// held is one key, not one per node. Used when an index is dropped, and by
-    /// a rebuild to reclaim the epoch it replaced.
+    /// Removes every key of this epoch, in batches, so the memory held is
+    /// bounded by [`CLEAR_BATCH`] rather than by the number of nodes.
     pub async fn clear(&mut self) -> Result<()> {
         loop {
             let mut batch = Vec::new();
@@ -83,9 +79,8 @@ impl<T: Reader + Writer + MaybeSend> KvNodeStore<'_, T> {
     }
 }
 
-/// Keys held at once while clearing. Bounds memory against the number of nodes,
-/// which is unbounded; the iterator is reopened per batch because deleting
-/// through a live iterator is not something every backend defines.
+/// The iterator is reopened per batch because deleting through a live one is
+/// not defined for every backend.
 const CLEAR_BATCH: usize = 1024;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -118,9 +113,7 @@ impl<T: Reader + Writer + MaybeSend> VectorNodeStore for KvNodeStore<'_, T> {
     }
 
     /// Streams the epoch's nodes, holding one at a time rather than the graph.
-    ///
-    /// The prefix stops at this epoch's node discriminator, so the scan never
-    /// reaches the meta key, another epoch, or another index.
+    /// The prefix stops at this epoch's node discriminator.
     async fn iterate_nodes<F>(&self, mut visit: F) -> Result<()>
     where
         F: FnMut(Node) -> Result<()> + MaybeSend,
