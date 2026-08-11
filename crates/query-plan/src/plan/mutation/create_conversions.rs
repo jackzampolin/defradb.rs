@@ -190,6 +190,28 @@ pub fn json_to_normal_value_with_kind_and_time(
                         },
                     )
                 }
+                // Blob: production stores hex text as String (Go parity). When
+                // DEFRA_TEST_BLOB_AS_BYTES is set, hex-decode into Bytes so e2e
+                // tests can exercise NormalValue::Bytes JSON converters (#1294).
+                ScalarKind::Blob => {
+                    if document::encoding::test_blob_as_bytes_enabled() {
+                        let s = value.as_str().ok_or_else(|| {
+                            QueryError::execution(format!(
+                                "Expected hex string for Blob field, got: {:?}",
+                                value
+                            ))
+                        })?;
+                        let bytes = document::encoding::decode_hex_blob(s).ok_or_else(|| {
+                            QueryError::execution(format!(
+                                "Invalid hex Blob value '{}': expected even-length hex",
+                                s
+                            ))
+                        })?;
+                        Ok(NormalValue::Bytes(bytes))
+                    } else {
+                        json_to_normal_value(value)
+                    }
+                }
                 // For other scalar types, fall through to default conversion.
                 _ => json_to_normal_value(value),
             },
@@ -456,9 +478,7 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
             }
         }
         NormalValue::String(s) => JsonValue::String(s.clone()),
-        NormalValue::Bytes(b) => {
-            JsonValue::Array(b.iter().map(|byte| JsonValue::Number((*byte).into())).collect())
-        }
+        NormalValue::Bytes(b) => document::encoding::bytes_to_json(b),
         NormalValue::Json(j) => j.clone(),
         NormalValue::BoolArray(arr) => {
             JsonValue::Array(arr.iter().map(|b| JsonValue::Bool(*b)).collect())
@@ -499,9 +519,7 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
         ),
         NormalValue::BytesArray(arr) => JsonValue::Array(
             arr.iter()
-                .map(|bytes| {
-                    JsonValue::Array(bytes.iter().map(|b| JsonValue::Number((*b).into())).collect())
-                })
+                .map(|bytes| document::encoding::bytes_to_json(bytes))
                 .collect(),
         ),
         NormalValue::Time(t) => {

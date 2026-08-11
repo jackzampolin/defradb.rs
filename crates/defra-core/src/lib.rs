@@ -9,6 +9,7 @@ pub mod block;
 pub mod block_delta;
 pub mod block_signature;
 pub mod browser_sync;
+pub mod cbor;
 pub mod collection;
 pub mod current_identity;
 pub mod dac_bypass;

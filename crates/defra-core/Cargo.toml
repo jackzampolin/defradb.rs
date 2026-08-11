@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["tracing"]
+
 [dependencies]
 # Error handling
 thiserror.workspace = true
@@ -15,6 +18,7 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_bytes.workspace = true
+ciborium.workspace = true
 uuid.workspace = true
 multibase = "0.9"
 

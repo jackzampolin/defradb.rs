@@ -200,6 +200,7 @@ Single-purpose binaries, each its own `[[test]]` with no submodules:
 | `--test issue1154_repro` | at-scale merge of every success-acked document after hub restart |
 | `--test issue1194_repro` | concurrent updates to distinct documents must not conflict |
 | `--test issue1211_repro` | same, through a branchable collection's head set |
+| `--test issue1294_bytes_json` | Blob-as-Bytes create+query must return lowercase hex |
 
 ### Rust Commands
 

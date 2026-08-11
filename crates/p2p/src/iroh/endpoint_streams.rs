@@ -372,7 +372,7 @@ async fn dispatch_stream(
                 artifact_count = request.artifacts.len(),
                 "Received SE artifacts"
             );
-            let data = serde_cbor::to_vec(&request)
+            let data = defra_core::cbor::to_vec(&request)
                 .map_err(|e| crate::error::Error::Codec(e.to_string()))?;
             if event_tx
                 .send(TransportEvent::SEArtifactsReceived {
@@ -557,8 +557,8 @@ where
     let signature = iroh::Signature::try_from(signature).map_err(|_| Error::InvalidSignature)?;
     let mut msg_for_verify = msg.clone();
     msg_for_verify.set_signature(None);
-    let bytes =
-        serde_cbor::to_vec(&msg_for_verify).map_err(|e| Error::CborSerialization(e.to_string()))?;
+    let bytes = defra_core::cbor::to_vec(&msg_for_verify)
+        .map_err(|e| Error::CborSerialization(e.to_string()))?;
 
     pubkey
         .verify(&bytes, &signature)

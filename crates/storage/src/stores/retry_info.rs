@@ -104,12 +104,12 @@ impl PersistedPushRetry {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        serde_cbor::to_vec(self)
+        defra_core::cbor::to_vec(self)
             .map_err(|error| format!("failed to serialize persisted push retry: {error}"))
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        serde_cbor::from_slice(bytes)
+        defra_core::cbor::from_slice(bytes)
             .map_err(|error| format!("failed to deserialize persisted push retry: {error}"))
     }
 }
@@ -174,11 +174,12 @@ impl RetryInfo {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        serde_cbor::to_vec(self).map_err(|e| format!("failed to serialize RetryInfo: {}", e))
+        defra_core::cbor::to_vec(self).map_err(|e| format!("failed to serialize RetryInfo: {}", e))
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        serde_cbor::from_slice(bytes).map_err(|e| format!("failed to deserialize RetryInfo: {}", e))
+        defra_core::cbor::from_slice(bytes)
+            .map_err(|e| format!("failed to deserialize RetryInfo: {}", e))
     }
 }
 
@@ -229,7 +230,7 @@ mod tests {
             retry_info: RetryInfo,
         }
 
-        let bytes = serde_cbor::to_vec(&LegacyPersistedPushRetry {
+        let bytes = defra_core::cbor::to_vec(&LegacyPersistedPushRetry {
             doc_id: "doc",
             collection_id: "collection",
             cid: "cid",

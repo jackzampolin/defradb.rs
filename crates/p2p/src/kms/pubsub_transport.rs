@@ -193,7 +193,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             warn!("KMS request arrived but no handler installed; dropping");
             return;
         };
-        let req: FetchEncryptionKeyRequest = match serde_cbor::from_slice(&payload) {
+        let req: FetchEncryptionKeyRequest = match defra_core::cbor::from_slice(&payload) {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "KMS dispatch: failed to decode request");
@@ -236,7 +236,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             )
             .await
         {
-            Ok(reply) => match serde_cbor::to_vec(&reply) {
+            Ok(reply) => match defra_core::cbor::to_vec(&reply) {
                 Ok(b) => (b, String::new()),
                 Err(e) => {
                     warn!(error = %e, "KMS dispatch: failed to encode reply");
@@ -404,7 +404,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                             debug!(from = %resp.from, error = %err, "KMS reply carried responder error");
                             continue;
                         }
-                        let reply: FetchEncryptionKeyReply = match serde_cbor::from_slice(&resp.data) {
+                        let reply: FetchEncryptionKeyReply = match defra_core::cbor::from_slice(&resp.data) {
                             Ok(r) => r,
                             Err(e) => {
                                 warn!(
@@ -742,7 +742,7 @@ mod tests {
             blocks: vec![vec![4, 5, 6]],
             ephemeral_public_key: vec![7; 32],
         };
-        let data = serde_cbor::to_vec(&reply).unwrap();
+        let data = defra_core::cbor::to_vec(&reply).unwrap();
         let request_id = crate::pubsub_rpc::derive_request_id(&payload);
         let envelope = InternalResponse {
             id: request_id.to_string(),
@@ -794,7 +794,7 @@ mod tests {
         let empty_envelope = InternalResponse {
             id: request_id.to_string(),
             err: String::new(),
-            data: serde_cbor::to_vec(&empty_reply).unwrap(),
+            data: defra_core::cbor::to_vec(&empty_reply).unwrap(),
             from: Vec::new(),
         };
         kt.dispatch_incoming(
@@ -813,7 +813,7 @@ mod tests {
         let key_envelope = InternalResponse {
             id: request_id.to_string(),
             err: String::new(),
-            data: serde_cbor::to_vec(&key_reply).unwrap(),
+            data: defra_core::cbor::to_vec(&key_reply).unwrap(),
             from: Vec::new(),
         };
         kt.dispatch_incoming(
@@ -847,7 +847,7 @@ mod tests {
             ephemeral_public_key: vec![9; 32],
             explicit_replay_capability: None,
         };
-        let payload = serde_cbor::to_vec(&request).unwrap();
+        let payload = defra_core::cbor::to_vec(&request).unwrap();
         let req = EncodedFetchRequest {
             payload: payload.clone(),
             request_id: "r1".to_string(),
@@ -867,7 +867,7 @@ mod tests {
             let envelope = InternalResponse {
                 id: request_id.to_string(),
                 err: String::new(),
-                data: serde_cbor::to_vec(&reply).unwrap(),
+                data: defra_core::cbor::to_vec(&reply).unwrap(),
                 from: Vec::new(),
             };
             kt.dispatch_incoming(
@@ -914,7 +914,7 @@ mod tests {
             ephemeral_public_key: vec![9; 32],
             explicit_replay_capability: None,
         };
-        let payload = serde_cbor::to_vec(&request).unwrap();
+        let payload = defra_core::cbor::to_vec(&request).unwrap();
         let mut rx = kt
             .send_request(EncodedFetchRequest {
                 payload: payload.clone(),
@@ -933,7 +933,7 @@ mod tests {
             let envelope = InternalResponse {
                 id: request_id.to_string(),
                 err: String::new(),
-                data: serde_cbor::to_vec(&reply).unwrap(),
+                data: defra_core::cbor::to_vec(&reply).unwrap(),
                 from: Vec::new(),
             };
             kt.dispatch_incoming(
@@ -1003,7 +1003,7 @@ mod tests {
         let envelope = InternalResponse {
             id: crate::pubsub_rpc::derive_request_id(&payload).to_string(),
             err: String::new(),
-            data: serde_cbor::to_vec(&reply).unwrap(),
+            data: defra_core::cbor::to_vec(&reply).unwrap(),
             from: Vec::new(),
         };
         kt.dispatch_incoming(
@@ -1110,7 +1110,7 @@ mod tests {
             ephemeral_public_key: vec![2; 32],
             explicit_replay_capability: Some(capability),
         };
-        let req_bytes = serde_cbor::to_vec(&req).unwrap();
+        let req_bytes = defra_core::cbor::to_vec(&req).unwrap();
 
         kt.dispatch_incoming(caller.to_string(), ENCRYPTION_TOPIC.to_string(), req_bytes)
             .await;
@@ -1123,7 +1123,7 @@ mod tests {
             .expect("reply must be published on caller's _response sub-topic");
         let env = InternalResponse::from_cbor(&reply_pub.1).expect("decode envelope");
         let reply: FetchEncryptionKeyReply =
-            serde_cbor::from_slice(&env.data).expect("decode reply");
+            defra_core::cbor::from_slice(&env.data).expect("decode reply");
         assert_eq!(reply.blocks, vec![vec![8]]);
         let from = seen.lock().clone().expect("handler must see peer identity");
         assert_eq!(from.peer_id, caller.to_string());

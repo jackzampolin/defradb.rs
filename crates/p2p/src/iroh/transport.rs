@@ -926,7 +926,7 @@ mod tests {
             if let TransportEvent::SEArtifactsReceived { peer_id, data } = event {
                 assert_eq!(peer_id, *transport0.local_peer_id());
                 let received: PushSEArtifactsRequest =
-                    serde_cbor::from_slice(&data).expect("SE artifacts should decode");
+                    defra_core::cbor::from_slice(&data).expect("SE artifacts should decode");
                 assert_eq!(received.sender_id, transport0.local_peer_id().to_string());
                 assert!(received.signature.is_some());
                 assert_eq!(received.collection_id, "collection1");

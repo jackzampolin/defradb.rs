@@ -14,6 +14,9 @@ description = "Key Management Service for DefraDB — DEK generation, wrapping, 
 # Implementation lands across milestones M1–M7 on separate branches.
 # This crate is a stub at design time.
 
+[package.metadata.cargo-machete]
+ignored = ["orbis", "sourcehub"]
+
 [features]
 default = []
 # Threshold (Orbis) backend. M6.
@@ -22,6 +25,7 @@ threshold = ["dep:orbis"]
 sourcehub = ["dep:sourcehub"]
 
 [dependencies]
+ciborium.workspace = true
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
 acp = { path = "../acp" }
@@ -36,7 +40,6 @@ async-lock.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_cbor = { workspace = true }
 serde_bytes = "0.11"
 base64 = "0.22"
 zeroize = "1.8"

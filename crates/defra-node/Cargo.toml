@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Reusable embedded DefraDB node builder"
 
+[package.metadata.cargo-machete]
+ignored = ["thiserror"]
+
 [[bin]]
 name = "coding-session-bench"
 path = "src/bin/coding-session-bench.rs"

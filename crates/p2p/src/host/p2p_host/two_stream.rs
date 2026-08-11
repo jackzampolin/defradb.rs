@@ -256,7 +256,7 @@ impl<S: Store> P2PHost<S> {
                     "Host received SE artifacts via two-stream protocol"
                 );
                 // Re-encode to CBOR for the db layer receiver
-                match serde_cbor::to_vec(&request) {
+                match defra_core::cbor::to_vec(&request) {
                     Ok(data) => {
                         if self
                             .event_tx

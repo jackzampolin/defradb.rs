@@ -46,7 +46,7 @@ impl TwoStreamHandler {
         })?;
 
         // Try to deserialize as PushLogRequest first
-        if let Ok(request) = serde_cbor::from_slice::<PushLogRequest>(&buf) {
+        if let Ok(request) = defra_core::cbor::from_slice::<PushLogRequest>(&buf) {
             crate::verify_message(&request)?;
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
@@ -59,7 +59,7 @@ impl TwoStreamHandler {
         }
 
         // Try to deserialize as DocSyncRequest
-        if let Ok(request) = serde_cbor::from_slice::<DocSyncRequest>(&buf) {
+        if let Ok(request) = defra_core::cbor::from_slice::<DocSyncRequest>(&buf) {
             crate::verify_message(&request)?;
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
@@ -72,7 +72,7 @@ impl TwoStreamHandler {
         }
 
         // Try to deserialize as BranchableSyncRequest
-        if let Ok(request) = serde_cbor::from_slice::<BranchableSyncRequest>(&buf) {
+        if let Ok(request) = defra_core::cbor::from_slice::<BranchableSyncRequest>(&buf) {
             crate::verify_message(&request)?;
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
@@ -85,7 +85,7 @@ impl TwoStreamHandler {
         }
 
         // Try to deserialize as IdentityRequest
-        if let Ok(request) = serde_cbor::from_slice::<IdentityRequest>(&buf) {
+        if let Ok(request) = defra_core::cbor::from_slice::<IdentityRequest>(&buf) {
             crate::verify_message(&request)?;
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
@@ -144,8 +144,8 @@ impl TwoStreamHandler {
         );
 
         // Try BranchableSyncReply first (has CollectionID + Heads fields).
-        // Must come before DocSyncReply since serde_cbor ignores unknown fields.
-        match serde_cbor::from_slice::<BranchableSyncReply>(&buf) {
+        // Must come before DocSyncReply since CBOR decoding ignores unknown fields.
+        match defra_core::cbor::from_slice::<BranchableSyncReply>(&buf) {
             Ok(reply) if !reply.collection_id.is_empty() => {
                 crate::verify_message(&reply)?;
                 ensure_transport_sender(&peer_id, &reply)?;
@@ -189,7 +189,7 @@ impl TwoStreamHandler {
         // A PushLogReply will also deserialize as DocSyncReply (with default
         // empty Results), but verifying the signature against the DocSyncReply
         // shape changes the serialized bytes and fails validation.
-        if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
+        if let Ok(response) = defra_core::cbor::from_slice::<PushLogReply>(&buf) {
             let message_id = response.message_id.clone();
             let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
             let is_pending_pushlog = {
@@ -220,7 +220,7 @@ impl TwoStreamHandler {
             }
         }
 
-        if let Ok(reply) = serde_cbor::from_slice::<IdentityResponse>(&buf) {
+        if let Ok(reply) = defra_core::cbor::from_slice::<IdentityResponse>(&buf) {
             crate::verify_message(&reply)?;
             ensure_transport_sender(&peer_id, &reply)?;
             let message_id = reply.message_id.clone();
@@ -246,7 +246,7 @@ impl TwoStreamHandler {
         // Deserialize as DocSyncReply once we've ruled out a pending PushLogReply
         // and an IdentityResponse. IdentityResponse shares the same metadata
         // shape and DocSyncReply defaults Results to empty, so DocSync must come later.
-        if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
+        if let Ok(reply) = defra_core::cbor::from_slice::<DocSyncReply>(&buf) {
             crate::verify_message(&reply)?;
             ensure_transport_sender(&peer_id, &reply)?;
             let message_id = reply.message_id.clone();
@@ -290,7 +290,7 @@ impl TwoStreamHandler {
         }
 
         // Fallback: try PushLogReply in case the message doesn't parse as DocSyncReply
-        if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
+        if let Ok(response) = defra_core::cbor::from_slice::<PushLogReply>(&buf) {
             crate::verify_message(&response)?;
             ensure_transport_sender(&peer_id, &response)?;
             let message_id = response.message_id.clone();

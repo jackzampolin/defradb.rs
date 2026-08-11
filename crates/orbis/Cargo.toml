@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["prost", "tonic-prost"]
+
 [dependencies]
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }

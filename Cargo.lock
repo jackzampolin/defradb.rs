@@ -2009,7 +2009,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
- "half 2.7.1",
+ "half",
 ]
 
 [[package]]
@@ -3423,11 +3423,9 @@ dependencies = [
  "proptest",
  "query",
  "rand 0.8.5",
- "reqwest 0.12.28",
  "schema",
  "serde",
  "serde_bytes",
- "serde_cbor",
  "serde_json",
  "sha2 0.10.9",
  "storage",
@@ -3525,7 +3523,6 @@ dependencies = [
  "schema",
  "serde",
  "serde_bytes",
- "serde_cbor",
  "serde_json",
  "storage",
  "telemetry",
@@ -3612,6 +3609,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "ciborium",
  "cid",
  "criterion 0.6.0",
  "ipld-core",
@@ -5064,12 +5062,6 @@ dependencies = [
  "tokio-util",
  "tracing",
 ]
-
-[[package]]
-name = "half"
-version = "1.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
 
 [[package]]
 name = "half"
@@ -6579,6 +6571,7 @@ dependencies = [
  "async-lock",
  "async-trait",
  "base64 0.22.1",
+ "ciborium",
  "cid",
  "crypto",
  "defra-core",
@@ -6587,7 +6580,6 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_bytes",
- "serde_cbor",
  "sourcehub",
  "thiserror 2.0.18",
  "tokio",
@@ -8632,7 +8624,6 @@ dependencies = [
  "rlimit",
  "serde",
  "serde_bytes",
- "serde_cbor",
  "serde_ipld_dagcbor",
  "serde_json",
  "sha2 0.10.9",
@@ -10980,16 +10971,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_cbor"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
-dependencies = [
- "half 1.8.3",
- "serde",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11653,7 +11634,6 @@ dependencies = [
  "rusty-leveldb",
  "schema",
  "serde",
- "serde_cbor",
  "serde_json",
  "telemetry",
  "tempfile",

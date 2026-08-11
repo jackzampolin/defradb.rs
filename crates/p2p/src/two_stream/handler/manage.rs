@@ -251,7 +251,7 @@ mod tests {
             b"t".to_vec(),
         );
         let back: ManageRequest =
-            serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
+            defra_core::cbor::from_slice(&defra_core::cbor::to_vec(&req).unwrap()).unwrap();
         assert!(matches!(back.op, ManageMutateOp::CollectionAdd { .. }));
     }
 }

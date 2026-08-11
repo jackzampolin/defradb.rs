@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "Transaction wrapper for DefraDB providing multistore access and callbacks"
 
+[package.metadata.cargo-machete]
+ignored = ["cid"]
+
 [dependencies]
 # Async runtime
 async-trait.workspace = true
