@@ -4,25 +4,35 @@ use std::cell::RefCell;
 use std::future::{poll_fn, Future};
 use std::thread::LocalKey;
 
+struct SwapGuard<'a, T: 'static> {
+    local: &'static LocalKey<RefCell<Option<T>>>,
+    value: &'a mut Option<T>,
+}
+
+impl<'a, T: 'static> SwapGuard<'a, T> {
+    fn new(local: &'static LocalKey<RefCell<Option<T>>>, value: &'a mut Option<T>) -> Self {
+        local.with(|local| std::mem::swap(value, &mut *local.borrow_mut()));
+        Self { local, value }
+    }
+
+    fn value(&self) -> Option<&T> {
+        self.value.as_ref()
+    }
+}
+
+impl<T: 'static> Drop for SwapGuard<'_, T> {
+    fn drop(&mut self) {
+        self.local
+            .with(|local| std::mem::swap(self.value, &mut *local.borrow_mut()));
+    }
+}
+
 fn with_value<T: 'static, R>(
     local: &'static LocalKey<RefCell<Option<T>>>,
     value: &mut Option<T>,
     f: impl FnOnce() -> R,
 ) -> R {
-    struct Reset<'a, T: 'static> {
-        local: &'static LocalKey<RefCell<Option<T>>>,
-        value: &'a mut Option<T>,
-    }
-
-    impl<T: 'static> Drop for Reset<'_, T> {
-        fn drop(&mut self) {
-            self.local
-                .with(|local| std::mem::swap(self.value, &mut *local.borrow_mut()));
-        }
-    }
-
-    local.with(|local| std::mem::swap(value, &mut *local.borrow_mut()));
-    let reset = Reset { local, value };
+    let reset = SwapGuard::new(local, value);
     let result = f();
     drop(reset);
     result
@@ -47,12 +57,17 @@ pub fn try_with<T: 'static, R>(
     local: &'static LocalKey<RefCell<Option<T>>>,
     f: impl FnOnce(&T) -> R,
 ) -> Option<R> {
-    local.with(|local| local.borrow().as_ref().map(f))
+    let mut value = None;
+    let reset = SwapGuard::new(local, &mut value);
+    let result = reset.value().map(f);
+    drop(reset);
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
 
     thread_local! {
         static VALUE: RefCell<Option<u8>> = const { RefCell::new(None) };
@@ -88,6 +103,19 @@ mod tests {
 
             futures::join!(first, second);
         });
+        assert_eq!(try_with(&VALUE, |value| *value), None);
+    }
+
+    #[test]
+    fn try_with_allows_reentrant_scopes() {
+        futures::executor::block_on(scope(&VALUE, 1, async {
+            let nested = try_with(&VALUE, |_| {
+                scope(&VALUE, 2, async { try_with(&VALUE, |value| *value) }).now_or_never()
+            });
+
+            assert_eq!(nested, Some(Some(Some(2))));
+            assert_eq!(try_with(&VALUE, |value| *value), Some(1));
+        }));
         assert_eq!(try_with(&VALUE, |value| *value), None);
     }
 }
