@@ -37,6 +37,13 @@ pub struct IndexDescription {
     #[serde(rename = "Unique", default)]
     pub unique: bool,
 
+    /// Kind-specific configuration.
+    ///
+    /// `None` in a description written before kinds existed, or by a caller
+    /// that set only `unique`; [`IndexDescription::normalized`] resolves that.
+    #[serde(rename = "Kind", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<IndexKind>,
+
     /// Internal-only marker for auto-generated schema indexes.
     #[serde(skip)]
     pub auto_generated: bool,
@@ -50,6 +57,7 @@ impl IndexDescription {
             id: 0,
             fields: Vec::new(),
             unique: false,
+            kind: None,
             auto_generated: false,
         }
     }
@@ -64,6 +72,55 @@ impl IndexDescription {
     }
 
     /// Set the index as unique.
+    /// The vector configuration, when this is a vector index.
+    pub fn vector(&self) -> Option<&VectorIndexDescription> {
+        match self.kind.as_ref()? {
+            IndexKind::Vector(vector) => Some(vector),
+            IndexKind::Ordered(_) => None,
+        }
+    }
+
+    /// Whether this index is a vector index.
+    pub fn is_vector(&self) -> bool {
+        self.vector().is_some()
+    }
+
+    /// Uniqueness, taken from the kind when one is set and from the legacy
+    /// field otherwise. A vector index is never unique.
+    pub fn resolved_unique(&self) -> bool {
+        match self.kind {
+            Some(IndexKind::Ordered(ordered)) => ordered.unique,
+            Some(IndexKind::Vector(_)) => false,
+            None => self.unique,
+        }
+    }
+
+    /// A copy whose kind and legacy `unique` flag agree.
+    ///
+    /// Two descriptions that mean the same thing but were built in different
+    /// styles, one setting only `unique` and one setting only `kind`, compare
+    /// unequal until both are normalized. Mirrors Go's `Normalize`.
+    pub fn normalized(mut self) -> Self {
+        let kind = self
+            .kind
+            .unwrap_or(IndexKind::Ordered(OrderedIndexDescription {
+                unique: self.unique,
+            }));
+        self.unique = match kind {
+            IndexKind::Ordered(ordered) => ordered.unique,
+            IndexKind::Vector(_) => false,
+        };
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Marks this as a vector index with the given configuration.
+    pub fn as_vector(mut self, vector: VectorIndexDescription) -> Self {
+        self.unique = false;
+        self.kind = Some(IndexKind::Vector(vector));
+        self
+    }
+
     pub fn as_unique(mut self) -> Self {
         self.unique = true;
         self
@@ -195,5 +252,165 @@ mod tests {
 
         let parsed: EncryptedIndexDescription = serde_json::from_str(&json).unwrap();
         assert_eq!(enc_idx, parsed);
+    }
+}
+
+/// Algorithm a vector index is built and searched with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VectorAlgorithm {
+    /// Hierarchical Navigable Small World graph.
+    #[default]
+    #[serde(rename = "HNSW")]
+    Hnsw,
+}
+
+/// How a vector index compares two vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DistanceMetric {
+    #[default]
+    #[serde(rename = "COSINE")]
+    Cosine,
+}
+
+/// HNSW build and search parameters.
+///
+/// `u32` rather than `usize` because these replicate inside a collection
+/// definition, and a width that differs between runtimes is a value that
+/// survives one and not the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HnswParams {
+    /// Maximum connections per node above layer 0.
+    #[serde(rename = "M", default = "default_hnsw_m")]
+    pub m: u32,
+    /// Candidate-list size while building.
+    #[serde(rename = "EfConstruction", default = "default_hnsw_ef_construction")]
+    pub ef_construction: u32,
+    /// Candidate-list size while searching.
+    #[serde(rename = "EfSearch", default = "default_hnsw_ef_search")]
+    pub ef_search: u32,
+}
+
+fn default_hnsw_m() -> u32 {
+    16
+}
+
+fn default_hnsw_ef_construction() -> u32 {
+    128
+}
+
+fn default_hnsw_ef_search() -> u32 {
+    64
+}
+
+impl Default for HnswParams {
+    fn default() -> Self {
+        Self {
+            m: default_hnsw_m(),
+            ef_construction: default_hnsw_ef_construction(),
+            ef_search: default_hnsw_ef_search(),
+        }
+    }
+}
+
+/// Configuration of a vector (approximate nearest neighbor) index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VectorIndexDescription {
+    #[serde(rename = "Algorithm", default)]
+    pub algorithm: VectorAlgorithm,
+    #[serde(rename = "Metric", default)]
+    pub metric: DistanceMetric,
+    /// Length of the vectors indexed. May be `0` on an embedding field, where
+    /// the model fixes the length.
+    #[serde(rename = "Dimensions", default)]
+    pub dimensions: u32,
+    /// Present when `algorithm` is HNSW.
+    #[serde(rename = "HNSW", default, skip_serializing_if = "Option::is_none")]
+    pub hnsw: Option<HnswParams>,
+}
+
+/// Configuration of an ordered index: one that stores field values in key
+/// order, which is every index kind that predates vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OrderedIndexDescription {
+    #[serde(rename = "Unique", default)]
+    pub unique: bool,
+}
+
+/// Which kind of index a description configures.
+///
+/// The concrete variant *is* the kind, so an index can never be in a state
+/// where a kind tag and its config disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "IndexKindWire", into = "IndexKindWire")]
+pub enum IndexKind {
+    Ordered(OrderedIndexDescription),
+    Vector(VectorIndexDescription),
+}
+
+impl Default for IndexKind {
+    fn default() -> Self {
+        IndexKind::Ordered(OrderedIndexDescription::default())
+    }
+}
+
+/// The flat form both kinds share on the wire.
+///
+/// There is no discriminator: the kind is sniffed from whether a vector-only
+/// field is present, matching Go's `parseIndexKind`. A tag would have been
+/// easier to read, but adding one here would mean a description this runtime
+/// writes is not one the other can parse.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct IndexKindWire {
+    #[serde(rename = "Algorithm", default, skip_serializing_if = "Option::is_none")]
+    algorithm: Option<VectorAlgorithm>,
+    #[serde(rename = "Metric", default, skip_serializing_if = "Option::is_none")]
+    metric: Option<DistanceMetric>,
+    #[serde(
+        rename = "Dimensions",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    dimensions: Option<u32>,
+    #[serde(rename = "HNSW", default, skip_serializing_if = "Option::is_none")]
+    hnsw: Option<HnswParams>,
+    #[serde(rename = "Unique", default, skip_serializing_if = "Option::is_none")]
+    unique: Option<bool>,
+}
+
+impl From<IndexKindWire> for IndexKind {
+    fn from(wire: IndexKindWire) -> Self {
+        if wire.algorithm.is_some() || wire.dimensions.is_some() {
+            IndexKind::Vector(VectorIndexDescription {
+                algorithm: wire.algorithm.unwrap_or_default(),
+                metric: wire.metric.unwrap_or_default(),
+                dimensions: wire.dimensions.unwrap_or_default(),
+                hnsw: wire.hnsw,
+            })
+        } else {
+            IndexKind::Ordered(OrderedIndexDescription {
+                unique: wire.unique.unwrap_or_default(),
+            })
+        }
+    }
+}
+
+impl From<IndexKind> for IndexKindWire {
+    fn from(kind: IndexKind) -> Self {
+        match kind {
+            IndexKind::Ordered(ordered) => Self {
+                algorithm: None,
+                metric: None,
+                dimensions: None,
+                hnsw: None,
+                unique: Some(ordered.unique),
+            },
+            IndexKind::Vector(vector) => Self {
+                algorithm: Some(vector.algorithm),
+                metric: Some(vector.metric),
+                dimensions: Some(vector.dimensions),
+                hnsw: vector.hnsw,
+                unique: None,
+            },
+        }
     }
 }

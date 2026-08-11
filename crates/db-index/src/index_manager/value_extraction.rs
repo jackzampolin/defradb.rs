@@ -262,6 +262,7 @@ mod coercion_tests {
             name: "idx_created_at".to_string(),
             id: 1,
             unique: false,
+            kind: None,
             auto_generated: false,
             fields: vec![IndexedFieldDescription {
                 name: "created_at".to_string(),
@@ -324,6 +325,7 @@ mod coercion_tests {
             name: "idx_label".to_string(),
             id: 2,
             unique: false,
+            kind: None,
             auto_generated: false,
             fields: vec![IndexedFieldDescription {
                 name: "label".to_string(),

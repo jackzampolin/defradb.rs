@@ -629,6 +629,7 @@ impl<'a> SdlParser<'a> {
                     id: index_id_counter,
                     fields: index_fields,
                     unique: idx_config.unique,
+                    kind: None,
                     auto_generated: false,
                 });
             }
@@ -679,6 +680,7 @@ impl<'a> SdlParser<'a> {
                 id: index_id_counter,
                 fields: indexed_fields,
                 unique: composite_idx.unique,
+                kind: None,
                 auto_generated: false,
             });
         }
@@ -721,6 +723,7 @@ impl<'a> SdlParser<'a> {
                     descending: false,
                 }],
                 unique: *requires_unique,
+                kind: None,
                 auto_generated: true,
             });
         }
