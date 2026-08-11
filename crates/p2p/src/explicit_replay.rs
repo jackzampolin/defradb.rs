@@ -86,7 +86,7 @@ fn now_unix() -> Result<u64> {
 }
 
 fn encode_claims(claims: &ExplicitReplayCapabilityClaims) -> Result<Vec<u8>> {
-    serde_cbor::to_vec(claims).map_err(|error| {
+    defra_core::cbor::to_vec(claims).map_err(|error| {
         Error::ExplicitReplayCapability(format!("failed to encode claims: {error}"))
     })
 }
@@ -114,7 +114,7 @@ fn decode_envelope(capability: &str) -> Result<ExplicitReplayCapabilityEnvelope>
         .decode(capability)
         .map_err(|error| Error::ExplicitReplayCapability(format!("invalid encoding: {error}")))?;
 
-    serde_cbor::from_slice(&bytes)
+    defra_core::cbor::from_slice(&bytes)
         .map_err(|error| Error::ExplicitReplayCapability(format!("invalid payload: {error}")))
 }
 
@@ -248,7 +248,7 @@ pub fn generate_capability_from_claims<I: FullIdentity>(
 
     let envelope = ExplicitReplayCapabilityEnvelope { claims, signature };
 
-    let envelope_bytes = serde_cbor::to_vec(&envelope)
+    let envelope_bytes = defra_core::cbor::to_vec(&envelope)
         .map_err(|error| Error::ExplicitReplayCapability(format!("failed to encode: {error}")))?;
 
     Ok(URL_SAFE_NO_PAD.encode(envelope_bytes))
@@ -382,7 +382,7 @@ mod tests {
         let claims_bytes = encode_claims(&claims).unwrap();
         let signature = authorizer.sign(&claims_bytes).unwrap();
         let envelope = ExplicitReplayCapabilityEnvelope { claims, signature };
-        URL_SAFE_NO_PAD.encode(serde_cbor::to_vec(&envelope).unwrap())
+        URL_SAFE_NO_PAD.encode(defra_core::cbor::to_vec(&envelope).unwrap())
     }
 
     #[test]

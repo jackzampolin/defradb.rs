@@ -16,7 +16,7 @@ pub const MAX_DOC_IDS: usize = 1000;
 /// This is used when a node wants to sync specific documents from the network.
 /// Unlike replicator sync (push-based), DocSync is pull-based.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.

@@ -474,7 +474,7 @@ async fn get_keys_identifies_the_requesting_node_on_the_wire() {
         .await
         .clone()
         .expect("transport must receive a request");
-    let request: crate::FetchEncryptionKeyRequest = serde_cbor::from_slice(&payload).unwrap();
+    let request: crate::FetchEncryptionKeyRequest = defra_core::cbor::from_slice(&payload).unwrap();
     assert_eq!(request.identity, node.to_string().into_bytes());
     assert_ne!(request.identity, user.to_string().into_bytes());
 }

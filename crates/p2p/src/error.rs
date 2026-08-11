@@ -434,12 +434,11 @@ pub fn blockstore_verify_to_p2p(e: blockstore::Error, cid: &cid::Cid) -> Error {
     }
 }
 
-impl From<serde_cbor::Error> for Error {
-    fn from(e: serde_cbor::Error) -> Self {
-        if e.is_io() || e.is_eof() || e.is_syntax() {
-            Error::CborDeserialization(e.to_string())
-        } else {
-            Error::CborSerialization(e.to_string())
+impl From<defra_core::cbor::Error> for Error {
+    fn from(e: defra_core::cbor::Error) -> Self {
+        match e {
+            defra_core::cbor::Error::Deserialize(msg) => Error::CborDeserialization(msg),
+            defra_core::cbor::Error::Serialize(msg) => Error::CborSerialization(msg),
         }
     }
 }

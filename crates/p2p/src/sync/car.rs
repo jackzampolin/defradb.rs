@@ -309,39 +309,51 @@ fn extract_links(block_data: &[u8]) -> Vec<Cid> {
 // is an internal Rust-to-Rust protocol.
 
 fn encode_car_header(roots: &[Cid]) -> Result<Vec<u8>> {
-    use serde_cbor::Value;
+    use ciborium::Value;
     let roots_val: Vec<Value> = roots
         .iter()
         .map(|cid| Value::Bytes(cid.to_bytes()))
         .collect();
 
-    let mut map = std::collections::BTreeMap::new();
-    map.insert(Value::Text("roots".into()), Value::Array(roots_val));
-    map.insert(Value::Text("version".into()), Value::Integer(1));
+    // ciborium's Value::Map is an ordered Vec, so key order is written out
+    // explicitly here. It previously came from a BTreeMap, which sorted the
+    // keys; "roots" < "version" alphabetically, so this order reproduces the
+    // existing bytes exactly. `car_header_bytes_unchanged_by_encoder` pins it.
+    let header = Value::Map(vec![
+        (Value::Text("roots".into()), Value::Array(roots_val)),
+        (Value::Text("version".into()), Value::Integer(1.into())),
+    ]);
 
-    serde_cbor::to_vec(&Value::Map(map))
-        .map_err(|e| Error::Codec(format!("failed to encode CAR header: {}", e)))
+    let mut out = Vec::new();
+    ciborium::into_writer(&header, &mut out)
+        .map_err(|e| Error::Codec(format!("failed to encode CAR header: {}", e)))?;
+    Ok(out)
 }
 
 fn decode_car_header(data: &[u8]) -> Result<Vec<Cid>> {
-    use serde_cbor::Value;
+    use ciborium::Value;
 
-    let value: Value = serde_cbor::from_slice(data)
+    let value: Value = defra_core::cbor::from_slice(data)
         .map_err(|e| Error::Codec(format!("invalid CAR header: {}", e)))?;
 
+    // ciborium models a CBOR map as an ordered Vec of pairs rather than a
+    // keyed map, so entries are looked up by scanning.
     let map = match value {
         Value::Map(m) => m,
         _ => return Err(Error::Codec("CAR header is not a CBOR map".into())),
     };
+    let field = |name: &str| {
+        map.iter()
+            .find(|(key, _)| matches!(key, Value::Text(text) if text == name))
+            .map(|(_, value)| value)
+    };
 
-    let version_key = Value::Text("version".into());
-    match map.get(&version_key) {
-        Some(Value::Integer(1)) => {}
+    match field("version") {
+        Some(Value::Integer(v)) if i128::from(*v) == 1 => {}
         _ => return Err(Error::Codec("CAR header version must be 1".into())),
     }
 
-    let roots_key = Value::Text("roots".into());
-    let roots_array = match map.get(&roots_key) {
+    let roots_array = match field("roots") {
         Some(Value::Array(a)) => a,
         _ => return Err(Error::Codec("CAR header 'roots' must be an array".into())),
     };

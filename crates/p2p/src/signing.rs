@@ -78,7 +78,8 @@ where
     msg.set_signature(None);
 
     // CBOR serialize the message
-    let bytes = serde_cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
+    let bytes =
+        defra_core::cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
 
     // Debug logging
     tracing::debug!(
@@ -151,8 +152,8 @@ where
     msg_for_verify.set_signature(None);
 
     // CBOR serialize
-    let bytes =
-        serde_cbor::to_vec(&msg_for_verify).map_err(|e| Error::CborSerialization(e.to_string()))?;
+    let bytes = defra_core::cbor::to_vec(&msg_for_verify)
+        .map_err(|e| Error::CborSerialization(e.to_string()))?;
 
     // Verify signature
     if !pubkey.verify(&bytes, signature) {
@@ -198,7 +199,8 @@ where
     msg.set_pubkey(transport.local_public_key_proto().to_vec());
     msg.set_signature(None);
 
-    let bytes = serde_cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
+    let bytes =
+        defra_core::cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
 
     let signature = transport.sign(&bytes)?;
     msg.set_signature(Some(signature));

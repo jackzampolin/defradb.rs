@@ -129,7 +129,7 @@ impl ManageQueryOp {
 /// The six MetaData fields are byte-identical to the SE message envelopes for
 /// compatibility with the shared `signing`/`verify_message` path.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.
@@ -347,7 +347,7 @@ impl Message for ManageReply {
 /// The six MetaData fields are byte-identical to the SE message envelopes for
 /// compatibility with the shared `signing`/`verify_message` path.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.
@@ -576,7 +576,7 @@ mod tests {
         };
         assert_eq!(
             op,
-            serde_cbor::from_slice(&serde_cbor::to_vec(&op).unwrap()).unwrap()
+            defra_core::cbor::from_slice(&defra_core::cbor::to_vec(&op).unwrap()).unwrap()
         );
     }
 
@@ -585,7 +585,7 @@ mod tests {
         let op = ManageQueryOp::ReplicatorList;
         assert_eq!(
             op,
-            serde_cbor::from_slice(&serde_cbor::to_vec(&op).unwrap()).unwrap()
+            defra_core::cbor::from_slice(&defra_core::cbor::to_vec(&op).unwrap()).unwrap()
         );
     }
 
@@ -596,7 +596,7 @@ mod tests {
         };
         assert_eq!(
             result,
-            serde_cbor::from_slice(&serde_cbor::to_vec(&result).unwrap()).unwrap()
+            defra_core::cbor::from_slice(&defra_core::cbor::to_vec(&result).unwrap()).unwrap()
         );
     }
 
@@ -651,7 +651,7 @@ mod tests {
         );
         req.set_message_id("mid-1".into());
         let back: ManageRequest =
-            serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
+            defra_core::cbor::from_slice(&defra_core::cbor::to_vec(&req).unwrap()).unwrap();
         assert_eq!(back.message_id(), "mid-1");
         assert_eq!(back.auth_token, b"jwt");
     }

@@ -422,7 +422,7 @@ fn test_pushlog_broadcast_to_request() {
 
 // Regression guard for issue #827.
 //
-// `#[serde(flatten)]` on MetaData causes serde_cbor to emit an indefinite-
+// `#[serde(flatten)]` on MetaData causes the encoder to emit an indefinite-
 // length CBOR map (major type 5, additional info 31 = byte 0xbf) instead of
 // a definite-length map (0xa0–0xb7 for 0–23 entries). Go's fxamacker/cbor
 // emits definite maps. Since both sides re-serialize for signature
@@ -460,42 +460,42 @@ mod regression_827 {
             "creator".into(),
             Bytes::from(vec![2]),
         );
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         assert_definite_cbor_map("PushLogRequest", &bytes);
     }
 
     #[test]
     fn docsync_request_definite_map() {
         let req = DocSyncRequest::new(vec!["doc1".into()]);
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         assert_definite_cbor_map("DocSyncRequest", &bytes);
     }
 
     #[test]
     fn branchable_request_definite_map() {
         let req = BranchableSyncRequest::new("col1".into());
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         assert_definite_cbor_map("BranchableSyncRequest", &bytes);
     }
 
     #[test]
     fn identity_request_definite_map() {
         let req = IdentityRequest::new("peer1".into());
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         assert_definite_cbor_map("IdentityRequest", &bytes);
     }
 
     #[test]
     fn query_se_request_definite_map() {
         let req = QuerySEArtifactsRequest::new("col1", vec![]);
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         assert_definite_cbor_map("QuerySEArtifactsRequest", &bytes);
     }
 
     #[test]
     fn push_se_request_definite_map() {
         let req = PushSEArtifactsRequest::new("col1", vec![]);
-        let bytes = serde_cbor::to_vec(&req).unwrap();
+        let bytes = defra_core::cbor::to_vec(&req).unwrap();
         assert_definite_cbor_map("PushSEArtifactsRequest", &bytes);
     }
 }
