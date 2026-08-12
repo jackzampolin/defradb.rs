@@ -86,6 +86,11 @@ jobs:
           command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete --locked
           cargo machete
 
+      # Feature-graph contracts for defra-node (#1398–#1400). Not a size check.
+      # Stdout-based; never `--workspace`. Lint does not install `just`.
+      - name: Feature-graph contracts (defra-node)
+        run: bash .github/scripts/assert-defra-node-graph.sh
+
       - name: Show sccache stats
         if: always()
         run: .github/scripts/show-sccache-stats.sh

@@ -493,6 +493,17 @@ lint:
     cargo clippy -p defra-node --features otel --all-targets -- -D warnings
     cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
     cargo clippy -p db --features p2p --all-targets -- -D warnings
+    just check-node-graph
+
+# Feature-graph contracts for defra-node (#1398–#1400). Not a size check.
+[group('check')]
+check-node-graph:
+    bash .github/scripts/assert-defra-node-graph.sh
+
+# Lean combo check (grows as later PRs make the combo legal).
+[group('check')]
+check-node-lean *features:
+    cargo check -p defra-node --no-default-features --features {{ features }}
 
 # Lint the test and bench targets too. CI does NOT do this for the workspace, so
 # this catches lints that would otherwise sit in the tree unnoticed.
