@@ -9,6 +9,7 @@ pub mod block;
 pub mod block_delta;
 pub mod block_signature;
 pub mod browser_sync;
+pub mod cbor;
 pub mod collection;
 pub mod current_identity;
 pub mod dac_bypass;
@@ -24,6 +25,8 @@ pub mod store;
 pub mod thread_bounds;
 pub mod transaction;
 pub mod types;
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod wasm_task_local;
 
 pub use action::{Action, ActionExecution, ActionStatus};
 pub use block::{

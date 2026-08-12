@@ -973,3 +973,200 @@ async fn concurrent_update_wins_over_stale_lazy_write_back() {
     );
     assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
 }
+
+/// The streaming counterpart of `implicit_full_scan_defers_one_collection_instead_of_each_document`:
+/// a streamed read must defer per document (matching Go's read-through
+/// `updateDataStore`, called per document from `FetchNext`), never as one
+/// full-scan marker - `defer_full_scan_write_back` discards per-document
+/// candidates on the assumption the whole collection was already read, which
+/// is false for a stream a caller may stop early.
+#[tokio::test]
+async fn streaming_lensed_read_defers_per_document_not_full_scan() {
+    let transform_store = Arc::new(SetVerifiedStore::default());
+    let options = crate::DbOptions::new().with_migration_write_back_batch_size(
+        NonZeroUsize::new(2).expect("batch size is non-zero"),
+    );
+    let mut raw_db = DB::with_options(MemoryStore::new(), options).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(indexed_users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let v2 = add_placeholder_version(&db, "placeholder").await;
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for name in ["Deferred-1", "Deferred-2", "Deferred-3"] {
+        seed_old_user(&db, &v1, name).await;
+    }
+
+    let txn = db.new_txn(true).await.unwrap();
+    let fetcher = crate::LensedDocFetcher::new(db, txn, transform_store, true);
+
+    let mut stream = fetcher
+        .stream_all_with_deleted("Users", false)
+        .await
+        .unwrap();
+    let mut docs = Vec::new();
+    while let Some((doc, _is_deleted)) = stream.next().await.unwrap() {
+        docs.push(doc);
+    }
+    assert_eq!(docs.len(), 3);
+    assert!(docs
+        .iter()
+        .all(|doc| doc.get("verified") == Some(&document::NormalValue::Bool(true))));
+    drop(stream);
+
+    let pending = fetcher.take_pending_write_backs().await;
+    assert!(
+        pending.full_scans.is_empty(),
+        "a stream must never mark a whole-collection full scan"
+    );
+    assert_eq!(
+        pending.documents.len(),
+        3,
+        "a stream must defer one write-back candidate per migrated document"
+    );
+
+    fetcher.take_txn().await.unwrap().discard().unwrap();
+}
+
+/// A lens-migrated collection must return correct, migrated documents through
+/// the streaming path, and persist them exactly as the eager auto-commit path
+/// does - proving `LensedAutoCommitFetcher::stream_all_with_deleted` isn't
+/// just correct in isolation but matches `get_all`'s observable contract.
+#[tokio::test]
+async fn streaming_auto_commit_read_migrates_and_persists() {
+    let store = Arc::new(MemoryStore::new());
+    let transform_store = Arc::new(SetVerifiedStore::default());
+    let mut raw_db = DB::from_arc(store.clone()).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let doc_id = seed_user(&db).await;
+    let v2 = add_verified_version(&db).await;
+
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let fetcher = crate::LensedAutoCommitFetcher::new(db.clone());
+    let mut stream = fetcher
+        .stream_all_with_deleted("Users", false)
+        .await
+        .unwrap();
+    let mut docs = Vec::new();
+    while let Some((doc, _is_deleted)) = stream.next().await.unwrap() {
+        docs.push(doc);
+    }
+    drop(stream);
+
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        docs[0].get("verified"),
+        Some(&document::NormalValue::Bool(true))
+    );
+    assert_eq!(docs[0].schema_version_id(), Some(v2.as_str()));
+    assert_eq!(transform_store.transform_calls.load(Ordering::SeqCst), 1);
+
+    let persisted = load_user(&db, &doc_id).await;
+    assert_eq!(
+        persisted.get("verified"),
+        Some(&document::NormalValue::Bool(true))
+    );
+    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+}
+
+/// The early-termination counterpart of
+/// `streaming_auto_commit_read_migrates_and_persists`: a `LimitNode` stops
+/// pulling long before the write-back batch boundary, and `ScanNode::close`
+/// then tears the stream down. Documents already migrated through the lens
+/// must be persisted at that point - otherwise every limited query re-runs the
+/// transform forever, and the eager path's write-back is silently lost.
+#[tokio::test]
+async fn streaming_auto_commit_read_persists_after_partial_consumption() {
+    let transform_store = Arc::new(SetVerifiedStore::default());
+    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let v2 = add_verified_version(&db).await;
+
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for name in ["Partial-1", "Partial-2", "Partial-3"] {
+        seed_old_user(&db, &v1, name).await;
+    }
+
+    let fetcher = crate::LensedAutoCommitFetcher::new(db.clone());
+    let mut stream = fetcher
+        .stream_all_with_deleted("Users", false)
+        .await
+        .unwrap();
+
+    // One document out of three, well under the default write-back batch size.
+    let (migrated, _is_deleted) = stream
+        .next()
+        .await
+        .unwrap()
+        .expect("stream yields the first document");
+    assert_eq!(
+        migrated.get("verified"),
+        Some(&document::NormalValue::Bool(true))
+    );
+
+    stream.close().await.unwrap();
+    drop(stream);
+
+    let doc_id = migrated.id().expect("migrated document keeps its DocID");
+    let persisted = load_user(&db, doc_id).await;
+    assert_eq!(
+        persisted.get("verified"),
+        Some(&document::NormalValue::Bool(true)),
+        "a partially consumed stream must persist the documents it did migrate"
+    );
+    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+}

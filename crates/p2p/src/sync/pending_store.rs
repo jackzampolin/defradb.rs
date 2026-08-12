@@ -81,11 +81,11 @@ pub struct PersistedPendingDag {
 
 impl PersistedPendingDag {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        serde_cbor::to_vec(self).map_err(|e| Error::Storage(e.to_string()))
+        defra_core::cbor::to_vec(self).map_err(|e| Error::Storage(e.to_string()))
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        serde_cbor::from_slice(bytes).map_err(|e| Error::Storage(e.to_string()))
+        defra_core::cbor::from_slice(bytes).map_err(|e| Error::Storage(e.to_string()))
     }
 }
 
@@ -101,11 +101,11 @@ pub struct PersistedQuarantinedDag {
 
 impl PersistedQuarantinedDag {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        serde_cbor::to_vec(self).map_err(|e| Error::Storage(e.to_string()))
+        defra_core::cbor::to_vec(self).map_err(|e| Error::Storage(e.to_string()))
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        serde_cbor::from_slice(bytes).map_err(|e| Error::Storage(e.to_string()))
+        defra_core::cbor::from_slice(bytes).map_err(|e| Error::Storage(e.to_string()))
     }
 
     /// Current wall-clock time as Unix seconds, for stamping `quarantined_at_unix_secs`.

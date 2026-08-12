@@ -16,7 +16,7 @@ fn is_false(value: &bool) -> bool {
 ///
 /// This is the primary message type for CRDT synchronization between nodes.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.
@@ -169,7 +169,7 @@ impl Message for PushLogRequest {
 
 /// PushLog reply message sent in response to a PushLogRequest.
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.
@@ -366,13 +366,13 @@ fn truncated_text_prefix(text: &str) -> String {
     not(any(feature = "libp2p-transport", feature = "iroh-transport")),
     allow(dead_code)
 )]
-fn describe_cbor_value(value: &serde_cbor::Value) -> String {
+fn describe_cbor_value(value: &ciborium::Value) -> String {
     match value {
-        serde_cbor::Value::Map(entries) => {
+        ciborium::Value::Map(entries) => {
             let keys: Vec<String> = entries
-                .keys()
-                .filter_map(|key| match key {
-                    serde_cbor::Value::Text(text) => Some(text.clone()),
+                .iter()
+                .filter_map(|(key, _)| match key {
+                    ciborium::Value::Text(text) => Some(text.clone()),
                     _ => None,
                 })
                 .take(10)
@@ -383,16 +383,16 @@ fn describe_cbor_value(value: &serde_cbor::Value) -> String {
                 format!("cbor_map(keys=[{}])", keys.join(","))
             }
         }
-        serde_cbor::Value::Array(items) => format!("cbor_array(len={})", items.len()),
-        serde_cbor::Value::Bytes(bytes) => format!("cbor_bytes(len={})", bytes.len()),
-        serde_cbor::Value::Text(text) => {
+        ciborium::Value::Array(items) => format!("cbor_array(len={})", items.len()),
+        ciborium::Value::Bytes(bytes) => format!("cbor_bytes(len={})", bytes.len()),
+        ciborium::Value::Text(text) => {
             format!("cbor_text(prefix={:?})", truncated_text_prefix(text))
         }
-        serde_cbor::Value::Tag(tag, _) => format!("cbor_tag({tag})"),
-        serde_cbor::Value::Bool(value) => format!("cbor_bool({value})"),
-        serde_cbor::Value::Null => "cbor_null".to_string(),
-        serde_cbor::Value::Integer(_) => "cbor_integer".to_string(),
-        serde_cbor::Value::Float(_) => "cbor_float".to_string(),
+        ciborium::Value::Tag(tag, _) => format!("cbor_tag({tag})"),
+        ciborium::Value::Bool(value) => format!("cbor_bool({value})"),
+        ciborium::Value::Null => "cbor_null".to_string(),
+        ciborium::Value::Integer(_) => "cbor_integer".to_string(),
+        ciborium::Value::Float(_) => "cbor_float".to_string(),
         _ => "cbor_scalar".to_string(),
     }
 }
@@ -406,7 +406,7 @@ fn describe_gossip_payload_shape(payload: &[u8]) -> String {
         return "empty".to_string();
     }
 
-    if let Ok(value) = serde_cbor::from_slice::<serde_cbor::Value>(payload) {
+    if let Ok(value) = defra_core::cbor::from_slice::<ciborium::Value>(payload) {
         return describe_cbor_value(&value);
     }
 
@@ -471,7 +471,7 @@ impl PushLogBroadcast {
     pub fn decode_gossip_payload(
         payload: &[u8],
     ) -> Result<(Self, PushLogGossipPayloadEncoding), String> {
-        serde_cbor::from_slice::<PushLogRequest>(payload)
+        defra_core::cbor::from_slice::<PushLogRequest>(payload)
             .map(|request| {
                 (
                     Self::from_request(&request),
@@ -479,7 +479,7 @@ impl PushLogBroadcast {
                 )
             })
             .or_else(|_| {
-                serde_cbor::from_slice::<Self>(payload)
+                defra_core::cbor::from_slice::<Self>(payload)
                     .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
             })
             .or_else(|_| {
@@ -490,8 +490,8 @@ impl PushLogBroadcast {
     }
 
     /// Encode a gossip payload using the canonical, self-describing wire format.
-    pub fn encode_gossip_payload(&self) -> Result<Vec<u8>, serde_cbor::Error> {
-        serde_cbor::to_vec(self)
+    pub fn encode_gossip_payload(&self) -> Result<Vec<u8>, defra_core::cbor::Error> {
+        defra_core::cbor::to_vec(self)
     }
 
     #[cfg_attr(
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn inspect_gossip_payload_identifies_cbor_request_shape() {
-        let payload = serde_cbor::to_vec(&PushLogRequest::new(
+        let payload = defra_core::cbor::to_vec(&PushLogRequest::new(
             "doc-1".to_string(),
             Bytes::from_static(&[1, 2, 3]),
             "collection-1".to_string(),
@@ -617,7 +617,7 @@ mod tests {
             future_field: "ignored by older decoders".to_string(),
         };
 
-        let encoded = serde_cbor::to_vec(&future).expect("future payload should encode");
+        let encoded = defra_core::cbor::to_vec(&future).expect("future payload should encode");
         let (decoded, encoding) = PushLogBroadcast::decode_gossip_payload(&encoded)
             .expect("future payload should decode as broadcast");
 

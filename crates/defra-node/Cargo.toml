@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Reusable embedded DefraDB node builder"
 
+[package.metadata.cargo-machete]
+ignored = ["thiserror"]
+
 [[bin]]
 name = "coding-session-bench"
 path = "src/bin/coding-session-bench.rs"
@@ -36,7 +39,7 @@ identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }
 lens = { path = "../lens" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "sync", "time"] }
 anyhow.workspace = true
 tracing.workspace = true
 async-trait = "0.1"

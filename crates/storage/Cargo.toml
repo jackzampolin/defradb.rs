@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+web-time.workspace = true
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 schema = { path = "../schema" }
@@ -21,7 +22,6 @@ async-trait.workspace = true
 
 # Serialization
 serde.workspace = true
-serde_cbor.workspace = true
 serde_json.workspace = true
 
 # IPLD
@@ -70,7 +70,7 @@ js-sys = { version = "0.3", optional = true }
 
 # Tokio is only available on non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 # Native storage backends
 redb = { workspace = true, optional = true }
@@ -80,6 +80,7 @@ lark-kv = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
 proptest.workspace = true

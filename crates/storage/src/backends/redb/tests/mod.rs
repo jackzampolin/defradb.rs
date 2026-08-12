@@ -59,6 +59,7 @@ mod shared_tests {
 }
 
 mod callbacks;
+mod chunked_scan;
 mod iterators;
 mod persistence;
 mod store_config;

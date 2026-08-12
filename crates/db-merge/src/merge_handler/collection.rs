@@ -103,8 +103,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     depth,
                     is_root,
                 } => {
-                    if depth >= super::MAX_MERGE_DEPTH {
-                        let error = MergeError::depth_exceeded(&cid, depth);
+                    if let Err(error) = self.ensure_merge_depth(&cid, depth) {
                         if is_root {
                             return Err(error);
                         }
@@ -277,7 +276,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 match &linked_block.delta {
                     CrdtDelta::Composite(composite_payload) => {
                         let doc_id_str = self
-                            .resolve_composite_doc_id(link_cid, &linked_block)
+                            .resolve_composite_doc_id(link_cid, &linked_block, depth + 1)
                             .await?;
                         tracing::debug!(
                             link_cid = %link_cid,
@@ -479,8 +478,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     depth,
                     is_root,
                 } => {
-                    if depth >= super::MAX_MERGE_DEPTH {
-                        let error = MergeError::depth_exceeded(&cid, depth);
+                    if let Err(error) = self.ensure_merge_depth(&cid, depth) {
                         if is_root {
                             return Err(error);
                         }
@@ -648,7 +646,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
                 if let CrdtDelta::Composite(composite_payload) = &linked_block.delta {
                     let doc_id_str = self
-                        .resolve_composite_doc_id(link_cid, &linked_block)
+                        .resolve_composite_doc_id(link_cid, &linked_block, depth + 1)
                         .await?;
                     match self
                         .process_composite_delta_in_txn(

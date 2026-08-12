@@ -2,7 +2,12 @@
 
 ## 0. The North Star: 1.0 Release
 
-**defradb.rs is at v1.0 RC1, tracking Go DefraDB v1.0.0-rc1.**
+**The Go compatibility baseline lives in `crates/defra-version/src/lib.rs`, not
+here.** Three constants define it: `GO_COMPAT_BRANCH`, `GO_COMPAT_COMMIT`, and
+`GO_COMPAT_TAG`. An empty tag means CI builds the pinned commit from source
+instead of downloading a release binary. `.github/workflows/ci.yml` greps those
+constants directly, so they are the single source of truth — read them rather
+than quoting a release number, which goes stale on every baseline bump.
 
 Go parity is achieved across CLI, HTTP API, GraphQL query engine, and P2P replication. We now validate with Rust-native integration tests that exercise the full stack, and are building Rust-specific features (Iroh transport, BM25 full-text search, Postgres wire protocol, WASM client).
 
@@ -47,36 +52,60 @@ No `ROADMAP.md`, `DEVELOPMENT.md`, `docs/` directories, or planning documents.
 
 ```
 crates/
-├── acp/             # Access Control Policy
-├── blockstore/      # IPLD block storage
-├── cli/             # Command-line interface
-├── crdt/            # CRDT implementations
-├── crypto/          # Cryptographic operations
-├── datastore/       # Data persistence abstractions
-├── db/              # Database core
-├── defra-core/      # Core types and traits
-├── defra-version/   # Version metadata and Go compat tracking
-├── document/        # Document handling
-├── events/          # Pub/sub event bus (subscriptions)
-├── ffi/             # C-compatible FFI bindings
-├── http/            # HTTP API server
-├── identity/        # Identity and JWT management
-├── keyring/         # Key storage
-├── lens/            # Schema migration via WASM transforms
-├── orbis/           # Threshold BLS signing (Orbis ring client)
-├── p2p/             # P2P networking (libp2p + optional Iroh)
-├── pg-compat/       # Postgres wire protocol compatibility
-├── query/           # Query engine (GraphQL, BM25)
-├── schema/          # Schema validation
-├── sourcehub/       # On-chain ACP client (Cosmos/EVM)
-├── storage/         # Storage backends (redb, fjall, rocksdb, memory)
-├── wasm/            # Browser client (WebAssembly)
-└── zanzibar/        # Google Zanzibar permission engine
+├── acp/                # Access Control Policy
+├── blockstore/         # IPLD block storage
+├── cli/                # Command-line interface
+├── crdt/               # CRDT implementations
+├── crypto/             # Cryptographic operations
+├── cursor/             # Opaque cursor token codec for GraphQL pagination
+├── datastore/          # Data persistence abstractions
+├── db/                 # Database core
+├── db-backup/          # Database export/import (backup)
+├── db-blocks/          # IPLD block builder for document mutations
+├── db-index/           # Secondary index manager for collections
+├── db-merge/           # P2P merge, broadcast, and document pushing
+├── db-nac/             # Node Access Control state management
+├── db-search/          # Vector search, embeddings, hybrid BM25+dense retrieval
+├── defra-core/         # Core types and traits
+├── defra-node/         # Reusable embedded node builder
+├── defra-version/      # Version metadata and Go compat tracking
+├── document/           # Document handling
+├── embedded/           # Embedded/mobile node assembly
+├── events/             # Pub/sub event bus (subscriptions)
+├── ffi/                # C-compatible FFI bindings
+├── http/               # HTTP API server
+├── identity/           # Identity and JWT management
+├── keyring/            # Key storage
+├── kms/                # DEK generation, wrapping, and distribution under NAC/DAC
+├── lens/               # Schema migration via WASM transforms
+├── orbis/              # Threshold BLS signing (Orbis ring client)
+├── p2p/                # P2P networking (libp2p + optional Iroh)
+├── p2p-adapter/        # P2P adapters for HTTP-facing operations
+├── pg-compat/          # Postgres wire protocol compatibility
+├── query/              # Query engine (GraphQL, BM25)
+├── query-parse/        # GraphQL/SDL parsing and schema generation
+├── query-plan/         # Query plan tree, planner, execution boundaries
+├── query-types/        # Shared type vocabulary for the query engine
+├── replication-filter/ # Query-filter-backed replication matcher
+├── schema/             # Schema validation
+├── sourcehub/          # On-chain ACP client (Cosmos/EVM)
+├── storage/            # Storage backends (lark, redb, fjall, rocksdb, memory)
+├── telemetry/          # OpenTelemetry exporter setup
+├── wasm/               # Browser client (WebAssembly)
+└── zanzibar/           # Google Zanzibar permission engine
 
 tools/
-├── ffi-test/          # FFI compatibility testing against Go
-└── integration-test/  # Rust-native integration tests (primary validation)
+├── apple/                  # Apple embedding: .xcframework build + Swift import smoke test
+├── ffi-test/               # FFI compatibility testing against Go
+├── hf_embedding_server.py  # Local HuggingFace embedding server for embedding benchmarks
+├── integration-test/       # Rust-native integration tests (primary validation)
+├── lens-host/              # Standalone WASM Lens transform runner (JSON stdin → stdout)
+├── otel-smoke/             # OTLP exporter smoke tests against a Compose-run collector
+└── pg-compat-harness/      # Drizzle ORM harness for the Postgres wire protocol
 ```
+
+Only `ffi-test`, `integration-test`, and `lens-host` are workspace members; the
+rest are scripts and non-Rust harnesses.
 
 ### File Size Guidelines
 
@@ -92,7 +121,7 @@ tools/
 | Files/Modules | snake_case | `lww.rs` |
 | Types | PascalCase | `LwwDelta` |
 | Functions | snake_case | `encode_priority()` |
-| Constants | SCREAMING_SNAKE_CASE | `MAX_PRIORITY` |
+| Constants | SCREAMING_SNAKE_CASE | `STATUS_ACTIVE` |
 
 ## 6. Comments Policy
 
@@ -113,8 +142,8 @@ Each worktree is isolated, no branch switching overhead.
 
 ## Build Dependencies
 
-- **Rust** (1.82+): `rustup`
-- **protoc**: `brew install protobuf` — required by `opentelemetry-proto` via `prost-build`
+- **Rust** (1.91+): `rustup`
+- **protoc**: `brew install protobuf` — required by `crates/orbis`, whose `build.rs` compiles `proto/orbis.proto` via `tonic-prost-build`
 - **cbindgen**: `cargo install cbindgen` — generates C headers for FFI
 - **Go** (1.25+): Required for FFI compatibility tests
 
@@ -143,19 +172,35 @@ Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 
 | Area | Binary | Modules |
 |------|--------|---------|
-| Basic | `--test basic` | smoke, document_lifecycle, transactions, collection_management, multi_collection, truncate_parallel |
-| Query | `--test query` | view, lens, lens_persistence, sdl_generate, index_management, explain_nested, subscription_docid, stubs |
-| ACP | `--test acp` | audit, basic, custom_policy, index, link_collection, multi_identity, multi_role, negative, negative_p2p, node_access, p2p, p2p_lifecycle, policy_validation, register_ops, relation_queries, relationship, revoke_lifecycle, transaction_rollback, xarchive_access_matrix |
-| P2P Iroh ACP | `--test p2p_iroh` | acp, dac, nac, trust_boundary |
-| NAC | `--test nac` | document_acp, operations, core_operations, p2p_management, relation_admin, cross_compartment_isolation, policy_evolution |
-| P2P | `--test p2p` | document, sync, management, trust_boundary, replication, replication_advanced, stubs |
-| P2P Admission | `--test p2p_admission` | fan-in backpressure (own binary: injects `DEFRA_P2P_MAX_PENDING_DAGS`) |
-| FTS | `--test fts` | basic, edge_cases, lifecycle, scoring |
-| Encryption | `--test encryption` | index, acp, block_verify, stubs |
-| Identity | `--test identity` | lifecycle, types, negative, node_identity, keyring_lifecycle |
-| Backup | `--test backup` | restore, dump, purge |
-| SourceHub | `--test sourcehub` | smoke, compartments, p2p_acp, policy_lifecycle, resilience |
-| Hub.rs | `--test hubrs` | smoke, compartments, p2p_acp, policy_lifecycle |
+| Basic | `--test basic` | batch_mutations, collection_delete_4657, collection_management, document_lifecycle, lark_crash_reopen, multi_collection, patch_secondary_relation_4709, self_ref_relations_4712, smoke, transactions, truncate_parallel |
+| Query | `--test query` | commits_aggregate, commits_collection_id, commits_height_filter, continuous_rollup, default_values_v1, downsample, downsample_gc, exhaustive_orphans_4454, explain_nested, gql_list_args, index_fallback_4633, index_management, lens, lens_persistence, lens_reindex_secondary_index_979, limits, multi_cid_vectors, planner_4656, planner_4684, sdl_generate, subscription_docid, view |
+| ACP | `--test acp` | audit, basic, cross_object, custom_policy, events_sse, index, link_collection, multi_identity, multi_role, negative, negative_p2p, node_access, p2p, p2p_lifecycle, policy_validation, register_ops, relation_queries, relationship, revoke_lifecycle, secp256k1_round_trip, transaction_rollback, xarchive_access_matrix |
+| P2P Iroh | `--test p2p_iroh` | acp, connection, peer, replication, schema, sync |
+| NAC | `--test nac` | core_operations, cross_compartment_isolation, dac_access_matrix, document_acp, multi_doc_create, operations, p2p_management, policy_evolution, relation_admin |
+| P2P | `--test p2p` | connection_manager, document, feature_binaries, filtered_replication, idempotent_replay, manage_relay, management, quarantine, receiver_pull, replication, replication_advanced, resilience, sync, transports, trust_boundary, write_contention |
+| FTS | `--test fts` | basic, edge_cases, lifecycle, relation_paths, scoring |
+| Encryption | `--test encryption` | acp, block_verify, cross_runtime_p2p, index, key_management, se_cross_runtime |
+| Identity | `--test identity` | keyring_dev_mode, keyring_lifecycle, lifecycle, negative, node_identity, types |
+| Backup | `--test backup` | dev_mode, dump, purge, restore |
+| Cursor | `--test cursor` | composite_index, error_paths, reindex_datetime_visibility, smoke |
+| SourceHub | `--test sourcehub` | acp_tuning, compartments, encryption_acp, p2p_acp, policy_lifecycle, resilience, smoke |
+| Hub.rs | `--test hubrs` | compartments, p2p_acp, policy_lifecycle, smoke |
+
+Single-purpose binaries, each its own `[[test]]` with no submodules:
+
+| Binary | Covers |
+|--------|--------|
+| `--test p2p_admission` | replicator fan-in against a tiny pending-DAG cap (injects `DEFRA_P2P_MAX_PENDING_DAGS`) |
+| `--test p2p_admission_restart` | hub restart must not lose success-acked pending-DAG registrations |
+| `--test p2p_admission_fairness` | per-source-peer pending-DAG quotas under a noisy pusher |
+| `--test p2p_backlog` | outbound push-backlog bounds and overload observability |
+| `--test p2p_push_storm` | outbound push-storm reproduction and profiling harness |
+| `--test p2p_deep_catchup` | deep full-DAG push under intake rate limiting |
+| `--test p2p_interop_bench` | cross-runtime P2P replication cost |
+| `--test issue1154_repro` | at-scale merge of every success-acked document after hub restart |
+| `--test issue1194_repro` | concurrent updates to distinct documents must not conflict |
+| `--test issue1211_repro` | same, through a branchable collection's head set |
+| `--test issue1294_bytes_json` | Blob-as-Bytes create+query must return lowercase hex |
 
 ### Rust Commands
 
@@ -170,8 +215,8 @@ cargo build --release              # Build release
 ### Tracking Go Upstream
 
 ```bash
-# Go repo location
-cd /Users/johnzampolin/go/src/github.com/sourcenetwork/defradb
+# Go repo location — point DEFRADB_GO_REPO at your Go DefraDB checkout
+cd "$DEFRADB_GO_REPO"
 
 # Check what's landed on develop
 git fetch origin develop
@@ -184,6 +229,13 @@ git log origin/develop --oneline --since="1 week ago"
 The Go repo has two remotes:
 - `origin` → `sourcenetwork/defradb` (upstream)
 - `fork` → `jackzampolin/defradb` (our fork, `jack/ffi-rust-compat` branch)
+
+`DEFRADB_GO_REPO` covers the shell commands above only. Integration tests that
+consume Go build artifacts resolve them at compile time under
+`$HOME/go/src/github.com/sourcenetwork/defradb` — see `COPY_WASM_PATH` in
+`tools/integration-test/tests/p2p_iroh/sync/version.rs`. A checkout elsewhere
+needs a symlink at that path, or the `p2p_iroh` lens tests fail on a missing
+WASM binary.
 
 ### Git Worktrees
 
@@ -207,11 +259,12 @@ git worktree remove ../defradb.rs-foo              # Remove worktree
 
 ## Storage Backends
 
-Four backends available, selectable via `--store` flag or `STORE` env var:
+Five backends available, selectable via the `--store` flag:
 
 | Backend | Type | Use Case |
 |---------|------|----------|
-| `redb` | COW B+ tree | Default, single-writer, reliable |
+| `lark` | LSM-tree | Default, `sourcenetwork/lark` |
+| `redb` | COW B+ tree | Single-writer, reliable |
 | `fjall` | LSM-tree | High write throughput, Shinzo indexer |
 | `rocksdb` | LSM-tree | Production, configurable via `ROCKS_*` env vars |
 | `memory` | In-memory | Testing only |

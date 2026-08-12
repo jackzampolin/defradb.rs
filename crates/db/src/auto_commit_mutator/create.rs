@@ -1,4 +1,7 @@
-use super::helpers::{ensure_collection_is_active, register_created_doc, write_local_create};
+use super::helpers::{
+    ensure_collection_is_active, register_created_doc, write_branchable_collection_block,
+    write_local_create,
+};
 use super::*;
 
 use db_blocks::DocStorageIdentity;
@@ -134,42 +137,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            // Store encryption config per-document so updates re-apply it
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
             // Bundle the doc blob + index write with the counter-store seeding so
             // the authoritative CRDT accumulation store is always seeded on create
             // (#1021 single-store invariant) — enforced by construction in
             // `write_local_create`.
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
 
-            // For branchable collections, create a collection-level block
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write collection block for branchable create"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             Ok((doc_id, block_result.cid, block_result.block, col_block_data))
         }

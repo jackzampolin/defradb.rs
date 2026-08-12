@@ -8,11 +8,13 @@
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
+use query::doc_stream::DocStream;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{IterOptions, Store};
 use tracing::warn;
 
+use crate::collection_stream::CollectionDocStream;
 use crate::database::DB;
 use crate::txn::DbTxn;
 use crate::versioned_fetcher::VersionedFetcher;
@@ -122,6 +124,58 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         }
 
         result
+    }
+
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn DocStream>> {
+        // Get collection from DB cache
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create a read-only transaction. Unlike the other methods here, this
+        // one must stay open for the stream's lifetime, so it is handed to
+        // AutoCommitDocStream instead of being discarded before returning.
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        let prefix = collection.collection_key_prefix();
+        let prefix_len = prefix.len();
+        let opts = IterOptions::new().with_prefix(prefix);
+        let iter = datastore
+            .iterator(opts)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        let inner = CollectionDocStream::new(
+            collection,
+            datastore,
+            systemstore,
+            iter,
+            prefix_len,
+            show_deleted,
+        );
+
+        Ok(Box::new(AutoCommitDocStream {
+            inner: Some(Box::new(inner)),
+            txn: std::sync::Mutex::new(Some(txn)),
+        }))
     }
 
     async fn get_by_ids(
@@ -352,3 +406,76 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         Ok(items)
     }
 }
+
+/// Pulls documents from storage, owning the read-only transaction opened for
+/// it (auto-commit fetchers open one per operation instead of reusing a
+/// caller-managed one).
+///
+/// `release_read_txn` drops the inner stream first so its `NamespaceView`s
+/// give up their `Arc<SharedTxn>` clones, then discards the transaction -
+/// `BasicTxn::discard` requires sole ownership of that Arc. `txn` is wrapped
+/// in a `std::sync::Mutex` purely so `DbTxn`'s non-`Sync` callback storage
+/// doesn't stop this struct satisfying `DocStream`'s `MaybeSendSync` bound;
+/// every access goes through `&mut self` via `get_mut`, so it never actually
+/// locks.
+struct AutoCommitDocStream<S: Store + 'static> {
+    inner: Option<Box<dyn DocStream>>,
+    txn: std::sync::Mutex<Option<DbTxn<S>>>,
+}
+
+impl<S: Store + 'static> AutoCommitDocStream<S> {
+    fn release_read_txn(&mut self) {
+        self.inner = None;
+        let slot = self
+            .txn
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(txn) = slot.take() {
+            if let Err(e) = txn.discard() {
+                warn!(error = %e, "failed to discard auto-commit stream transaction");
+            }
+        }
+    }
+
+    /// Close the inner stream, then release the transaction whether or not the
+    /// close succeeded. Go propagates iterator-close errors from its
+    /// exhaustion path (`fetcher/prefix.go`, `fetcher/multi.go`); the release
+    /// is unconditional because a leaked read transaction is worse than a
+    /// swallowed cleanup error.
+    async fn close_inner_then_release(&mut self) -> query::error::Result<()> {
+        let closed = match self.inner.take() {
+            Some(mut inner) => inner.close().await,
+            None => Ok(()),
+        };
+        self.release_read_txn();
+        closed
+    }
+}
+
+impl<S: Store + 'static> Drop for AutoCommitDocStream<S> {
+    fn drop(&mut self) {
+        self.release_read_txn();
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + 'static> DocStream for AutoCommitDocStream<S> {
+    async fn next(&mut self) -> query::error::Result<Option<(Document, bool)>> {
+        let pulled = match self.inner.as_mut() {
+            Some(inner) => inner.next().await?,
+            None => None,
+        };
+        if pulled.is_none() {
+            self.close_inner_then_release().await?;
+        }
+        Ok(pulled)
+    }
+
+    async fn close(&mut self) -> query::error::Result<()> {
+        self.close_inner_then_release().await
+    }
+}
+
+#[cfg(test)]
+mod tests;

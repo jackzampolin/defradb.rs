@@ -70,7 +70,7 @@ use acp::DocumentACP;
 use blockstore::Blockstore;
 use cid::Cid;
 use parking_lot::Mutex;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
@@ -157,6 +157,12 @@ pub struct SyncStatus {
 
 struct SyncShutdownState {
     is_shutting_down: AtomicBool,
+    /// Wakes tasks parked in [`SyncShutdownHandle::cancelled`] the moment
+    /// shutdown begins, so a periodic loop exits on the signal instead of at
+    /// the end of its sleep. Carries no state of its own; `is_shutting_down`
+    /// remains the single source of truth and stays a plain atomic because it
+    /// is read on hot paths.
+    shutdown_notify: Notify,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Long-lived poll fetches keyed by pending-DAG root. The retry clock may
     /// re-emit a root before its previous bounded fetch has exhausted all
@@ -236,6 +242,7 @@ impl SyncShutdownHandle {
         Self {
             inner: Arc::new(SyncShutdownState {
                 is_shutting_down: AtomicBool::new(false),
+                shutdown_notify: Notify::new(),
                 background_tasks: Mutex::new(Vec::new()),
                 pending_dag_fetch_tasks: Mutex::new(HashMap::new()),
             }),
@@ -243,11 +250,40 @@ impl SyncShutdownHandle {
     }
 
     fn begin_shutdown(&self) -> bool {
-        !self.inner.is_shutting_down.swap(true, Ordering::AcqRel)
+        let won = !self.inner.is_shutting_down.swap(true, Ordering::AcqRel);
+        if won {
+            // Wake every parked `cancelled()` waiter. Ordering matters: the
+            // flag is set first, so a waiter that registers between the swap
+            // and this call observes the flag and never parks.
+            self.inner.shutdown_notify.notify_waiters();
+        }
+        won
     }
 
     pub fn is_shutting_down(&self) -> bool {
         self.inner.is_shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Resolves as soon as shutdown begins, and immediately if it already has.
+    ///
+    /// Periodic loops select on this against their sleep so they exit on the
+    /// signal rather than at the end of an interval, matching Go's
+    /// `select { case <-ctx.Done(): ... }` shape in
+    /// `internal/db/p2p/replicator.go`.
+    pub async fn cancelled(&self) {
+        // Register before observing the flag: a `notify_waiters` that lands
+        // after this point wakes us, and one that landed before it is
+        // reflected in the flag we are about to read. Checking first would
+        // leave a window where neither happens and the caller parks forever.
+        let notified = self.inner.shutdown_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        if self.is_shutting_down() {
+            return;
+        }
+
+        notified.await;
     }
 
     pub async fn shutdown(&self) {
@@ -531,7 +567,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 return;
             }
             self.manager.resync_persisted_pending_dags().await;
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = self.runtime.shutdown.cancelled() => return,
+            }
         }
     }
 
@@ -547,7 +586,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             if self.runtime.shutdown.is_shutting_down() {
                 return;
             }
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = self.runtime.shutdown.cancelled() => return,
+            }
             let due = self
                 .manager
                 .claim_due_pending_dag_retries(tokio::time::Instant::now());
@@ -833,5 +875,79 @@ mod shutdown_tests {
             "shutdown should use one shared deadline, got {:?}",
             elapsed
         );
+    }
+
+    /// #1309: a periodic loop must exit on the shutdown signal, not at the end
+    /// of its sleep. The pending-DAG sweeps used a bare `sleep(interval)`, so a
+    /// task spawned before shutdown kept its `Arc<SyncCoordinator>` (and through
+    /// it the store) alive for up to the interval: 60s for the resync sweep.
+    ///
+    /// The interval here is an hour on purpose. Without the cancellation arm
+    /// this test cannot pass by waiting; it can only pass by being woken.
+    #[tokio::test]
+    async fn periodic_loop_exits_on_the_signal_not_the_interval() {
+        let shutdown = SyncShutdownHandle::new();
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let loop_shutdown = shutdown.clone();
+        let loop_exited = Arc::clone(&exited);
+        let task = tokio::spawn(async move {
+            loop {
+                if loop_shutdown.is_shutting_down() {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
+                    _ = loop_shutdown.cancelled() => break,
+                }
+            }
+            loop_exited.store(true, Ordering::SeqCst);
+        });
+
+        // Let the loop reach its sleep so the wakeup, not the entry check, is
+        // what ends it.
+        tokio::task::yield_now().await;
+        assert!(
+            !exited.load(Ordering::SeqCst),
+            "loop must still be parked before shutdown is signalled"
+        );
+
+        shutdown.shutdown().await;
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("loop must wake on the signal, not wait out its interval")
+            .expect("loop task should not panic");
+        assert!(exited.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_returns_immediately_when_shutdown_already_began() {
+        let shutdown = SyncShutdownHandle::new();
+        shutdown.shutdown().await;
+
+        tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+            .await
+            .expect("cancelled() must not park once shutdown has begun");
+    }
+
+    /// The register-then-check ordering in `cancelled()` is what makes this
+    /// pass: a waiter that observed the flag as false must still be woken by
+    /// the `notify_waiters` that follows the flag store.
+    #[tokio::test]
+    async fn cancelled_does_not_miss_a_shutdown_racing_its_registration() {
+        for _ in 0..256 {
+            let shutdown = SyncShutdownHandle::new();
+            let waiter_shutdown = shutdown.clone();
+            let waiter = tokio::spawn(async move { waiter_shutdown.cancelled().await });
+
+            let signaller = tokio::spawn(async move { shutdown.shutdown().await });
+
+            tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .expect("cancelled() lost the wakeup and parked forever")
+                .expect("waiter should not panic");
+            signaller.await.expect("signaller should not panic");
+        }
     }
 }

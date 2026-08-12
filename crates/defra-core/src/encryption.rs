@@ -5,13 +5,33 @@
 //!
 //! # Key generation model
 //!
-//! Each encrypted write generates a fresh random AES-256 key via
-//! [`generate_encryption_key`]. The key is stored alongside its ciphertext
-//! in a separate `Encryption` block (see
+//! A write that explicitly requests encryption generates a fresh random
+//! AES-256 key via [`generate_encryption_key`]. The key is stored alongside
+//! its ciphertext in a separate `Encryption` block (see
 //! [`crate::block_signature::Encryption`]), and the data block links to it
 //! via its `encryption: Option<Cid>` field. Decryption loads the
 //! `Encryption` block by CID and reads the key directly — no master key
 //! is needed at the receiver.
+//!
+//! A write that carries no config does not turn encryption off: the block
+//! writer inherits the previous block's key and `Encryption` link, so a field
+//! created encrypted stays encrypted under one key for its whole history until
+//! a new explicit request rotates it. The DAG, not any process-local state, is
+//! what records that a document is encrypted — see `db-blocks`'
+//! `inherited_encryption`, mirroring Go's `determineBlockEncryption` in
+//! `internal/core/block/store.go`.
+//!
+//! Inheritance is per field and requires a previous head. A field first
+//! written by an update has none, so on a document encrypted as a whole it
+//! falls back to the document-level policy recorded by the composite block's
+//! encryption link, which mints it a key rather than leaving it in the clear.
+//! Go writes that field in plaintext instead (its head set is per-field,
+//! `internal/core/block/store.go`); this is a deliberate divergence.
+//!
+//! Reusing one key across a field's history is sound because every delta is
+//! sealed with a fresh random 96-bit nonce (see `crypto::encryption::nonce`).
+//! That uniqueness is load-bearing under this model: a deterministic or
+//! counter-based nonce would repeat a (key, nonce) pair across updates.
 //!
 //! This matches Go DefraDB's `internal/encryption/encryptor.go` exactly.
 //! The previous Rust implementation derived keys deterministically from
@@ -27,9 +47,7 @@
 
 use rand::RngCore;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
@@ -81,9 +99,10 @@ impl AsRef<[u8]> for EncryptionKey {
 /// Encryption policy for a CRDT document mutation.
 ///
 /// Carries which fields should be encrypted; does NOT carry any key
-/// material. Each encrypted write generates a fresh random key via
-/// [`generate_encryption_key`] and stores it in the per-block
-/// `Encryption` metadata.
+/// material. A write that supplies this config generates a fresh random key
+/// via [`generate_encryption_key`] and stores it in the per-block
+/// `Encryption` metadata; a write without one inherits the previous block's
+/// key instead of dropping to plaintext.
 #[derive(Debug, Clone, Default)]
 pub struct EncryptionConfig {
     pub encrypt_doc: bool,
@@ -184,43 +203,6 @@ pub fn set_encryption_config(config: Option<EncryptionConfig>) {
 /// Get the current encryption config for this thread.
 pub fn get_encryption_config() -> Option<EncryptionConfig> {
     CURRENT_ENCRYPTION_CONFIG.with(|c| c.borrow().clone())
-}
-
-/// Global per-document encryption store.
-/// Maps docID → EncryptionConfig so updates can re-apply encryption
-/// that was set during document creation.
-static DOC_ENCRYPTION_STORE: std::sync::OnceLock<Mutex<HashMap<String, EncryptionConfig>>> =
-    std::sync::OnceLock::new();
-
-fn doc_encryption_store() -> &'static Mutex<HashMap<String, EncryptionConfig>> {
-    DOC_ENCRYPTION_STORE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-const MAX_DOC_ENCRYPTION_ENTRIES: usize = 10_000;
-
-/// Store encryption config for a document.
-pub fn store_doc_encryption(doc_id: &str, config: EncryptionConfig) {
-    if let Ok(mut store) = doc_encryption_store().lock() {
-        if store.len() >= MAX_DOC_ENCRYPTION_ENTRIES {
-            store.clear();
-        }
-        store.insert(doc_id.to_string(), config);
-    }
-}
-
-/// Retrieve stored encryption config for a document.
-pub fn get_doc_encryption(doc_id: &str) -> Option<EncryptionConfig> {
-    doc_encryption_store()
-        .lock()
-        .ok()
-        .and_then(|store| store.get(doc_id).cloned())
-}
-
-/// Clear all stored encryption configs (for node cleanup).
-pub fn clear_doc_encryption_store() {
-    if let Ok(mut store) = doc_encryption_store().lock() {
-        store.clear();
-    }
 }
 
 #[cfg(test)]

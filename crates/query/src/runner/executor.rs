@@ -452,19 +452,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // and ACP checks see uncommitted state.
         let result = if let Some(provider) = txn_provider {
             if let Some(deferred_acp_mutations) = deferred_acp_mutations {
-                super::TXN_COLLECTION_PROVIDER
-                    .scope(
-                        provider,
-                        crate::txn::scope_deferred_acp_mutations(
-                            deferred_acp_mutations,
-                            await_with_timeout(execution, self.query_timeout),
-                        ),
-                    )
-                    .await
+                super::scope_txn_collection_provider(
+                    provider,
+                    crate::txn::scope_deferred_acp_mutations(
+                        deferred_acp_mutations,
+                        await_with_timeout(execution, self.query_timeout),
+                    ),
+                )
+                .await
             } else {
-                super::TXN_COLLECTION_PROVIDER
-                    .scope(provider, await_with_timeout(execution, self.query_timeout))
-                    .await
+                super::scope_txn_collection_provider(
+                    provider,
+                    await_with_timeout(execution, self.query_timeout),
+                )
+                .await
             }
         } else if let Some(deferred_acp_mutations) = deferred_acp_mutations {
             crate::txn::scope_deferred_acp_mutations(
@@ -576,6 +577,18 @@ mod tests {
             Ok(vec![self.make_doc(format!("auto-{call}"))])
         }
 
+        /// In-memory mock: there is no storage to stream from.
+        async fn stream_all_with_deleted(
+            &self,
+            collection_name: &str,
+            show_deleted: bool,
+        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+            Ok(Box::new(crate::doc_stream::VecStream::new(
+                self.get_all_with_deleted(collection_name, show_deleted)
+                    .await?,
+            )))
+        }
+
         async fn get_by_ids(
             &self,
             collection_name: &str,
@@ -636,6 +649,18 @@ mod tests {
 
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             Ok(vec![make_users_doc("serial")])
+        }
+
+        /// In-memory mock: there is no storage to stream from.
+        async fn stream_all_with_deleted(
+            &self,
+            collection_name: &str,
+            show_deleted: bool,
+        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+            Ok(Box::new(crate::doc_stream::VecStream::new(
+                self.get_all_with_deleted(collection_name, show_deleted)
+                    .await?,
+            )))
         }
 
         async fn get_by_ids(

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use document::Document;
 use std::marker::PhantomData;
 
+use crate::doc_stream::DocStream;
 use crate::error::{QueryError, Result};
 use crate::fetcher::{CommitsQueryOptions, DocFetcher, FetchByIdsResult};
 use crate::planner::index_selection::IndexScanParams;
@@ -108,6 +109,26 @@ impl DocFetcher for FetcherWrapper {
             .map_err(|e| {
                 QueryError::execution(format!(
                     "fetcher error during planner execution for collection '{}' (get_all_with_deleted): {}",
+                    collection_name, e
+                ))
+            })
+    }
+
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> Result<Box<dyn DocStream>> {
+        // Forwards to the wrapped fetcher's own streaming override, so a
+        // bounded downstream consumer still short-circuits the underlying
+        // scan through this wrapper instead of paying for the whole
+        // collection.
+        self.get_fetcher()
+            .stream_all_with_deleted(collection_name, show_deleted)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (stream_all_with_deleted): {}",
                     collection_name, e
                 ))
             })

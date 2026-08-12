@@ -5,15 +5,18 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::iterator::RocksDbMergingIterator;
 use super::metrics::RocksDbTransactionMetrics;
 use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
 };
+use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
+use crate::empty_iterator::EmptyIterator;
+use crate::merging::MergingIterator;
+use crate::range_bounds::compute_range_bounds;
 
 /// Owned snapshot that holds an `Arc<DB>` to ensure the DB outlives the snapshot.
 ///
@@ -65,7 +68,9 @@ impl OwnedSnapshot {
 /// RocksDB transaction with snapshot isolation and buffered writes.
 pub(crate) struct RocksDbTxn {
     pub(crate) db: Arc<rocksdb::OptimisticTransactionDB>,
-    snapshot: OwnedSnapshot,
+    /// Shared so a chunked scan's per-window refill closure can hold its own
+    /// handle without borrowing `&self` past the `iterator()` call.
+    snapshot: Arc<OwnedSnapshot>,
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
     pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
     pub(crate) commit_gate: Arc<tokio::sync::RwLock<()>>,
@@ -127,7 +132,7 @@ impl RocksDbTxn {
             || conflict_tracker.current_version(),
             |snapshot| snapshot.version(),
         );
-        let snapshot = OwnedSnapshot::new(Arc::clone(&db));
+        let snapshot = Arc::new(OwnedSnapshot::new(Arc::clone(&db)));
 
         Self {
             db,
@@ -224,32 +229,24 @@ impl Reader for RocksDbTxn {
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
         // Compute range bounds
-        let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let Some((start_bound, end_bound)) = compute_range_bounds(&opts) else {
+            return Ok(Box::new(EmptyIterator::new()));
+        };
 
-        // Read matching items from RocksDB snapshot
-        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = {
+        let snapshot = if opts.reverse() {
+            // Chunked forward reads cannot be reversed after the fact, and
+            // reverse scans are not on the limit hot path: read everything
+            // matching eagerly, exactly as before.
+            let mut items = Vec::new();
             let mut read_opts = rocksdb::ReadOptions::default();
-
             if let Bound::Included(ref start) = start_bound {
                 read_opts.set_iterate_lower_bound(start.clone());
             }
-            match &end_bound {
-                Bound::Excluded(ref end) => {
-                    read_opts.set_iterate_upper_bound(end.clone());
-                }
-                Bound::Included(ref end) => {
-                    let mut upper = end.clone();
-                    upper.push(0);
-                    read_opts.set_iterate_upper_bound(upper);
-                }
-                Bound::Unbounded => {}
-            }
+            set_upper_bound(&mut read_opts, &end_bound);
 
             let iter = self
                 .snapshot
                 .iterator_opt(rocksdb::IteratorMode::Start, read_opts);
-
-            let mut items = Vec::new();
             for result in iter {
                 match result {
                     Ok((k, v)) => {
@@ -267,10 +264,69 @@ impl Reader for RocksDbTxn {
                     }
                 }
             }
-            items
+            items.reverse();
+            // Already fully materialized: the whole (reversed) result is
+            // handed over as the one and only window.
+            ChunkedSnapshot::from_window(items)
+        } else {
+            // `set_iterate_lower_bound` is inclusive, so an `Excluded` start
+            // needs its key's successor (`+ 0x00`) — the same adjustment the
+            // refill below makes for `after`.
+            let initial_lower = match &start_bound {
+                Bound::Included(start) => Some(start.clone()),
+                Bound::Unbounded => None,
+                Bound::Excluded(start) => Some({
+                    let mut succ = start.clone();
+                    succ.push(0);
+                    succ
+                }),
+            };
+            let end_bound_for_chunk = end_bound.clone();
+            let prefix = opts.prefix().map(|p| p.to_vec());
+            let snapshot = Arc::clone(&self.snapshot);
+            ChunkedSnapshot::new(DEFAULT_CHUNK_SIZE, move |after: Option<Vec<u8>>| {
+                // Only the lower bound moves between refills, to
+                // `after`'s exclusive successor (`after + 0x00`); the upper
+                // bound is fixed for the whole scan.
+                let lower = match &after {
+                    Some(k) => {
+                        let mut succ = k.clone();
+                        succ.push(0);
+                        Some(succ)
+                    }
+                    None => initial_lower.clone(),
+                };
+                let result = (|| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+                    let mut read_opts = rocksdb::ReadOptions::default();
+                    if let Some(lower) = &lower {
+                        read_opts.set_iterate_lower_bound(lower.clone());
+                    }
+                    set_upper_bound(&mut read_opts, &end_bound_for_chunk);
+
+                    let iter = snapshot.iterator_opt(rocksdb::IteratorMode::Start, read_opts);
+                    let mut items = Vec::new();
+                    for r in iter {
+                        let (k, v) = r.map_err(|e| {
+                            Error::Backend(format!("rocksdb iterator error: {}", e))
+                        })?;
+                        let key_bytes = k.as_ref();
+                        if prefix.as_deref().is_none_or(|p| key_bytes.starts_with(p)) {
+                            items.push((
+                                key_bytes.to_vec(),
+                                if keys_only { Vec::new() } else { v.to_vec() },
+                            ));
+                            if items.len() >= DEFAULT_CHUNK_SIZE {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(items)
+                })();
+                async move { result }
+            })
         };
 
-        // Extract pending items in range
+        // Extract pending items into Vec (sorted by BTreeMap, with Option for deletions)
         let pending = self.pending.lock();
         let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = pending
             .range((start_bound, end_bound))
@@ -284,66 +340,28 @@ impl Reader for RocksDbTxn {
             })
             .collect();
 
-        Ok(Box::new(RocksDbMergingIterator::new(
-            snapshot_items,
+        Ok(Box::new(MergingIterator::new(
+            snapshot,
             pending_items,
             opts,
         )))
     }
 }
 
-/// Compute the start and end bounds for a range query from IterOptions.
-fn compute_range_bounds(opts: &IterOptions) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-    let start_bound = match (opts.prefix(), opts.start()) {
-        (Some(prefix), Some(start)) => {
-            if prefix > start {
-                Bound::Included(prefix.to_vec())
-            } else {
-                Bound::Included(start.to_vec())
-            }
+/// Apply `end_bound` as `read_opts`'s upper bound.
+///
+/// `set_iterate_upper_bound` is exclusive, so an `Included` bound needs its
+/// key's successor (`+ 0x00`) to still cover the key itself.
+fn set_upper_bound(read_opts: &mut rocksdb::ReadOptions, end_bound: &Bound<Vec<u8>>) {
+    match end_bound {
+        Bound::Excluded(end) => read_opts.set_iterate_upper_bound(end.clone()),
+        Bound::Included(end) => {
+            let mut upper = end.clone();
+            upper.push(0);
+            read_opts.set_iterate_upper_bound(upper);
         }
-        (Some(prefix), None) => Bound::Included(prefix.to_vec()),
-        (None, Some(start)) => Bound::Included(start.to_vec()),
-        (None, None) => Bound::Unbounded,
-    };
-
-    let end_bound = match (opts.prefix(), opts.end()) {
-        (Some(prefix), Some(end)) => {
-            let prefix_end = prefix_to_end_bound(prefix);
-            if let Some(pe) = prefix_end {
-                if pe.as_slice() < end {
-                    Bound::Excluded(pe)
-                } else {
-                    Bound::Excluded(end.to_vec())
-                }
-            } else {
-                Bound::Excluded(end.to_vec())
-            }
-        }
-        (Some(prefix), None) => match prefix_to_end_bound(prefix) {
-            Some(end) => Bound::Excluded(end),
-            None => Bound::Unbounded,
-        },
-        (None, Some(end)) => Bound::Excluded(end.to_vec()),
-        (None, None) => Bound::Unbounded,
-    };
-
-    (start_bound, end_bound)
-}
-
-fn prefix_to_end_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    if prefix.is_empty() {
-        return None;
+        Bound::Unbounded => {}
     }
-
-    let mut end = prefix.to_vec();
-    while let Some(last) = end.pop() {
-        if last < 0xFF {
-            end.push(last + 1);
-            return Some(end);
-        }
-    }
-    None
 }
 
 #[async_trait]

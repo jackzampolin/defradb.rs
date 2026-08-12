@@ -31,6 +31,7 @@ mod mutation;
 mod mutation_inputs;
 mod plan;
 mod plan_aggregates;
+mod plan_drive;
 mod plan_formatting;
 mod plan_validation;
 mod query;
@@ -56,12 +57,41 @@ use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
 
+#[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     /// Per-request collection provider override for transaction-scoped schema resolution.
     ///
     /// When a query executes within a transaction that has uncommitted schema changes,
     /// this is set to a transaction-aware provider so `get_collection()` sees the new schemas.
     static TXN_COLLECTION_PROVIDER: Arc<dyn CollectionProvider>;
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static TXN_COLLECTION_PROVIDER: std::cell::RefCell<Option<Arc<dyn CollectionProvider>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+async fn scope_txn_collection_provider<F>(
+    provider: Arc<dyn CollectionProvider>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    return TXN_COLLECTION_PROVIDER.scope(provider, future).await;
+
+    #[cfg(target_arch = "wasm32")]
+    defra_core::wasm_task_local::scope(&TXN_COLLECTION_PROVIDER, provider, future).await
+}
+
+fn current_txn_collection_provider() -> Option<Arc<dyn CollectionProvider>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return TXN_COLLECTION_PROVIDER.try_with(Clone::clone).ok();
+
+    #[cfg(target_arch = "wasm32")]
+    defra_core::wasm_task_local::try_with(&TXN_COLLECTION_PROVIDER, Clone::clone)
 }
 
 // Re-export for backwards compatibility
@@ -407,9 +437,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Returns the transaction-scoped provider if set (via task-local storage),
     /// otherwise returns the default process-wide provider.
     fn effective_provider(&self) -> Arc<dyn CollectionProvider> {
-        TXN_COLLECTION_PROVIDER
-            .try_with(|p| p.clone())
-            .unwrap_or_else(|_| self.collection_provider.clone())
+        current_txn_collection_provider().unwrap_or_else(|| self.collection_provider.clone())
     }
 
     /// Get the names of all collections.

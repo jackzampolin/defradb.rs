@@ -14,6 +14,7 @@ use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::plan;
+use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
@@ -283,15 +284,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan.document_map().clone();
 
         // Execute the plan and collect results
-        plan.init().await?;
-        plan.start().await?;
+        let outcome = async {
+            plan.init().await?;
+            plan.start().await?;
 
-        let mut docs = Vec::new();
-        while plan.next().await? {
-            let doc = plan.value().deep_clone();
-            docs.push(doc);
+            let mut docs = Vec::new();
+            while plan.next().await? {
+                let doc = plan.value().deep_clone();
+                docs.push(doc);
+            }
+            Ok(docs)
         }
-        plan.close().await?;
+        .await;
+
+        let docs = plan_drive::close_after(plan.as_mut(), outcome).await?;
 
         // Compute the aggregate based on type
         let value = match agg.aggregate_type {

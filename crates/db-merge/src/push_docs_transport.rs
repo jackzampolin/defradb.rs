@@ -10,7 +10,9 @@ use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
 use crate::push_docs_creator::resolve_push_creator;
-use crate::push_docs_replay::{ReplayPushConfig, ReplayPushGate};
+use crate::push_docs_replay::{
+    persist_replay_failures, ReplayDocumentFailure, ReplayPushConfig, ReplayPushGate,
+};
 use db::database::DB;
 
 async fn document_matches_filter<R: Reader + ?Sized>(
@@ -278,70 +280,92 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                 let pid = peer_id.clone();
                 let gate = replay_gate.clone();
                 let peer_key = pid.clone();
+                let replay_doc_id = doc_id.clone();
+                let replay_collection_id = collection.collection_id().to_string();
                 let total_blocks = requests.len();
                 let permit = replay_gate
                     .acquire_document_task()
                     .await
                     .map_err(|e| format!("replay gate closed before scheduling push: {e}"))?;
-                push_handles.push(tokio::spawn(async move {
-                    let _permit = permit;
-                    let mut completed_blocks = 0usize;
-                    for req in requests {
-                        let cid = req.cid.clone();
-                        match gate
-                            .send_pushlog(&peer_key, t.send_two_stream_request(&pid, req))
-                            .await
-                        {
-                            Ok(reply) if reply.err_message.is_some() => {
-                                tracing::warn!(
-                                    peer_id = %pid,
-                                    completed_blocks,
-                                    total_blocks,
-                                    cid_len = cid.len(),
-                                    error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
-                                    "Existing document replay PushLog was rejected; stopping replay for this document"
-                                );
-                                break;
-                            }
-                            Ok(_) => {
-                                completed_blocks += 1;
-                            }
-                            Err(e) => {
-                                if e.is_connection_like() {
-                                    tracing::debug!(
-                                        peer_id = %pid,
-                                        completed_blocks,
-                                        total_blocks,
-                                        cid_len = cid.len(),
-                                        error = %e,
-                                        "Existing document replay stopped because the connection became unavailable"
-                                    );
-                                } else {
+                push_handles.push((
+                    replay_doc_id,
+                    replay_collection_id,
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let mut completed_blocks = 0usize;
+                        for req in requests {
+                            let cid = req.cid.clone();
+                            match gate
+                                .send_pushlog_with_rate_limit_retry(&peer_key, || {
+                                    t.send_two_stream_request(&pid, req.clone())
+                                })
+                                .await
+                            {
+                                Ok(reply) if reply.err_message.is_some() => {
                                     tracing::warn!(
                                         peer_id = %pid,
                                         completed_blocks,
                                         total_blocks,
                                         cid_len = cid.len(),
-                                        error = %e,
-                                        "Existing document replay PushLog failed; stopping replay for this document"
+                                        error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
+                                        "Existing document replay PushLog was rejected; deferring document to persisted retry"
                                     );
+                                    return false;
                                 }
-                                break;
+                                Ok(_) => {
+                                    completed_blocks += 1;
+                                }
+                                Err(e) => {
+                                    if e.is_connection_like() {
+                                        tracing::debug!(
+                                            peer_id = %pid,
+                                            completed_blocks,
+                                            total_blocks,
+                                            cid_len = cid.len(),
+                                            error = %e,
+                                            "Existing document replay stopped because the connection became unavailable"
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            peer_id = %pid,
+                                            completed_blocks,
+                                            total_blocks,
+                                            cid_len = cid.len(),
+                                            error = %e,
+                                            "Existing document replay PushLog failed; deferring document to persisted retry"
+                                        );
+                                    }
+                                    return false;
+                                }
                             }
                         }
-                    }
-                }));
+                        true
+                    }),
+                ));
             }
         }
     }
 
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
-    for jh in push_handles {
-        if let Err(e) = jh.await {
-            tracing::error!(error = %e, "Replay push task panicked or was cancelled");
+    let mut replay_failures = Vec::new();
+    for (doc_id, collection_id, jh) in push_handles {
+        match jh.await {
+            Ok(true) => {}
+            Ok(false) => replay_failures.push(ReplayDocumentFailure {
+                doc_id,
+                collection_id,
+            }),
+            Err(error) => {
+                tracing::error!(%error, %doc_id, "Replay push task panicked or was cancelled");
+                replay_failures.push(ReplayDocumentFailure {
+                    doc_id,
+                    collection_id,
+                });
+            }
         }
     }
     tracing::debug!("all push tasks completed");
+    persist_replay_failures(db.store().clone(), peer_id, &replay_failures).await?;
 
     if skipped_creator_docs > 0 {
         return Err(format!(

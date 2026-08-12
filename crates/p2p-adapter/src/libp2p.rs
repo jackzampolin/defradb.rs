@@ -893,7 +893,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()> {
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+        timeout: Option<std::time::Duration>,
+    ) -> P2PResult<()> {
         let pusher = self
             .doc_pusher
             .as_ref()
@@ -905,13 +910,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no event bus for sync"))?;
 
-        let connected_peers = self.handle.connected_peers().await.map_err(|error| {
-            P2PError::transport(format!("failed to get connected peers: {error}"))
-        })?;
-        if connected_peers.is_empty() {
-            return Ok(());
-        }
-
         // Wire-compatible with Go (#828): use pubsub_rpc doc-sync when the
         // coordinator has it. `pubsub_sync_documents` also feeds each
         // received reply through the coordinator's DAG-fetch scheduler,
@@ -922,131 +920,77 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .sync_coordinator
             .as_ref()
             .is_some_and(|coord| coord.pubsub_services_ready());
-        let sync_peer_count = if use_pubsub {
-            self.handle
-                .topic_peers(DefraTopic::DocSync)
-                .await
-                .map_err(|error| {
-                    P2PError::transport(format!("failed to get doc-sync topic peers: {error}"))
-                })?
-                .len()
-        } else {
-            connected_peers.len()
-        };
-        if sync_peer_count == 0 {
-            return Ok(());
+        if !use_pubsub {
+            // Parallelism 1: libp2p's send is fire-and-forget, dispatched one
+            // peer at a time.
+            return crate::doc_sync::sync::sync_documents(
+                Arc::new(self.handle.clone()),
+                event_bus.as_ref(),
+                doc_ids,
+                timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT),
+                1,
+            )
+            .await;
+        }
+
+        let connected_peers = self.handle.connected_peers().await.map_err(|error| {
+            P2PError::transport(format!("failed to get connected peers: {error}"))
+        })?;
+        if connected_peers.is_empty() {
+            return Err(P2PError::transport("no connected peers to sync with"));
         }
 
         let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
-        let total_expected = sync_peer_count * doc_ids.len();
-        let mut total_received = 0;
-        let overall_timeout = std::time::Duration::from_secs(30);
-        let idle_timeout = std::time::Duration::from_secs(3);
+        // A caller deadline covers the whole operation, as Go's single wait
+        // context does. `start` is taken before the publish, so the merge loop
+        // below gets whatever the reply wait leaves rather than a second full
+        // budget.
+        let overall_timeout = timeout.unwrap_or(crate::doc_sync::DEFAULT_DOC_SYNC_TIMEOUT);
         let start = std::time::Instant::now();
         let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
 
-        if use_pubsub {
-            let coord = self
-                .sync_coordinator
-                .as_ref()
-                .expect("pubsub readiness requires a coordinator");
-            let replies = coord
-                .pubsub_sync_documents(
-                    doc_ids,
-                    Some(std::time::Duration::from_secs(8)),
-                    Some(sync_peer_count),
-                )
-                .await
-                .map_err(|error| {
-                    event_bus.unsubscribe(sub.id());
-                    P2PError::transport(format!("pubsub_rpc doc-sync failed: {error}"))
-                })?;
-            let heads = replies
-                .into_iter()
-                .flat_map(|(_, reply)| reply.results)
-                .flat_map(|item| item.heads)
-                .filter_map(|head| cid::Cid::try_from(head.as_slice()).ok());
-            let mut pending_heads =
-                unmerged_doc_sync_heads(coord.blockstore().as_ref(), heads).await;
-
-            while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
-                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
-                {
-                    Ok(Some(msg)) => {
-                        if let Some(data) = msg.as_merge_complete() {
-                            if doc_set.contains(&data.doc_id) {
-                                pending_heads.remove(&data.cid);
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(_) => {}
-                }
-            }
-
-            event_bus.unsubscribe(sub.id());
-            return Ok(());
-        }
-
-        for _attempt in 0..3 {
-            if total_received >= total_expected || start.elapsed() >= overall_timeout {
-                break;
-            }
-
-            // Track whether any request was dispatched. If none were, further
-            // attempts cannot produce merges — exit like the historical CLI
-            // and iroh paths instead of burning the full overall timeout.
-            let mut any_sent = false;
-            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
-            if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
+        let coord = self
+            .sync_coordinator
+            .as_ref()
+            .expect("pubsub readiness requires a coordinator");
+        // Go's `activePeers` (`sync_doc.go:97-109`) is the connected set, so
+        // that is what a reply is expected from — not the doc-sync topic's
+        // subscriber list.
+        let expected_peers = connected_peers.len();
+        let replies = coord
+            .pubsub_sync_documents(doc_ids, Some(overall_timeout), Some(expected_peers))
+            .await
+            .map_err(|error| {
                 event_bus.unsubscribe(sub.id());
-                return Err(P2PError::internal(format!(
-                    "failed to sign DocSync request: {error}"
-                )));
+                P2PError::transport(format!("pubsub_rpc doc-sync failed: {error}"))
+            })?;
+        // Evaluated on the raw advertisement, before the merged-head filter
+        // below: a peer offering a head we already hold is a reply Go counts,
+        // and filtering first would turn it into a spurious timeout.
+        let heads = match crate::doc_sync::pubsub_replies::advertised_heads(
+            expected_peers,
+            &doc_set,
+            &replies,
+        ) {
+            Ok(heads) => heads,
+            Err(error) => {
+                event_bus.unsubscribe(sub.id());
+                return Err(error);
             }
+        };
+        let mut pending_heads = unmerged_doc_sync_heads(coord.blockstore().as_ref(), heads).await;
 
-            for peer_id in &connected_peers {
-                match self
-                    .handle
-                    .send_doc_sync_request(*peer_id, request.clone())
-                    .await
-                {
-                    Ok(_) => any_sent = true,
-                    Err(error) => {
-                        tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
-                    }
-                }
-            }
-
-            if !any_sent {
-                break;
-            }
-
-            // Idle completion matches iroh/historical CLI: exit after
-            // `idle_timeout` with no MergeComplete events, even when zero
-            // merges arrived. Requiring a minimum merge count (the previous
-            // shared-adapter gate) held HTTP handlers for the full 30s when
-            // peers had nothing to contribute — e.g. source-side explicit
-            // sync while collection replication delivers the doc out of band.
-            let mut last_merge = std::time::Instant::now();
-            while total_received < total_expected && start.elapsed() < overall_timeout {
-                if last_merge.elapsed() > idle_timeout {
-                    break;
-                }
-
-                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
-                {
-                    Ok(Some(msg)) => {
-                        if let Some(data) = msg.as_merge_complete() {
-                            if doc_set.contains(&data.doc_id) {
-                                total_received += 1;
-                                last_merge = std::time::Instant::now();
-                            }
+        while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await {
+                Ok(Some(msg)) => {
+                    if let Some(data) = msg.as_merge_complete() {
+                        if doc_set.contains(&data.doc_id) {
+                            pending_heads.remove(&data.cid);
                         }
                     }
-                    Ok(None) => break,
-                    Err(_) => {}
                 }
+                Ok(None) => break,
+                Err(_) => {}
             }
         }
 
@@ -1181,6 +1125,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 mod tests {
     use super::*;
     use blockstore::DefraBlockstore;
+    use p2p::testutil::MockBitswapStore;
     use storage::backends::MemoryStore;
 
     #[tokio::test]
@@ -1199,5 +1144,158 @@ mod tests {
         let pending = unmerged_doc_sync_heads(&blockstore, [merged, unmerged, unmerged]).await;
 
         assert_eq!(pending, HashSet::from([unmerged]));
+    }
+
+    /// #1299 regression guard for the ordering of the two steps the pubsub
+    /// branch runs: a silent peer plus a head we have already merged is a
+    /// success in Go (its `result` map holds the head), so the timeout check
+    /// must read the raw advertisement and only then drop merged heads.
+    #[tokio::test]
+    async fn already_merged_head_from_one_peer_is_not_a_timeout() {
+        let blockstore = DefraBlockstore::new(Arc::new(MemoryStore::new()), true);
+        let merged =
+            cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                .unwrap();
+        blockstore.put(&merged, b"merged").await.unwrap();
+        blockstore.mark_as_merged(&merged).await.unwrap();
+
+        let doc_set = HashSet::from(["bae-doc-1".to_string()]);
+        let replies = [(
+            "peer-a".to_string(),
+            p2p::message::pubsub::DocSyncReply {
+                results: vec![p2p::message::pubsub::DocSyncItem {
+                    doc_id: "bae-doc-1".to_string(),
+                    heads: vec![merged.to_bytes()],
+                }],
+                sender: "peer-a".to_string(),
+            },
+        )];
+
+        let heads = crate::doc_sync::pubsub_replies::advertised_heads(2, &doc_set, &replies)
+            .expect("an advertised head is a result even when a peer stays silent");
+        let pending = unmerged_doc_sync_heads(&blockstore, heads).await;
+
+        assert!(
+            pending.is_empty(),
+            "the advertised head is already merged, so nothing is left to wait for"
+        );
+    }
+
+    /// The adapter under test carries no sync coordinator, so the blockstore
+    /// generic is never exercised; a do-nothing implementation satisfies it.
+    struct NoopBlockstore;
+
+    #[async_trait]
+    impl Blockstore for NoopBlockstore {
+        async fn get(&self, _cid: &cid::Cid) -> blockstore::Result<Option<bytes::Bytes>> {
+            Ok(None)
+        }
+        async fn put(&self, _cid: &cid::Cid, _data: &[u8]) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn put_many(&self, _blocks: &[(&cid::Cid, &[u8])]) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn has(&self, _cid: &cid::Cid) -> blockstore::Result<bool> {
+            Ok(false)
+        }
+        async fn delete(&self, _cid: &cid::Cid) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn get_size(&self, _cid: &cid::Cid) -> blockstore::Result<Option<usize>> {
+            Ok(None)
+        }
+        async fn all_cids(&self) -> blockstore::Result<Vec<cid::Cid>> {
+            Ok(Vec::new())
+        }
+        fn hash_on_read(&self, _enabled: bool) {}
+        async fn is_merged(&self, _cid: &cid::Cid) -> blockstore::Result<bool> {
+            Ok(false)
+        }
+        async fn mark_as_merged(&self, _cid: &cid::Cid) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn get_unmerged(&self) -> blockstore::Result<Vec<cid::Cid>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn wait_until_connected(handle: &P2PHostHandle, peer_id: libp2p::PeerId) {
+        let start = std::time::Instant::now();
+        loop {
+            if handle
+                .connected_peers()
+                .await
+                .unwrap_or_default()
+                .contains(&peer_id)
+            {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "timed out waiting for connection to {peer_id}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Dials `handle_a` to `handle_b` and waits until each side observes the
+    /// other as connected. Mirrors `assert_hosts_connect_over` in
+    /// `crates/p2p/tests/host_tests.rs`.
+    async fn connect_hosts(handle_a: &P2PHostHandle, handle_b: &P2PHostHandle) {
+        handle_b
+            .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr_b = handle_b.listen_addresses().await.unwrap().remove(0);
+        let peer_b = handle_b.local_peer_id_cached();
+        let peer_a = handle_a.local_peer_id_cached();
+
+        handle_a.dial(peer_b, vec![addr_b]).await.unwrap();
+        wait_until_connected(handle_a, peer_b).await;
+        wait_until_connected(handle_b, peer_a).await;
+    }
+
+    /// Characterization, libp2p counterpart of the iroh test: a peer that
+    /// accepts the request but never replies leaves `sync_documents` exiting
+    /// Ok. libp2p's send is fire-and-forget, unlike iroh's, which awaits a
+    /// reply and so fails against an unresponsive peer and exits via the
+    /// `!any_sent` branch instead.
+    #[tokio::test]
+    async fn doc_sync_with_unresponsive_peer_returns_ok() {
+        let (host_a, handle_a, _events_a, _replicators_a) =
+            p2p::host::P2PHost::new(MockBitswapStore::new())
+                .await
+                .expect("host a");
+        let (host_b, handle_b, _events_b, _replicators_b) =
+            p2p::host::P2PHost::new(MockBitswapStore::new())
+                .await
+                .expect("host b");
+
+        tokio::spawn(host_a.run());
+        tokio::spawn(host_b.run());
+
+        let adapter = P2PAdapter::<NoopBlockstore> {
+            handle: handle_a.clone(),
+            sync_coordinator: None,
+            doc_pusher: Some(crate::doc_sync::test_support::StubPusher::arc_doc_pusher()),
+            event_bus: Some(Arc::new(events::ChannelBus::default())),
+            version_syncer: None,
+            replicator_push_options: ReplicatorPushOptionsState::default(),
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            nac_checker: None,
+        };
+
+        connect_hosts(&handle_a, &handle_b).await;
+
+        let result = adapter
+            .sync_documents("Users", vec!["bae-does-not-matter".to_string()], None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "unresponsive peer should currently exit via idle timeout with Ok, got: {result:?}"
+        );
     }
 }

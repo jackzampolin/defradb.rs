@@ -67,6 +67,13 @@ pub fn workspace_root() -> PathBuf {
         .expect("failed to canonicalize workspace root")
 }
 
+/// Return the configured Rust CLI binary, falling back to Cargo's debug output.
+pub fn rust_binary() -> PathBuf {
+    std::env::var_os("DEFRA_RUST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target/debug/defra"))
+}
+
 /// Generate `rust_<name>` and `go_<name>` test wrappers for a single-node test.
 ///
 /// Usage: `for_each_runtime!(name, inner_fn);` (bare builder)

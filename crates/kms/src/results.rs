@@ -6,8 +6,8 @@
 //! or `wait_all()` for a HashMap once the producer side closes.
 
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 
+use crate::channel;
 use crate::error::Result;
 use crate::types::EncryptionCid;
 
@@ -15,10 +15,10 @@ use crate::types::EncryptionCid;
 pub type ResolvedKey = (EncryptionCid, [u8; 32]);
 
 /// Receiver half of the results channel.
-pub type ResultsReceiver = mpsc::Receiver<Result<ResolvedKey>>;
+pub type ResultsReceiver = channel::Receiver<Result<ResolvedKey>>;
 
 /// Sender half, given to the producer (DefraKms or transport adapter).
-pub type ResultsSender = mpsc::Sender<Result<ResolvedKey>>;
+pub type ResultsSender = channel::Sender<Result<ResolvedKey>>;
 
 /// Streaming aggregator over `(EncryptionCid, [u8;32])` resolutions.
 pub struct KeyResults {
@@ -29,7 +29,7 @@ impl KeyResults {
     /// Build a new pair (results consumer, sender). `buffer` is the channel
     /// capacity; clamped to ≥1.
     pub fn new(buffer: usize) -> (Self, ResultsSender) {
-        let (tx, rx) = mpsc::channel(buffer.max(1));
+        let (tx, rx) = channel::bounded(buffer.max(1));
         (Self { rx }, tx)
     }
 

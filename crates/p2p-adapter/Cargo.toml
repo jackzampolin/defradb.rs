@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "DefraDB P2P adapters for HTTP-facing operations"
 
+[package.metadata.cargo-machete]
+ignored = ["hex", "serde"]
+
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
@@ -43,6 +46,7 @@ crypto = { path = "../crypto" }
 data-encoding = "2"
 db-nac = { path = "../db-nac" }
 iroh.workspace = true
+p2p = { path = "../p2p", features = ["test-utils"] }
 
 [features]
 default = ["native", "wasmtime-runtime", "iroh", "libp2p"]

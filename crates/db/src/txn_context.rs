@@ -6,8 +6,9 @@ use query::runner::DocFetcher;
 use query::txn::{DeferredAcpMutations, TransactionContext};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use storage::corekv::Store;
+use web_time::Instant;
 
 use crate::collection_provider::TxnCollectionProvider;
 use crate::database::DB;

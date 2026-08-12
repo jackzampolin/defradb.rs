@@ -26,6 +26,25 @@ impl<S: Store + 'static> BlockAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
+    async fn signed_block_bytes(
+        &self,
+        cid: &str,
+        caller_did: Option<&str>,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let caller_did = caller_did
+            .map(|did| identity::Did::try_from(did.to_string()))
+            .transpose()
+            .map_err(|error| format!("invalid caller DID: {error}"))?;
+        let caller_identity: acp::Identity = caller_did.into();
+        db::block_verify::authorized_signed_block_bytes(
+            &self.database,
+            self.document_acp.as_ref(),
+            cid,
+            &caller_identity,
+        )
+        .await
+    }
+
     async fn verify_signature(
         &self,
         cid: &str,
@@ -40,9 +59,11 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             other => return Err(format!("unsupported key type: {}", other)),
         };
 
-        let caller_identity: acp::Identity = caller_did
-            .and_then(|d| identity::Did::try_from(d.to_string()).ok())
-            .into();
+        let caller_did = caller_did
+            .map(|did| identity::Did::try_from(did.to_string()))
+            .transpose()
+            .map_err(|error| format!("invalid caller DID: {error}"))?;
+        let caller_identity: acp::Identity = caller_did.into();
 
         db::block_verify::verify_block_signature(
             &self.database,

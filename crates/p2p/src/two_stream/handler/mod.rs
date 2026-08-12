@@ -282,7 +282,7 @@ where
     })?
     .map_err(|e| Error::CborDeserialization(format!("failed to read {label}: {e}")))?;
 
-    serde_cbor::from_slice(&buf)
+    defra_core::cbor::from_slice(&buf)
         .map_err(|e| Error::CborDeserialization(format!("failed to decode {label}: {e}")))
 }
 

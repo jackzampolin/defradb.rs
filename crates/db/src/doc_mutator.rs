@@ -7,16 +7,16 @@ use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
-use tracing::warn;
 
-use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
+use crate::auto_commit_mutator::helpers::write_branchable_collection_block;
+use crate::block_builder::{write_delete_block, write_document_blocks};
 use crate::collection::Collection;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::event_emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use db_blocks::DocStorageIdentity;
-use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
+use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
@@ -258,35 +258,15 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                let short_id = collection.resolved_root_id();
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(error) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %error,
-                            "Failed to write collection block for transaction create"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             (doc_id, block_result.cid, block_result.block, col_block_data)
         };
@@ -476,8 +456,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config()
-                .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
+            let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
             let kms = self.db.kms();
 
@@ -507,31 +486,15 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             )
             .await?;
 
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                let short_id = collection.resolved_root_id();
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(error) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %error,
-                            "Failed to write collection block for transaction update"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             (block_result.cid, block_result.block, col_block_data)
         };
@@ -633,31 +596,15 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                let short_id = collection.resolved_root_id();
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(error) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %error,
-                            "Failed to write collection block for transaction delete"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             (block_result.cid, block_result.block, col_block_data)
         };

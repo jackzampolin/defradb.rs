@@ -18,7 +18,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // Deltas carry no document identity: recover it from the ownership
         // index (composites can also derive it from their DAG).
         let doc_id = match &block.delta {
-            CrdtDelta::Composite(_) => match self.resolve_composite_doc_id(cid, &block).await {
+            CrdtDelta::Composite(_) => match self.resolve_composite_doc_id(cid, &block, 0).await {
                 Ok(doc_id) => doc_id,
                 // No recoverable identity → treat as unrecoverable metadata;
                 // real infrastructure errors propagate.

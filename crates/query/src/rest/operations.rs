@@ -13,6 +13,34 @@ use crate::txn::TransactionRegistry;
 use super::error::{RestError, RestResult};
 use super::trait_def::{CollectionDocIdsPage, CollectionDocIdsPagination, RestOperations};
 
+/// Convert a JSON value to GraphQL input syntax.
+///
+/// Object keys are bare identifiers (GraphQL input objects), not JSON-quoted keys.
+/// String leaves use JSON string encoding, which is a valid GraphQL `StringValue`
+/// and matches Go DefraDB's test harness (`valueToGQL` → `encoding/json.Marshal`),
+/// including `\b`, `\f`, and `\uXXXX` for other controls.
+pub(super) fn json_to_graphql_input(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => {
+            serde_json::to_string(s).expect("serializing a string to JSON cannot fail")
+        }
+        JsonValue::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(json_to_graphql_input).collect();
+            format!("[{}]", items.join(", "))
+        }
+        JsonValue::Object(obj) => {
+            let fields: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, json_to_graphql_input(v)))
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+    }
+}
+
 /// Production implementation of REST operations using QueryRunner.
 ///
 /// This wraps a QueryRunner and translates REST operations into GraphQL queries/mutations.
@@ -24,35 +52,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     /// Create a new REST operations implementation.
     pub fn new(runner: Arc<QueryRunner<F, R>>) -> Self {
         Self { runner }
-    }
-
-    /// Convert a JSON value to GraphQL input syntax.
-    fn json_to_graphql_input(value: &JsonValue) -> String {
-        match value {
-            JsonValue::Null => "null".to_string(),
-            JsonValue::Bool(b) => b.to_string(),
-            JsonValue::Number(n) => n.to_string(),
-            JsonValue::String(s) => {
-                let escaped = s
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-                    .replace('\r', "\\r")
-                    .replace('\t', "\\t");
-                format!("\"{}\"", escaped)
-            }
-            JsonValue::Array(arr) => {
-                let items: Vec<String> = arr.iter().map(Self::json_to_graphql_input).collect();
-                format!("[{}]", items.join(", "))
-            }
-            JsonValue::Object(obj) => {
-                let fields: Vec<String> = obj
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, Self::json_to_graphql_input(v)))
-                    .collect();
-                format!("{{{}}}", fields.join(", "))
-            }
-        }
     }
 
     fn build_list_ids_query(
@@ -82,7 +81,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     }
 
     fn build_create_mutation(&self, collection: &str, data: &JsonValue) -> String {
-        let graphql_data = Self::json_to_graphql_input(data);
+        let graphql_data = json_to_graphql_input(data);
         format!(
             r#"mutation {{ add_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
             collection = collection,
@@ -91,7 +90,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     }
 
     fn build_create_many_mutation(&self, collection: &str, docs: &[JsonValue]) -> String {
-        let inputs: Vec<String> = docs.iter().map(Self::json_to_graphql_input).collect();
+        let inputs: Vec<String> = docs.iter().map(json_to_graphql_input).collect();
         format!(
             r#"mutation {{ add_{collection}(input: [{inputs}]) {{ _docID }} }}"#,
             collection = collection,
@@ -100,7 +99,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     }
 
     fn build_update_mutation(&self, collection: &str, doc_id: &str, patch: &JsonValue) -> String {
-        let graphql_patch = Self::json_to_graphql_input(patch);
+        let graphql_patch = json_to_graphql_input(patch);
         format!(
             r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {graphql_patch}) {{ _docID }} }}"#,
             collection = collection,

@@ -6,6 +6,9 @@ description = "Integration test harness for defradb"
 license = "Apache-2.0 OR MIT"
 autotests = false
 
+[package.metadata.cargo-machete]
+ignored = ["anyhow"]
+
 [[test]]
 name = "basic"
 path = "tests/basic.rs"
@@ -55,6 +58,10 @@ name = "issue1211_repro"
 path = "tests/issue1211_repro.rs"
 
 [[test]]
+name = "issue1294_bytes_json"
+path = "tests/issue1294_bytes_json.rs"
+
+[[test]]
 name = "p2p_backlog"
 path = "tests/p2p_backlog.rs"
 
@@ -99,10 +106,10 @@ name = "cursor"
 path = "tests/cursor.rs"
 
 [dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "adaf59d" }
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "adaf59d" }
+hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
 document = { path = "../../crates/document" }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde_json = "1.0"
 anyhow = "1.0"

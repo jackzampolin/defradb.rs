@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "P2P merge handler, broadcast mutator, and document pushing for DefraDB"
 
+[package.metadata.cargo-machete]
+ignored = ["futures", "serde_bytes"]
+
 [features]
 default = ["native", "wasmtime-runtime"]
 native = ["db/native"]
@@ -22,7 +25,6 @@ futures.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-serde_cbor.workspace = true
 serde_bytes.workspace = true
 ciborium = "0.2"
 hex.workspace = true
@@ -64,7 +66,7 @@ events = { path = "../events", default-features = false }
 kms = { path = "../kms" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 libp2p.workspace = true
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 
@@ -72,7 +74,7 @@ p2p = { path = "../p2p", features = ["libp2p-transport"] }
 wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 blst = "0.3"
 getrandom = "0.2"
 criterion.workspace = true

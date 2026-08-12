@@ -1,4 +1,7 @@
-use super::helpers::{ensure_collection_is_active, register_created_doc, write_local_create};
+use super::helpers::{
+    ensure_collection_is_active, register_created_doc, write_branchable_collection_block,
+    write_local_create,
+};
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -213,10 +216,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
             write_local_create(
                 &datastore,
                 &collection,
@@ -226,30 +225,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             )
             .await?;
 
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    &schema_version_id,
-                    computed.block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write collection block for branchable create"
-                        );
-                    }
-                }
-            }
+            let col_block_data = write_branchable_collection_block(
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                computed.block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
 
             results.push((
                 doc_id,

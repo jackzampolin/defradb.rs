@@ -1,5 +1,6 @@
 use super::helpers::{
-    ensure_collection_is_active, register_block_doc_id_mappings, write_local_update,
+    ensure_collection_is_active, register_block_doc_id_mappings, write_branchable_collection_block,
+    write_local_update,
 };
 use super::*;
 
@@ -216,12 +217,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
-                // Block-ownership registration is correctness-critical (P2P
-                // serve, KMS, and ACP resolution all read the index), so unlike
-                // the best-effort commits-query block writes below its failure
-                // is fatal: surfaced here and routed through the discard path.
-                let mut ownership_error: Option<String> = None;
-                let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
+                let commit_result: CommitArtifacts = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -237,11 +233,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
-                    // Get encryption config: first try thread-local (explicit in mutation),
-                    // then fall back to per-document stored config (from create with encryption).
-                    // This matches Go's behavior where encryption propagates through the DAG.
-                    let enc_config = get_encryption_config()
-                        .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
+                    // Explicit config from the mutation only. A document created
+                    // encrypted keeps its encryption because the block writer
+                    // inherits it from the previous block, matching Go's
+                    // determineBlockEncryption.
+                    let enc_config = get_encryption_config();
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
 
@@ -250,7 +246,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
-                    match write_document_blocks(
+                    let block_result = write_document_blocks(
                         &blockstore,
                         &headstore,
                         &doc,
@@ -262,71 +258,40 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         None,
                     )
                     .await
-                    {
-                        Ok(block_result) => {
-                            if let Some(doc_id) = doc.id() {
-                                match txn.systemstore() {
-                                    Ok(systemstore) => {
-                                        if let Err(e) = register_block_doc_id_mappings(
-                                            &systemstore,
-                                            &block_result,
-                                            &doc_id.to_string(),
-                                        )
-                                        .await
-                                        {
-                                            ownership_error = Some(e.to_string());
-                                        }
-                                    }
-                                    Err(e) => ownership_error = Some(e.to_string()),
-                                }
-                            }
-                            // For branchable collections, create a collection-level block
-                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                            if collection.schema().is_branchable {
-                                let short_id = collection.resolved_root_id();
-                                match write_collection_block(
-                                    &blockstore,
-                                    &headstore,
-                                    short_id,
-                                    schema_version_id,
-                                    block_result.cid,
-                                    sign_config.as_ref(),
-                                )
-                                .await
-                                {
-                                    Ok((col_cid, col_bytes)) => {
-                                        col_block_data = Some((col_cid, col_bytes));
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            collection = %collection_name,
-                                            error = %e,
-                                            "Failed to write collection block for branchable update"
-                                        );
-                                    }
-                                }
-                            }
-                            Some((block_result.cid, block_result.block, col_block_data))
-                        }
-                        Err(e) => {
-                            warn!(
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to write document blocks - commits queries may not work"
-                            );
-                            // Don't fail the mutation, just log the warning
-                            None
-                        }
-                    }
-                }; // blockstore and headstore dropped here
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to write document blocks for update on collection {}: {}",
+                            collection_name, e
+                        ))
+                    })?;
 
-                // A failed ownership registration must not commit a partial
-                // index; drop the txn (rolls back) and surface the error.
-                if let Some(e) = ownership_error {
-                    return Err(query::error::QueryError::execution(format!(
-                        "failed to record block ownership mappings for update: {e}"
-                    )));
-                }
+                    if let Some(doc_id) = doc.id() {
+                        let systemstore = txn.systemstore().map_err(|e| {
+                            query::error::QueryError::execution(format!(
+                                "failed to get systemstore: {}",
+                                e
+                            ))
+                        })?;
+                        register_block_doc_id_mappings(
+                            &systemstore,
+                            &block_result,
+                            &doc_id.to_string(),
+                        )
+                        .await?;
+                    }
+
+                    let col_block_data = write_branchable_collection_block(
+                        collection_name,
+                        &collection,
+                        &blockstore,
+                        &headstore,
+                        block_result.cid,
+                        sign_config.as_ref(),
+                    )
+                    .await?;
+
+                    (block_result.cid, block_result.block, col_block_data)
+                }; // blockstore and headstore dropped here
 
                 // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {
@@ -338,10 +303,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     return Err(crate::error::commit_query_error(e));
                 }
 
-                // Emit update event for subscriptions when blocks were written.
-                if let (Some(doc_id), Some((cid, block, col_data))) =
-                    (doc.id(), commit_result.as_ref())
-                {
+                if let Some(doc_id) = doc.id() {
+                    let (cid, block, col_data) = &commit_result;
                     self.emit_update_events(
                         &collection,
                         &doc_id.to_string(),
@@ -353,18 +316,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                 // Count modified fields
                 let fields_modified = doc.values().len();
-                match commit_result {
-                    Some((cid, block, col_data)) => {
-                        let mut result =
-                            UpdateResult::with_commit(doc, fields_modified, cid, block);
-                        if let Some((col_cid, col_bytes)) = col_data {
-                            result.broadcast_cid = Some(col_cid);
-                            result.broadcast_block = Some(col_bytes);
-                        }
-                        Ok(result)
-                    }
-                    None => Ok(UpdateResult::new(doc, fields_modified)),
+                let (cid, block, col_data) = commit_result;
+                let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
+                if let Some((col_cid, col_bytes)) = col_data {
+                    result.broadcast_cid = Some(col_cid);
+                    result.broadcast_block = Some(col_bytes);
                 }
+                Ok(result)
             }
             Err(e) => {
                 // Discard the transaction on error

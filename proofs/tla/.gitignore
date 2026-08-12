@@ -3,3 +3,8 @@ states/
 *.out
 *.toolbox/
 MC.out
+
+# TLC writes an error-trace spec next to the model whenever one violates its
+# invariant, so a full run-all.sh leaves one pair per RED model behind.
+*_TTrace_*.tla
+*_TTrace_*.bin

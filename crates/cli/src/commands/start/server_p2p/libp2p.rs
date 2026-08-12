@@ -76,21 +76,6 @@ impl Node {
         coordinator
             .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
             .await;
-        let coordinator_for_restore = coordinator.clone();
-        tokio::spawn(async move {
-            coordinator_for_restore
-                .run_pending_dag_resync(std::time::Duration::from_secs(60))
-                .await;
-        });
-
-        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
-        // roots at a tight cadence. Sibling of the resync sweep above.
-        let coordinator_for_retry_clock = coordinator.clone();
-        tokio::spawn(async move {
-            coordinator_for_retry_clock
-                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
-                .await;
-        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let handle_for_acp = handle.clone();
@@ -131,10 +116,11 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let replication = db_merge::create_replication_stack(
+        let replication = db_merge::create_replication_stack_with_max_merge_depth(
             database.clone(),
             merge_blockstore,
             coordinator.clone(),
+            config.datastore.max_merge_depth,
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
@@ -229,6 +215,28 @@ impl Node {
             )
             .await;
             info!("Replication loop stopped");
+        });
+
+        // Started here, not earlier, for two reasons (#1309). These are managed
+        // tasks: nothing can drain them until the caller owns a shutdown handle,
+        // so spawning them before the last fallible step above would leak both
+        // sweeps (and through them the store) on any early return. And the sync
+        // event channel only has its consumer once the replication loop above is
+        // running, which is the same ordering defra-node's setup_p2p documents.
+        let coordinator_for_restore = coordinator.clone();
+        coordinator.spawn_background_task("pending_dag_resync", async move {
+            coordinator_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
+        });
+
+        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
+        // roots at a tight cadence. Sibling of the resync sweep above.
+        let coordinator_for_retry_clock = coordinator.clone();
+        coordinator.spawn_background_task("pending_dag_retry_clock", async move {
+            coordinator_for_retry_clock
+                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
+                .await;
         });
 
         let coordinator_for_events = coordinator.clone();

@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "FFI bindings for DefraDB Rust implementation"
 
+[package.metadata.cargo-machete]
+ignored = ["cid", "libp2p", "serde_bytes", "serde_ipld_dagcbor", "serde_yaml", "sha2", "thiserror"]
+
 [lib]
 crate-type = ["staticlib", "cdylib", "rlib"]
 

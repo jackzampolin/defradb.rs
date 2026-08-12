@@ -413,7 +413,7 @@ impl KeyTransport for FakeTransport {
         "fake"
     }
     async fn send_request(&self, _: EncodedFetchRequest) -> crate::Result<TransportReplyStream> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = crate::transport_reply_channel(1);
         if let Some(r) = self.reply.lock().await.take() {
             let _ = tx.send(r).await;
         }
@@ -437,7 +437,7 @@ impl KeyTransport for RecordingTransport {
         request: EncodedFetchRequest,
     ) -> crate::Result<TransportReplyStream> {
         *self.payload.lock().await = Some(request.payload);
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_tx, rx) = crate::transport_reply_channel(1);
         Ok(rx)
     }
 
@@ -474,7 +474,7 @@ async fn get_keys_identifies_the_requesting_node_on_the_wire() {
         .await
         .clone()
         .expect("transport must receive a request");
-    let request: crate::FetchEncryptionKeyRequest = serde_cbor::from_slice(&payload).unwrap();
+    let request: crate::FetchEncryptionKeyRequest = defra_core::cbor::from_slice(&payload).unwrap();
     assert_eq!(request.identity, node.to_string().into_bytes());
     assert_ne!(request.identity, user.to_string().into_bytes());
 }

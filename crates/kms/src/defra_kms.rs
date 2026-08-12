@@ -267,7 +267,7 @@ impl KmsService for DefraKms {
                     explicit_replay_capability: ctx.explicit_replay_capability().map(str::to_owned),
                 };
                 let payload =
-                    serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
+                    defra_core::cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
                 let encoded = EncodedFetchRequest {
                     payload,
                     request_id: uuid::Uuid::new_v4().to_string(),
@@ -276,7 +276,7 @@ impl KmsService for DefraKms {
                     remote.iter().copied().collect();
 
                 let (transport_tx, mut transport_rx) =
-                    tokio::sync::mpsc::channel(self.transports.len().max(1) * 16);
+                    crate::channel::bounded(self.transports.len().max(1) * 16);
                 for transport in &self.transports {
                     let mut rx = match transport.send_request(encoded.clone()).await {
                         Ok(rx) => rx,
@@ -287,17 +287,11 @@ impl KmsService for DefraKms {
                     };
                     let transport_tx = transport_tx.clone();
                     spawn_task(async move {
-                        loop {
-                            tokio::select! {
-                                _ = transport_tx.closed() => break,
-                                result = rx.recv() => {
-                                    let Some(result) = result else {
-                                        break;
-                                    };
-                                    if transport_tx.send(result).await.is_err() {
-                                        break;
-                                    }
-                                }
+                        while let Some(result) =
+                            crate::channel::recv_until_closed(&mut rx, &transport_tx).await
+                        {
+                            if transport_tx.send(result).await.is_err() {
+                                break;
                             }
                         }
                     });

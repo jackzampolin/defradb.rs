@@ -8,6 +8,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::fetcher::DocFetcher;
 use crate::limits::QueryLimits;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
@@ -183,23 +184,34 @@ pub(crate) fn build_mapping(
     Ok(mapping)
 }
 
-/// Build a plan tree from a Select operation and documents.
+/// Where a plan's `ScanNode` gets its documents.
+pub(crate) enum ScanSource {
+    /// Pre-materialized documents: docID lookups, index scans, and explain paths.
+    Docs(Vec<Doc>),
+    /// A fetcher the scan streams from, so a bounded query stops the fetch.
+    Fetcher(Arc<dyn DocFetcher>),
+}
+
+/// Build a plan tree from a Select operation and a document source.
 ///
 /// If `acp_filter` is provided, a PermissionFilterNode is inserted after SelectNode
 /// but before any OrderBy/Limit/Aggregate nodes. This ensures aggregates operate
 /// on ACP-filtered documents rather than the full set.
 pub(crate) fn build_plan(
     select: &Select,
-    docs: Vec<Doc>,
+    source: ScanSource,
     mapping: DocumentMapping,
     collection: &CollectionVersion,
     acp_filter: Option<AcpFilter>,
     query_limits: QueryLimits,
 ) -> Result<Box<dyn PlanNode>> {
-    // Create ScanNode with preloaded documents, filter, and docIDs
-    let mut scan = ScanNode::new(collection.clone(), mapping.clone())
-        .with_docs(docs)
-        .with_show_deleted(select.show_deleted);
+    // Create ScanNode with a document source, filter, and docIDs
+    let scan = ScanNode::new(collection.clone(), mapping.clone());
+    let mut scan = match source {
+        ScanSource::Docs(docs) => scan.with_docs(docs),
+        ScanSource::Fetcher(fetcher) => scan.with_fetcher(fetcher),
+    }
+    .with_show_deleted(select.show_deleted);
 
     // Pass filter and docIDs to ScanNode for explain output
     // First check select.filter, then fall back to aggregate target filter

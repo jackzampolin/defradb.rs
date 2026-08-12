@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Query plan tree, planner, and fetcher/mutator/txn abstractions for DefraDB"
 
 [dependencies]
+web-time.workspace = true
 # Internal crates
 cursor = { path = "../cursor" }
 query-types = { path = "../query-types" }
@@ -24,7 +25,6 @@ lens = { path = "../lens", default-features = false }
 async-trait.workspace = true
 async-lock.workspace = true
 futures.workspace = true
-tokio = { version = "1.35", default-features = false, features = ["rt"] }
 
 # Serialization
 serde_json.workspace = true
@@ -38,8 +38,11 @@ tracing.workspace = true
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.35", default-features = false, features = ["rt"] }
+
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true

@@ -6,6 +6,7 @@
 mod fetcher;
 mod index_scan;
 pub(crate) mod migration;
+mod stream;
 
 #[cfg(test)]
 mod tests;
@@ -68,6 +69,18 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             migration_cache: Mutex::new(MigrationCache::default()),
         }
     }
+
+    /// Build a lightweight fetcher for use by a `DocStream` that outlives a
+    /// single `&self` call. `migration_cache` starts fresh rather than
+    /// shared: it is pure memoization (`load_migration_context` recomputes on
+    /// a miss), so a cold cache costs nothing correctness-wise.
+    pub(super) fn clone_for_stream(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            write_back_migrations: self.write_back_migrations,
+            migration_cache: Mutex::new(MigrationCache::default()),
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -83,6 +96,15 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Vec<(Document, bool)>> {
         self.get_all_with_deleted_impl(collection_name, show_deleted)
+            .await
+    }
+
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
+        self.stream_all_with_deleted_impl(collection_name, show_deleted)
             .await
     }
 

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use std::time::Instant;
 use tracing::{debug, warn};
+use web_time::Instant;
 
 use crate::planner::{Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;

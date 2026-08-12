@@ -105,6 +105,34 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
     }
 
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
+        let (collection, datastore, systemstore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        let prefix = collection.collection_key_prefix();
+        let prefix_len = prefix.len();
+        let opts = storage::corekv::IterOptions::new().with_prefix(prefix);
+        let iter = datastore
+            .iterator(opts)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        Ok(Box::new(
+            crate::collection_stream::CollectionDocStream::new(
+                collection,
+                datastore,
+                systemstore,
+                iter,
+                prefix_len,
+                show_deleted,
+            ),
+        ))
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,

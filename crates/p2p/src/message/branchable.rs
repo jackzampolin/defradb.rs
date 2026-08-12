@@ -10,7 +10,7 @@ use super::traits::Message;
 /// Sent to peers to ask for their head CIDs for a branchable collection.
 /// Uses two-stream protocol (same transport as DocSync).
 ///
-/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// Note: We don't use `#[serde(flatten)]` because serde's flatten produces
 /// indefinite-length maps when flatten is used (CBOR major type 0xbf).
 /// Go's fxamacker/cbor produces definite-length maps, causing signature
 /// verification to fail. Instead, we duplicate the fields for wire compatibility.

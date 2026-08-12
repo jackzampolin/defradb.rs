@@ -115,9 +115,9 @@ pub fn build_lens_ipld_blocks(
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         let digest = hasher.finalize();
-        let mh = Multihash::<64>::wrap(*SHA2_256_CODE, &digest)
+        let mh = Multihash::<64>::wrap(SHA2_256_CODE, &digest)
             .map_err(|e| format!("multihash: {}", e))?;
-        Ok(Cid::new_v1(*DAG_CBOR_CODEC, mh))
+        Ok(Cid::new_v1(DAG_CBOR_CODEC, mh))
     };
 
     let mut blocks = Vec::new();

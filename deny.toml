@@ -46,12 +46,6 @@ ignore = [
     # will disappear when iroh does.
     "RUSTSEC-2025-0134",
 
-    # serde_cbor — unmaintained. Used directly by db, storage, and p2p
-    # for wire-format CBOR. Replacing with ciborium is a workspace-wide
-    # refactor that touches P2P wire format — out of scope for #705 and
-    # deliberately tracked as future work.
-    "RUSTSEC-2021-0127",
-
     # wasmtime-related — belt-and-braces ignore after the wasmtime 41
     # upgrade (which remediated RUSTSEC-2025-0046 / 0118 / 2026-0006).
     # Retained until the upstream advisory is retracted for recent

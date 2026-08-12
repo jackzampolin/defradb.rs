@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["prost", "tonic-prost"]
+
 [dependencies]
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
@@ -18,7 +21,7 @@ tonic-prost = { workspace = true }
 prost = { workspace = true }
 
 # Async runtime (dedicated runtime for sync bridge)
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 # Encoding
 hex.workspace = true
@@ -33,6 +36,7 @@ thiserror.workspace = true
 [dev-dependencies]
 base64.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync"] }
 tokio-stream.workspace = true
 blst = "0.3"
 
