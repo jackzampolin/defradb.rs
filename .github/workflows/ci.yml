@@ -21,10 +21,14 @@ on:
 # this concurrency group once the merge ref is gone).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Merge-queue runs are never cancelled: cancelling one ejects that PR from
-  # the queue, so the queue stalls instead of merging. Every other ref keeps
-  # tip-only behaviour.
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  # Two refs are never cancelled, for different reasons:
+  #   merge_group — cancelling a queue run ejects that PR from the queue, so
+  #     the queue would stall instead of merging.
+  #   main — a push to main is the only validation merged code ever gets, and
+  #     during a merge train each merge would otherwise cancel the previous
+  #     merge's run, leaving main untested exactly when it changes fastest.
+  # Every other ref keeps tip-only behaviour.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
