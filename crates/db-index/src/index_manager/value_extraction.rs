@@ -63,7 +63,14 @@ impl IndexManager {
                 _ => value,
             };
 
-            let expanded = Self::expand_value_for_indexing(value);
+            // A vector is one value, not a set of them. Expanding it would
+            // index each component as its own entry, which is both wrong and
+            // enormous: a 768-dimension embedding would become 768 entries.
+            let expanded = if index_desc.is_vector() {
+                vec![value]
+            } else {
+                Self::expand_value_for_indexing(value)
+            };
             field_value_sets.push(expanded);
         }
 

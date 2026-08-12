@@ -678,10 +678,10 @@ fn sampled_levels_stay_within_the_bound() {
     for m in [2usize, 4, 16, 48] {
         let params = Params::new(m);
         let bound = LevelSampler::max_level(params.ml);
-        let mut sampler = LevelSampler::new(GRAPH_SEED);
+        let sampler = LevelSampler::new(GRAPH_SEED);
         let mut highest = 0;
-        for _ in 0..200_000 {
-            let level = sampler.level(params.ml);
+        for id in 0..200_000u64 {
+            let level = sampler.level(id, params.ml);
             assert!(
                 level <= bound,
                 "m={m}: drew level {level} above the bound {bound}"

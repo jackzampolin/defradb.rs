@@ -9,7 +9,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
     /// Adds `vector` under `id`, replacing any node already stored there.
     pub async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
         let vector = self.prepared(vector);
-        let top_level = self.sampler.level(self.params.ml);
+        let top_level = self.sampler.level(id.0, self.params.ml);
 
         let Some(mut meta) = self.store.get_meta().await? else {
             self.store

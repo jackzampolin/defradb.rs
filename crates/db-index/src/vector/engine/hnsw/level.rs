@@ -1,20 +1,26 @@
 //! Level generation: how tall a new node is.
 
-/// Draws a node's top layer from the exponential-decay distribution of the HNSW
-/// paper, `floor(-ln(u) * ml)` for `u` uniform in `(0, 1]`.
+/// Assigns a node's top layer from the exponential-decay distribution of the
+/// HNSW paper, `floor(-ln(u) * ml)` for `u` uniform in `(0, 1]`.
 ///
 /// The decay is what makes the graph a hierarchy: almost every node lands on
 /// layer 0 and each layer above holds exponentially fewer, so a search covers
 /// ground cheaply at the sparse top before the fine-grained walk at the bottom.
 ///
-/// SplitMix64 rather than a random-number crate. The seed is the caller's, so
-/// a sequence of inserts is reproducible; the generator is fixed here forever,
-/// so a recall figure measured today means the same thing next year; and
-/// nothing needs an entropy source, which is what makes this work unchanged on
-/// `wasm32-unknown-unknown`, where the usual ones need a JS shim.
-#[derive(Debug, Clone)]
+/// A node's level is a pure function of its id and the index seed, not the next
+/// value of a running sequence. That matters because a persistent index builds
+/// its engine once per transaction: a sequential generator would restart from
+/// the seed on every operation and hand every node the same level, collapsing
+/// the hierarchy. Keying on the id also makes a rebuild reproduce the heights
+/// it replaced.
+///
+/// SplitMix64 rather than a random-number crate: the generator is fixed here
+/// forever, so a recall figure measured today means the same thing next year,
+/// and nothing needs an entropy source, which is what lets this work unchanged
+/// on `wasm32-unknown-unknown` where the usual ones need a JS shim.
+#[derive(Debug, Clone, Copy)]
 pub struct LevelSampler {
-    state: u64,
+    seed: u64,
 }
 
 /// Mantissa bits in an `f64`. The sampler draws exactly this many, which is
@@ -33,12 +39,13 @@ const MIX_SHIFT_3: u32 = 31;
 
 impl LevelSampler {
     pub fn new(seed: u64) -> Self {
-        Self { state: seed }
+        Self { seed }
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(GOLDEN_GAMMA);
-        let mut z = self.state;
+    /// SplitMix64's finalizer, which is what makes sequential ids come out
+    /// well spread rather than correlated.
+    fn mix(&self, id: u64) -> u64 {
+        let mut z = self.seed.wrapping_add(id).wrapping_add(GOLDEN_GAMMA);
         z = (z ^ (z >> MIX_SHIFT_1)).wrapping_mul(MIX_MULTIPLIER_1);
         z = (z ^ (z >> MIX_SHIFT_2)).wrapping_mul(MIX_MULTIPLIER_2);
         z ^ (z >> MIX_SHIFT_3)
@@ -46,17 +53,16 @@ impl LevelSampler {
 
     /// Uniform in `(0, 1]`. Open at zero so `ln` is always defined, which is
     /// why the reference implementation has to redraw and this does not.
-    fn next_unit(&mut self) -> f64 {
-        let bits = self.next_u64() >> (u64::BITS - MANTISSA_BITS);
+    fn unit(&self, id: u64) -> f64 {
+        let bits = self.mix(id) >> (u64::BITS - MANTISSA_BITS);
         ((bits + 1) as f64) / ((1u64 << MANTISSA_BITS) as f64)
     }
 
-    /// A node's top layer.
-    pub fn level(&mut self, ml: f64) -> usize {
-        let level = -self.next_unit().ln() * ml;
-        // `level` is finite and non-negative for every `u` in (0, 1] and every
-        // finite `ml`, so this cannot saturate to a surprising value; the cast
-        // is a floor.
+    /// The top layer of the node with this id.
+    pub fn level(&self, id: u64, ml: f64) -> usize {
+        let level = -self.unit(id).ln() * ml;
+        // Finite and non-negative for every `u` in (0, 1] and finite `ml`, so
+        // the cast cannot saturate; it is a floor.
         level as usize
     }
 
