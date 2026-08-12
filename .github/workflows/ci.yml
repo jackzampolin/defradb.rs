@@ -208,7 +208,12 @@ jobs:
 
   build:
     name: Build & Test
-    runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
+    # Either studio host. Port isolation comes from there being exactly one
+    # `studio`-labelled runner process per box, not from naming a host, so
+    # floating this job still permits only one node-spawning job per box.
+    # Cache warmth is preserved by the peer pull in "Restore or build
+    # binaries" rather than by pinning the producer.
+    runs-on: [self-hosted, macOS, ARM64, studio]
     env:
       # The full workspace test suite launches roughly 187 test executables.
       # Incremental artifacts caused a ~25s startup delay per executable on
@@ -433,16 +438,36 @@ jobs:
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p target/ci "$CACHE_DIR"
 
+          # The two studio hosts share a Thunderbolt link, so a cache miss can
+          # be served by the sibling for the price of copying ~100MB rather
+          # than a full rebuild. Best-effort by design: any failure here falls
+          # through to the build path below, so an unreachable or rebooting
+          # peer costs time, never a red run.
+          case "${RUNNER_NAME:-}" in
+            studio-1*) PEER=studio-2 ;;
+            studio-2*) PEER=studio-1 ;;
+            *)         PEER="" ;;
+          esac
+
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
-            echo "Cache hit — restoring from $CACHE_DIR"
+            echo "Cache hit (local) — restoring from $CACHE_DIR"
+            cp "$CACHE_DIR/defra" target/ci/defra
+            cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
+          elif [ -n "$PEER" ] \
+            && scp -q -o BatchMode=yes -o ConnectTimeout=5 \
+                 "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" 2>/dev/null \
+            && scp -q -o BatchMode=yes -o ConnectTimeout=5 \
+                 "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp" 2>/dev/null; then
+            # Staged via .tmp so an interrupted copy cannot leave a truncated
+            # binary that later runs would treat as a valid cache hit.
+            mv "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra"
+            mv "$CACHE_DIR/defra-iroh.tmp" "$CACHE_DIR/defra-iroh"
+            echo "Cache hit (peer $PEER over Thunderbolt)"
             cp "$CACHE_DIR/defra" target/ci/defra
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
           else
-            # The build job populates this cache on studio-1 only; suites
-            # pinned to the other host self-build once per commit and
-            # populate their own host-local cache so the sibling suite and
-            # any re-run hit it.
-            echo "Cache miss — building binaries"
+            rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
+            echo "Cache miss (local and peer) — building binaries"
             cargo build -p cli
             cp target/debug/defra target/ci/defra
             cp target/debug/defra "$CACHE_DIR/defra"
