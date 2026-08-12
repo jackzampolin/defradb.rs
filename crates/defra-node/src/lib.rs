@@ -491,6 +491,48 @@ impl EmbeddedNode {
         self.acp_ops.add_dac_policy(identity, policy).await
     }
 
+    /// Grant `target` the `relation` on a document (Go: client.Store::AddDACActorRelationship).
+    ///
+    /// `identity` is the requesting actor's DID; it must own the document or
+    /// hold a relation that manages `relation`. `target` is an actor DID, the
+    /// all-actors wildcard `*`, or a structured subject.
+    ///
+    /// Returns `existed_already`: `true` means the relationship was already
+    /// present and the call was a no-op, `false` means it was newly added. A new
+    /// grant also publishes a document-update event.
+    pub async fn add_dac_actor_relationship(
+        &self,
+        identity: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        target: &str,
+    ) -> anyhow::Result<bool> {
+        self.acp_ops
+            .add_dac_actor_relationship(identity, collection, doc_id, relation, target)
+            .await
+    }
+
+    /// Revoke `target`'s `relation` on a document (Go: client.Store::DeleteDACActorRelationship).
+    ///
+    /// `identity` is the requesting actor's DID; it must own the document or
+    /// hold a relation that manages `relation`.
+    ///
+    /// Returns `record_found`: `true` means the relationship existed and was
+    /// deleted, `false` means there was nothing to delete.
+    pub async fn delete_dac_actor_relationship(
+        &self,
+        identity: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        target: &str,
+    ) -> anyhow::Result<bool> {
+        self.acp_ops
+            .delete_dac_actor_relationship(identity, collection, doc_id, relation, target)
+            .await
+    }
+
     /// Access the resolved node-level embedding runtime config.
     pub fn embedding_config(&self) -> &db::EmbeddingClientConfig {
         &self.embedding_config
@@ -1437,8 +1479,10 @@ impl NodeBuilder {
         ));
         let acp_ops: Arc<dyn acp_ops::AcpOps> = Arc::new(acp_ops::DbAcpOps::new(
             database.clone(),
+            document_acp.clone(),
             acp_setup.local_zanzibar_store,
             acp_setup.sourcehub_acp,
+            event_bus.clone(),
         ));
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
