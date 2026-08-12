@@ -60,6 +60,24 @@ just ci                # Reproduce the CI pipeline locally
 
 Run `just` on its own to list every target, grouped.
 
+The build and test recipes take a `profile` variable, default `dev`:
+
+```bash
+just profile=super-dev test        # lean build, into target/super-dev/
+```
+
+`super-dev` compiles workspace crates with line-tables-only debug info and
+dependencies with none, for ~7.5x less debug object volume than `dev` at the
+same build time. Every worktree keeps its own `target/`, so that adds up:
+prefer it for day-to-day work, agent worktrees, and disk-constrained machines.
+Panic backtraces still carry real `file:line` frames. Stay on `dev` when
+stepping through code in lldb, where full variable inspection matters. The
+override must come before the recipe name; release recipes ignore it.
+
+`just sweep` (keeps 7 days, `just sweep 14` for two weeks) is the other half:
+the profile shrinks each build generation, sweeping bounds how many pile up,
+since cargo never collects the artifacts it has stopped using.
+
 ## Configuration
 
 The CLI exposes GraphQL query guardrails on `defradb start`:
