@@ -27,11 +27,44 @@ pub(crate) trait AcpOps: Send + Sync {
     ) -> anyhow::Result<bool>;
 }
 
+/// The ACP backends a node was built with, shared by every caller that needs to
+/// resolve a policy id.
+#[derive(Clone)]
+pub(crate) struct PolicyLookup {
+    pub(crate) local: Option<Arc<dyn acp::ZanzibarStore>>,
+    pub(crate) sourcehub: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+}
+
+impl PolicyLookup {
+    pub(crate) fn new(
+        local: Option<Arc<dyn acp::ZanzibarStore>>,
+        sourcehub: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+    ) -> Self {
+        Self { local, sourcehub }
+    }
+
+    /// Load a policy from whichever ACP backend this node was built with.
+    pub(crate) async fn get_policy(&self, policy_id: &str) -> anyhow::Result<Option<acp::Policy>> {
+        if let Some(store) = &self.local {
+            store
+                .get_policy(policy_id)
+                .await
+                .map_err(|error| anyhow!("failed to get policy: {error}"))
+        } else if let Some(sourcehub) = &self.sourcehub {
+            sourcehub
+                .get_policy(policy_id)
+                .await
+                .map_err(|error| anyhow!("failed to get policy: {error}"))
+        } else {
+            bail!("operation requires ACP, but ACP not available");
+        }
+    }
+}
+
 pub(crate) struct DbAcpOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
     document_acp: Arc<dyn acp::DocumentACP>,
-    local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
-    sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+    policy_lookup: PolicyLookup,
     event_bus: Arc<dyn events::Bus>,
     policy_counter: AtomicU64,
 }
@@ -49,15 +82,13 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
     pub(crate) fn new(
         database: Arc<db::DB<S>>,
         document_acp: Arc<dyn acp::DocumentACP>,
-        local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
-        sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+        policy_lookup: PolicyLookup,
         event_bus: Arc<dyn events::Bus>,
     ) -> Self {
         Self {
             database,
             document_acp,
-            local_zanzibar_store,
-            sourcehub_acp,
+            policy_lookup,
             event_bus,
             policy_counter: AtomicU64::new(1),
         }
@@ -75,24 +106,6 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
             .await
             .map_err(|error| anyhow!("{error}"))?;
         Ok(did)
-    }
-
-    /// Load a policy from whichever ACP backend this node was built with.
-    async fn get_policy(&self, policy_id: &str) -> anyhow::Result<acp::Policy> {
-        let policy = if let Some(store) = &self.local_zanzibar_store {
-            store
-                .get_policy(policy_id)
-                .await
-                .map_err(|error| anyhow!("failed to get policy: {error}"))?
-        } else if let Some(sourcehub_acp) = &self.sourcehub_acp {
-            sourcehub_acp
-                .get_policy(policy_id)
-                .await
-                .map_err(|error| anyhow!("failed to get policy: {error}"))?
-        } else {
-            bail!("operation requires ACP, but ACP not available");
-        };
-        policy.ok_or_else(|| anyhow!("policy '{policy_id}' not found"))
     }
 
     async fn relationship_target(
@@ -115,7 +128,11 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
         let target = acp::parse_target_subject(target)
             .map_err(|error| anyhow!("invalid target: {error}"))?;
 
-        let loaded = self.get_policy(&policy.id).await?;
+        let loaded = self
+            .policy_lookup
+            .get_policy(&policy.id)
+            .await?
+            .ok_or_else(|| anyhow!("policy '{}' not found", policy.id))?;
         let resource = loaded
             .get_resource(&policy.resource_name)
             .ok_or_else(|| anyhow!("resource '{}' not found in policy", policy.resource_name))?;
@@ -191,14 +208,14 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed).map_err(|error| anyhow!(error))?;
 
-        if let Some(sourcehub_acp) = &self.sourcehub_acp {
+        if let Some(sourcehub_acp) = &self.policy_lookup.sourcehub {
             return sourcehub_acp
                 .add_policy(identity, policy)
                 .await
                 .map_err(|error| anyhow!("SourceHub create policy failed: {error}"));
         }
 
-        let Some(store) = &self.local_zanzibar_store else {
+        let Some(store) = &self.policy_lookup.local else {
             bail!("operation requires ACP, but ACP not available");
         };
         let counter = self.policy_counter.fetch_add(1, Ordering::SeqCst);

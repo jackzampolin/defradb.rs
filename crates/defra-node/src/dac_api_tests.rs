@@ -74,6 +74,45 @@ async fn add_dac_policy_returns_id_and_validates_policy() {
 }
 
 #[tokio::test]
+async fn add_schema_rejects_unregistered_policy_id() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    let err = node
+        .add_schema("type Users @policy(id: \"deadbeef\", resource: \"users\") { name: String }")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("schema policy validation error"),
+        "{err:#}"
+    );
+
+    node.add_schema("type Plain { name: String }")
+        .await
+        .expect("a schema without @policy must not need the policy store");
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_view_rejects_unregistered_policy_id() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema("type Plain { name: String }")
+        .await
+        .unwrap();
+
+    let err = node
+        .add_view(
+            "Plain { name }",
+            "type PlainView @policy(id: \"deadbeef\", resource: \"users\") { name: String }",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("schema policy validation error"),
+        "{err:#}"
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
 async fn dac_share_journey_grant_and_revoke() {
     let (node, doc_id) = node_with_protected_users().await;
     let did_b = identity::Did::new(DID_B).unwrap();

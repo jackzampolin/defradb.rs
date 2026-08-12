@@ -1472,16 +1472,18 @@ impl NodeBuilder {
         };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
+        let policy_lookup =
+            acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.sourcehub_acp);
         let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
             database.clone(),
             query_limits,
             document_acp.clone(),
+            policy_lookup.clone(),
         ));
         let acp_ops: Arc<dyn acp_ops::AcpOps> = Arc::new(acp_ops::DbAcpOps::new(
             database.clone(),
             document_acp.clone(),
-            acp_setup.local_zanzibar_store,
-            acp_setup.sourcehub_acp,
+            policy_lookup,
             event_bus.clone(),
         ));
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
