@@ -274,3 +274,97 @@ fn merge_doc_id(short_id: u64) -> document::DocID {
         multihash::Multihash::wrap(*defra_core::SHA2_256_CODE, &hasher.finalize()).unwrap();
     document::DocID::new_v0(cid::Cid::new_v1(0x55, mh))
 }
+
+/// Reindex-after-migration clears every index and rebuilds it. A vector index
+/// rides that path, which makes it the rebuild mechanism that exists today:
+/// `remove_all` then `bulk_index`, without the epoch swap.
+#[tokio::test]
+async fn an_index_can_be_cleared_and_rebuilt() {
+    use storage::index::CollectionIndex;
+
+    const DOCUMENTS: usize = 40;
+    let db = DB::new(MemoryStore::new()).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    let schema = schema();
+    let mut manager = IndexManager::new(COLLECTION_SHORT_ID);
+
+    {
+        let datastore = txn.datastore().unwrap();
+        let desc = manager
+            .create_index_of_kind(
+                &datastore,
+                "docs",
+                "by_embedding".to_string(),
+                vec![IndexedFieldDescription {
+                    name: "embedding".to_string(),
+                    descending: false,
+                }],
+                vector_kind(),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let documents = corpus(DOCUMENTS);
+        manager
+            .bulk_index(&datastore, "by_embedding", &documents, &schema)
+            .await
+            .unwrap();
+
+        let mut view = datastore.clone();
+        assert_eq!(live_ids(&mut view, desc.id).await.len(), DOCUMENTS);
+
+        // What reindex does.
+        let index = manager.get_index("by_embedding").unwrap();
+        index.remove_all(&mut datastore.clone()).await.unwrap();
+        let mut view = datastore.clone();
+        assert!(
+            live_ids(&mut view, desc.id).await.is_empty(),
+            "remove_all must leave nothing behind"
+        );
+
+        manager
+            .bulk_index(&datastore, "by_embedding", &documents, &schema)
+            .await
+            .unwrap();
+
+        let mut view = datastore.clone();
+        let mut rebuilt = live_ids(&mut view, desc.id).await;
+        rebuilt.sort();
+        assert_eq!(
+            rebuilt,
+            (1..=DOCUMENTS as u64).map(NodeId).collect::<Vec<_>>(),
+            "a rebuilt index must hold every document again"
+        );
+
+        // And it still answers.
+        let vector_index = db_index::vector::index::VectorIndex::try_new(
+            COLLECTION_SHORT_ID,
+            index.description().clone(),
+        )
+        .unwrap();
+        let mut view = datastore.clone();
+        let hits = vector_index
+            .search(&mut view, &[1.0f64, 0.0, 0.0, 0.0], 5, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 5, "a rebuilt index must still be searchable");
+    }
+    txn.commit().await.unwrap();
+}
+
+/// Live node ids of an index, read back through the port.
+async fn live_ids<T>(view: &mut T, index_id: u32) -> Vec<NodeId>
+where
+    T: storage::corekv::Reader + storage::corekv::Writer + defra_core::thread_bounds::MaybeSend,
+{
+    let kv = KvNodeStore::new(view, COLLECTION_SHORT_ID, index_id, 0);
+    let mut ids = Vec::new();
+    kv.iterate_nodes(|node| {
+        ids.push(node.id);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    ids
+}
