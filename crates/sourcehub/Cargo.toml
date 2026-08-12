@@ -23,7 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Async
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "io-util"] }
 async-trait.workspace = true
 
 # Error handling
@@ -65,6 +65,9 @@ acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", tag 
 futures.workspace = true
 prost.workspace = true
 tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net"] }
 
 [lints]
 workspace = true
