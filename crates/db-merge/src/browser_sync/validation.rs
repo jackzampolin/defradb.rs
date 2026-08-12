@@ -68,7 +68,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             let cid = Cid::from_str(&block.cid).map_err(|error| {
                 BrowserSyncError::Invalid(format!("invalid block CID '{}': {error}", block.cid))
             })?;
-            if cid.codec() != *DAG_CBOR_CODEC {
+            if cid.codec() != DAG_CBOR_CODEC {
                 return Err(BrowserSyncError::Invalid(format!(
                     "block {cid} is not DAG-CBOR"
                 )));

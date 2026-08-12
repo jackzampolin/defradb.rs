@@ -29,7 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Async
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "io-util"] }
 async-trait.workspace = true
 
 # Error handling
@@ -65,12 +65,15 @@ alloy-rlp.workspace = true
 bs58.workspace = true
 
 # ACP light client (proof-validated cache)
-acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", rev = "086ddadc98bc55183920aa0fe6bc4d3719e0e5e7" }
+acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", tag = "defra-harness/2026-08-07-port-conflict" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 futures.workspace = true
 prost.workspace = true
 tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net"] }
 
 [lints]
 workspace = true

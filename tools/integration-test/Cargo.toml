@@ -109,7 +109,7 @@ path = "tests/cursor.rs"
 hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
 defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
 document = { path = "../../crates/document" }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",

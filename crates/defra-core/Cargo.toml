@@ -25,7 +25,6 @@ multibase = "0.9"
 # IPLD
 cid.workspace = true
 multihash.workspace = true
-multicodec.workspace = true
 serde_ipld_dagcbor.workspace = true
 ipld-core.workspace = true
 
@@ -45,6 +44,9 @@ tracing.workspace = true
 # runtime is single-threaded and HTTP-server-side scoping does not apply.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [dev-dependencies]
 criterion.workspace = true
