@@ -4,12 +4,3 @@ git-fetch-with-cli = true
 [build]
 # Auto-detect available cores (M3 Ultra = 32)
 # jobs defaults to logical CPU count when omitted
-
-[profile.dev]
-# Split debug info for faster incremental builds on macOS
-split-debuginfo = "unpacked"
-
-[profile.dev.package."*"]
-# Optimize all dependencies even in dev builds
-# Crypto libs (ed25519-dalek, k256, sha2) are unusably slow without optimization
-opt-level = 2

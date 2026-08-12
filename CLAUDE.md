@@ -212,6 +212,22 @@ cargo fmt --all                    # Format
 cargo build --release              # Build release
 ```
 
+### Build Profile in Worktrees
+
+Every worktree keeps its own `target/`, and a stock dev build retains one debug
+object per codegen unit forever, so concurrent worktrees add up fast. The
+justfile's `profile` variable (default `dev`) selects the profile for the build
+and test recipes; `super-dev` keeps `file:line` backtrace frames for workspace
+crates while dropping dependency debug info, for ~7.5x less object volume.
+
+```bash
+just profile=super-dev test              # unit tests, into target/super-dev/
+just profile=super-dev integration-suite acp
+```
+
+The override must precede the recipe name. Prefer it in agent worktrees; stay
+on `dev` when stepping through code in lldb.
+
 ### Tracking Go Upstream
 
 ```bash

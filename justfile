@@ -51,6 +51,12 @@ export PATH := tooling_bin + ":" + go_root + "/bin" + ":" + cargo_bin + ":" + el
 # Integration areas, each a [[test]] binary in tools/integration-test.
 integration_suites := "basic query acp nac p2p encryption identity backup sourcehub hubrs fts p2p_iroh cursor"
 
+# Cargo profile for the build and test recipes. `dev` is the stock debug
+# profile and the default; `just profile=super-dev test` opts into the lean
+# profile, which builds into target/super-dev/ and keeps ~7.5x less debug
+# object volume — see Cargo.toml. Release recipes ignore this.
+profile := "dev"
+
 _default:
     @just --list --unsorted
 
@@ -327,7 +333,7 @@ doctor:
 # Debug build of the whole workspace.
 [group('build')]
 build:
-    cargo build --workspace
+    cargo build --workspace --profile {{ profile }}
 
 # Optimized build. Fat LTO, single codegen unit: slow, and what ships.
 [group('build')]
@@ -366,31 +372,31 @@ build-apple:
 [doc("Workspace unit tests (mirrors CI's Build & Test step).")]
 [group('test')]
 test:
-    cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
+    cargo test --workspace --profile {{ profile }} --exclude integration-test --exclude ffi-test --exclude conformance
 
 # Unit tests for one crate: `just test-crate crdt`.
 [group('test')]
 test-crate crate *args:
-    cargo test -p {{ crate }} {{ args }}
+    cargo test -p {{ crate }} --profile {{ profile }} {{ args }}
 
 # Feature-gated suites the default workspace run skips. defra-node's p2p tests
 # are in-crate and off by default, so nothing else reaches them.
 [doc("Feature-gated suites the default workspace run never reaches.")]
 [group('test')]
 test-features:
-    cargo test -p telemetry --features otlp
-    cargo test -p cli --features otel --test telemetry_dedup
-    cargo test -p defra-node --features p2p
+    cargo test -p telemetry --profile {{ profile }} --features otlp
+    cargo test -p cli --profile {{ profile }} --features otel --test telemetry_dedup
+    cargo test -p defra-node --profile {{ profile }} --features p2p
 
 # Every integration area, serially. Each spawns real nodes.
 [group('test')]
 integration:
-    cargo test -p integration-test
+    cargo test -p integration-test --profile {{ profile }}
 
 # One integration area: `just integration-suite acp`, `just integration-suite p2p`.
 [group('test')]
 integration-suite suite *args:
-    cargo test -p integration-test --test {{ suite }} {{ args }}
+    cargo test -p integration-test --test {{ suite }} --profile {{ profile }} {{ args }}
 
 # The pure-Rust half of the P2P topologies, serialized. `--skip ::go_` drops the
 # dual-runtime variants; the harness port allocator has a bind race in parallel
@@ -398,17 +404,17 @@ integration-suite suite *args:
 [doc("Pure-Rust P2P topologies, serialized (skips the go_ variants).")]
 [group('test')]
 integration-p2p:
-    cargo test -p integration-test --test p2p -- --test-threads=1 --skip ::go_
+    cargo test -p integration-test --test p2p --profile {{ profile }} -- --test-threads=1 --skip ::go_
 
 # The go_* half, which needs a Go DefraDB binary on PATH.
 [group('test')]
 integration-go:
-    cargo test -p integration-test --test p2p -- --test-threads=1 ::go_
+    cargo test -p integration-test --test p2p --profile {{ profile }} -- --test-threads=1 ::go_
 
 # FFI compatibility against Go. Needs `just setup-go` and the generated header.
 [group('test')]
 test-ffi:
-    cargo test -p ffi-test
+    cargo test -p ffi-test --profile {{ profile }}
 
 # Run every listed integration area one at a time, reporting each. Keeps going
 # after a failure and exits non-zero if any failed, so one red area does not
@@ -421,7 +427,7 @@ integration-all:
     failed=()
     for suite in {{ integration_suites }}; do
         echo "== $suite =="
-        cargo test -p integration-test --test "$suite" || failed+=("$suite")
+        cargo test -p integration-test --test "$suite" --profile {{ profile }} || failed+=("$suite")
     done
     total=$(echo {{ integration_suites }} | wc -w | tr -d ' ')
     if [ ${#failed[@]} -gt 0 ]; then
