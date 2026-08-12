@@ -103,9 +103,14 @@ impl VectorIndex {
             NormalValue::Float64Array(v) => Indexable::Wide(v),
             NormalValue::NillableFloat32Array(Some(v)) => Indexable::Narrow(v),
             NormalValue::NillableFloat64Array(Some(v)) => Indexable::Wide(v),
+            // Go's `Similarity` accepts a vector "of type Int, Float32 or
+            // Float64", so a peer can send one and this must not turn it away.
+            NormalValue::IntArray(v) => Indexable::Integral(v),
+            NormalValue::NillableIntArray(Some(v)) => Indexable::Integral(v),
             NormalValue::Null
             | NormalValue::NillableFloat32Array(None)
-            | NormalValue::NillableFloat64Array(None) => return Ok(None),
+            | NormalValue::NillableFloat64Array(None)
+            | NormalValue::NillableIntArray(None) => return Ok(None),
             other => {
                 return Err(Error::InvalidDocument(format!(
                     "index '{}' expects a vector field, got {other:?}",
@@ -138,6 +143,7 @@ impl VectorIndex {
 enum Indexable<'v> {
     Narrow(&'v [f32]),
     Wide(&'v [f64]),
+    Integral(&'v [i64]),
 }
 
 impl Indexable<'_> {
@@ -145,6 +151,7 @@ impl Indexable<'_> {
         match self {
             Indexable::Narrow(v) => v.len(),
             Indexable::Wide(v) => v.len(),
+            Indexable::Integral(v) => v.len(),
         }
     }
 
@@ -160,6 +167,7 @@ impl Indexable<'_> {
         let squared = match self {
             Indexable::Narrow(v) => super::core::squared_norm(v),
             Indexable::Wide(v) => super::core::squared_norm(v),
+            Indexable::Integral(v) => super::core::squared_norm(v),
         };
         squared.is_finite() && squared >= super::core::NORM_THRESHOLD
     }
@@ -187,6 +195,7 @@ impl CollectionIndex for VectorIndex {
         match indexable {
             Indexable::Narrow(v) => engine.insert(id, v).await,
             Indexable::Wide(v) => engine.insert(id, v).await,
+            Indexable::Integral(v) => engine.insert(id, v).await,
         }
         .map_err(into_storage)
     }

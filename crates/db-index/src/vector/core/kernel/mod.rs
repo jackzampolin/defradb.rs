@@ -41,9 +41,13 @@ pub use tier::{Tier, ALL_TIERS};
 
 /// A vector element width the kernels can consume.
 ///
-/// Sealed: a tier's kernels exist per concrete width, so a third implementation
-/// would have nothing to dispatch to. `f32` is what embedding models emit and
-/// what Go stores; `f64` is what JSON and GraphQL carry.
+/// The four widths a vector can arrive in, matching what the reference accepts:
+/// `f32` is what embedding models emit and what a node stores, `f64` is what
+/// JSON and GraphQL carry, and `i32`/`i64` are what an integer vector field
+/// holds.
+///
+/// Sealed, because a tier's kernels exist per concrete width and an outside
+/// implementation would have nothing to dispatch to.
 ///
 /// Shareable because a `&[Self]` is held across the awaits of an index walk.
 pub trait Element: Copy + defra_core::thread_bounds::MaybeSendSync + sealed::Sealed {
@@ -68,6 +72,8 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for f32 {}
     impl Sealed for f64 {}
+    impl Sealed for i32 {}
+    impl Sealed for i64 {}
 }
 
 /// Dot product of two vectors, on the best tier this machine has.
@@ -176,3 +182,44 @@ impl_element!(
     dot = dot_f64,
     squared_euclidean = squared_euclidean_f64
 );
+
+/// An integer width runs on the scalar tier whatever the machine has.
+///
+/// The SIMD tiers cover the widths a walk actually compares. An integer vector
+/// is an input: the index converts it to its stored width once, at the
+/// boundary, so these never appear inside a graph traversal. Widening `i32` is
+/// a natural fit for the existing half-width load slot and `i64` is not (no
+/// tier below AVX-512's `avx512dq` converts it), so the pair stays together on
+/// the scalar path rather than splitting for a gain nothing measures. If an
+/// integer hot path ever appears, the tier work is a local addition here.
+macro_rules! impl_integral_element {
+    ($ty:ty) => {
+        impl Element for $ty {
+            #[inline(always)]
+            fn widen(self) -> f64 {
+                self as f64
+            }
+
+            /// Saturating, which is Rust's defined behaviour for this cast: a
+            /// value outside the integer's range clamps rather than wrapping
+            /// into an unrelated number.
+            #[inline(always)]
+            fn narrow(value: f64) -> Self {
+                value as $ty
+            }
+
+            #[inline]
+            unsafe fn dot_with(_tier: Tier, a: &[Self], b: &[Self]) -> f64 {
+                scalar::dot(a, b)
+            }
+
+            #[inline]
+            unsafe fn squared_euclidean_with(_tier: Tier, a: &[Self], b: &[Self]) -> f64 {
+                scalar::squared_euclidean(a, b)
+            }
+        }
+    };
+}
+
+impl_integral_element!(i32);
+impl_integral_element!(i64);

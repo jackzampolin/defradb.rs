@@ -186,6 +186,45 @@ fn known_values_are_exact() {
     );
 }
 
+/// The integer widths run on the scalar tier, but they are part of the same
+/// API and must agree with the float widths on the same values.
+#[test]
+fn integer_widths_agree_with_the_float_widths() {
+    for n in [0usize, 1, 3, 8, 17, 64] {
+        let a: Vec<i64> = (0..n as i64).map(|i| i - 3).collect();
+        let b: Vec<i64> = (0..n as i64).map(|i| 7 - i * 2).collect();
+        let a32: Vec<i32> = a.iter().map(|x| *x as i32).collect();
+        let b32: Vec<i32> = b.iter().map(|x| *x as i32).collect();
+        let af: Vec<f64> = a.iter().map(|x| *x as f64).collect();
+        let bf: Vec<f64> = b.iter().map(|x| *x as f64).collect();
+
+        // Small integers are exact in f64, so these are equalities, not bounds.
+        assert_eq!(dot(&a, &b), dot(&af, &bf), "i64 dot at len {n}");
+        assert_eq!(dot(&a32, &b32), dot(&af, &bf), "i32 dot at len {n}");
+        assert_eq!(
+            squared_euclidean(&a, &b),
+            squared_euclidean(&af, &bf),
+            "i64 sq_euclid at len {n}"
+        );
+        assert_eq!(
+            squared_euclidean(&a32, &b32),
+            squared_euclidean(&af, &bf),
+            "i32 sq_euclid at len {n}"
+        );
+    }
+}
+
+/// Narrowing out of the accumulator saturates rather than wrapping, so an
+/// out-of-range value cannot become an unrelated one.
+#[test]
+fn narrowing_to_an_integer_saturates() {
+    assert_eq!(i32::narrow(f64::from(i32::MAX) * 4.0), i32::MAX);
+    assert_eq!(i32::narrow(f64::from(i32::MIN) * 4.0), i32::MIN);
+    assert_eq!(i64::narrow(f64::INFINITY), i64::MAX);
+    assert_eq!(i32::narrow(2.9), 2);
+    assert_eq!(i32::narrow(-2.9), -2);
+}
+
 #[test]
 fn empty_vectors_are_zero() {
     for tier in live_tiers() {

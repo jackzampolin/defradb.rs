@@ -117,6 +117,40 @@ async fn either_element_width_indexes_identically() {
     assert_eq!(stored[0], stored[1], "the two widths stored different data");
 }
 
+/// Go's `Similarity` accepts a vector "of type Int, Float32 or Float64", so a
+/// peer can send an integer vector and this must index it, not refuse it.
+#[tokio::test]
+async fn an_integer_vector_is_accepted() {
+    use db_index::vector::kv_store::KvNodeStore;
+    use db_index::vector::store::VectorNodeStore;
+
+    let store = MemoryStore::new();
+    let index = index();
+    let mut write = txn(&store).await;
+    index
+        .save(&mut write, 1, &[NormalValue::IntArray(vec![3, 0, 4, 0])])
+        .await
+        .unwrap();
+    index
+        .save(
+            &mut write,
+            2,
+            &[NormalValue::NillableIntArray(Some(vec![0, 1, 0, 0]))],
+        )
+        .await
+        .unwrap();
+    write.commit().await.unwrap();
+
+    assert_eq!(live_ids(&store, &index).await, vec![NodeId(1), NodeId(2)]);
+
+    // Stored normalized, and 3-0-4-0 has norm 5, so the direction is preserved.
+    let mut read = txn(&store).await;
+    let kv = KvNodeStore::new(&mut read, COLLECTION, 3, 0);
+    let node = kv.get_node(NodeId(1)).await.unwrap().unwrap();
+    assert!((node.vector[0] - 0.6).abs() < 1e-6);
+    assert!((node.vector[2] - 0.8).abs() < 1e-6);
+}
+
 /// A vector is one value. Indexing it component-by-component would be both
 /// wrong and enormous, so the whole array must reach the index intact.
 #[tokio::test]
