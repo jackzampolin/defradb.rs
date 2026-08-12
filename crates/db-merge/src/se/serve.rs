@@ -8,8 +8,11 @@
 //! Both the standalone CLI and the embedded node route inbound SE events here so
 //! the serve/receive logic lives in one place.
 
-use p2p::message::{PushSEArtifactsReply, QuerySEArtifactsReply, QuerySEArtifactsRequest};
+#[cfg(feature = "libp2p-transport")]
+use p2p::message::PushSEArtifactsReply;
+use p2p::message::{QuerySEArtifactsReply, QuerySEArtifactsRequest};
 use p2p::transport::{P2PTransport, PeerId};
+#[cfg(feature = "libp2p-transport")]
 use p2p::P2PHostHandle;
 use storage::corekv::Store;
 
@@ -125,6 +128,7 @@ pub async fn handle_artifacts_received<S: Store>(
 }
 
 /// Extract the `MessageID` from a CBOR-encoded `PushSEArtifactsRequest`.
+#[cfg(feature = "libp2p-transport")]
 fn extract_push_message_id(data: &[u8]) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct MsgIdOnly {
@@ -141,6 +145,7 @@ fn extract_push_message_id(data: &[u8]) -> Option<String> {
 /// Go's artifact push (`storeSEProto.SendRequest`) blocks until it receives this
 /// reply, so a Rust replicator MUST acknowledge or the Go owner's write hangs.
 /// Returns the stored doc IDs for bus events.
+#[cfg(feature = "libp2p-transport")]
 pub async fn handle_artifacts_push<S: Store>(
     store: &S,
     handle: &P2PHostHandle,

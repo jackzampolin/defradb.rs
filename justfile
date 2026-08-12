@@ -499,6 +499,21 @@ lint:
     cargo clippy -p defra-node --features otel --all-targets -- -D warnings
     cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
     cargo clippy -p db --features p2p --all-targets -- -D warnings
+    cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
+    cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
+    cargo check -p p2p --no-default-features --features iroh-transport
+    cargo check -p db-merge --no-default-features --features native
+    just check-node-graph
+
+# Feature-graph contracts for defra-node (#1398–#1400). Not a size check.
+[group('check')]
+check-node-graph:
+    bash .github/scripts/assert-defra-node-graph.sh
+
+# Lean combo check. Examples: lark,redb,native  |  lark,redb,native,p2p
+[group('check')]
+check-node-lean *features:
+    cargo check -p defra-node --no-default-features --features {{ features }}
 
 # Lint the test and bench targets too. CI does NOT do this for the workspace, so
 # this catches lints that would otherwise sit in the tree unnoticed.
@@ -511,6 +526,7 @@ lint-all-targets:
 [group('check')]
 lint-wasm:
     cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+    cargo clippy -p defra-wasm --target wasm32-unknown-unknown --no-default-features --all-targets -- -D warnings
 
 # Docs must build without warnings; a broken intra-doc link fails CI.
 [doc("Build docs with warnings denied (broken links fail CI).")]

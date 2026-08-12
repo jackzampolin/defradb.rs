@@ -208,6 +208,7 @@ Single-purpose binaries, each its own `[[test]]` with no submodules:
 cargo test                         # Run all unit tests
 cargo test -p crdt                 # Test specific crate
 cargo clippy --all -- -D warnings  # Lint
+just check-node-graph              # Feature-graph contracts for defra-node
 cargo fmt --all                    # Format
 cargo build --release              # Build release
 ```

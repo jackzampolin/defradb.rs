@@ -52,6 +52,7 @@ just build             # Build all crates
 just build-release     # Release binary
 just test              # Unit tests
 just lint              # Lint (every clippy invocation CI runs)
+just check-node-graph  # Feature-graph contracts for defra-node
 just fmt               # Format
 just gate              # fmt + lint + docs + tests, before asking for a review
 just ci                # Reproduce the CI pipeline locally

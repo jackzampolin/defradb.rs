@@ -44,7 +44,7 @@ futures.workspace = true
 async-trait.workspace = true
 
 # Debugging
-console_error_panic_hook = "0.1"
+console_error_panic_hook = { version = "0.1", optional = true }
 
 # Cryptography (for hashing schema IDs)
 sha2.workspace = true
@@ -73,9 +73,12 @@ cid.workspace = true
 wasm-bindgen-test = "0.3"
 
 [features]
-default = []
+# The shipped browser artifact depends on this default. Building with
+# --no-default-features drops the panic hook, turning browser panics into
+# silent aborts.
+default = ["debug"]
 # Enable console_error_panic_hook for better error messages in debug builds
-debug = []
+debug = ["dep:console_error_panic_hook"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz", "--enable-mutable-globals", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

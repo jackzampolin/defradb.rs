@@ -2,7 +2,9 @@
 //! introspection exposed through [`EmbeddedNode`].
 
 use anyhow::{Context, Result};
-use defra_node::{EmbeddedNode, LensConfig, LensModule};
+use defra_node::EmbeddedNode;
+#[cfg(feature = "wasmtime-runtime")]
+use defra_node::{LensConfig, LensModule};
 
 const USER_SDL: &str = r#"
 type User {
@@ -15,6 +17,7 @@ type User {
 // 4-byte version (`1`). Wasmtime accepts this as an empty module, which is
 // all we need to prove [`EmbeddedNode::set_migration`] wires through to the
 // underlying lens store.
+#[cfg(feature = "wasmtime-runtime")]
 const EMPTY_WASM: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
 #[tokio::test(flavor = "current_thread")]
@@ -191,6 +194,7 @@ async fn set_active_collection_version_round_trips_to_original() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "wasmtime-runtime")]
 #[tokio::test(flavor = "current_thread")]
 async fn set_migration_registers_lens_between_versions() -> Result<()> {
     let node = EmbeddedNode::builder().build().await?;
