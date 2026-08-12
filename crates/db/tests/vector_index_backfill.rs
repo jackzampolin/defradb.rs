@@ -177,3 +177,100 @@ async fn backfill_skips_documents_without_a_vector() {
     }
     txn.commit().await.unwrap();
 }
+
+/// A document arriving over P2P merge must reach the vector index the same way
+/// a local write does: the merge hooks iterate every index, so a vector one is
+/// maintained by construction. Proven rather than assumed.
+#[tokio::test]
+async fn merged_documents_are_indexed() {
+    let db = DB::new(MemoryStore::new()).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    let schema = schema();
+    let mut manager = IndexManager::new(COLLECTION_SHORT_ID);
+
+    {
+        let datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        let desc = manager
+            .create_index_of_kind(
+                &datastore,
+                "docs",
+                "by_embedding".to_string(),
+                vec![IndexedFieldDescription {
+                    name: "embedding".to_string(),
+                    descending: false,
+                }],
+                vector_kind(),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        // Arriving over merge rather than through a local write.
+        for (short_id, doc) in corpus(12) {
+            let mut doc = doc;
+            doc.set_id(merge_doc_id(short_id));
+            manager
+                .on_document_create_merge(&datastore, &systemstore, &doc, short_id, &schema)
+                .await
+                .unwrap();
+        }
+
+        let mut view = datastore.clone();
+        let kv = KvNodeStore::new(&mut view, COLLECTION_SHORT_ID, desc.id, 0);
+        let mut ids = Vec::new();
+        kv.iterate_nodes(|node| {
+            ids.push(node.id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        ids.sort();
+        assert_eq!(
+            ids,
+            (1..=12u64).map(NodeId).collect::<Vec<_>>(),
+            "every merged document must be searchable on the replica"
+        );
+
+        // A merged update replaces the vector; a merged delete tombstones it.
+        let (_, mut replacement) = corpus(1).pop().unwrap();
+        replacement.set_id(merge_doc_id(1));
+        replacement.set(
+            "embedding",
+            document::NormalValue::Float64Array(vec![9.0, 9.0, 9.0, 9.0]),
+        );
+        let (_, original) = corpus(1).pop().unwrap();
+        manager
+            .on_document_update_merge(
+                &datastore,
+                &systemstore,
+                &original,
+                &replacement,
+                1,
+                &schema,
+            )
+            .await
+            .unwrap();
+
+        let mut view = datastore.clone();
+        let kv = KvNodeStore::new(&mut view, COLLECTION_SHORT_ID, desc.id, 0);
+        let node = kv
+            .get_node(NodeId(1))
+            .await
+            .unwrap()
+            .expect("still present");
+        assert!(!node.deleted, "an updated document stays searchable");
+    }
+    txn.commit().await.unwrap();
+}
+
+/// Merged documents carry ids from the writing node; any stable distinct id
+/// serves here.
+fn merge_doc_id(short_id: u64) -> document::DocID {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("merged-{short_id}").as_bytes());
+    let mh: multihash::Multihash<64> =
+        multihash::Multihash::wrap(*defra_core::SHA2_256_CODE, &hasher.finalize()).unwrap();
+    document::DocID::new_v0(cid::Cid::new_v1(0x55, mh))
+}
