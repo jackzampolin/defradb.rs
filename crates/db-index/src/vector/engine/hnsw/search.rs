@@ -6,7 +6,7 @@ use std::collections::{BinaryHeap, HashSet};
 use super::{Candidate, Hnsw};
 use crate::error::Result;
 use crate::vector::core::Element;
-use crate::vector::engine::ann::Neighbor;
+use crate::vector::engine::ann::{Admit, AdmitAll, Neighbor};
 use crate::vector::store::{NodeId, VectorNodeStore};
 
 impl<S: VectorNodeStore> Hnsw<S> {
@@ -21,6 +21,26 @@ impl<S: VectorNodeStore> Hnsw<S> {
         query: &[E],
         k: usize,
         ef_search: usize,
+    ) -> Result<Vec<Neighbor>> {
+        self.search_with_ef_where(query, k, ef_search, &AdmitAll)
+            .await
+    }
+
+    /// [`search_with_ef`](Self::search_with_ef) restricted to the nodes
+    /// `admit` accepts.
+    ///
+    /// **Returns a full `k` whenever `k` admitted nodes are reachable.** The
+    /// walk only stops early once it holds `ef >= k` admitted results that
+    /// nothing left in the frontier can improve on; short of that it keeps
+    /// expanding until the reachable graph is exhausted. So a shortfall means
+    /// the corpus really has fewer matches, never that the search gave up
+    /// early with a filter in the way.
+    pub async fn search_with_ef_where<E: Element, A: Admit>(
+        &self,
+        query: &[E],
+        k: usize,
+        ef_search: usize,
+        admit: &A,
     ) -> Result<Vec<Neighbor>> {
         if k == 0 {
             return Ok(Vec::new());
@@ -38,6 +58,9 @@ impl<S: VectorNodeStore> Hnsw<S> {
         let mut current = self.candidate(&query, entry);
 
         for layer in (1..=meta.top_layer).rev() {
+            // The descent routes, it does not answer, so it admits everything.
+            // Filtering here could strand the walk on a layer with no admitted
+            // node and lose the region below it.
             if let Some(best) = self
                 .search_greedy(&query, current.id, layer)
                 .await?
@@ -47,7 +70,9 @@ impl<S: VectorNodeStore> Hnsw<S> {
             }
         }
 
-        let mut found = self.search_layer(&query, vec![current], ef, 0).await?;
+        let mut found = self
+            .search_layer(&query, vec![current], ef, 0, admit)
+            .await?;
         found.truncate(k);
         Ok(found
             .into_iter()
@@ -71,7 +96,8 @@ impl<S: VectorNodeStore> Hnsw<S> {
             distance: 0.0,
             vector: Vec::new().into(),
         };
-        self.search_layer(query, vec![seed], 1, layer).await
+        self.search_layer(query, vec![seed], 1, layer, &AdmitAll)
+            .await
     }
 
     /// SEARCH-LAYER (paper Algorithm 2), seeded with a set of entry points
@@ -83,12 +109,13 @@ impl<S: VectorNodeStore> Hnsw<S> {
     ///
     /// Entry points are re-read from the store rather than trusted, because the
     /// descent passes ids with a placeholder distance.
-    pub(super) async fn search_layer(
+    pub(super) async fn search_layer<A: Admit>(
         &self,
         query: &[f32],
         entry_points: Vec<Candidate>,
         ef: usize,
         layer: usize,
+        admit: &A,
     ) -> Result<Vec<Candidate>> {
         let mut visited: HashSet<NodeId> = HashSet::new();
         // Nearest pops first: the frontier explores closest-first.
@@ -103,9 +130,9 @@ impl<S: VectorNodeStore> Hnsw<S> {
             let Some(node) = self.store.get_node(entry.id).await? else {
                 continue;
             };
-            let deleted = node.deleted;
+            let admitted = !node.deleted && admit.admits(node.id);
             let candidate = self.candidate(query, node);
-            if !deleted {
+            if admitted {
                 results.push(candidate.clone());
             }
             frontier.push(Reverse(candidate));
@@ -139,14 +166,16 @@ impl<S: VectorNodeStore> Hnsw<S> {
                 let Some(neighbor) = self.store.get_node(neighbor_id).await? else {
                     continue;
                 };
-                let deleted = neighbor.deleted;
+                // A rejected node is still a route to its neighbors, exactly
+                // as a tombstone is; only admission to the results differs.
+                let admitted = !neighbor.deleted && admit.admits(neighbor.id);
                 let candidate = self.candidate(query, neighbor);
 
                 // Extend the frontier only where it could still matter. This
                 // bounds how far the walk spreads; it does not end the loop.
                 let worst = results.peek().map(|c| c.distance);
                 if results.len() < ef || worst.is_some_and(|worst| candidate.distance < worst) {
-                    if !deleted {
+                    if admitted {
                         results.push(candidate.clone());
                         if results.len() > ef {
                             results.pop();

@@ -5,7 +5,7 @@
 //! since a trait with one implementor is a guess. Not exposed as a
 //! user-selectable kind.
 
-use super::ann::{EngineKind, Neighbor, VectorIndexEngine};
+use super::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
 use crate::vector::core::{Element, Metric};
 use crate::vector::store::{Node, NodeId, VectorNodeStore};
@@ -72,11 +72,12 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
 
     /// `effort` is ignored: an exhaustive scan has no accuracy to trade. Holds
     /// `k` results rather than scoring the whole corpus and sorting.
-    async fn search<E: Element>(
+    async fn search_where<E: Element, A: Admit>(
         &self,
         query: &[E],
         k: usize,
         _effort: Option<usize>,
+        admit: &A,
     ) -> Result<Vec<Neighbor>> {
         if k == 0 {
             return Ok(Vec::new());
@@ -93,6 +94,9 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
         let metric = self.metric;
         self.store
             .iterate_nodes(|node| {
+                if !admit.admits(node.id) {
+                    return Ok(());
+                }
                 let distance = if metric == Metric::Cosine {
                     metric.distance_normalized(&query, &node.vector)
                 } else {

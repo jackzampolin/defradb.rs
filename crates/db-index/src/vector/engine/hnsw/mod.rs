@@ -33,7 +33,7 @@ mod search;
 pub use candidate::Candidate;
 pub use level::LevelSampler;
 
-use super::ann::{EngineKind, Neighbor, VectorIndexEngine};
+use super::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
 use crate::vector::core::{metric::normalize, Element, Metric};
 use crate::vector::params::Params;
@@ -194,13 +194,14 @@ impl<S: VectorNodeStore> VectorIndexEngine for Hnsw<S> {
     }
 
     /// `effort` is `ef_search`, defaulting to the configured value.
-    async fn search<E: Element>(
+    async fn search_where<E: Element, A: Admit>(
         &self,
         query: &[E],
         k: usize,
         effort: Option<usize>,
+        admit: &A,
     ) -> Result<Vec<Neighbor>> {
-        self.search_with_ef(query, k, effort.unwrap_or(self.params.ef_search))
+        self.search_with_ef_where(query, k, effort.unwrap_or(self.params.ef_search), admit)
             .await
     }
 }

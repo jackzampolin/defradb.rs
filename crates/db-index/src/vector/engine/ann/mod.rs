@@ -13,6 +13,6 @@ mod engine;
 mod engine_kind;
 mod neighbor;
 
-pub use engine::VectorIndexEngine;
+pub use engine::{Admit, AdmitAll, VectorIndexEngine};
 pub use engine_kind::EngineKind;
 pub use neighbor::Neighbor;

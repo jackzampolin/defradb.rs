@@ -3,6 +3,7 @@
 use super::Hnsw;
 use crate::error::{Error, Result};
 use crate::vector::core::Element;
+use crate::vector::engine::ann::AdmitAll;
 use crate::vector::store::{Meta, Node, NodeId, VectorNodeStore};
 
 impl<S: VectorNodeStore> Hnsw<S> {
@@ -59,7 +60,13 @@ impl<S: VectorNodeStore> Hnsw<S> {
         let mut entry_points = vec![current];
         for layer in (0..=meta.top_layer.min(top_level)).rev() {
             let found = self
-                .search_layer(&vector, entry_points, self.params.ef_construction, layer)
+                .search_layer(
+                    &vector,
+                    entry_points,
+                    self.params.ef_construction,
+                    layer,
+                    &AdmitAll,
+                )
                 .await?;
 
             let selected = self.select_neighbors(&found, self.params.m);

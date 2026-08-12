@@ -13,7 +13,7 @@ use defra_core::thread_bounds::MaybeSend;
 
 use db_index::error::{Error, Result};
 use db_index::vector::core::Metric;
-use db_index::vector::engine::ann::{EngineKind, VectorIndexEngine};
+use db_index::vector::engine::ann::{AdmitAll, EngineKind, VectorIndexEngine};
 use db_index::vector::engine::flat::Flat;
 use db_index::vector::engine::hnsw::{Hnsw, LevelSampler};
 use db_index::vector::params::{
@@ -343,6 +343,25 @@ async fn both_kinds_satisfy_the_engine_trait() {
             .unwrap()
             .is_empty());
         assert!(engine.search(&vectors[1], 5, Some(64)).await.unwrap().len() > 1);
+
+        // Filtering is part of the contract, so every kind answers it, and the
+        // defaulted `search` must agree with an all-admitting `search_where`.
+        let filtered = engine
+            .search_where(&vectors[1], 5, None, &|id: NodeId| !id.0.is_multiple_of(2))
+            .await
+            .unwrap();
+        assert!(
+            filtered.iter().all(|h| !h.id.0.is_multiple_of(2)),
+            "{kind:?}: a rejected node was returned"
+        );
+        assert_eq!(
+            engine.search(&vectors[1], 5, None).await.unwrap(),
+            engine
+                .search_where(&vectors[1], 5, None, &AdmitAll)
+                .await
+                .unwrap(),
+            "{kind:?}: the defaulted search disagrees with an all-admitting one"
+        );
     }
 
     let mut corpus = Corpus::new(CORPUS_SEED);
@@ -448,6 +467,175 @@ async fn search_hits_carry_a_floating_point_distance_for_an_integer_query() {
         "expected {want}, got {}",
         at_45.distance
     );
+}
+
+/// Filtered nearest-neighbour search must still hand back a full `k`. A filter
+/// narrows *what may be returned*, never how many: if `k` admitted documents
+/// exist, `k` come back.
+#[tokio::test]
+async fn a_filtered_search_still_returns_a_full_k() {
+    const K: usize = 10;
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let vectors = corpus.vectors(2000, 16);
+    let index = build(&vectors, GRAPH_SEED).await;
+
+    // Increasingly selective filters, down to one admitted node in fifty.
+    for divisor in [2u64, 5, 10, 25, 50] {
+        let admit = move |id: NodeId| id.0.is_multiple_of(divisor);
+        let admitted = (0..vectors.len() as u64)
+            .filter(|id| admit(NodeId(*id)))
+            .count();
+        assert!(admitted >= K, "test setup: need at least {K} admitted");
+
+        let mut queries = Corpus::new(QUERY_SEED);
+        for _ in 0..10 {
+            let query = queries.vector(16);
+            let hits = index
+                .search_with_ef_where(&query, K, DEFAULT_EF_SEARCH, &admit)
+                .await
+                .unwrap();
+            assert_eq!(
+                hits.len(),
+                K,
+                "1 in {divisor} admitted ({admitted} of {}), yet only {} came back",
+                vectors.len(),
+                hits.len()
+            );
+            assert!(
+                hits.iter().all(|h| admit(h.id)),
+                "a rejected node was returned"
+            );
+        }
+    }
+}
+
+/// The filtered hits must be the true nearest *among the admitted*, not merely
+/// the admitted subset of an unfiltered top-k.
+#[tokio::test]
+async fn a_filtered_search_finds_the_nearest_admitted() {
+    const K: usize = 10;
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let vectors = corpus.vectors(1000, 16);
+    let index = build(&vectors, GRAPH_SEED).await;
+    let admit = |id: NodeId| id.0.is_multiple_of(7);
+
+    let mut queries = Corpus::new(QUERY_SEED);
+    let (mut hit, mut total) = (0usize, 0usize);
+    for _ in 0..25 {
+        let query = queries.vector(16);
+
+        // Exhaustive over the admitted subset only.
+        let mut want: Vec<(NodeId, f64)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (NodeId(i as u64), Metric::Cosine.distance(&query, v)))
+            .filter(|(id, _)| admit(*id))
+            .collect();
+        want.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        let want: Vec<NodeId> = want.into_iter().take(K).map(|(id, _)| id).collect();
+
+        let got = index
+            .search_with_ef_where(&query, K, 128, &admit)
+            .await
+            .unwrap();
+        hit += got.iter().filter(|n| want.contains(&n.id)).count();
+        total += want.len();
+    }
+    let recall = hit as f64 / total as f64;
+    println!("filtered recall@{K} (1 in 7 admitted) = {recall:.4}");
+    assert!(
+        recall > 0.9,
+        "filtered recall {recall:.4} is too low to be right"
+    );
+}
+
+/// A rejected node is still a route. If the only admitted documents sit behind
+/// rejected ones, the walk must still reach them.
+#[tokio::test]
+async fn traversal_passes_through_rejected_nodes() {
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let vectors = corpus.vectors(500, 16);
+    let index = build(&vectors, GRAPH_SEED).await;
+
+    // Admit only the last ten ids, which are unrelated to where a query lands.
+    let admit = |id: NodeId| id.0 >= 490;
+    let mut queries = Corpus::new(QUERY_SEED);
+    for _ in 0..10 {
+        let query = queries.vector(16);
+        let hits = index
+            .search_with_ef_where(&query, 5, DEFAULT_EF_SEARCH, &admit)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "the walk failed to reach the admitted region"
+        );
+        assert!(hits.iter().all(|h| h.id.0 >= 490));
+    }
+}
+
+#[tokio::test]
+async fn the_degenerate_filters_behave() {
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let vectors = corpus.vectors(300, 16);
+    let index = build(&vectors, GRAPH_SEED).await;
+    let query = Corpus::new(QUERY_SEED).vector(16);
+
+    let nothing = index
+        .search_with_ef_where(&query, 10, DEFAULT_EF_SEARCH, &|_: NodeId| false)
+        .await
+        .unwrap();
+    assert!(
+        nothing.is_empty(),
+        "a filter admitting nothing must return nothing"
+    );
+
+    let everything = index
+        .search_with_ef_where(&query, 10, DEFAULT_EF_SEARCH, &|_: NodeId| true)
+        .await
+        .unwrap();
+    let unfiltered = index
+        .search_with_ef(&query, 10, DEFAULT_EF_SEARCH)
+        .await
+        .unwrap();
+    assert_eq!(
+        everything, unfiltered,
+        "admitting everything must equal an unfiltered search"
+    );
+
+    // Fewer admitted than k: return what exists, not an error.
+    let three = index
+        .search_with_ef_where(&query, 10, DEFAULT_EF_SEARCH, &|id: NodeId| id.0 < 3)
+        .await
+        .unwrap();
+    assert_eq!(three.len(), 3);
+}
+
+/// Both kinds must agree under the same filter, which is what makes the exact
+/// kind an oracle for the filtered path too.
+#[tokio::test]
+async fn both_kinds_agree_under_a_filter() {
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let vectors = corpus.vectors(400, 16);
+    let graph = build(&vectors, GRAPH_SEED).await;
+    let exact = flat(&vectors).await;
+    let admit = |id: NodeId| id.0.is_multiple_of(3);
+
+    let mut queries = Corpus::new(QUERY_SEED);
+    for _ in 0..15 {
+        let query = queries.vector(16);
+        let from_graph = graph
+            .search_with_ef_where(&query, 5, 200, &admit)
+            .await
+            .unwrap();
+        let from_scan = exact.search_where(&query, 5, None, &admit).await.unwrap();
+        assert_eq!(
+            from_graph.iter().map(|h| h.id).collect::<Vec<_>>(),
+            from_scan.iter().map(|h| h.id).collect::<Vec<_>>(),
+            "the graph and the exact scan disagree under a filter"
+        );
+    }
 }
 
 /// The exact kind must agree with a direct scan on every query, or it is not an
