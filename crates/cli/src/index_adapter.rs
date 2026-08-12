@@ -33,6 +33,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         fields: Vec<String>,
         name: Option<&str>,
         unique: bool,
+        vector: Option<schema::VectorIndexDescription>,
     ) -> Result<IndexInfo, String> {
         self.database
             .check_node_access(None, acp::nac::NodePermission::IndexCreate)
@@ -68,13 +69,17 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         let (index_desc, updated_schema) = {
             let systemstore = txn.systemstore().map_err(|e| format!("{}", e))?;
 
+            let kind = match vector {
+                Some(vector) => schema::IndexKind::Vector(vector),
+                None => schema::IndexKind::Ordered(schema::OrderedIndexDescription { unique }),
+            };
             let index_desc = index_manager
-                .create_index(
+                .create_index_of_kind(
                     &systemstore,
                     collection,
                     name.unwrap_or("").to_string(),
                     indexed_fields,
-                    unique,
+                    kind,
                     &schema.fields,
                 )
                 .await
@@ -102,6 +107,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
             .map_err(|e| format!("{}", e))?;
 
         Ok(IndexInfo {
+            kind: index_desc.kind,
             id: index_desc.id,
             name: index_desc.name,
             collection: collection.to_string(),
@@ -156,6 +162,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         for col in &collections {
             for idx in col.get_indexes() {
                 result.push(IndexInfo {
+                    kind: idx.kind,
                     id: idx.id,
                     name: idx.name.clone(),
                     collection: col.name().to_string(),
