@@ -5,6 +5,14 @@
 //! wiring code.
 //!
 //! P2P uses IROH (QUIC-native) transport for peer-to-peer replication.
+//!
+//! ## Cargo features
+//!
+//! - `lark` / `redb` / `rocksdb` — storage backends. Default: `lark`, `redb`.
+//! - `sourcehub` — on-chain document ACP. Default-on. Omit for local-only ACP.
+//! - `p2p` — Iroh/QUIC replication.
+//! - `http` — GraphQL HTTP server.
+//! - `otel` — OpenTelemetry exporter.
 
 mod benchmark_data_gen;
 mod benchmark_queries;
@@ -36,11 +44,13 @@ pub use coding_search::{
     CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
     CodingSearchTarget,
 };
+pub use config::DocumentAcpConfig;
 #[cfg(feature = "http")]
 pub use config::HttpConfig;
 #[cfg(feature = "p2p")]
 pub use config::P2PConfig;
-pub use config::{DocumentAcpConfig, SourceHubConfig};
+#[cfg(feature = "sourcehub")]
+pub use config::SourceHubConfig;
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
@@ -833,6 +843,9 @@ impl NodeBuilder {
     }
 
     /// Configure the node to use SourceHub-backed document ACP.
+    ///
+    /// Requires the `sourcehub` feature (on by default).
+    #[cfg(feature = "sourcehub")]
     pub fn with_sourcehub(mut self, config: SourceHubConfig) -> Self {
         self.document_acp = DocumentAcpConfig::SourceHub(config);
         self

@@ -32,6 +32,26 @@ assert_present() {
   exit 1
 }
 
+# Present iff stdout matches ^<pkg> v. Absent iff no such line: exit 101 or
+# exit 0 + empty stdout both count as absent. Never treat the -i exit code
+# as present.
+assert_absent() {
+  local crate=$1
+  local pkg=$2
+  shift 2
+  local stdout rc
+  set +e
+  stdout="$(cargo tree -p "$crate" -e normal --locked "$@" -i "$pkg")"
+  rc=$?
+  set -e
+  if printf '%s\n' "$stdout" | grep -q "^${pkg} v"; then
+    echo "error: unexpected ^${pkg} v in ${crate}${*:+ $*} tree (cargo tree -i exit ${rc})" >&2
+    printf '%s\n' "$stdout" >&2
+    exit 1
+  fi
+  echo "ok: ${crate}${*:+ $*} has no ^${pkg} v"
+}
+
 unique_crate_names() {
   cargo tree -p defra-node -e normal --locked --prefix none "$@" \
     | awk '{print $1}' | grep -v '^(*)' | sort -u | wc -l
@@ -41,6 +61,13 @@ assert_present defra-node sourcehub
 assert_present defra-node wasmtime
 assert_present defra-node libp2p
 assert_present cli libp2p
+
+# Lean local-ACP combo. `native` is not a defra-node feature yet.
+assert_absent defra-node sourcehub --no-default-features --features lark,redb
+assert_absent defra-node acp-light-client --no-default-features --features lark,redb
+assert_absent defra-node commonware-cryptography --no-default-features --features lark,redb
+assert_absent defra-node aws-lc-rs --no-default-features --features lark,redb
+assert_absent defra-node cosmrs --no-default-features --features lark,redb
 
 # Unique crate names. Log only — not a gate and not binary size. Main may move.
 echo "defra-node default unique crate names: $(unique_crate_names)"

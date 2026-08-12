@@ -12,10 +12,17 @@ use db::{DEFAULT_TRANSACTION_CLEANUP_INTERVAL, DEFAULT_TRANSACTION_IDLE_TIMEOUT}
 pub enum DocumentAcpConfig {
     #[default]
     Local,
+    /// On-chain document ACP via SourceHub.
+    ///
+    /// Requires the `sourcehub` feature (on by default).
+    #[cfg(feature = "sourcehub")]
     SourceHub(SourceHubConfig),
 }
 
 /// SourceHub document ACP configuration.
+///
+/// Requires the `sourcehub` feature (on by default).
+#[cfg(feature = "sourcehub")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceHubConfig {
     pub grpc_address: String,

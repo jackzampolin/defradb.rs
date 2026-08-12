@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+#[cfg(feature = "sourcehub")]
+use anyhow::anyhow;
+use anyhow::Result;
 
 pub(crate) async fn create_document_acp(
     acp_store: Arc<dyn acp::AcpStore>,
     config: &crate::DocumentAcpConfig,
 ) -> Result<(Arc<dyn acp::DocumentACP>, bool)> {
     match config {
+        #[cfg(feature = "sourcehub")]
         crate::DocumentAcpConfig::SourceHub(sourcehub_config) => {
             let tuning = sourcehub::AcpTuning::default();
             let provider = Arc::new(

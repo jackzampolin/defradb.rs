@@ -14,12 +14,14 @@ path = "src/bin/coding-session-bench.rs"
 test = false
 
 [features]
-default = ["lark", "redb"]
+default = ["lark", "redb", "sourcehub"]
 lark = ["storage/lark"]
 http = ["dep:defra-http", "dep:axum"]
 p2p = ["dep:p2p", "dep:blockstore", "dep:cid", "dep:defra-http", "dep:defra-p2p-adapter"]
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
+# SourceHub / hub.rs on-chain document ACP. Default-on; omit for local-only ACP.
+sourcehub = ["dep:sourcehub"]
 # Compile in OpenTelemetry exporter support. Mirrors the CLI's `otel` feature
 # and the underlying `telemetry/otlp` gate. Off by default — embedded users
 # who want OTel must opt in.
@@ -34,7 +36,7 @@ query = { path = "../query" }
 events = { path = "../events" }
 rand.workspace = true
 acp = { path = "../acp" }
-sourcehub = { path = "../sourcehub" }
+sourcehub = { path = "../sourcehub", optional = true }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }
