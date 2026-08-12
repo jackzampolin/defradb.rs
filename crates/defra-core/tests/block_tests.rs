@@ -8,6 +8,7 @@ use cid::Cid;
 use defra_core::{
     Block, CollectionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink,
     Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType, DAG_CBOR_CODEC,
+    SHA2_256_CODE,
 };
 
 fn test_cid() -> Cid {
@@ -289,7 +290,18 @@ fn test_block_cid_uses_dag_cbor_codec() {
     let block = Block::new(test_lww_delta(), vec![], vec![]);
     let cid = block.generate_cid().unwrap();
 
-    assert_eq!(cid.codec(), *DAG_CBOR_CODEC);
+    assert_eq!(cid.codec(), DAG_CBOR_CODEC);
+}
+
+/// Both codec values are encoded in the prefix of every CID Go produces, so
+/// decoding a Go test vector re-derives them independently of the literals in
+/// `block.rs`. A wrong constant there would silently rewrite every document ID.
+#[test]
+fn test_codec_constants_match_go_cid_prefix() {
+    let go_cid = Cid::from_str(GO_LWW_SIMPLE_CID).unwrap();
+
+    assert_eq!(go_cid.codec(), DAG_CBOR_CODEC);
+    assert_eq!(go_cid.hash().code(), SHA2_256_CODE);
 }
 
 #[test]
