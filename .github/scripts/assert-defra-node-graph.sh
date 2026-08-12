@@ -98,28 +98,35 @@ LEAN_IROH=(--no-default-features --features lark,redb,native,p2p)
 assert_no_libp2p defra-node "${LEAN_IROH[@]}"
 assert_present defra-node iroh "${LEAN_IROH[@]}"
 
-# p2p crate feature line (the ^p2p v package, not p2p-*) must omit libp2p-transport.
-assert_p2p_crate_no_libp2p_transport() {
-  local stdout rc
+# p2p crate feature line (the ^p2p v package, not p2p-*). Default cargo tree
+# omits features; --format '{p} {f}' prints them so this can fail.
+assert_p2p_crate_iroh_only() {
+  local stdout rc line
   set +e
-  stdout="$(cargo tree -p defra-node -e normal --locked "${LEAN_IROH[@]}" -i p2p)"
+  stdout="$(cargo tree -p defra-node -e normal --locked "${LEAN_IROH[@]}" -i p2p --format '{p} {f}')"
   rc=$?
   set -e
-  if ! printf '%s\n' "$stdout" | grep -q '^p2p v'; then
+  line="$(printf '%s\n' "$stdout" | grep '^p2p v' || true)"
+  if [ -z "$line" ]; then
     echo "error: expected ^p2p v in lean Iroh tree (cargo tree -i exit ${rc})" >&2
     if [ -n "$stdout" ]; then
       printf '%s\n' "$stdout" >&2
     fi
     exit 1
   fi
-  if printf '%s\n' "$stdout" | grep '^p2p v' | grep -q 'libp2p-transport'; then
-    echo "error: p2p crate line enables libp2p-transport" >&2
-    printf '%s\n' "$stdout" | grep '^p2p v' >&2
+  if ! printf '%s\n' "$line" | grep -q 'iroh-transport'; then
+    echo "error: p2p crate line missing iroh-transport" >&2
+    printf '%s\n' "$line" >&2
     exit 1
   fi
-  echo "ok: lean Iroh p2p crate line has no libp2p-transport"
+  if printf '%s\n' "$line" | grep -q 'libp2p-transport'; then
+    echo "error: p2p crate line enables libp2p-transport" >&2
+    printf '%s\n' "$line" >&2
+    exit 1
+  fi
+  echo "ok: lean Iroh p2p crate line has iroh-transport and no libp2p-transport"
 }
-assert_p2p_crate_no_libp2p_transport
+assert_p2p_crate_iroh_only
 
 # Unique crate names. Log only — not a gate and not binary size. Main may move.
 echo "defra-node default unique crate names: $(unique_crate_names)"
