@@ -20,7 +20,7 @@ use libp2p::{
     swarm::{behaviour::toggle::Toggle, dial_opts::DialOpts},
     tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use sysinfo::{RefreshKind, System, SystemExt};
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::{
     sync::mpsc,
     time::{self, Instant, MissedTickBehavior},
@@ -101,7 +101,9 @@ impl ResourceManagerRuntimeLimits {
 }
 
 fn total_system_memory_bytes() -> u64 {
-    let system = System::new_with_specifics(RefreshKind::new().with_memory());
+    let system = System::new_with_specifics(
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+    );
     system.total_memory()
 }
 
@@ -793,6 +795,22 @@ mod tests {
             GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES,
         )
         .expect("Go minimum FD and memory limits must be accepted");
+    }
+
+    /// `sysinfo::total_memory` reports bytes; a unit or refresh-kind regression
+    /// would be orders of magnitude off and skew the Go-parity memory divisor.
+    #[test]
+    fn total_system_memory_is_reported_in_bytes() {
+        let total = total_system_memory_bytes();
+
+        assert!(
+            total > 256 * 1024 * 1024,
+            "implausibly small system memory, expected bytes: {total}"
+        );
+        assert!(
+            total < 16 * 1024 * 1024 * 1024 * 1024,
+            "implausibly large system memory, expected bytes: {total}"
+        );
     }
 
     #[test]

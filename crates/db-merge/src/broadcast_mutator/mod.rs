@@ -77,7 +77,7 @@ pub trait SeArtifactRepusher: Send + Sync {
 /// failures are logged at `error` level but do not affect the mutation result.
 /// Peers will eventually receive the data via the next replicator sync or DAG
 /// fetch.
-pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp2pTransport> {
+pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport> {
     inner: AutoCommitMutator<S>,
     sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,

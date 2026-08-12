@@ -12,10 +12,17 @@ use db::{DEFAULT_TRANSACTION_CLEANUP_INTERVAL, DEFAULT_TRANSACTION_IDLE_TIMEOUT}
 pub enum DocumentAcpConfig {
     #[default]
     Local,
+    /// On-chain document ACP via SourceHub.
+    ///
+    /// Requires the `sourcehub` feature (on by default).
+    #[cfg(feature = "sourcehub")]
     SourceHub(SourceHubConfig),
 }
 
 /// SourceHub document ACP configuration.
+///
+/// Requires the `sourcehub` feature (on by default).
+#[cfg(feature = "sourcehub")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceHubConfig {
     pub grpc_address: String,
@@ -82,7 +89,10 @@ impl HttpConfig {
     }
 }
 
-/// Configuration for the optional P2P networking layer (IROH/QUIC).
+/// Configuration for the optional P2P networking layer.
+///
+/// Iroh/QUIC only. Requires the `p2p` feature, which implies `native`.
+/// libp2p lives on CLI, FFI, and `embedded` — not this crate.
 #[cfg(feature = "p2p")]
 pub struct P2PConfig {
     /// UDP port for QUIC listener.

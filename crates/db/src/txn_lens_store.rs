@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 #[cfg(not(feature = "wasmtime-runtime"))]
-use lens::MemoryTransformStore;
+use lens::UnsupportedTransformStore;
 #[cfg(feature = "wasmtime-runtime")]
 use lens::WasmTransformStore;
 use lens::{LensConfig, LensDocResultStream, LensDocStream, TransformId, TransformStore};
@@ -38,7 +38,7 @@ impl TxnLensStore {
 
     #[cfg(not(feature = "wasmtime-runtime"))]
     fn create_local_store() -> Result<Arc<dyn TransformStore>> {
-        Ok(Arc::new(MemoryTransformStore::new()))
+        Ok(Arc::new(UnsupportedTransformStore))
     }
 }
 
