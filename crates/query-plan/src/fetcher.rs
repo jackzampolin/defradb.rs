@@ -139,6 +139,30 @@ pub trait DocFetcher: MaybeSendSync {
         Ok(docs.into_iter().map(|d| (d, false)).collect())
     }
 
+    /// Read named documents by short id, without scanning the collection.
+    ///
+    /// `None` means this fetcher cannot seek, and the caller must fall back.
+    /// It is `None` rather than a scan-and-filter default because a
+    /// [`Document`] does not carry its own short id, so a default here could
+    /// only return the whole collection and call it a seek.
+    ///
+    /// Absent ids are skipped: a caller holding an id from an index may hold
+    /// one whose document has since gone. The result follows the order asked
+    /// for.
+    ///
+    /// This is what lets a query that already knows which documents it wants,
+    /// such as one narrowed by a vector index, cost the number it asked for
+    /// rather than the size of the collection.
+    async fn get_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> Result<Option<Vec<Document>>> {
+        let _ = (collection_name, doc_short_ids, show_deleted);
+        Ok(None)
+    }
+
     /// Stream documents from a collection with their deletion status.
     ///
     /// Unlike [`Self::get_all_with_deleted`], the returned stream yields one
