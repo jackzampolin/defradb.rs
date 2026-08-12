@@ -31,7 +31,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features release-full,vendored-openssl"
+            features: "--no-default-features --features release-full"
           - variant: full
             target: aarch64-apple-darwin
             platform: darwin_arm64
@@ -52,7 +52,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,lark,vendored-openssl"
+            features: "--no-default-features --features rocksdb,lark"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
@@ -73,7 +73,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features lark,vendored-openssl"
+            features: "--no-default-features --features lark"
           - variant: lark
             target: aarch64-apple-darwin
             platform: darwin_arm64
