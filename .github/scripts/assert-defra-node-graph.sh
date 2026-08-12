@@ -62,13 +62,16 @@ assert_present defra-node wasmtime
 assert_present defra-node libp2p
 assert_present cli libp2p
 
-# Lean local-ACP combo. `native` is not a defra-node feature yet.
-assert_absent defra-node sourcehub --no-default-features --features lark,redb
-assert_absent defra-node acp-light-client --no-default-features --features lark,redb
-assert_absent defra-node commonware-cryptography --no-default-features --features lark,redb
-assert_absent defra-node aws-lc-rs --no-default-features --features lark,redb
-assert_absent defra-node cosmrs --no-default-features --features lark,redb
+# Lean local-ACP + native host. No SourceHub, no Wasmtime. Still has libp2p
+# (db-merge native deps); that boundary is a later PR.
+assert_absent defra-node sourcehub --no-default-features --features lark,redb,native
+assert_absent defra-node acp-light-client --no-default-features --features lark,redb,native
+assert_absent defra-node commonware-cryptography --no-default-features --features lark,redb,native
+assert_absent defra-node aws-lc-rs --no-default-features --features lark,redb,native
+assert_absent defra-node cosmrs --no-default-features --features lark,redb,native
+assert_absent defra-node wasmtime --no-default-features --features lark,redb,native
+assert_absent defra-node cranelift-codegen --no-default-features --features lark,redb,native
 
 # Unique crate names. Log only — not a gate and not binary size. Main may move.
 echo "defra-node default unique crate names: $(unique_crate_names)"
-echo "defra-node --no-default-features --features lark,redb unique crate names: $(unique_crate_names --no-default-features --features lark,redb)"
+echo "defra-node --no-default-features --features lark,redb,native unique crate names: $(unique_crate_names --no-default-features --features lark,redb,native)"

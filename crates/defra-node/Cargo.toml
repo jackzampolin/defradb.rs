@@ -14,22 +14,32 @@ path = "src/bin/coding-session-bench.rs"
 test = false
 
 [features]
-default = ["lark", "redb", "sourcehub"]
+default = ["lark", "redb", "native", "sourcehub", "wasmtime-runtime"]
 lark = ["storage/lark"]
 http = ["dep:defra-http", "dep:axum"]
 p2p = ["dep:p2p", "dep:blockstore", "dep:cid", "dep:defra-http", "dep:defra-p2p-adapter"]
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
+# Native host (tokio, event channel). Default-on.
+native = ["db/native", "db-merge/native"]
 # SourceHub / hub.rs on-chain document ACP. Default-on; omit for local-only ACP.
 sourcehub = ["dep:sourcehub"]
+# Lens WASM execution. Default-on; without it set_migration fails explicitly.
+# Weak-dep `?` forwards onto the optional adapter only when `p2p` enabled it.
+wasmtime-runtime = [
+    "db/wasmtime-runtime",
+    "db-merge/wasmtime-runtime",
+    "lens/wasmtime-runtime",
+    "defra-p2p-adapter?/wasmtime-runtime",
+]
 # Compile in OpenTelemetry exporter support. Mirrors the CLI's `otel` feature
 # and the underlying `telemetry/otlp` gate. Off by default — embedded users
 # who want OTel must opt in.
 otel = ["telemetry/otlp"]
 
 [dependencies]
-db = { path = "../db" }
-db-merge = { path = "../db-merge" }
+db = { path = "../db", default-features = false }
+db-merge = { path = "../db-merge", default-features = false }
 replication-filter = { path = "../replication-filter" }
 storage = { path = "../storage" }
 query = { path = "../query" }
@@ -40,7 +50,7 @@ sourcehub = { path = "../sourcehub", optional = true }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }
-lens = { path = "../lens" }
+lens = { path = "../lens", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "sync", "time"] }
 anyhow.workspace = true
 tracing.workspace = true

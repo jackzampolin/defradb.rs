@@ -44,4 +44,8 @@ pub enum Error {
     /// File path not allowed (path traversal or HTTP restriction).
     #[error("file path not allowed: {0}")]
     PathNotAllowed(String),
+
+    /// Lens WASM runtime is not compiled in.
+    #[error("lens runtime unavailable: rebuild with the wasmtime-runtime feature")]
+    RuntimeUnavailable,
 }

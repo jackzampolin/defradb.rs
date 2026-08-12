@@ -493,7 +493,7 @@ lint:
     cargo clippy -p defra-node --features otel --all-targets -- -D warnings
     cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
     cargo clippy -p db --features p2p --all-targets -- -D warnings
-    cargo clippy -p defra-node --no-default-features --features lark,redb --all-targets -- -D warnings
+    cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
     just check-node-graph
 
 # Feature-graph contracts for defra-node (#1398–#1400). Not a size check.

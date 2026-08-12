@@ -9,7 +9,10 @@
 //! ## Cargo features
 //!
 //! - `lark` / `redb` / `rocksdb` — storage backends. Default: `lark`, `redb`.
+//! - `native` — native host (tokio, event channel). Default-on.
 //! - `sourcehub` — on-chain document ACP. Default-on. Omit for local-only ACP.
+//! - `wasmtime-runtime` — Lens WASM execution. Default-on. Without it,
+//!   [`EmbeddedNode::set_migration`] returns an explicit error.
 //! - `p2p` — Iroh/QUIC replication.
 //! - `http` — GraphQL HTTP server.
 //! - `otel` — OpenTelemetry exporter.
@@ -385,6 +388,9 @@ impl EmbeddedNode {
     /// Returns the content-addressed [`TransformId`] of the stored transform.
     /// Placeholder versions are created if the source or destination are not
     /// yet materialized, allowing migrations to be registered ahead of patches.
+    ///
+    /// Requires the `wasmtime-runtime` feature (on by default). Without it this
+    /// returns an explicit error instead of registering a no-op transform.
     pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
         self.as_node_identity(self.schema_ops.set_migration(config))
             .await
