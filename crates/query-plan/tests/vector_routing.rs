@@ -36,12 +36,19 @@ fn ordered_index(id: u32, field: &str) -> IndexDescription {
     index
 }
 
-fn similarity(field: &str, index: usize) -> SimilarityField {
+fn similarity(field: &str, output_name: &str) -> SimilarityField {
     SimilarityField {
         target_field: field.to_string(),
         vector: vec![1.0, 0.0, 0.0, 0.0],
-        index,
+        output_name: output_name.to_string(),
     }
+}
+
+fn order(field: &str, descending: bool) -> Option<OrderKey> {
+    Some(OrderKey {
+        field: field.to_string(),
+        descending,
+    })
 }
 
 /// The shape that routes: one similarity, ordered by it descending, limited.
@@ -49,11 +56,8 @@ fn routable() -> SimilarityQuery {
     SimilarityQuery {
         limit: Some(10),
         offset: 0,
-        similarities: vec![similarity("embedding", 3)],
-        sole_order: Some(OrderKey {
-            field_index: 3,
-            descending: true,
-        }),
+        similarities: vec![similarity("embedding", "SIMILARITY")],
+        sole_order: order("SIMILARITY", true),
     }
 }
 
@@ -102,7 +106,10 @@ fn zero_or_several_similarities_do_not_route() {
     assert_eq!(route(&none, &indexes), Err(NotRouted::NotOneSimilarity));
 
     let two = SimilarityQuery {
-        similarities: vec![similarity("embedding", 3), similarity("other", 4)],
+        similarities: vec![
+            similarity("embedding", "SIMILARITY"),
+            similarity("other", "other_sim"),
+        ],
         ..routable()
     };
     assert_eq!(route(&two, &indexes), Err(NotRouted::NotOneSimilarity));
@@ -114,25 +121,15 @@ fn zero_or_several_similarities_do_not_route() {
 fn the_ordering_must_be_that_similarity_alone_descending() {
     let indexes = [vector_index(7, "embedding", DIMENSIONS)];
 
-    for order in [
-        None,
-        Some(OrderKey {
-            field_index: 3,
-            descending: false,
-        }),
-        Some(OrderKey {
-            field_index: 1,
-            descending: true,
-        }),
-    ] {
+    for key in [None, order("SIMILARITY", false), order("name", true)] {
         let query = SimilarityQuery {
-            sole_order: order,
+            sole_order: key.clone(),
             ..routable()
         };
         assert_eq!(
             route(&query, &indexes),
             Err(NotRouted::NotOrderedBySimilarity),
-            "{order:?} should not route"
+            "{key:?} should not route"
         );
     }
 }
@@ -144,11 +141,8 @@ fn the_ordering_must_be_that_similarity_alone_descending() {
 fn an_alias_ordered_query_routes() {
     let indexes = [vector_index(7, "embedding", DIMENSIONS)];
     let query = SimilarityQuery {
-        similarities: vec![similarity("embedding", 5)],
-        sole_order: Some(OrderKey {
-            field_index: 5,
-            descending: true,
-        }),
+        similarities: vec![similarity("embedding", "dense_score")],
+        sole_order: order("dense_score", true),
         ..routable()
     };
     assert_eq!(route(&query, &indexes).unwrap().index_id, 7);
@@ -177,7 +171,7 @@ fn a_dimension_mismatch_does_not_route() {
     let query = SimilarityQuery {
         similarities: vec![SimilarityField {
             vector: vec![1.0, 0.0],
-            ..similarity("embedding", 3)
+            ..similarity("embedding", "SIMILARITY")
         }],
         ..routable()
     };
@@ -199,7 +193,7 @@ fn an_unfixed_dimension_accepts_any_length() {
         let query = SimilarityQuery {
             similarities: vec![SimilarityField {
                 vector: vec![0.5; length],
-                ..similarity("embedding", 3)
+                ..similarity("embedding", "SIMILARITY")
             }],
             ..routable()
         };

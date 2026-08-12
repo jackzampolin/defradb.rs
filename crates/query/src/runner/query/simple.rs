@@ -37,7 +37,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // show_deleted, the scan filter, and a downstream limit without ever
         // materializing the collection. doc_ids and index-scan lookups fetch
         // specific documents rather than scanning, so they stay materialized.
-        let source = if select.show_deleted {
+        let source = if let Some(narrowed) = try_vector_narrow(select, collection, fetcher).await? {
+            narrowed
+        } else if select.show_deleted {
             ScanSource::Fetcher(Arc::new(FetcherWrapper::new(fetcher)))
         } else if let Some(ref doc_ids) = select.doc_ids {
             // Deduplicate doc_ids while preserving order (Go compatibility)
@@ -144,4 +146,85 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         Ok(JsonValue::Array(results))
     }
+}
+
+/// Narrows a scan to the nearest documents when a vector index can answer the
+/// query. `None` leaves the existing paths untouched.
+async fn try_vector_narrow(
+    select: &query_types::mapper::Select,
+    collection: &schema::CollectionVersion,
+    fetcher: &dyn query_plan::fetcher::DocFetcher,
+) -> Result<Option<ScanSource>> {
+    use query_plan::planner::vector_routing::{route, OrderKey, SimilarityField, SimilarityQuery};
+    use query_types::mapper::{OrderDirection, Requestable};
+
+    if select.show_deleted || !fetcher.supports_vector_search() {
+        return Ok(None);
+    }
+
+    let similarities = select
+        .fields
+        .iter()
+        .filter_map(|field| match field {
+            Requestable::Similarity(similarity) => Some(SimilarityField {
+                target_field: similarity.target_field.clone(),
+                vector: similarity.vector.clone(),
+                output_name: similarity.output_name().to_string(),
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let sole_order = select
+        .order_by
+        .as_ref()
+        .and_then(|order| match order.conditions.as_slice() {
+            [condition] => condition.fields.first().map(|field| OrderKey {
+                field: field.clone(),
+                descending: condition.direction == OrderDirection::Desc,
+            }),
+            _ => None,
+        });
+
+    let query = SimilarityQuery {
+        limit: select
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.limit)
+            .map(|limit| limit as usize),
+        offset: select
+            .limit
+            .as_ref()
+            .map(|limit| limit.offset as usize)
+            .unwrap_or(0),
+        similarities,
+        sole_order,
+    };
+
+    let Ok(route) = route(&query, &collection.indexes) else {
+        return Ok(None);
+    };
+
+    let doc_short_ids = fetcher
+        .vector_search(
+            &select.collection_name,
+            route.index_id,
+            &route.query_vector,
+            route.k,
+            None,
+        )
+        .await?;
+
+    debug!(
+        collection = %select.collection_name,
+        index_id = route.index_id,
+        k = route.k,
+        found = doc_short_ids.len(),
+        "narrowed scan with a vector index"
+    );
+
+    Ok(Some(ScanSource::VectorNarrowed {
+        fetcher: Arc::new(FetcherWrapper::new(fetcher)),
+        doc_short_ids,
+    }))
 }

@@ -70,19 +70,17 @@ pub struct SimilarityField {
     pub target_field: String,
     /// The vector to compare it to.
     pub vector: Vec<f64>,
-    /// Where this field sits in the selection, which is what an order-by
-    /// refers to, whether directly or through an alias.
-    pub index: usize,
+    /// The name an order-by refers to: the alias when set, `SIMILARITY`
+    /// otherwise. An alias-ordered query is therefore the same shape here as a
+    /// directly-ordered one.
+    pub output_name: String,
 }
 
 /// The single order-by key of a routable query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderKey {
-    /// The selection index being ordered by. An alias resolves to the index of
-    /// the field it names, so an alias-ordered query is indistinguishable here
-    /// from a directly-ordered one, which is what lets the hybrid retrieval
-    /// path route.
-    pub field_index: usize,
+    /// The name being ordered by.
+    pub field: String,
     /// Descending is required.
     pub descending: bool,
 }
@@ -101,8 +99,11 @@ pub fn route(
         return Err(NotRouted::NotOneSimilarity);
     };
 
-    let order = query.sole_order.ok_or(NotRouted::NotOrderedBySimilarity)?;
-    if !order.descending || order.field_index != similarity.index {
+    let order = query
+        .sole_order
+        .as_ref()
+        .ok_or(NotRouted::NotOrderedBySimilarity)?;
+    if !order.descending || order.field != similarity.output_name {
         return Err(NotRouted::NotOrderedBySimilarity);
     }
 

@@ -10,8 +10,9 @@ use schema::{DistanceMetric, IndexDescription, VectorAlgorithm, VectorIndexDescr
 use storage::corekv::{MaybeSend, Reader, Writer};
 use storage::index::CollectionIndex;
 
+use super::core::Element;
 use super::core::Metric;
-use super::engine::ann::VectorIndexEngine;
+use super::engine::ann::{Admit, Neighbor, VectorIndexEngine};
 use super::engine::hnsw::Hnsw;
 use super::kv_store::KvNodeStore;
 use super::params::Params;
@@ -68,6 +69,29 @@ impl VectorIndex {
 
     pub fn vector_description(&self) -> &VectorIndexDescription {
         &self.vector
+    }
+
+    /// The `k` nearest documents to `query`, nearest first.
+    pub async fn search<T: Reader + Writer + MaybeSend, E: Element>(
+        &self,
+        txn: &mut T,
+        query: &[E],
+        k: usize,
+        effort: Option<usize>,
+    ) -> Result<Vec<Neighbor>> {
+        self.engine(txn).search(query, k, effort).await
+    }
+
+    /// [`search`](Self::search) restricted to the documents `admit` accepts.
+    pub async fn search_where<T: Reader + Writer + MaybeSend, E: Element, A: Admit>(
+        &self,
+        txn: &mut T,
+        query: &[E],
+        k: usize,
+        effort: Option<usize>,
+        admit: &A,
+    ) -> Result<Vec<Neighbor>> {
+        self.engine(txn).search_where(query, k, effort, admit).await
     }
 
     /// Returns the configured algorithm behind [`VectorIndexEngine`] rather
