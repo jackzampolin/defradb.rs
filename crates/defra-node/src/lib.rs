@@ -149,6 +149,7 @@ pub struct EmbeddedNode {
     schema_ops: Arc<dyn SchemaOps>,
     block_ops: Arc<dyn BlockOps>,
     acp_ops: Arc<dyn acp_ops::AcpOps>,
+    document_acp: Arc<dyn acp::DocumentACP>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     node_query_identity: Option<identity::Did>,
@@ -531,6 +532,17 @@ impl EmbeddedNode {
         self.acp_ops
             .delete_dac_actor_relationship(identity, collection, doc_id, relation, target)
             .await
+    }
+
+    /// Access the raw document ACP handle (Go: `node.DB.DocumentACP()`).
+    ///
+    /// This is an escape hatch for policy and relationship operations the node
+    /// does not wrap. It bypasses node access control and the collection-policy
+    /// lookup, so standard flows belong on [`Self::add_dac_policy`],
+    /// [`Self::add_dac_actor_relationship`], and
+    /// [`Self::delete_dac_actor_relationship`].
+    pub fn document_acp(&self) -> Arc<dyn acp::DocumentACP> {
+        self.document_acp.clone()
     }
 
     /// Access the resolved node-level embedding runtime config.
@@ -1488,7 +1500,7 @@ impl NodeBuilder {
         ));
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
-            document_acp,
+            document_acp.clone(),
             registry,
             node_query_identity.clone(),
         ));
@@ -1505,6 +1517,7 @@ impl NodeBuilder {
             schema_ops,
             block_ops,
             acp_ops,
+            document_acp,
             embedding_config,
             node_identity_did,
             node_query_identity,

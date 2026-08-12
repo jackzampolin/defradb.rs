@@ -1,4 +1,8 @@
+use super::tests::SIGNING_STORE_GUARD;
 use super::EmbeddedNode;
+use crypto::Key;
+use defra_core::signing::{SigningConfig, SigningKeyType};
+use identity::{Identity as _, RawIdentity};
 
 const POLICY_YAML: &str = r#"
 name: Sensitive Rows
@@ -40,6 +44,30 @@ async fn node_with_protected_users() -> (EmbeddedNode, String) {
         .unwrap()
         .to_string();
     (node, doc_id)
+}
+
+/// Generate a fresh Ed25519 node identity and register it in the process-local
+/// signing registry with exportable key bytes, so `with_node_acp_enabled` can
+/// match it against the database node DID.
+fn register_local_node_identity() -> String {
+    let private_key = crypto::generate_ed25519().unwrap();
+    let identity = RawIdentity::from_ed25519(private_key.clone()).unwrap();
+    let did = identity.did().unwrap().to_string();
+
+    let public_key_bytes = identity.public_key_bytes();
+    defra_core::signing::store_identity(
+        &did,
+        SigningConfig {
+            key_type: SigningKeyType::Ed25519,
+            private_key_bytes: private_key.raw().to_vec(),
+            public_key_bytes: public_key_bytes.clone(),
+            public_key_hex: hex::encode(&public_key_bytes),
+            remote_signer: None,
+            signing_authorization: None,
+        },
+    );
+
+    did
 }
 
 async fn visible_users(node: &EmbeddedNode, identity: Option<identity::Did>) -> usize {
@@ -212,4 +240,63 @@ async fn dac_relationship_requires_a_collection_policy() {
         "operation requires ACP, but collection has no policy"
     );
     node.shutdown().await;
+}
+
+#[tokio::test]
+async fn document_acp_handle_registers_and_checks_a_document() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    let policy_id = node.add_dac_policy(DID_A, POLICY_YAML).await.unwrap();
+    let did_a = identity::Did::new(DID_A).unwrap();
+
+    let document_acp = node.document_acp();
+    document_acp
+        .register_doc_object(&did_a, &policy_id, "users", "doc-x")
+        .await
+        .unwrap();
+
+    assert!(document_acp
+        .check_doc_access(
+            &acp::Identity::Authenticated(did_a),
+            acp::DocumentPermission::Read,
+            &policy_id,
+            "users",
+            "doc-x",
+        )
+        .await
+        .unwrap());
+    assert!(!document_acp
+        .check_doc_access(
+            &acp::Identity::Anonymous,
+            acp::DocumentPermission::Read,
+            &policy_id,
+            "users",
+            "doc-x",
+        )
+        .await
+        .unwrap());
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_dac_policy_is_gated_by_node_access_control() {
+    let _serial = SIGNING_STORE_GUARD.lock().await;
+    defra_core::signing::clear_identity_store();
+    let node_did = register_local_node_identity();
+
+    let node = EmbeddedNode::builder()
+        .with_node_identity_did(&node_did)
+        .with_node_acp_enabled()
+        .build()
+        .await
+        .unwrap();
+
+    let err = node.add_dac_policy(DID_B, POLICY_YAML).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "not authorized to perform operation. Permission: add-dac-policy"
+    );
+    assert!(node.add_dac_policy(&node_did, POLICY_YAML).await.is_ok());
+
+    node.shutdown().await;
+    defra_core::signing::clear_identity_store();
 }
