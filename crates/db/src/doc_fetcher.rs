@@ -47,7 +47,7 @@ impl<S: Store> DbDocFetcher<S> {
     /// Create a new transaction-scoped document fetcher.
     ///
     /// Collections will be loaded lazily from the transaction's cache.
-    pub(crate) fn new(txn: DbTxn<S>) -> Self {
+    pub fn new(txn: DbTxn<S>) -> Self {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
         }

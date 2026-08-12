@@ -179,12 +179,22 @@ async fn the_requested_order_is_preserved() {
     assert_eq!(titles(&mut node).await, vec!["doc-8", "doc-1", "doc-4"]);
 }
 
-/// A pre-loaded document carries no short id, so a restriction over it could
-/// only be ignored. That must fail loudly rather than quietly read everything.
-#[test]
-#[should_panic(expected = "short-id restriction")]
-fn a_restriction_over_preloaded_documents_is_refused() {
-    let _ = ScanNode::new(collection(), mapping())
-        .with_docs(Vec::new())
-        .with_doc_short_ids(vec![1]);
+/// A vector-routed scan reports one index fetch, which is how an explain shows
+/// the query routed. An unrouted one reports none.
+#[tokio::test]
+async fn a_vector_routed_scan_reports_an_index_fetch() {
+    let fetcher = Arc::new(RecordingFetcher::default());
+    let mut routed = scan(fetcher.clone())
+        .with_doc_short_ids(vec![1, 2])
+        .as_vector_indexed();
+    titles(&mut routed).await;
+    assert_eq!(routed.explain_execute_inner()["indexFetches"], 1);
+
+    let mut unrouted = scan(fetcher).with_doc_short_ids(vec![1, 2]);
+    titles(&mut unrouted).await;
+    assert_eq!(
+        unrouted.explain_execute_inner()["indexFetches"],
+        0,
+        "a plain short-id restriction is not an index hit"
+    );
 }

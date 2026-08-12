@@ -218,7 +218,10 @@ pub(crate) fn build_plan(
         ScanSource::VectorNarrowed {
             fetcher,
             doc_short_ids,
-        } => scan.with_fetcher(fetcher).with_doc_short_ids(doc_short_ids),
+        } => scan
+            .with_fetcher(fetcher)
+            .with_doc_short_ids(doc_short_ids)
+            .as_vector_indexed(),
     }
     .with_show_deleted(select.show_deleted);
 

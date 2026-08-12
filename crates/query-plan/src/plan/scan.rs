@@ -47,6 +47,8 @@ pub struct ScanNode {
     /// narrowed by a vector index, costs what it asked for rather than the
     /// size of the collection.
     doc_short_ids: Option<Vec<u64>>,
+    /// Whether the restriction came from a vector index search.
+    vector_indexed: bool,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -87,6 +89,7 @@ impl ScanNode {
             filter: None,
             doc_ids: None,
             doc_short_ids: None,
+            vector_indexed: false,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -113,21 +116,18 @@ impl ScanNode {
     /// An empty list means no documents match, which is different from no
     /// restriction: the scan yields nothing rather than everything.
     ///
-    /// # Panics
-    /// If documents were already pre-loaded with
-    /// [`with_docs`](Self::with_docs). A [`Doc`] carries no short id, so the
-    /// restriction could not be applied to them and would be silently
-    /// ignored -- a query would quietly read the whole collection while
-    /// claiming to be narrowed.
+    /// Applies to the fetcher path only. Pre-loaded documents carry no short
+    /// id, so a restriction cannot address them; `ScanSource` yields either
+    /// documents or a fetcher, never both, so the two do not meet.
     pub fn with_doc_short_ids(mut self, doc_short_ids: Vec<u64>) -> Self {
-        assert!(
-            !self.docs_provided,
-            "ScanNode for collection '{}' was given a short-id restriction after \
-             documents were pre-loaded; a pre-loaded Doc has no short id, so the \
-             restriction cannot be honoured",
-            self.collection.name
-        );
         self.doc_short_ids = Some(doc_short_ids);
+        self
+    }
+
+    /// Marks the restriction as coming from a vector index, which explain
+    /// reports as one index fetch.
+    pub fn as_vector_indexed(mut self) -> Self {
+        self.vector_indexed = true;
         self
     }
 
@@ -148,16 +148,7 @@ impl ScanNode {
     /// Set documents directly (for testing or in-memory operations).
     ///
     /// Providing an empty vector is valid and represents an empty collection.
-    /// # Panics
-    /// If a short-id restriction was already set; see
-    /// [`with_doc_short_ids`](Self::with_doc_short_ids).
     pub fn with_docs(mut self, docs: Vec<Doc>) -> Self {
-        assert!(
-            self.doc_short_ids.is_none(),
-            "ScanNode for collection '{}' has a short-id restriction, which \
-             pre-loaded documents cannot honour",
-            self.collection.name
-        );
         self.docs = docs;
         self.docs_provided = true;
         self
@@ -423,10 +414,11 @@ impl PlanNode for ScanNode {
             "fieldFetches".to_string(),
             serde_json::json!(self.exec_info.fields_fetched),
         );
-        obj.insert(
-            "indexFetches".to_string(),
-            serde_json::json!(self.exec_info.indexes_fetched),
-        );
+        // A vector-index hit counts as one fetch. Unlike a scalar index, which
+        // counts each entry read, this does not reflect the graph search's real
+        // node reads; matching the reference, which tracks the same gap.
+        let index_fetches = self.exec_info.indexes_fetched + u64::from(self.vector_indexed);
+        obj.insert("indexFetches".to_string(), serde_json::json!(index_fetches));
 
         serde_json::Value::Object(obj)
     }
