@@ -39,6 +39,14 @@ pub struct ScanNode {
     filter: Option<Filter>,
     /// Optional document IDs supplied separately from the scan filter
     doc_ids: Option<Vec<String>>,
+    /// Documents this scan is restricted to, by short id.
+    ///
+    /// Unlike [`ScanNode::doc_ids`], which drops non-matching documents after
+    /// reading them, this narrows the read itself: the fetcher seeks each one.
+    /// A query that already knows which documents it wants, such as one
+    /// narrowed by a vector index, costs what it asked for rather than the
+    /// size of the collection.
+    doc_short_ids: Option<Vec<u64>>,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -78,6 +86,7 @@ impl ScanNode {
             document_mapping,
             filter: None,
             doc_ids: None,
+            doc_short_ids: None,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -98,6 +107,30 @@ impl ScanNode {
     }
 
     /// Set document IDs supplied separately from the scan filter.
+    /// Restricts this scan to the given documents, read by seeking rather
+    /// than by scanning and discarding.
+    ///
+    /// An empty list means no documents match, which is different from no
+    /// restriction: the scan yields nothing rather than everything.
+    ///
+    /// # Panics
+    /// If documents were already pre-loaded with
+    /// [`with_docs`](Self::with_docs). A [`Doc`] carries no short id, so the
+    /// restriction could not be applied to them and would be silently
+    /// ignored -- a query would quietly read the whole collection while
+    /// claiming to be narrowed.
+    pub fn with_doc_short_ids(mut self, doc_short_ids: Vec<u64>) -> Self {
+        assert!(
+            !self.docs_provided,
+            "ScanNode for collection '{}' was given a short-id restriction after \
+             documents were pre-loaded; a pre-loaded Doc has no short id, so the \
+             restriction cannot be honoured",
+            self.collection.name
+        );
+        self.doc_short_ids = Some(doc_short_ids);
+        self
+    }
+
     pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
         // Only set if non-empty; empty means scan entire collection
         if !doc_ids.is_empty() {
@@ -115,7 +148,16 @@ impl ScanNode {
     /// Set documents directly (for testing or in-memory operations).
     ///
     /// Providing an empty vector is valid and represents an empty collection.
+    /// # Panics
+    /// If a short-id restriction was already set; see
+    /// [`with_doc_short_ids`](Self::with_doc_short_ids).
     pub fn with_docs(mut self, docs: Vec<Doc>) -> Self {
+        assert!(
+            self.doc_short_ids.is_none(),
+            "ScanNode for collection '{}' has a short-id restriction, which \
+             pre-loaded documents cannot honour",
+            self.collection.name
+        );
         self.docs = docs;
         self.docs_provided = true;
         self
@@ -159,11 +201,18 @@ impl PlanNode for ScanNode {
         // (e.g. a satisfied LimitNode) stop the underlying fetch.
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
-                self.stream = Some(
-                    fetcher
-                        .stream_all_with_deleted(&self.collection.name, self.show_deleted)
-                        .await?,
-                );
+                self.stream = Some(match self.doc_short_ids.as_deref() {
+                    Some(ids) => {
+                        fetcher
+                            .stream_by_doc_short_ids(&self.collection.name, ids, self.show_deleted)
+                            .await?
+                    }
+                    None => {
+                        fetcher
+                            .stream_all_with_deleted(&self.collection.name, self.show_deleted)
+                            .await?
+                    }
+                });
             } else {
                 // No docs provided and no fetcher - this is a programming error.
                 // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
