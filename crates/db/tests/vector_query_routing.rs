@@ -2,9 +2,8 @@
 //! exhaustive scan returns.
 //!
 //! Exercised through `IndexManager` and a real transaction, down to the stored
-//! graph. What this does not cover is `DbDocFetcher::vector_search`'s
-//! collection-name lookup, which needs a schema-registered collection; that is
-//! thin plumbing over the same call.
+//! graph, which isolates the ranking from the collection lookup around it.
+//! `vector_fetcher_lookup.rs` covers that lookup, over a registered collection.
 
 use db::database::DB;
 use db::index_manager::IndexManager;
