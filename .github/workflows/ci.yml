@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Every base branch, not just main. The filter matches the PR's *base*, so
-    # limiting it to main means a stacked PR (one targeting the branch below it)
-    # runs no jobs at all and shows an empty, green-looking check list.
+    # Every base branch, not just main. GitHub stacks evaluate each layer as
+    # if it targeted the stack base, but a `main`-only filter still misses
+    # layers whose literal base is the branch below. `ci-scope` then drops
+    # the expensive jobs on middle layers.
     branches: ['**']
 
 # Only the tip of each ref keeps a run. Superseded PR pushes and main merge
@@ -28,6 +29,36 @@ env:
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
+  # GitHub stacks fire a full `pull_request` workflow per layer. Lint and
+  # Lean stay on every layer (cheap; the graph harness lives in Lint). The
+  # self-hosted node suites run only on standalone PRs, the stack tip
+  # (whole change), and the lowest unmerged layer (what would land on
+  # main next). Middle layers skip them.
+  ci-scope:
+    name: CI scope
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+    steps:
+      - id: decide
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('full', 'true');
+              return;
+            }
+            const stack = context.payload.pull_request && context.payload.pull_request.stack;
+            if (!stack) {
+              core.setOutput('full', 'true');
+              return;
+            }
+            const isTip = stack.position === stack.size;
+            const isLowest = stack.base && stack.base.ref === context.payload.pull_request.base.ref;
+            const full = isTip || isLowest;
+            core.setOutput('full', full ? 'true' : 'false');
+            core.info(`stack #${stack.number} pos ${stack.position}/${stack.size} full=${full}`);
+
   # Studio jobs are pinned to a runner slot so each job's incremental target
   # state stays warm on one machine (a suite that bounces between hosts turns
   # a small rebuild into a full one) and so same-host exclusivity is
@@ -97,6 +128,8 @@ jobs:
 
   wasm-check:
     name: WASM Build Check
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     # spark-1: the wasm32 target doesn't care about host arch, and pinning
     # here takes this job off the vps (which now serves release.yml's x86_64
     # builds only) and out of p2p-linux's way. No GitHub-hosted rust-cache:
@@ -217,6 +250,8 @@ jobs:
 
   build:
     name: Build & Test
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     # Either studio host. Port isolation comes from there being exactly one
     # `studio`-labelled runner process per box, not from naming a host, so
     # floating this job still permits only one node-spawning job per box.
@@ -315,6 +350,8 @@ jobs:
 
   conformance:
     name: Conformance
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     # Spawns real `defra` nodes, so it must never co-run with another
     # node-spawning job on the SAME host (harness port allocator TOCTOU bind
     # race — "failed to start rust-0"). Host pinning provides that: this job
@@ -383,7 +420,8 @@ jobs:
 
   integration:
     name: Integration (${{ matrix.suite }})
-    needs: build
+    needs: [ci-scope, build]
+    if: needs.ci-scope.outputs.full == 'true'
     runs-on: [self-hosted, macOS, ARM64, studio, "${{ matrix.host }}"]
     strategy:
       fail-fast: false
@@ -692,6 +730,8 @@ jobs:
     # now serves release.yml's x86_64 builds only. Still Linux/epoll — the
     # scheduling-race coverage is arch-independent.
     name: P2P Integration (Linux)
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     runs-on: [self-hosted, Linux, ARM64, spark, spark-2]
     timeout-minutes: 45
     env:
