@@ -280,8 +280,6 @@ fn merge_doc_id(short_id: u64) -> document::DocID {
 /// `remove_all` then `bulk_index`, without the epoch swap.
 #[tokio::test]
 async fn an_index_can_be_cleared_and_rebuilt() {
-    use storage::index::CollectionIndex;
-
     const DOCUMENTS: usize = 40;
     let db = DB::new(MemoryStore::new()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
