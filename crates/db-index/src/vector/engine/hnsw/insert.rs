@@ -33,6 +33,18 @@ impl<S: VectorNodeStore> Hnsw<S> {
             });
         };
 
+        // The first vector inserted fixes the width, which is the only thing
+        // that can when an index declares no dimensions because an embedding
+        // model fixes the length. Mixing widths is not an approximation: the
+        // metric would rank on the shared leading elements and silently ignore
+        // the rest.
+        if vector.len() != entry.vector.len() {
+            return Err(Error::VectorDimensionMismatch {
+                indexed: entry.vector.len(),
+                got: vector.len(),
+            });
+        }
+
         // Descend from the top, keeping only the closest node found so far,
         // down to the first layer this node will occupy.
         let mut current = self.candidate(&vector, entry);

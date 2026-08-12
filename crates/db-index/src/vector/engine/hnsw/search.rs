@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
 use super::{Candidate, Hnsw};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::vector::core::Element;
 use crate::vector::engine::ann::{Admit, AdmitAll, Neighbor};
 use crate::vector::store::{NodeId, VectorNodeStore};
@@ -53,6 +53,16 @@ impl<S: VectorNodeStore> Hnsw<S> {
         };
 
         let query = self.prepared(query);
+        // A query of the wrong width would be scored on its shared leading
+        // elements, so it would return confident, wrong neighbours rather than
+        // no answer. The planner catches this when the index declares its
+        // dimensions; this catches it when it does not.
+        if query.len() != entry.vector.len() {
+            return Err(Error::VectorDimensionMismatch {
+                indexed: entry.vector.len(),
+                got: query.len(),
+            });
+        }
         let mut current = self.candidate(&query, entry);
 
         for layer in (1..=meta.top_layer).rev() {

@@ -230,13 +230,20 @@ async fn a_dimension_mismatch_is_rejected() {
         "the error must name what was expected, got: {err}"
     );
 
-    // Declaring zero dimensions means an embedding field fixes the length, so
-    // anything is accepted.
+    // Declaring zero dimensions means an embedding model fixes the length, so
+    // the description has nothing to check against and the first vector
+    // indexed fixes it instead. Everything after must still agree: a mixed
+    // index would rank on the shared leading elements.
     let free = VectorIndex::try_new(COLLECTION, description(0)).unwrap();
     free.save(&mut write, 2, &wide(&[1.0, 0.0])).await.unwrap();
-    free.save(&mut write, 3, &wide(&[1.0, 0.0, 0.0]))
+    let err = free
+        .save(&mut write, 3, &wide(&[1.0, 0.0, 0.0]))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("2-dimension"),
+        "the error must name the width the index holds, got: {err}"
+    );
 }
 
 #[tokio::test]
