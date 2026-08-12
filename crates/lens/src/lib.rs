@@ -9,6 +9,7 @@ mod error;
 mod history;
 mod pipeline;
 mod store;
+mod unsupported_store;
 #[cfg(feature = "wasmtime-runtime")]
 mod wasm;
 #[cfg(feature = "wasmtime-runtime")]
@@ -22,5 +23,6 @@ pub use pipeline::{Lens, LensInput};
 pub use store::{
     LensDocResultStream, LensDocStream, MemoryTransformStore, TransformId, TransformStore,
 };
+pub use unsupported_store::UnsupportedTransformStore;
 #[cfg(feature = "wasmtime-runtime")]
 pub use wasm::{WasmSandboxConfig, WasmTransformStore};

@@ -53,11 +53,7 @@ struct BroadcastCapture<'a> {
     broadcast_block: Option<&'a Vec<u8>>,
 }
 
-pub(crate) struct BroadcastBatchMutator<
-    S: Store,
-    B: Blockstore,
-    T: P2PTransport = p2p::Libp2pTransport,
-> {
+pub(crate) struct BroadcastBatchMutator<S: Store, B: Blockstore, T: P2PTransport> {
     inner: Arc<BatchMutator<S>>,
     sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,

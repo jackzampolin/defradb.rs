@@ -349,7 +349,7 @@ pub async fn write_document_blocks(
                 .unwrap_or(false)
                 || doc.get_counter_delta(field_name).is_some();
 
-            let nonce: i64 = if is_counter && !heads.is_empty() {
+            let nonce: i64 = if is_counter && !is_create {
                 rand::random()
             } else {
                 0
@@ -656,6 +656,10 @@ mod encryption_derivation_tests;
 #[cfg(test)]
 #[path = "write_kms_tests.rs"]
 mod kms_write_tests;
+
+#[cfg(test)]
+#[path = "write_counter_tests.rs"]
+mod counter_write_tests;
 
 #[cfg(test)]
 #[path = "write_priority_tests.rs"]

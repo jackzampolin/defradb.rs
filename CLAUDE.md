@@ -208,9 +208,29 @@ Single-purpose binaries, each its own `[[test]]` with no submodules:
 cargo test                         # Run all unit tests
 cargo test -p crdt                 # Test specific crate
 cargo clippy --all -- -D warnings  # Lint
+just check-node-graph              # Feature-graph contracts for defra-node
 cargo fmt --all                    # Format
 cargo build --release              # Build release
 ```
+
+### Build Profile in Worktrees
+
+Every worktree keeps its own `target/`, and a stock dev build retains one debug
+object per codegen unit forever, so concurrent worktrees add up fast. The
+justfile's `profile` variable (default `dev`) selects the profile for the build
+and test recipes; `super-dev` keeps `file:line` backtrace frames for workspace
+crates while dropping dependency debug info, for ~7.5x less object volume.
+
+```bash
+just profile=super-dev test              # unit tests, into target/super-dev/
+just profile=super-dev integration-suite acp
+```
+
+The override must precede the recipe name. Prefer it in agent worktrees; stay
+on `dev` when stepping through code in lldb.
+
+`just sweep` (keeps 7 days) deletes this worktree's stale artifacts. The
+profile shrinks each build generation; sweeping bounds how many pile up.
 
 ### Tracking Go Upstream
 
