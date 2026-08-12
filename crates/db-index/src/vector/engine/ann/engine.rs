@@ -2,7 +2,7 @@
 
 use defra_core::thread_bounds::MaybeSendSync;
 
-use super::{IndexKind, Neighbor};
+use super::{EngineKind, Neighbor};
 use crate::error::Result;
 use crate::vector::core::Element;
 use crate::vector::store::NodeId;
@@ -17,7 +17,7 @@ use crate::vector::store::NodeId;
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait VectorIndexEngine: MaybeSendSync {
     /// Which algorithm this is.
-    fn kind(&self) -> IndexKind;
+    fn kind(&self) -> EngineKind;
 
     /// Adds `vector` under `id`, replacing any vector already there.
     ///

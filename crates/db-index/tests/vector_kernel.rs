@@ -1,9 +1,19 @@
-//! Every SIMD tier is held to the scalar tier's answer, at both element widths,
+//! Every SIMD tier is held to the scalar tier's answer, at every element width,
 //! to a machine-epsilon bound rather than a hand-picked tolerance. Which tiers
 //! run depends on the machine: `Tier::is_available` decides, and every failure
 //! message names the tier it came from.
 
 use db_index::vector::core::{dot, squared_euclidean, Element, Tier, ALL_TIERS};
+
+/// Runs `check` for every physical width a vector field can hold.
+macro_rules! for_every_width {
+    ($check:ident) => {{
+        $check::<f32>("f32");
+        $check::<f64>("f64");
+        $check::<i32>("i32");
+        $check::<i64>("i64");
+    }};
+}
 
 fn live_tiers() -> Vec<Tier> {
     ALL_TIERS
@@ -53,7 +63,26 @@ fn squared_euclidean_epsilon<T: Element>(a: &[T], b: &[T]) -> f64 {
 /// AVX2, 8 for AVX-512), up to a realistic embedding dimension.
 const LENGTHS: [usize; 17] = [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 64, 129, 1536];
 
+/// The same value sequence at any element width, so every instantiation sees
+/// identical inputs and can be compared against the same oracle.
+///
+/// Whole numbers, because `i32` and `i64` are swept alongside the float widths
+/// and a fractional corpus would truncate under them into something else.
+/// Fractional coverage is [`fractional_vectors`], float widths only.
 fn vectors<T: Element>() -> Vec<(Vec<T>, Vec<T>)> {
+    LENGTHS
+        .into_iter()
+        .map(|n| {
+            let a = (0..n).map(|i| T::narrow((i as f64) * 3.0 - 7.0)).collect();
+            let b = (0..n).map(|i| T::narrow(11.0 - (i as f64) * 2.0)).collect();
+            (a, b)
+        })
+        .collect()
+}
+
+/// Fractional inputs, which only the float widths can hold. Keeps the tiers'
+/// rounding under test now that the shared corpus is whole numbers.
+fn fractional_vectors<T: Element>() -> Vec<(Vec<T>, Vec<T>)> {
     LENGTHS
         .into_iter()
         .map(|n| {
@@ -96,13 +125,31 @@ fn check_against_scalar<T: Element>(width: &str) {
 }
 
 #[test]
-fn f32_every_live_tier_matches_scalar_within_machine_epsilon() {
-    check_against_scalar::<f32>("f32");
+fn every_live_tier_matches_scalar_within_machine_epsilon() {
+    for_every_width!(check_against_scalar);
 }
 
+/// The float widths again, on fractional inputs, where the tiers' rounding
+/// actually differs from the oracle's.
 #[test]
-fn f64_every_live_tier_matches_scalar_within_machine_epsilon() {
-    check_against_scalar::<f64>("f64");
+fn fractional_inputs_match_scalar_within_machine_epsilon() {
+    fn check<T: Element>(width: &str) {
+        for (a, b) in fractional_vectors::<T>() {
+            let want = Tier::Scalar.dot(&a, &b).expect("scalar is always live");
+            let eps = dot_epsilon(&a, &b);
+            for tier in live_tiers() {
+                let got = tier.dot(&a, &b).expect("filtered to live tiers");
+                assert!(
+                    (want - got).abs() <= eps,
+                    "{width} {} dot len={}: scalar={want} got={got} eps={eps}",
+                    tier.name(),
+                    a.len()
+                );
+            }
+        }
+    }
+    check::<f32>("f32");
+    check::<f64>("f64");
 }
 
 /// Lengths that are not lane multiples must still be exact. Sums of small
@@ -130,8 +177,7 @@ fn remainders_are_not_dropped() {
             }
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 /// Unequal lengths are well-defined, not an error and not a panic: a distance
@@ -166,24 +212,21 @@ fn unequal_lengths_use_the_shared_prefix_only() {
             }
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 /// Hand-computed, so the suite does not only agree with itself.
 #[test]
 fn known_values_are_exact() {
-    // 1*4 + 2*5 + 3*6 = 32 and 3^2 * 3 = 27, both exactly representable.
-    assert_eq!(dot(&[1.0f32, 2.0, 3.0], &[4.0f32, 5.0, 6.0]), 32.0);
-    assert_eq!(dot(&[1.0f64, 2.0, 3.0], &[4.0f64, 5.0, 6.0]), 32.0);
-    assert_eq!(
-        squared_euclidean(&[1.0f32, 2.0, 3.0], &[4.0f32, 5.0, 6.0]),
-        27.0
-    );
-    assert_eq!(
-        squared_euclidean(&[1.0f64, 2.0, 3.0], &[4.0f64, 5.0, 6.0]),
-        27.0
-    );
+    // 1*4 + 2*5 + 3*6 = 32 and 3^2 * 3 = 27, both exactly representable at
+    // every width.
+    fn check<T: Element>(width: &str) {
+        let a = [T::narrow(1.0), T::narrow(2.0), T::narrow(3.0)];
+        let b = [T::narrow(4.0), T::narrow(5.0), T::narrow(6.0)];
+        assert_eq!(dot(&a, &b), 32.0, "{width}");
+        assert_eq!(squared_euclidean(&a, &b), 27.0, "{width}");
+    }
+    for_every_width!(check);
 }
 
 /// The integer widths run on the scalar tier, but they are part of the same
@@ -227,22 +270,23 @@ fn narrowing_to_an_integer_saturates() {
 
 #[test]
 fn empty_vectors_are_zero() {
-    for tier in live_tiers() {
-        assert_eq!(tier.dot::<f32>(&[], &[]), Some(0.0), "{}", tier.name());
-        assert_eq!(tier.dot::<f64>(&[], &[]), Some(0.0), "{}", tier.name());
-        assert_eq!(
-            tier.squared_euclidean::<f32>(&[], &[]),
-            Some(0.0),
-            "{}",
-            tier.name()
-        );
-        assert_eq!(
-            tier.squared_euclidean::<f64>(&[], &[]),
-            Some(0.0),
-            "{}",
-            tier.name()
-        );
+    fn check<T: Element>(width: &str) {
+        for tier in live_tiers() {
+            assert_eq!(
+                tier.dot::<T>(&[], &[]),
+                Some(0.0),
+                "{width} {}",
+                tier.name()
+            );
+            assert_eq!(
+                tier.squared_euclidean::<T>(&[], &[]),
+                Some(0.0),
+                "{width} {}",
+                tier.name()
+            );
+        }
     }
+    for_every_width!(check);
 }
 
 #[test]
@@ -258,8 +302,7 @@ fn identical_vectors_have_zero_distance_exactly() {
             );
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 /// The free functions must route to the widest tier this machine can run.

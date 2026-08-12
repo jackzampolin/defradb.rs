@@ -94,14 +94,21 @@ async fn a_saved_document_becomes_a_searchable_node() {
     );
 }
 
-/// Both widths a document field can carry must be accepted, and must agree.
+/// Every width a document field can carry must be accepted, and all of them
+/// must store the same direction. `f32`/`f64` carry the value exactly;
+/// `IntArray` carries the same whole numbers.
 #[tokio::test]
-async fn either_element_width_indexes_identically() {
-    let components = [0.5f32, -0.25, 0.75, 0.125];
+async fn every_element_width_indexes_identically() {
+    let components = [3.0f32, -2.0, 6.0, 1.0];
     let as_wide: Vec<f64> = components.iter().map(|x| *x as f64).collect();
+    let as_int: Vec<i64> = components.iter().map(|x| *x as i64).collect();
 
     let mut stored = Vec::new();
-    for values in [narrow(&components), wide(&as_wide)] {
+    for values in [
+        narrow(&components),
+        wide(&as_wide),
+        vec![NormalValue::IntArray(as_int)],
+    ] {
         let store = MemoryStore::new();
         let index = index();
         let mut write = txn(&store).await;
@@ -114,7 +121,10 @@ async fn either_element_width_indexes_identically() {
         let kv = KvNodeStore::new(&mut read, COLLECTION, 3, 0);
         stored.push(kv.get_node(NodeId(1)).await.unwrap().unwrap().vector);
     }
-    assert_eq!(stored[0], stored[1], "the two widths stored different data");
+    assert!(
+        stored.windows(2).all(|pair| pair[0] == pair[1]),
+        "the widths stored different data: {stored:?}"
+    );
 }
 
 /// Go's `Similarity` accepts a vector "of type Int, Float32 or Float64", so a

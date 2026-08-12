@@ -10,9 +10,9 @@
 //! `index/flat`, `index/ivfpq`, `index/ssg` and `index/pq`.
 
 mod engine;
-mod kind;
+mod engine_kind;
 mod neighbor;
 
 pub use engine::VectorIndexEngine;
-pub use kind::IndexKind;
+pub use engine_kind::EngineKind;
 pub use neighbor::Neighbor;

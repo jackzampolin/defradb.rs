@@ -7,6 +7,25 @@ use db_index::vector::core::{
 
 const METRICS: [Metric; 3] = [Metric::Cosine, Metric::Euclidean, Metric::NegativeDot];
 
+/// Runs `check` for the widths that can hold a scaled unit vector. Anything
+/// about normalization belongs here rather than in [`for_every_width`].
+macro_rules! for_float_widths {
+    ($check:ident) => {{
+        $check::<f32>("f32");
+        $check::<f64>("f64");
+    }};
+}
+
+/// Runs `check` for every physical width a vector field can hold.
+macro_rules! for_every_width {
+    ($check:ident) => {{
+        $check::<f32>("f32");
+        $check::<f64>("f64");
+        $check::<i32>("i32");
+        $check::<i64>("i64");
+    }};
+}
+
 /// Distances accumulate in `f64`, but `f32` inputs carry only 24 bits of
 /// mantissa, so the bound is set by the input width. Round-tripping a value
 /// through `T` learns its epsilon without naming it.
@@ -39,20 +58,16 @@ fn cosine_oracle<T: Element>(width: &str) {
     let d = Metric::Cosine.distance(&x, &long_x);
     assert!(d.abs() < tol, "{width}: magnitude must not matter, got {d}");
 
-    // 45 degrees -> 1 - cos45.
+    // 45 degrees -> 1 - cos45. Whole-number components, so every width holds
+    // the inputs exactly even though the answer is irrational.
     let d = Metric::Cosine.distance(&vector::<T>(&[1.0, 0.0]), &vector::<T>(&[1.0, 1.0]));
     let want = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
     assert!((d - want).abs() < tol, "{width}: 45 degrees, got {d}");
 }
 
 #[test]
-fn f32_cosine_matches_hand_computed_oracle() {
-    cosine_oracle::<f32>("f32");
-}
-
-#[test]
-fn f64_cosine_matches_hand_computed_oracle() {
-    cosine_oracle::<f64>("f64");
+fn cosine_matches_hand_computed_oracle() {
+    for_every_width!(cosine_oracle);
 }
 
 /// A nearest-neighbour search orders distances, and NaN is not orderable.
@@ -63,7 +78,7 @@ fn no_metric_produces_nan() {
             (vector(&[1.0, 2.0, 3.0]), vector(&[4.0, 5.0, 6.0])),
             (vector(&[0.0, 0.0, 0.0]), vector(&[1.0, 2.0, 3.0])),
             (vector(&[0.0, 0.0, 0.0]), vector(&[0.0, 0.0, 0.0])),
-            (vector(&[1e-38, 0.0, 0.0]), vector(&[1.0, 0.0, 0.0])),
+            (vector(&[1.0, 0.0, 0.0]), vector(&[0.0, 0.0, 0.0])),
             (vector(&[f64::INFINITY, 0.0, 0.0]), vector(&[0.0, 0.0, 0.0])),
             (
                 vector(&[f64::INFINITY, 0.0, 0.0]),
@@ -85,8 +100,7 @@ fn no_metric_produces_nan() {
             }
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 #[test]
@@ -106,8 +120,7 @@ fn cosine_distance_stays_within_its_range() {
             );
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 /// The normalized fast path must agree with the general one.
@@ -126,8 +139,7 @@ fn normalized_path_agrees_with_general_path() {
             "{width}: general={general} fast={fast}"
         );
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_float_widths!(check);
 }
 
 #[test]
@@ -142,8 +154,7 @@ fn normalize_yields_unit_length() {
             "{width}: direction not preserved"
         );
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_float_widths!(check);
 }
 
 #[test]
@@ -167,8 +178,29 @@ fn normalize_refuses_a_vector_with_no_direction() {
             );
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_float_widths!(check);
+}
+
+/// An integral width cannot hold a scaled unit vector, so `normalize` must
+/// refuse rather than truncate `[3, 4]` into `[0, 0]` and destroy the
+/// direction it was asked to preserve.
+#[test]
+fn normalize_refuses_an_integral_width() {
+    fn check<T: Element>(width: &str) {
+        let mut v = vector::<T>(&[3.0, 4.0]);
+        assert!(!normalize(&mut v), "{width}: must refuse");
+        assert_eq!(
+            v.iter().map(|x| x.widen()).collect::<Vec<_>>(),
+            vec![3.0, 4.0],
+            "{width}: must be left untouched"
+        );
+    }
+    check::<i32>("i32");
+    check::<i64>("i64");
+
+    // The float widths still normalize.
+    let mut v = vec![3.0f32, 4.0];
+    assert!(normalize(&mut v));
 }
 
 /// The threshold is on the *squared* norm, matching Go's `normThreshold`: a
@@ -203,8 +235,7 @@ fn euclidean_matches_hand_computed_oracle() {
         let d = Metric::Euclidean.distance(&vector::<T>(&[0.0, 0.0]), &vector::<T>(&[3.0, 4.0]));
         assert!((d - 5.0).abs() < tolerance::<T>(), "{width}: got {d}");
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 #[test]
@@ -220,8 +251,7 @@ fn negative_dot_orders_larger_products_as_nearer() {
             "{width}: larger dot product must sort nearer: {dn} !< {df}"
         );
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 /// A length mismatch is compared over the shared prefix, not raised.
@@ -258,8 +288,7 @@ fn a_length_mismatch_uses_the_shared_prefix() {
             assert!(!Metric::NegativeDot.distance(a, b).is_nan());
         }
     }
-    check::<f32>("f32");
-    check::<f64>("f64");
+    for_every_width!(check);
 }
 
 /// An empty pair has no direction and no separation, and must still answer.

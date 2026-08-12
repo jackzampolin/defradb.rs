@@ -33,7 +33,7 @@ mod search;
 pub use candidate::Candidate;
 pub use level::LevelSampler;
 
-use super::ann::{IndexKind, Neighbor, VectorIndexEngine};
+use super::ann::{EngineKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
 use crate::vector::core::{metric::normalize, Element, Metric};
 use crate::vector::params::Params;
@@ -181,8 +181,8 @@ impl<S: VectorNodeStore> Hnsw<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S: VectorNodeStore> VectorIndexEngine for Hnsw<S> {
-    fn kind(&self) -> IndexKind {
-        IndexKind::Hnsw
+    fn kind(&self) -> EngineKind {
+        EngineKind::Hnsw
     }
 
     async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {

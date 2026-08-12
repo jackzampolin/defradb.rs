@@ -53,6 +53,14 @@ pub use tier::{Tier, ALL_TIERS};
 ///
 /// Shareable because a `&[Self]` is held across the awaits of an index walk.
 pub trait Element: Copy + MaybeSendSync + sealed::Sealed {
+    /// Whether this width can only hold whole numbers.
+    ///
+    /// An integral element cannot represent a scaled unit vector: normalizing
+    /// `[3, 4]` would truncate to `[0, 0]` and destroy the direction it was
+    /// meant to preserve. [`normalize`](crate::vector::core::normalize) checks
+    /// this and refuses rather than silently doing that.
+    const IS_INTEGRAL: bool;
+
     /// Widen to the accumulator width.
     fn widen(self) -> f64;
 
@@ -123,6 +131,8 @@ mod scalar {
 macro_rules! impl_element {
     ($ty:ty, dot = $dot:ident, squared_euclidean = $sqe:ident) => {
         impl Element for $ty {
+            const IS_INTEGRAL: bool = false;
+
             // `f64 as f64` is a no-op the compiler discards; the cast exists
             // because one macro body serves both widths.
             #[allow(clippy::unnecessary_cast)]
@@ -197,6 +207,8 @@ impl_element!(
 macro_rules! impl_integral_element {
     ($ty:ty) => {
         impl Element for $ty {
+            const IS_INTEGRAL: bool = true;
+
             #[inline(always)]
             fn widen(self) -> f64 {
                 self as f64

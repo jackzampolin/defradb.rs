@@ -5,7 +5,7 @@
 //! since a trait with one implementor is a guess. Not exposed as a
 //! user-selectable kind.
 
-use super::ann::{IndexKind, Neighbor, VectorIndexEngine};
+use super::ann::{EngineKind, Neighbor, VectorIndexEngine};
 use crate::error::Result;
 use crate::vector::core::{Element, Metric};
 use crate::vector::store::{Node, NodeId, VectorNodeStore};
@@ -38,8 +38,8 @@ impl<S> Flat<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
-    fn kind(&self) -> IndexKind {
-        IndexKind::Flat
+    fn kind(&self) -> EngineKind {
+        EngineKind::Flat
     }
 
     /// No graph to maintain, so a node is stored with no layers at all.

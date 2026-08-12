@@ -94,10 +94,15 @@ pub fn squared_norm<T: Element>(v: &[T]) -> f64 {
 
 /// Scale `v` to unit length in place.
 ///
-/// Returns `false` and leaves `v` untouched when it has no direction to
-/// preserve. The index rejects such vectors at insert rather than storing a
-/// point it can never rank.
+/// Returns `false` and leaves `v` untouched when there is no direction to
+/// preserve, or when the element width cannot hold one: an integral width
+/// would truncate `[3, 4]` to `[0, 0]`. The index rejects directionless vectors
+/// at insert rather than storing a point it can never rank, and converts an
+/// integral vector to its stored width before it gets here.
 pub fn normalize<T: Element>(v: &mut [T]) -> bool {
+    if T::IS_INTEGRAL {
+        return false;
+    }
     let sum_sq = squared_norm(v);
     if !usable_norm(sum_sq) {
         return false;

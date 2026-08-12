@@ -13,7 +13,7 @@ use defra_core::thread_bounds::MaybeSend;
 
 use db_index::error::{Error, Result};
 use db_index::vector::core::Metric;
-use db_index::vector::engine::ann::{IndexKind, VectorIndexEngine};
+use db_index::vector::engine::ann::{EngineKind, VectorIndexEngine};
 use db_index::vector::engine::flat::Flat;
 use db_index::vector::engine::hnsw::{Hnsw, LevelSampler};
 use db_index::vector::params::{
@@ -309,7 +309,11 @@ async fn recall_against_an_exact_scan_is_recorded() {
 /// makes it an abstraction.
 #[tokio::test]
 async fn both_kinds_satisfy_the_engine_trait() {
-    async fn exercise<E: VectorIndexEngine>(engine: &mut E, vectors: &[Vec<f32>], kind: IndexKind) {
+    async fn exercise<E: VectorIndexEngine>(
+        engine: &mut E,
+        vectors: &[Vec<f32>],
+        kind: EngineKind,
+    ) {
         assert_eq!(engine.kind(), kind);
         for (i, vector) in vectors.iter().enumerate() {
             engine.insert(NodeId(i as u64), vector).await.unwrap();
@@ -352,13 +356,13 @@ async fn both_kinds_satisfy_the_engine_trait() {
             GRAPH_SEED,
         ),
         &vectors,
-        IndexKind::Hnsw,
+        EngineKind::Hnsw,
     )
     .await;
     exercise(
         &mut Flat::new(MemoryNodeStore::new(), Metric::Cosine),
         &vectors,
-        IndexKind::Flat,
+        EngineKind::Flat,
     )
     .await;
 }
