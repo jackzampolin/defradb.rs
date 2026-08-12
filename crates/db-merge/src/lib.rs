@@ -10,9 +10,9 @@ pub mod browser_sync;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod head_provider;
 pub mod merge_handler;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
 pub mod peer_identity;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
 pub mod push_docs;
 pub mod push_docs_common;
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,11 +40,11 @@ pub use browser_sync::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use head_provider::DbHeadProvider;
 pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
 pub use push_docs::{
     push_existing_docs, push_existing_docs_with_config, retry_collection_commit, retry_doc,
     PushExistingDocsSeOptions,

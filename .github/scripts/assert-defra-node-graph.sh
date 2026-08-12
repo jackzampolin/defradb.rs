@@ -9,7 +9,7 @@
 # CLI's libp2p into every tree.
 set -euo pipefail
 
-# Always `-p defra-node` or `-p cli`. Workspace trees are forbidden.
+# Always `-p defra-node`, `-p cli`, or `-p db-merge`. Workspace trees are forbidden.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 assert_present() {
@@ -57,13 +57,32 @@ unique_crate_names() {
     | awk '{print $1}' | grep -v '^(*)' | sort -u | wc -l
 }
 
+# No libp2p / libp2p-* crates. Grep --prefix none; do not enumerate names.
+assert_no_libp2p() {
+  local crate=$1
+  shift
+  local stdout
+  stdout="$(cargo tree -p "$crate" -e normal --locked --prefix none "$@")"
+  if printf '%s\n' "$stdout" | grep -q '^libp2p'; then
+    echo "error: unexpected ^libp2p in ${crate}${*:+ $*} --prefix none tree" >&2
+    printf '%s\n' "$stdout" | grep '^libp2p' >&2
+    exit 1
+  fi
+  echo "ok: ${crate}${*:+ $*} --prefix none has no ^libp2p"
+}
+
 assert_present defra-node sourcehub
 assert_present defra-node wasmtime
-assert_present defra-node libp2p
 assert_present cli libp2p
 
-# Lean local-ACP + native host. No SourceHub, no Wasmtime. Still has libp2p
-# (db-merge native deps); that boundary is a later PR.
+# Default defra-node (no p2p feature) must not resolve libp2p / libp2p-*.
+assert_no_libp2p defra-node
+
+# Isolated db-merge native graph must not resolve the optional libp2p dep.
+# cargo tree -i libp2p often exits 0 with empty stdout — still absent.
+assert_absent db-merge libp2p --no-default-features --features native
+
+# Lean local-ACP + native host. No SourceHub, no Wasmtime, no libp2p.
 assert_absent defra-node sourcehub --no-default-features --features lark,redb,native
 assert_absent defra-node acp-light-client --no-default-features --features lark,redb,native
 assert_absent defra-node commonware-cryptography --no-default-features --features lark,redb,native

@@ -53,7 +53,7 @@ default = ["native", "wasmtime-runtime", "iroh", "libp2p"]
 native = ["db/native", "db-merge/native"]
 wasmtime-runtime = ["db/wasmtime-runtime", "db-merge/wasmtime-runtime", "lens/wasmtime-runtime"]
 iroh = ["p2p/iroh-transport"]
-libp2p = ["dep:libp2p", "p2p/libp2p-transport"]
+libp2p = ["dep:libp2p", "p2p/libp2p-transport", "db-merge/libp2p-transport"]
 
 [lints]
 workspace = true
