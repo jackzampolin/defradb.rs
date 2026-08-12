@@ -12,9 +12,10 @@ description = "P2P merge handler, broadcast mutator, and document pushing for De
 ignored = ["futures", "serde_bytes"]
 
 [features]
-default = ["native", "wasmtime-runtime"]
+default = ["native", "wasmtime-runtime", "libp2p-transport"]
 native = ["db/native"]
 wasmtime-runtime = ["db/wasmtime-runtime"]
+libp2p-transport = ["dep:libp2p", "p2p/libp2p-transport"]
 
 [dependencies]
 # Async
@@ -67,8 +68,8 @@ kms = { path = "../kms" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
-libp2p.workspace = true
-p2p = { path = "../p2p", features = ["libp2p-transport"] }
+p2p = { path = "../p2p", default-features = false }
+libp2p = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
