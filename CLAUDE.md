@@ -228,6 +228,9 @@ just profile=super-dev integration-suite acp
 The override must precede the recipe name. Prefer it in agent worktrees; stay
 on `dev` when stepping through code in lldb.
 
+`just sweep` (keeps 7 days) deletes this worktree's stale artifacts. The
+profile shrinks each build generation; sweeping bounds how many pile up.
+
 ### Tracking Go Upstream
 
 ```bash

@@ -583,6 +583,19 @@ bench *args:
 clean:
     cargo clean
 
+# Cargo never collects stale artifacts, so a long-lived worktree accumulates
+# every generation of every rebuild — 44 coexisting copies of one rlib in one
+# measured case. This drops the ones nothing has touched lately, keeping the
+# working set warm. `just sweep 14` to keep two weeks. Installs the subcommand
+# on first use, and only ever touches this worktree's target dir.
+[doc("Delete target artifacts untouched for N days (default 7).")]
+[group('misc')]
+sweep days="7":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v cargo-sweep >/dev/null 2>&1 || cargo install cargo-sweep --locked
+    cargo sweep --time {{ days }}
+
 # Remove everything setup installed. Rerun `just setup` afterwards.
 [group('misc')]
 clean-tooling:
