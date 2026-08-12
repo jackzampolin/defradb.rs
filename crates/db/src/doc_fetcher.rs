@@ -105,21 +105,22 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
     }
 
-    async fn get_by_doc_short_ids(
+    async fn stream_by_doc_short_ids(
         &self,
         collection_name: &str,
         doc_short_ids: &[u64],
         show_deleted: bool,
-    ) -> query::error::Result<Option<Vec<Document>>> {
+    ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        let docs = collection
-            .get_by_short_ids(&datastore, &systemstore, doc_short_ids, show_deleted)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
-
-        Ok(Some(docs.into_iter().map(|(_, doc, _)| doc).collect()))
+        Ok(Box::new(crate::collection_stream::ShortIdDocStream::new(
+            collection,
+            datastore,
+            systemstore,
+            doc_short_ids.to_vec(),
+            show_deleted,
+        )))
     }
 
     async fn stream_all_with_deleted(

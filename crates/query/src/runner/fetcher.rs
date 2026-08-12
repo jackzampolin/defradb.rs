@@ -98,6 +98,24 @@ impl DocFetcher for FetcherWrapper {
             })
     }
 
+    async fn stream_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> Result<Box<dyn DocStream>> {
+        self.get_fetcher()
+            .stream_by_doc_short_ids(collection_name, doc_short_ids, show_deleted)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' \
+                     (get_by_doc_short_ids): {}",
+                    collection_name, e
+                ))
+            })
+    }
+
     async fn get_all_with_deleted(
         &self,
         collection_name: &str,
