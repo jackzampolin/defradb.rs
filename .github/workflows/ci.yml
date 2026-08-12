@@ -208,7 +208,12 @@ jobs:
 
   build:
     name: Build & Test
-    runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
+    # Either studio host. Port isolation comes from there being exactly one
+    # `studio`-labelled runner process per box, not from naming a host, so
+    # floating this job still permits only one node-spawning job per box.
+    # Cache warmth is preserved by the peer pull in "Restore or build
+    # binaries" rather than by pinning the producer.
+    runs-on: [self-hosted, macOS, ARM64, studio]
     env:
       # The full workspace test suite launches roughly 187 test executables.
       # Incremental artifacts caused a ~25s startup delay per executable on
