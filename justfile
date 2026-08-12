@@ -505,6 +505,7 @@ lint-all-targets:
 [group('check')]
 lint-wasm:
     cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+    cargo clippy -p defra-wasm --target wasm32-unknown-unknown --no-default-features --all-targets -- -D warnings
 
 # Docs must build without warnings; a broken intra-doc link fails CI.
 [doc("Build docs with warnings denied (broken links fail CI).")]

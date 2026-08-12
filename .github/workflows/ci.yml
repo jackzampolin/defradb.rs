@@ -124,6 +124,10 @@ jobs:
       - name: Clippy (wasm32)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
+      # The panic hook is default-on; this keeps the opt-out path compiling.
+      - name: Clippy (wasm32, no default features)
+        run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --no-default-features --all-targets -- -D warnings
+
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 

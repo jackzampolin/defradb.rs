@@ -71,10 +71,6 @@ impl DefraClient {
     /// ```
     #[wasm_bindgen(js_name = create)]
     pub async fn create(config: JsValue) -> std::result::Result<DefraClient, JsValue> {
-        // Set up panic hook for better error messages
-        #[cfg(feature = "debug")]
-        console_error_panic_hook::set_once();
-
         Self::new_impl(config).await.map_err(|e| e.into())
     }
 
