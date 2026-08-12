@@ -64,7 +64,7 @@ iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
 [dev-dependencies]
 base64 = { workspace = true }
 tempfile = "3.17"
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 zeroize = "1"
 zstd = "0.13"
 
