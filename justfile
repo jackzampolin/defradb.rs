@@ -494,6 +494,8 @@ lint:
     cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
     cargo clippy -p db --features p2p --all-targets -- -D warnings
     cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
+    cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
+    cargo check -p p2p --no-default-features --features iroh-transport
     cargo check -p db-merge --no-default-features --features native
     just check-node-graph
 
@@ -502,7 +504,7 @@ lint:
 check-node-graph:
     bash .github/scripts/assert-defra-node-graph.sh
 
-# Lean combo check (grows as later PRs make the combo legal).
+# Lean combo check. Examples: lark,redb,native  |  lark,redb,native,p2p
 [group('check')]
 check-node-lean *features:
     cargo check -p defra-node --no-default-features --features {{ features }}

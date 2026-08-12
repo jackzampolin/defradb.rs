@@ -4,7 +4,7 @@
 //! downstream binaries can embed a DefraDB instance without duplicating
 //! wiring code.
 //!
-//! P2P uses IROH (QUIC-native) transport for peer-to-peer replication.
+//! P2P uses Iroh/QUIC only. libp2p lives on CLI, FFI, and `embedded`.
 //!
 //! ## Cargo features
 //!
@@ -13,7 +13,7 @@
 //! - `sourcehub` — on-chain document ACP. Default-on. Omit for local-only ACP.
 //! - `wasmtime-runtime` — Lens WASM execution. Default-on. Without it,
 //!   [`EmbeddedNode::set_migration`] returns an explicit error.
-//! - `p2p` — Iroh/QUIC replication.
+//! - `p2p` — Iroh/QUIC replication. Implies `native`. Does **not** compile libp2p.
 //! - `http` — GraphQL HTTP server.
 //! - `otel` — OpenTelemetry exporter.
 
@@ -900,7 +900,10 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable P2P networking for replication.
+    /// Enable Iroh/QUIC P2P replication.
+    ///
+    /// Requires the `p2p` feature, which implies `native`. Does not compile
+    /// libp2p; that stack lives on CLI, FFI, and `embedded`.
     #[cfg(feature = "p2p")]
     pub fn with_p2p(mut self, config: P2PConfig) -> Self {
         self.p2p_config = Some(config);

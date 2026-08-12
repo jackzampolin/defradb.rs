@@ -89,7 +89,10 @@ impl HttpConfig {
     }
 }
 
-/// Configuration for the optional P2P networking layer (IROH/QUIC).
+/// Configuration for the optional P2P networking layer.
+///
+/// Iroh/QUIC only. Requires the `p2p` feature, which implies `native`.
+/// libp2p lives on CLI, FFI, and `embedded` — not this crate.
 #[cfg(feature = "p2p")]
 pub struct P2PConfig {
     /// UDP port for QUIC listener.

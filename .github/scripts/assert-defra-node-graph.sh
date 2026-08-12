@@ -91,6 +91,37 @@ assert_absent defra-node cosmrs --no-default-features --features lark,redb,nativ
 assert_absent defra-node wasmtime --no-default-features --features lark,redb,native
 assert_absent defra-node cranelift-codegen --no-default-features --features lark,redb,native
 
+# Lean Iroh P2P: Iroh present, no libp2p / libp2p-*, p2p crate not enabling
+# libp2p-transport. `p2p` implies native, so listing native is redundant but
+# matches the advertised combo.
+LEAN_IROH=(--no-default-features --features lark,redb,native,p2p)
+assert_no_libp2p defra-node "${LEAN_IROH[@]}"
+assert_present defra-node iroh "${LEAN_IROH[@]}"
+
+# p2p crate feature line (the ^p2p v package, not p2p-*) must omit libp2p-transport.
+assert_p2p_crate_no_libp2p_transport() {
+  local stdout rc
+  set +e
+  stdout="$(cargo tree -p defra-node -e normal --locked "${LEAN_IROH[@]}" -i p2p)"
+  rc=$?
+  set -e
+  if ! printf '%s\n' "$stdout" | grep -q '^p2p v'; then
+    echo "error: expected ^p2p v in lean Iroh tree (cargo tree -i exit ${rc})" >&2
+    if [ -n "$stdout" ]; then
+      printf '%s\n' "$stdout" >&2
+    fi
+    exit 1
+  fi
+  if printf '%s\n' "$stdout" | grep '^p2p v' | grep -q 'libp2p-transport'; then
+    echo "error: p2p crate line enables libp2p-transport" >&2
+    printf '%s\n' "$stdout" | grep '^p2p v' >&2
+    exit 1
+  fi
+  echo "ok: lean Iroh p2p crate line has no libp2p-transport"
+}
+assert_p2p_crate_no_libp2p_transport
+
 # Unique crate names. Log only — not a gate and not binary size. Main may move.
 echo "defra-node default unique crate names: $(unique_crate_names)"
 echo "defra-node --no-default-features --features lark,redb,native unique crate names: $(unique_crate_names --no-default-features --features lark,redb,native)"
+echo "defra-node --no-default-features --features lark,redb,native,p2p unique crate names: $(unique_crate_names --no-default-features --features lark,redb,native,p2p)"

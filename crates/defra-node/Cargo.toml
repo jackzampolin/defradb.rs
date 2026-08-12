@@ -17,7 +17,18 @@ test = false
 default = ["lark", "redb", "native", "sourcehub", "wasmtime-runtime"]
 lark = ["storage/lark"]
 http = ["dep:defra-http", "dep:axum"]
-p2p = ["dep:p2p", "dep:blockstore", "dep:cid", "dep:defra-http", "dep:defra-p2p-adapter"]
+# Iroh/QUIC only. Implies native. Does not enable libp2p.
+p2p = [
+    "native",
+    "dep:p2p",
+    "dep:blockstore",
+    "dep:cid",
+    "dep:defra-http",
+    "dep:defra-p2p-adapter",
+    "p2p/iroh-transport",
+    "defra-p2p-adapter/iroh",
+    "defra-p2p-adapter/native",
+]
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
 # Native host (tokio, event channel). Default-on.
