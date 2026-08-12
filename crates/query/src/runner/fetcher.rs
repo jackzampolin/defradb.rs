@@ -98,6 +98,23 @@ impl DocFetcher for FetcherWrapper {
             })
     }
 
+    async fn vector_search(
+        &self,
+        collection_name: &str,
+        index_id: u32,
+        query_vector: &[f64],
+        k: usize,
+        effort: Option<usize>,
+    ) -> Result<Vec<u64>> {
+        self.get_fetcher()
+            .vector_search(collection_name, index_id, query_vector, k, effort)
+            .await
+    }
+
+    fn supports_vector_search(&self) -> bool {
+        self.get_fetcher().supports_vector_search()
+    }
+
     async fn stream_by_doc_short_ids(
         &self,
         collection_name: &str,

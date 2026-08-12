@@ -275,6 +275,36 @@ pub trait DocFetcher: MaybeSendSync {
         false
     }
 
+    /// Nearest documents to `query_vector` under a vector index, nearest first.
+    ///
+    /// Returns document short ids, which is what a scan can be narrowed by.
+    /// `admit` restricts what may be *returned* without restricting what may be
+    /// traversed, so a filtered query still gets a full `k` whenever `k`
+    /// matching documents exist.
+    ///
+    /// Follows the same capability shape as
+    /// [`get_by_index_scan`](Self::get_by_index_scan): defaulted to an error
+    /// and gated by [`supports_vector_search`](Self::supports_vector_search),
+    /// so a fetcher without storage access is never asked.
+    async fn vector_search(
+        &self,
+        collection_name: &str,
+        index_id: u32,
+        query_vector: &[f64],
+        k: usize,
+        effort: Option<usize>,
+    ) -> Result<Vec<u64>> {
+        let _ = (collection_name, index_id, query_vector, k, effort);
+        Err(query_types::error::QueryError::execution(
+            "Vector search is not supported by this fetcher".to_string(),
+        ))
+    }
+
+    /// Whether [`vector_search`](Self::vector_search) can be used.
+    fn supports_vector_search(&self) -> bool {
+        false
+    }
+
     /// Get a document at a specific historical version (CID-based time-travel query).
     ///
     /// This method reconstructs the document as it existed when the commit at `cid`
