@@ -211,6 +211,7 @@ pub async fn write_document_blocks(
 
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
+    let mut initial_field_cids: Vec<Cid> = Vec::new();
     let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let is_create = modified_fields.is_none();
@@ -219,7 +220,7 @@ pub async fn write_document_blocks(
     } else {
         Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?)
     };
-    let priority: u64 = if is_create {
+    let composite_priority: u64 = if is_create {
         1
     } else {
         snapshot
@@ -273,6 +274,15 @@ pub async fn write_document_blocks(
 
         if should_create_block {
             let heads: Vec<Cid> = field_head_entries.iter().map(|h| h.cid).collect();
+            let field_priority = if is_create {
+                1
+            } else {
+                snapshot
+                    .as_ref()
+                    .ok_or_else(|| "snapshot required for updates".to_string())?
+                    .field_max_priority(field_name)
+                    + 1
+            };
 
             let cbor_value = if let Some(delta) = doc.get_counter_delta(field_name) {
                 delta
@@ -348,7 +358,7 @@ pub async fn write_document_blocks(
             let delta = if is_counter {
                 CrdtDelta::Counter(CounterDeltaPayload {
                     field_name: field_name.clone(),
-                    priority,
+                    priority: field_priority,
                     nonce,
                     schema_version_id: schema_version_id.to_string(),
                     data: value_bytes,
@@ -356,7 +366,7 @@ pub async fn write_document_blocks(
             } else {
                 CrdtDelta::Lww(LwwDeltaPayload {
                     field_name: field_name.clone(),
-                    priority,
+                    priority: field_priority,
                     schema_version_id: schema_version_id.to_string(),
                     data: value_bytes,
                 })
@@ -366,14 +376,14 @@ pub async fn write_document_blocks(
                 Block::new_with_options(delta, heads.clone(), vec![], encryption_cid, None);
 
             if let Some(signer) = signing_config {
-                tracing::debug!(field = %field_name, priority, "Signing field block");
+                tracing::debug!(field = %field_name, priority = field_priority, "Signing field block");
                 match sign_block(&field_block, signer, blockstore).await {
                     Ok(Some(sig_cid)) => {
                         tracing::debug!(field = %field_name, sig_cid = %sig_cid, "Field block signed");
                         field_block.signature = Some(sig_cid);
                     }
                     Ok(None) => {
-                        tracing::debug!(field = %field_name, priority, "Skipped signing (priority > 1)");
+                        tracing::debug!(field = %field_name, priority = field_priority, "Skipped signing (priority > 1)");
                     }
                     Err(e) => {
                         tracing::debug!(field = %field_name, error = %e, "Failed to sign field block");
@@ -417,14 +427,14 @@ pub async fn write_document_blocks(
             }
 
             let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
-            let priority_bytes = encode_priority_varint(priority);
+            let priority_bytes = encode_priority_varint(field_priority);
             headstore
                 .set(&head_key.bytes(), &priority_bytes)
                 .await
                 .map_err(|e| format!("Failed to write field head: {}", e))?;
             headstore
                 .set(
-                    &priority_index_key(identity.doc_short_id, priority, field_cid),
+                    &priority_index_key(identity.doc_short_id, field_priority, field_cid),
                     &[],
                 )
                 .await
@@ -440,12 +450,15 @@ pub async fn write_document_blocks(
 
             field_links.push(DAGLink::new(field_name.clone(), field_cid));
             field_cids.push(field_cid);
+            if field_priority == 1 {
+                initial_field_cids.push(field_cid);
+            }
         }
     }
 
     let composite_payload = CompositeDeltaPayload {
         schema_version_id: schema_version_id.to_string(),
-        priority,
+        priority: composite_priority,
         status: 1,
     };
 
@@ -502,14 +515,14 @@ pub async fn write_document_blocks(
     }
 
     let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
-    let priority_bytes = encode_priority_varint(priority);
+    let priority_bytes = encode_priority_varint(composite_priority);
     headstore
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
     headstore
         .set(
-            &priority_index_key(identity.doc_short_id, priority, composite_cid),
+            &priority_index_key(identity.doc_short_id, composite_priority, composite_cid),
             &[],
         )
         .await
@@ -532,10 +545,8 @@ pub async fn write_document_blocks(
     );
 
     if let Some(session_key) = defra_core::batch_signing::get_batch_session_key() {
-        if priority == 1 {
-            for fc in &field_cids {
-                defra_core::batch_signing::batch_collect_cid(&session_key, *fc);
-            }
+        for cid in initial_field_cids {
+            defra_core::batch_signing::batch_collect_cid(&session_key, cid);
         }
         defra_core::batch_signing::batch_collect_cid(&session_key, composite_cid);
     }
@@ -645,3 +656,7 @@ mod encryption_derivation_tests;
 #[cfg(test)]
 #[path = "write_kms_tests.rs"]
 mod kms_write_tests;
+
+#[cfg(test)]
+#[path = "write_priority_tests.rs"]
+mod priority_write_tests;
