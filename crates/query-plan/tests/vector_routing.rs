@@ -58,7 +58,20 @@ fn routable() -> SimilarityQuery {
         offset: 0,
         similarities: vec![similarity("embedding", "SIMILARITY")],
         sole_order: order("SIMILARITY", true),
+        show_deleted: false,
     }
+}
+
+/// The index holds live documents only, so narrowing a `showDeleted` query to
+/// it would drop exactly the rows that were asked for.
+#[test]
+fn a_show_deleted_query_does_not_route() {
+    let indexes = [vector_index(7, "embedding", DIMENSIONS)];
+    let query = SimilarityQuery {
+        show_deleted: true,
+        ..routable()
+    };
+    assert_eq!(route(&query, &indexes), Err(NotRouted::ShowDeleted));
 }
 
 #[test]

@@ -8,6 +8,7 @@
 //! into a filter on essentially every call, and under Go's rule it could never
 //! be routed at all.
 
+use query_types::mapper::{OrderDirection, Requestable, Select};
 use schema::{IndexDescription, VectorIndexDescription};
 
 /// What a routable query resolved to.
@@ -39,6 +40,9 @@ pub enum NotRouted {
     NotOrderedBySimilarity,
     /// No vector index on the target field.
     NoVectorIndex,
+    /// The query wants deleted documents. The index holds only live ones, so
+    /// narrowing to it would silently drop exactly what was asked for.
+    ShowDeleted,
     /// The query vector's length does not match the index's declared
     /// dimensions. Scoring it would silently use the shared prefix only.
     DimensionMismatch { expected: u32, actual: usize },
@@ -61,6 +65,8 @@ pub struct SimilarityQuery {
     /// several keys is not routable, so anything else is represented as
     /// `None`.
     pub sole_order: Option<OrderKey>,
+    /// Whether the query asks for deleted documents.
+    pub show_deleted: bool,
 }
 
 /// One `_similarity` field in the selection.
@@ -85,11 +91,59 @@ pub struct OrderKey {
     pub descending: bool,
 }
 
+/// The routable shape of a parsed query.
+///
+/// The planner and its tests read the shape through this one function, so a
+/// query that routes in a test routes in the planner for the same reasons.
+pub fn similarity_query(select: &Select) -> SimilarityQuery {
+    SimilarityQuery {
+        limit: select
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.limit)
+            .map(|limit| limit as usize),
+        offset: select
+            .limit
+            .as_ref()
+            .map_or(0, |limit| limit.offset as usize),
+        similarities: select
+            .fields
+            .iter()
+            .filter_map(|field| match field {
+                Requestable::Similarity(similarity) => Some(SimilarityField {
+                    target_field: similarity.target_field.clone(),
+                    vector: similarity.vector.clone(),
+                    output_name: similarity.output_name().to_string(),
+                }),
+                _ => None,
+            })
+            .collect(),
+        // An `_alias` ordering parses to the bare alias, so ordering by an
+        // aliased similarity arrives here the same shape as ordering by the
+        // field directly. That is what lets the hybrid query route.
+        sole_order: select
+            .order_by
+            .as_ref()
+            .and_then(|order| match order.conditions.as_slice() {
+                [condition] => condition.fields.first().map(|field| OrderKey {
+                    field: field.clone(),
+                    descending: condition.direction == OrderDirection::Desc,
+                }),
+                _ => None,
+            }),
+        show_deleted: select.show_deleted,
+    }
+}
+
 /// Decides whether `query` can be answered by one of `indexes`.
 pub fn route(
     query: &SimilarityQuery,
     indexes: &[IndexDescription],
 ) -> Result<VectorRoute, NotRouted> {
+    if query.show_deleted {
+        return Err(NotRouted::ShowDeleted);
+    }
+
     let limit = query
         .limit
         .filter(|limit| *limit > 0)

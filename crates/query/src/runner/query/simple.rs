@@ -155,53 +155,13 @@ async fn try_vector_narrow(
     collection: &schema::CollectionVersion,
     fetcher: &dyn query_plan::fetcher::DocFetcher,
 ) -> Result<Option<ScanSource>> {
-    use query_plan::planner::vector_routing::{route, OrderKey, SimilarityField, SimilarityQuery};
-    use query_types::mapper::{OrderDirection, Requestable};
+    use query_plan::planner::vector_routing::{route, similarity_query};
 
-    if select.show_deleted || !fetcher.supports_vector_search() {
+    if !fetcher.supports_vector_search() {
         return Ok(None);
     }
 
-    let similarities = select
-        .fields
-        .iter()
-        .filter_map(|field| match field {
-            Requestable::Similarity(similarity) => Some(SimilarityField {
-                target_field: similarity.target_field.clone(),
-                vector: similarity.vector.clone(),
-                output_name: similarity.output_name().to_string(),
-            }),
-            _ => None,
-        })
-        .collect();
-
-    let sole_order = select
-        .order_by
-        .as_ref()
-        .and_then(|order| match order.conditions.as_slice() {
-            [condition] => condition.fields.first().map(|field| OrderKey {
-                field: field.clone(),
-                descending: condition.direction == OrderDirection::Desc,
-            }),
-            _ => None,
-        });
-
-    let query = SimilarityQuery {
-        limit: select
-            .limit
-            .as_ref()
-            .and_then(|limit| limit.limit)
-            .map(|limit| limit as usize),
-        offset: select
-            .limit
-            .as_ref()
-            .map(|limit| limit.offset as usize)
-            .unwrap_or(0),
-        similarities,
-        sole_order,
-    };
-
-    let Ok(route) = route(&query, &collection.indexes) else {
+    let Ok(route) = route(&similarity_query(select), &collection.indexes) else {
         return Ok(None);
     };
 

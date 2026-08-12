@@ -9654,6 +9654,7 @@ dependencies = [
  "futures",
  "identity",
  "lens",
+ "query-parse",
  "query-types",
  "schema",
  "serde_json",
