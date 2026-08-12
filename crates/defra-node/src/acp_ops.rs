@@ -142,8 +142,13 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
 
     /// Announce the document's latest state so subscribers re-evaluate access.
     ///
-    /// A failure here leaves the grant in place: the relationship is already
-    /// stored, and the event is only a notification (matches the FFI path).
+    /// A publish failure is deliberately non-fatal: the relationship is already
+    /// persisted by the time this runs, and the event is only a best-effort
+    /// notification that lets subscribers re-evaluate access. Reporting it as an
+    /// error would tell the caller the grant failed when it did not. The FFI
+    /// surface makes the opposite choice and propagates the same failure
+    /// (`crates/ffi/src/acp/dac.rs:401-409`), so the two surfaces report an
+    /// unpublishable event differently.
     async fn publish_document_update(&self, collection_id: &str, doc_id: &str) {
         match db::block_reader::read_latest_composite_block(&self.database, doc_id).await {
             Ok(result) => {
