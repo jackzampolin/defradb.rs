@@ -66,7 +66,7 @@ events = { path = "../events", default-features = false }
 kms = { path = "../kms" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 libp2p.workspace = true
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 
@@ -74,7 +74,7 @@ p2p = { path = "../p2p", features = ["libp2p-transport"] }
 wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 blst = "0.3"
 getrandom = "0.2"
 criterion.workspace = true

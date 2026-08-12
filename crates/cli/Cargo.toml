@@ -51,7 +51,7 @@ telemetry = { path = "../telemetry", default-features = false }
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "signal", "sync", "time"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 

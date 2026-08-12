@@ -124,7 +124,7 @@ mod tests {
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);
-        Cid::new_v1(*DAG_CBOR_CODEC, hash)
+        Cid::new_v1(DAG_CBOR_CODEC, hash)
     }
 
     #[test]

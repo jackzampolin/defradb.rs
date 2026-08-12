@@ -23,7 +23,7 @@ pgwire = "0.38"
 sqlparser = { version = "0.55", features = ["visitor"] }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "sync"] }
 async-trait = { workspace = true }
 
 # Serialization
