@@ -29,6 +29,9 @@ pub(crate) trait AcpOps: Send + Sync {
 
 /// The ACP backends a node was built with, shared by every caller that needs to
 /// resolve a policy id.
+///
+/// `create_document_acp` guarantees exactly one of `local`/`sourcehub` is
+/// `Some`, so every "ACP not available" branch below is defensive only.
 #[derive(Clone)]
 pub(crate) struct PolicyLookup {
     pub(crate) local: Option<Arc<dyn acp::ZanzibarStore>>,
@@ -159,13 +162,15 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
 
     /// Announce the document's latest state so subscribers re-evaluate access.
     ///
-    /// A publish failure is deliberately non-fatal: the relationship is already
-    /// persisted by the time this runs, and the event is only a best-effort
-    /// notification that lets subscribers re-evaluate access. Reporting it as an
-    /// error would tell the caller the grant failed when it did not. The FFI
-    /// surface makes the opposite choice and propagates the same failure
-    /// (`crates/ffi/src/acp/dac.rs:401-409`), so the two surfaces report an
-    /// unpublishable event differently.
+    /// Three surfaces treat an unpublishable event differently. Go
+    /// (`internal/db/db_dac.go:129-134`, calling `publishDocUpdateEvent` in
+    /// `internal/db/db.go`) makes a doc that is absent from the store a silent
+    /// no-op and propagates only genuine storage errors. The FFI propagates
+    /// both (`crates/ffi/src/acp/dac.rs:401-409`). defra-node deliberately
+    /// warns on both and continues: the relationship is already persisted by
+    /// the time this runs and the event is only a best-effort notification, so
+    /// surfacing an error here would tell the caller the grant failed when it
+    /// did not.
     async fn publish_document_update(&self, collection_id: &str, doc_id: &str) {
         match db::block_reader::read_latest_composite_block(&self.database, doc_id).await {
             Ok(result) => {
@@ -191,11 +196,21 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
     async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
+        // Go gates on node access before rejecting an empty creator
+        // (`internal/db/db_dac.go:64-67`), so a NAC denial wins. An empty
+        // identity is Go's `immutable.None`, not a DID to parse.
+        let requestor = match identity {
+            "" => None,
+            did => Some(Did::new(did).map_err(|error| anyhow!("invalid identity DID: {error}"))?),
+        };
+        self.database
+            .check_node_access(requestor.as_ref(), acp::nac::NodePermission::DacPolicyAdd)
+            .await
+            .map_err(|error| anyhow!("{error}"))?;
+
         if identity.is_empty() {
             bail!("policy creator can not be empty");
         }
-        self.authorize(identity, acp::nac::NodePermission::DacPolicyAdd)
-            .await?;
 
         if policy.is_empty() {
             bail!("policy data can not be empty");
@@ -264,13 +279,14 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
             .await
             .map_err(|error| anyhow!("{error}"))?;
 
+        // Local ACP relationships are node-local (matches Go): a grant is not
+        // propagated to peers. Cross-node access control is SourceHub's role.
         if added {
             self.publish_document_update(&resolved.collection_id, doc_id)
                 .await;
         }
 
-        // Local ACP relationships are node-local (matches Go): a grant is not
-        // propagated to peers. Cross-node access control is SourceHub's role.
+        // Go returns ExistedAlready; `added` is its inverse.
         Ok(!added)
     }
 

@@ -46,6 +46,9 @@ use defra_core::signing::SigningConfig;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
 use rand::Rng;
 
+/// Re-exported so callers can name `Arc<dyn acp::DocumentACP>` (the type
+/// [`EmbeddedNode::document_acp`] returns) without depending on `acp` directly.
+pub use acp;
 pub use coding_search::{
     CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
     CodingSearchTarget,

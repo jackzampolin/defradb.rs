@@ -169,10 +169,23 @@ async fn dac_share_journey_grant_and_revoke() {
             .unwrap(),
         "second grant reports existed_already"
     );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), updates.recv())
+            .await
+            .is_err(),
+        "an existed-already grant must not publish a doc-update event"
+    );
+
     assert!(node
         .delete_dac_actor_relationship(DID_A, "Users", &doc_id, "reader", DID_B)
         .await
         .unwrap());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), updates.recv())
+            .await
+            .is_err(),
+        "a revoke must not publish a doc-update event"
+    );
     assert_eq!(visible_users(&node, Some(did_b)).await, 0);
     assert!(!node
         .delete_dac_actor_relationship(DID_A, "Users", &doc_id, "reader", DID_B)
@@ -295,7 +308,9 @@ async fn add_dac_policy_is_gated_by_node_access_control() {
         err.to_string(),
         "not authorized to perform operation. Permission: add-dac-policy"
     );
-    assert!(node.add_dac_policy(&node_did, POLICY_YAML).await.is_ok());
+    node.add_dac_policy(&node_did, POLICY_YAML)
+        .await
+        .expect("node identity must bypass NAC");
 
     node.shutdown().await;
     defra_core::signing::clear_identity_store();
