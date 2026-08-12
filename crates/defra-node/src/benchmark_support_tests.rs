@@ -144,10 +144,14 @@ struct MockEmbeddingServer {
     base_url: String,
     state: MockEmbeddingState,
     task: tokio::task::JoinHandle<()>,
+    _fixture_permit: tokio::sync::SemaphorePermit<'static>,
 }
+
+static EMBEDDING_FIXTURE_TEST: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 impl MockEmbeddingServer {
     async fn start() -> Self {
+        let fixture_permit = EMBEDDING_FIXTURE_TEST.acquire().await.unwrap();
         let state = MockEmbeddingState::default();
         let app = Router::new()
             .route("/embeddings", post(mock_embedding_handler))
@@ -163,6 +167,7 @@ impl MockEmbeddingServer {
             base_url: format!("http://{}", addr),
             state,
             task,
+            _fixture_permit: fixture_permit,
         }
     }
 

@@ -76,7 +76,7 @@ await_holding_refcell_ref = "warn"
 defra-p2p-adapter = { path = "crates/p2p-adapter", default-features = false }
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35" }
 async-trait = "0.1"
 async-lock = "3"
 futures = "0.3"
@@ -140,7 +140,6 @@ bs58 = "0.5"
 cid = { version = "0.11.3", features = ["serde"] }
 multihash = "0.19"
 multihash-codetable = { version = "0.2.2", features = ["sha2"] }
-multicodec = "0.1"
 serde_ipld_dagcbor = "0.6"
 ipld-core = { version = "0.4", features = ["codec", "serde"] }
 
