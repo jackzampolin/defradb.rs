@@ -760,6 +760,58 @@ impl<'a> SdlParser<'a> {
             .map(|f| schema::EncryptedIndexDescription::new(&f.name))
             .collect();
 
+        // Build vector indexes from @vectorIndex directives.
+        //
+        // These join `indexes` as a kind rather than becoming a parallel list
+        // the way full-text did. That is what #1326 asks for, and it is what
+        // the Go implementation does: the kind lives on the index description,
+        // so a collection definition carries one list whichever runtime wrote
+        // it.
+        for field in &type_def.fields {
+            let Some(config) = field.directives.vector_index.as_ref() else {
+                continue;
+            };
+            let name = generate_index_name(&type_def.name, &field.name, &existing_index_names);
+            existing_index_names.push(name.clone());
+            index_id_counter += 1;
+
+            let hnsw = config.hnsw.clone().unwrap_or_default();
+            let metric = match hnsw.metric.as_deref() {
+                None | Some("COSINE") => schema::DistanceMetric::Cosine,
+                Some(other) => {
+                    return Err(QueryError::parse(format!(
+                        "@vectorIndex has no metric named '{other}'"
+                    )))
+                }
+            };
+            let defaults = schema::HnswParams::default();
+
+            indexes.push(
+                IndexDescription {
+                    name,
+                    id: index_id_counter,
+                    fields: vec![IndexedFieldDescription {
+                        name: field.name.clone(),
+                        descending: false,
+                    }],
+                    unique: false,
+                    kind: None,
+                    auto_generated: false,
+                }
+                .as_vector(schema::VectorIndexDescription {
+                    algorithm: schema::VectorAlgorithm::Hnsw,
+                    metric,
+                    // Zero means an `@embedding` on the field fixes the length.
+                    dimensions: config.dimensions.unwrap_or(0),
+                    hnsw: Some(schema::HnswParams {
+                        m: hnsw.m.unwrap_or(defaults.m),
+                        ef_construction: hnsw.ef_construction.unwrap_or(defaults.ef_construction),
+                        ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
+                    }),
+                }),
+            );
+        }
+
         // Build full-text indexes from @fulltext directives
         let fulltext_indexes: Vec<schema::FullTextIndexDescription> = type_def
             .fields

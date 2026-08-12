@@ -18,6 +18,7 @@ pub const KNOWN_FIELD_DIRECTIVES: &[&str] = &[
     "embedding",
     "encryptedIndex",
     "fulltext",
+    "vectorIndex",
     "immutable",
     "policy", // Go allows @policy on fields in some contexts
 ];
@@ -47,6 +48,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
         "fulltext" => &["language", "k1", "b"],
+        "vectorIndex" => &["dimensions", "HNSW"],
         "immutable" => &[],
         _ => &[],
     }
@@ -90,6 +92,34 @@ pub fn get_directive_string_list(directive: &Directive<'_, String>, arg_name: &s
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Get a non-negative integer argument from a directive.
+///
+/// `None` for an absent argument; `Some(Err)` for one that is present but not a
+/// non-negative integer, because a mistyped parameter is a schema error rather
+/// than something to silently default.
+pub fn get_directive_u32(
+    directive: &Directive<'_, String>,
+    arg_name: &str,
+) -> Option<Result<u32, String>> {
+    let value = get_directive_arg(directive, arg_name)?;
+    Some(directive_u32(arg_name, value))
+}
+
+/// Reads a non-negative integer out of one AST value.
+pub fn directive_u32(
+    arg_name: &str,
+    value: &graphql_parser::schema::Value<'_, String>,
+) -> Result<u32, String> {
+    match value {
+        graphql_parser::schema::Value::Int(number) => number
+            .as_i64()
+            .filter(|n| *n >= 0 && *n <= i64::from(u32::MAX))
+            .map(|n| n as u32)
+            .ok_or_else(|| format!("{arg_name} must be a non-negative 32-bit integer")),
+        _ => Err(format!("{arg_name} must be an integer")),
     }
 }
 
@@ -162,6 +192,8 @@ pub struct ParsedDirectives {
     pub embedding: Option<EmbeddingConfig>,
     /// Full-text search configuration from @fulltext directive
     pub fulltext: Option<FullTextConfig>,
+    /// Vector index configuration from @vectorIndex directive
+    pub vector_index: Option<VectorIndexConfig>,
     /// Whether this field is immutable after document creation
     pub immutable: bool,
 }
@@ -172,6 +204,32 @@ pub struct FullTextConfig {
     pub language: Option<String>,
     pub k1: Option<f64>,
     pub b: Option<f64>,
+}
+
+/// Vector index configuration from the `@vectorIndex` directive.
+///
+/// The argument names are Go's, because the SDL is what users and parity tests
+/// see. `dimensions` sits at the top level rather than inside the algorithm
+/// config because it describes the field, not the algorithm, and the algorithm
+/// is chosen by *which* config argument is present.
+#[derive(Debug, Clone, Default)]
+pub struct VectorIndexConfig {
+    /// Vector length. `None` when an `@embedding` on the same field fixes it.
+    pub dimensions: Option<u32>,
+    /// Present when the `HNSW` argument was given. Its absence still means
+    /// HNSW, with defaults.
+    pub hnsw: Option<HnswConfig>,
+}
+
+/// The `HNSW` argument of `@vectorIndex`. Every member is optional: an omitted
+/// one keeps the default from `schema`, so the directive and the defaults
+/// cannot drift apart.
+#[derive(Debug, Clone, Default)]
+pub struct HnswConfig {
+    pub metric: Option<String>,
+    pub m: Option<u32>,
+    pub ef_construction: Option<u32>,
+    pub ef_search: Option<u32>,
 }
 
 /// Index configuration from @index directive

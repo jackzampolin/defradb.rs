@@ -18,6 +18,8 @@
 //! [`dot`] returns the true dot product, never negated. "Smaller is closer"
 //! belongs in [`super::metric`], where a distance is defined.
 
+use defra_core::thread_bounds::MaybeSendSync;
+
 /// Compiled only where a SIMD tier exists to use it.
 #[cfg(any(
     target_arch = "x86_64",
@@ -50,7 +52,7 @@ pub use tier::{Tier, ALL_TIERS};
 /// implementation would have nothing to dispatch to.
 ///
 /// Shareable because a `&[Self]` is held across the awaits of an index walk.
-pub trait Element: Copy + defra_core::thread_bounds::MaybeSendSync + sealed::Sealed {
+pub trait Element: Copy + MaybeSendSync + sealed::Sealed {
     /// Widen to the accumulator width.
     fn widen(self) -> f64;
 
