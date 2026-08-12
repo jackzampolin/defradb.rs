@@ -29,12 +29,10 @@ impl<S: VectorNodeStore> Hnsw<S> {
     /// [`search_with_ef`](Self::search_with_ef) restricted to the nodes
     /// `admit` accepts.
     ///
-    /// **Returns a full `k` whenever `k` admitted nodes are reachable.** The
-    /// walk only stops early once it holds `ef >= k` admitted results that
-    /// nothing left in the frontier can improve on; short of that it keeps
-    /// expanding until the reachable graph is exhausted. So a shortfall means
-    /// the corpus really has fewer matches, never that the search gave up
-    /// early with a filter in the way.
+    /// Returns a full `k` whenever `k` admitted nodes are reachable: the walk
+    /// stops early only once it holds `ef >= k` *admitted* results nothing in
+    /// the frontier can improve on, and otherwise runs until the reachable
+    /// graph is exhausted. A shortfall means the corpus has fewer matches.
     pub async fn search_with_ef_where<E: Element, A: Admit>(
         &self,
         query: &[E],
@@ -58,9 +56,8 @@ impl<S: VectorNodeStore> Hnsw<S> {
         let mut current = self.candidate(&query, entry);
 
         for layer in (1..=meta.top_layer).rev() {
-            // The descent routes, it does not answer, so it admits everything.
-            // Filtering here could strand the walk on a layer with no admitted
-            // node and lose the region below it.
+            // The descent routes rather than answers, so it admits everything:
+            // a layer with no admitted node would otherwise strand the walk.
             if let Some(best) = self
                 .search_greedy(&query, current.id, layer)
                 .await?
@@ -166,8 +163,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
                 let Some(neighbor) = self.store.get_node(neighbor_id).await? else {
                     continue;
                 };
-                // A rejected node is still a route to its neighbors, exactly
-                // as a tombstone is; only admission to the results differs.
+                // Rejected nodes are still routes, exactly as tombstones are.
                 let admitted = !neighbor.deleted && admit.admits(neighbor.id);
                 let candidate = self.candidate(query, neighbor);
 

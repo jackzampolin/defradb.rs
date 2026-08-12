@@ -7,13 +7,9 @@ use crate::error::Result;
 use crate::vector::core::Element;
 use crate::vector::store::NodeId;
 
-/// Decides which nodes a search may return.
-///
-/// Separate from the traversal on purpose: a node that fails the predicate is
-/// still walked through, exactly as a tombstone is, because the graph's
-/// connectivity does not care what the query is looking for. Excluding such a
-/// node from the walk instead of from the results would strand whole regions
-/// behind it.
+/// Decides which nodes a search may *return*. A rejected node is still walked
+/// through, exactly as a tombstone is: excluding it from the walk would strand
+/// whatever lies behind it.
 pub trait Admit: MaybeSendSync {
     fn admits(&self, id: NodeId) -> bool;
 }
@@ -60,11 +56,8 @@ pub trait VectorIndexEngine: MaybeSendSync {
     /// Up to `k` nearest live nodes to `query`, nearest first.
     ///
     /// Takes any element width, for the same reason [`insert`](Self::insert)
-    /// does.
-    ///
-    /// Defaulted, so a kind implements
-    /// [`search_where`](Self::search_where) alone and the two can never
-    /// disagree about anything but the filter.
+    /// does. Defaulted, so a kind implements
+    /// [`search_where`](Self::search_where) alone and the two cannot disagree.
     ///
     /// `effort` is how hard to look, in the kind's own unit: `ef_search` for
     /// HNSW, probes for an IVF kind, ignored by an exact one. `None` takes the
@@ -81,21 +74,11 @@ pub trait VectorIndexEngine: MaybeSendSync {
 
     /// Up to `k` nearest live nodes that `admit` accepts, nearest first.
     ///
-    /// **Every kind must provide this**, not only the graph ones: filtering is
-    /// part of what a vector index is for, so it belongs in the contract rather
-    /// than in whichever implementation happened to need it first.
+    /// Filtered nearest-neighbour search, required of every kind.
     ///
-    /// This is filtered nearest-neighbour search. The predicate decides what
-    /// may be *returned*, never what may be *traversed*: a rejected node is
-    /// still a route to its neighbors, so the graph stays connected however
-    /// selective the filter is.
-    ///
-    /// The cost of that selectivity is real and worth stating. The walk stops
-    /// early once it holds `ef` results none of which can be improved on; a
-    /// filter that rejects nearly everything never fills those `ef` slots, so
-    /// the walk keeps going and degrades toward a full traversal. That is the
-    /// correct amount of work rather than a pathology: it is bounded by the
-    /// corpus, which is exactly what the unrouted query would have read.
+    /// A selective filter never fills the `ef` result slots, so the walk keeps
+    /// expanding and degrades toward a full traversal. That is bounded by the
+    /// corpus, which is what the unrouted query would have read anyway.
     async fn search_where<E: Element, A: Admit>(
         &self,
         query: &[E],
