@@ -8,6 +8,11 @@ on:
     # limiting it to main means a stacked PR (one targeting the branch below it)
     # runs no jobs at all and shows an empty, green-looking check list.
     branches: ['**']
+  # Merge-queue entries. Inert until a ruleset on main requires a merge queue —
+  # nothing emits merge_group events before then. Present first so that
+  # enabling the queue does not strand entries waiting on checks that never run.
+  merge_group:
+    branches: [main]
 
 # Only the tip of each ref keeps a run. Superseded PR pushes and main merge
 # trains cancel prior work so intermediate SHAs cannot stack the self-hosted
@@ -15,7 +20,10 @@ on:
 # this concurrency group once the merge ref is gone).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Merge-queue runs are never cancelled: cancelling one ejects that PR from
+  # the queue, so the queue stalls instead of merging. Every other ref keeps
+  # tip-only behaviour.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 env:
   CARGO_TERM_COLOR: always
