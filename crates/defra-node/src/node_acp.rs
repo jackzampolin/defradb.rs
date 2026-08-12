@@ -11,7 +11,6 @@ pub(crate) enum Persistence {
 
 pub(crate) struct DocumentAcpSetup {
     pub document_acp: Arc<dyn acp::DocumentACP>,
-    #[allow(dead_code)]
     pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
 }

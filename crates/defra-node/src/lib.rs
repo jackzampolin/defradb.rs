@@ -17,6 +17,7 @@
 //! - `http` — GraphQL HTTP server.
 //! - `otel` — OpenTelemetry exporter.
 
+mod acp_ops;
 mod benchmark_data_gen;
 mod benchmark_queries;
 mod benchmark_stats;
@@ -24,6 +25,8 @@ mod benchmark_stats;
 pub mod benchmark_support;
 pub mod coding_search;
 pub mod config;
+#[cfg(test)]
+mod dac_api_tests;
 mod db_impls;
 pub mod dense_search;
 #[cfg(test)]
@@ -145,6 +148,7 @@ pub struct EmbeddedNode {
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
     block_ops: Arc<dyn BlockOps>,
+    acp_ops: Arc<dyn acp_ops::AcpOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     node_query_identity: Option<identity::Did>,
@@ -480,6 +484,11 @@ impl EmbeddedNode {
     /// Access the event bus directly.
     pub fn event_bus(&self) -> &Arc<dyn events::Bus> {
         &self.event_bus
+    }
+
+    /// Register a DAC policy (Go: client.Store::AddDACPolicy). Returns the policy ID.
+    pub async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
+        self.acp_ops.add_dac_policy(identity, policy).await
     }
 
     /// Access the resolved node-level embedding runtime config.
@@ -1426,6 +1435,11 @@ impl NodeBuilder {
             query_limits,
             document_acp.clone(),
         ));
+        let acp_ops: Arc<dyn acp_ops::AcpOps> = Arc::new(acp_ops::DbAcpOps::new(
+            database.clone(),
+            acp_setup.local_zanzibar_store,
+            acp_setup.sourcehub_acp,
+        ));
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
             document_acp,
@@ -1444,6 +1458,7 @@ impl NodeBuilder {
             event_bus,
             schema_ops,
             block_ops,
+            acp_ops,
             embedding_config,
             node_identity_did,
             node_query_identity,
