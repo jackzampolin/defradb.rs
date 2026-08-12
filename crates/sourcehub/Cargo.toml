@@ -13,7 +13,13 @@ ignored = ["alloy-rlp"]
 
 [dependencies]
 # HTTP client for REST/LCD and CometBFT JSON-RPC
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "charset",
+    "http2",
+    "system-proxy",
+    "rustls-tls-native-roots",
+] }
 
 # Cosmos SDK transaction building and signing
 cosmrs = "0.22"
