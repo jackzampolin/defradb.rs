@@ -103,8 +103,9 @@ impl VectorIndex {
             NormalValue::Float64Array(v) => Indexable::Wide(v),
             NormalValue::NillableFloat32Array(Some(v)) => Indexable::Narrow(v),
             NormalValue::NillableFloat64Array(Some(v)) => Indexable::Wide(v),
-            // Go's `Similarity` accepts a vector "of type Int, Float32 or
-            // Float64", so a peer can send one and this must not turn it away.
+            // Go's `Similarity` declares the query vector as "Int, Float32 or
+            // Float64", so a peer can send an integer one and this must index
+            // it rather than refuse it.
             NormalValue::IntArray(v) => Indexable::Integral(v),
             NormalValue::NillableIntArray(Some(v)) => Indexable::Integral(v),
             NormalValue::Null
