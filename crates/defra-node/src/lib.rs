@@ -746,7 +746,7 @@ pub struct NodeBuilder {
 }
 
 struct StoreBuildArgs {
-    acp_store: Arc<dyn acp::AcpStore>,
+    persistence: node_acp::Persistence,
     document_acp_config: DocumentAcpConfig,
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
@@ -1112,12 +1112,11 @@ impl NodeBuilder {
                 "embedded node starting (ephemeral, no data_path)"
             );
             let store = Arc::new(storage::MemoryStore::new());
-            let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
 
             Self::build_with_store(
                 store,
                 StoreBuildArgs {
-                    acp_store,
+                    persistence: node_acp::Persistence::Memory,
                     document_acp_config: self.document_acp,
                     db_options,
                     event_bus,
@@ -1238,13 +1237,10 @@ impl NodeBuilder {
             telemetry_handle,
         } = args;
 
-        let acp_store: Arc<dyn acp::AcpStore> =
-            Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-
         Self::build_with_store(
             store,
             StoreBuildArgs {
-                acp_store,
+                persistence: node_acp::Persistence::Persistent,
                 document_acp_config,
                 db_options,
                 event_bus,
@@ -1268,7 +1264,7 @@ impl NodeBuilder {
         args: StoreBuildArgs,
     ) -> anyhow::Result<EmbeddedNode> {
         let StoreBuildArgs {
-            acp_store,
+            persistence,
             document_acp_config,
             db_options,
             event_bus,
@@ -1397,8 +1393,10 @@ impl NodeBuilder {
             registry.start_stale_transaction_cleanup(cleanup.max_idle_age, cleanup.sweep_interval)
         });
 
-        let (document_acp, _strict_replicated_doc_access) =
-            node_acp::create_document_acp(acp_store, &document_acp_config).await?;
+        let acp_setup =
+            node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
+        let document_acp = acp_setup.document_acp.clone();
+        let _strict_replicated_doc_access = acp_setup.sourcehub_acp.is_some();
 
         #[cfg(feature = "p2p")]
         if let Some(wire_document_acp) = p2p_result

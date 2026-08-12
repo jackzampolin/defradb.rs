@@ -4,10 +4,26 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use anyhow::Result;
 
-pub(crate) async fn create_document_acp(
-    acp_store: Arc<dyn acp::AcpStore>,
+pub(crate) enum Persistence {
+    Persistent,
+    Memory,
+}
+
+pub(crate) struct DocumentAcpSetup {
+    pub document_acp: Arc<dyn acp::DocumentACP>,
+    #[allow(dead_code)]
+    pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
+    pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+}
+
+pub(crate) async fn create_document_acp<S>(
+    store: Arc<S>,
+    persistence: Persistence,
     config: &crate::DocumentAcpConfig,
-) -> Result<(Arc<dyn acp::DocumentACP>, bool)> {
+) -> Result<DocumentAcpSetup>
+where
+    S: storage::corekv::Store + 'static,
+{
     match config {
         #[cfg(feature = "sourcehub")]
         crate::DocumentAcpConfig::SourceHub(sourcehub_config) => {
@@ -26,11 +42,122 @@ pub(crate) async fn create_document_acp(
                 provider,
                 tuning.cache_ttl,
             ));
-            Ok((sh_acp, true))
+            Ok(DocumentAcpSetup {
+                document_acp: sh_acp.clone(),
+                local_zanzibar_store: None,
+                sourcehub_acp: Some(sh_acp),
+            })
         }
-        crate::DocumentAcpConfig::Local => {
-            let document_acp = Arc::new(acp::LocalDocumentACP::new(acp_store));
-            Ok((document_acp, false))
-        }
+        crate::DocumentAcpConfig::Local => match persistence {
+            Persistence::Persistent => {
+                let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
+                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
+                Ok(local_document_acp_setup(document_acp, zanzibar_store))
+            }
+            Persistence::Memory => {
+                let zanzibar_store = Arc::new(acp::MemoryZanzibarStore::new());
+                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
+                Ok(local_document_acp_setup(document_acp, zanzibar_store))
+            }
+        },
+    }
+}
+
+fn local_document_acp_setup(
+    document_acp: Arc<dyn acp::DocumentACP>,
+    zanzibar_store: Arc<dyn acp::ZanzibarStore>,
+) -> DocumentAcpSetup {
+    DocumentAcpSetup {
+        document_acp,
+        local_zanzibar_store: Some(zanzibar_store),
+        sourcehub_acp: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_document_acp, Persistence};
+    use crate::DocumentAcpConfig;
+    use acp::{DocumentPermission, Identity, StorePolicyOptions};
+    use identity::Did;
+    use std::sync::Arc;
+
+    fn did(value: &str) -> Did {
+        Did::new(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_document_acp_enforces_stored_custom_policy() {
+        let store = Arc::new(storage::MemoryStore::new());
+        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local)
+            .await
+            .unwrap();
+
+        assert!(acp_setup.sourcehub_acp.is_none());
+        let document_acp = acp_setup.document_acp;
+        let local_store = acp_setup
+            .local_zanzibar_store
+            .expect("local ACP should expose a Zanzibar store");
+
+        let parsed = acp::policy_yaml::parse_policy_yaml(
+            r#"
+name: Viewer Policy
+resources:
+  - name: users
+    relations:
+      - name: viewer
+      - name: editor
+      - name: remover
+    permissions:
+      - name: read
+        expr: viewer
+      - name: update
+        expr: editor
+      - name: delete
+        expr: remover
+"#,
+        )
+        .unwrap();
+        let policy = acp::policy_yaml::build_policy(&parsed, 1).unwrap();
+        let options = StorePolicyOptions::new()
+            .with_validation()
+            .with_dpi_enforcement();
+        local_store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .unwrap();
+
+        let owner = did("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let viewer = did("did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR");
+
+        document_acp
+            .register_doc_object(&owner, &policy.id, "users", "doc1")
+            .await
+            .unwrap();
+        document_acp
+            .add_actor_relationship(&owner, &viewer, &policy.id, "users", "doc1", "viewer", &[])
+            .await
+            .unwrap();
+
+        assert!(document_acp
+            .check_doc_access(
+                &Identity::Authenticated(viewer.clone()),
+                DocumentPermission::Read,
+                &policy.id,
+                "users",
+                "doc1",
+            )
+            .await
+            .unwrap());
+        assert!(!document_acp
+            .check_doc_access(
+                &Identity::Authenticated(viewer),
+                DocumentPermission::Update,
+                &policy.id,
+                "users",
+                "doc1",
+            )
+            .await
+            .unwrap());
     }
 }
