@@ -15,7 +15,11 @@ on:
 # this concurrency group once the merge ref is gone).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs are cancelled; main is not. A push to main is the only
+  # validation merged code ever gets, and during a merge train each merge would
+  # otherwise cancel the previous merge's run — leaving main untested exactly
+  # when it changes fastest.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
