@@ -27,7 +27,7 @@ libp2p-stream = { workspace = true, optional = true }
 multiaddr = { workspace = true, optional = true }
 
 # Async
-tokio = { workspace = true, features = ["sync", "rt", "macros", "fs"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "fs", "time"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 
@@ -91,7 +91,7 @@ libp2p-transport = [
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 p2p = { path = ".", features = ["test-utils"] }
 
 [package.metadata.cargo-machete]

@@ -175,7 +175,7 @@ impl CID {
 
         // Validate hash function (only support SHA-256 for now)
         let hash = c.hash();
-        if hash.code() != *SHA2_256_CODE {
+        if hash.code() != SHA2_256_CODE {
             return Err(Error::InvalidCID(format!(
                 "unsupported hash function: {}",
                 hash.code()
@@ -196,7 +196,7 @@ impl CID {
 
         // Validate hash function
         let hash = c.hash();
-        if hash.code() != *SHA2_256_CODE {
+        if hash.code() != SHA2_256_CODE {
             return Err(Error::InvalidCID(format!(
                 "unsupported hash function: {}",
                 hash.code()

@@ -25,7 +25,7 @@ anyhow = "1.0"
 
 [dev-dependencies]
 defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 serial_test = "3"
 
 [lints]
