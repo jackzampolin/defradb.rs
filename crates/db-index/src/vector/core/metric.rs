@@ -6,6 +6,12 @@
 //! cosine, which is `sqrt` of a negative number for every non-zero vector. The
 //! kernels return true products and the inversion happens once, here.
 //!
+//! A distance is always `f64`, whatever width the vectors are. It is a measure
+//! *between* two vectors, not a value drawn from them: the angle between two
+//! `i64` vectors is irrational far more often than not, and returning it in the
+//! element's own type would round the answer to whichever grid the input
+//! happened to use.
+//!
 //! Nothing here fails, panics, or returns NaN. Vectors of different lengths are
 //! compared over their shared prefix, and an undefined comparison yields the
 //! largest distance the metric can express, so it sorts last instead of

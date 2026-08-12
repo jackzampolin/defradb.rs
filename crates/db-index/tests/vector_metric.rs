@@ -181,6 +181,39 @@ fn normalize_refuses_a_vector_with_no_direction() {
     for_float_widths!(check);
 }
 
+/// A distance is `f64` whatever the element width, and it must be free to take
+/// a value the element type could never hold. Integer vectors at 45 degrees are
+/// still `1 - cos45` apart.
+#[test]
+fn a_distance_is_floating_point_whatever_the_element_width() {
+    fn check<T: Element>(width: &str) {
+        let tol = tolerance::<T>();
+
+        let cosine = Metric::Cosine.distance(&vector::<T>(&[1.0, 0.0]), &vector::<T>(&[1.0, 1.0]));
+        let want = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
+        assert!(
+            (cosine - want).abs() < tol,
+            "{width}: expected {want}, got {cosine}"
+        );
+        assert!(
+            cosine.fract() != 0.0,
+            "{width}: a 45 degree separation is not a whole number, got {cosine}"
+        );
+
+        let euclidean =
+            Metric::Euclidean.distance(&vector::<T>(&[0.0, 0.0]), &vector::<T>(&[1.0, 1.0]));
+        assert!(
+            (euclidean - std::f64::consts::SQRT_2).abs() < tol,
+            "{width}: expected sqrt(2), got {euclidean}"
+        );
+
+        // The norm of an integer vector is irrational just as often.
+        let n = norm(&vector::<T>(&[1.0, 1.0]));
+        assert!((n - std::f64::consts::SQRT_2).abs() < tol, "{width}: {n}");
+    }
+    for_every_width!(check);
+}
+
 /// An integral width cannot hold a scaled unit vector, so `normalize` must
 /// refuse rather than truncate `[3, 4]` into `[0, 0]` and destroy the
 /// direction it was asked to preserve.

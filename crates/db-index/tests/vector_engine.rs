@@ -403,6 +403,53 @@ async fn the_query_width_does_not_change_the_answer() {
     }
 }
 
+/// A search hit carries an `f64` distance no matter what the query was made of.
+/// An integer query against a stored corpus still separates by irrational
+/// angles, and the hit must be able to say so.
+#[tokio::test]
+async fn search_hits_carry_a_floating_point_distance_for_an_integer_query() {
+    let mut index = graph(GRAPH_SEED);
+    for (id, vector) in [
+        (1u64, [1.0f32, 0.0, 0.0]),
+        (2, [1.0, 1.0, 0.0]),
+        (3, [0.0, 1.0, 0.0]),
+    ] {
+        index.insert(NodeId(id), &vector).await.unwrap();
+    }
+
+    // The same query as i32, i64 and f32: one direction, three widths.
+    let hits_i32 = index.search_with_ef(&[1i32, 0, 0], 3, 64).await.unwrap();
+    let hits_i64 = index.search_with_ef(&[1i64, 0, 0], 3, 64).await.unwrap();
+    let hits_f32 = index
+        .search_with_ef(&[1.0f32, 0.0, 0.0], 3, 64)
+        .await
+        .unwrap();
+    assert_eq!(hits_i32, hits_i64, "the integer widths must agree");
+    assert_eq!(
+        hits_i32, hits_f32,
+        "an integer query must match its float twin"
+    );
+
+    assert_eq!(hits_i32.first().map(|h| h.id), Some(NodeId(1)));
+    assert!(
+        hits_i32[0].distance.abs() < 1e-6,
+        "the identical direction is distance 0, got {}",
+        hits_i32[0].distance
+    );
+
+    // Node 2 sits at 45 degrees: a distance no integer type could express.
+    let at_45 = hits_i32
+        .iter()
+        .find(|h| h.id == NodeId(2))
+        .expect("node 2 is reachable");
+    let want = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
+    assert!(
+        (at_45.distance - want).abs() < 1e-6,
+        "expected {want}, got {}",
+        at_45.distance
+    );
+}
+
 /// The exact kind must agree with a direct scan on every query, or it is not an
 /// oracle.
 #[tokio::test]
