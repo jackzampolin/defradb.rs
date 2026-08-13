@@ -1,11 +1,5 @@
-//! Whether the hybrid retrieval query in `db-search` actually routes to a
-//! vector index.
-//!
-//! The query is built here in the shape `render_dense_ranked_query` emits, then
-//! driven through the real parser and the real extraction, because every past
-//! break in this path was in the translation rather than in the rule: an
-//! `_alias` ordering that kept its wrapper, or a second scored field counted as
-//! a second similarity.
+//! The hybrid retrieval query `db-search` emits, driven through the real
+//! parser and the real extraction.
 
 use query_plan::planner::vector_routing::{route, similarity_query, NotRouted};
 use schema::{
@@ -13,8 +7,6 @@ use schema::{
     VectorIndexDescription,
 };
 
-/// The aliases `db-search` renders. Duplicated deliberately: if they change
-/// there, this test must fail rather than quietly follow.
 const BM25_ALIAS: &str = "dense_v1_bm25_score";
 const SIMILARITY_ALIAS: &str = "dense_v1_similarity_score";
 
@@ -40,8 +32,6 @@ fn vector_index() -> Vec<IndexDescription> {
     })]
 }
 
-/// The query `render_dense_ranked_query` produces, with the pieces that vary
-/// per call left open.
 fn hybrid_query(filter: Option<&str>, order_alias: &str, limit: usize) -> String {
     let vector = VECTOR
         .iter()
@@ -74,16 +64,11 @@ fn route_query(query: &str) -> Result<query_plan::planner::vector_routing::Vecto
     route(&similarity_query(&parse(query)), &vector_index())
 }
 
-/// The case that matters: `exclude_doc_ids` folds into a filter on essentially
-/// every hybrid call, and Go refuses a filtered query outright (its issue
-/// 5071). This engine filters during the walk, so the filter must not stop it.
 #[test]
 fn the_dense_ranked_hybrid_query_routes() {
     let filter = r#"{_and: [{status: {_eq: "published"}}, {_docID: {_nin: ["bae-1", "bae-2"]}}]}"#;
     let query = hybrid_query(Some(filter), SIMILARITY_ALIAS, 20);
 
-    // Without this the test would still pass if the parser dropped the filter,
-    // and would then be proving nothing at all.
     assert!(
         parse(&query).filter.is_some(),
         "the filter must survive parsing, or this test is vacuous"
@@ -96,8 +81,6 @@ fn the_dense_ranked_hybrid_query_routes() {
     assert_eq!(routed.k, 20);
 }
 
-/// Without a filter it must route identically, so the filter is proven to be
-/// the thing that does not matter.
 #[test]
 fn the_filter_does_not_change_the_route() {
     let filtered = route_query(&hybrid_query(
@@ -109,8 +92,6 @@ fn the_filter_does_not_change_the_route() {
     assert_eq!(filtered, plain);
 }
 
-/// A `BM25` field is scored too, but it is not a similarity, so it must not
-/// make the query ambiguous.
 #[test]
 fn the_bm25_field_is_not_a_second_similarity() {
     let query = similarity_query(&parse(&hybrid_query(None, SIMILARITY_ALIAS, 20)));
@@ -124,8 +105,6 @@ fn the_bm25_field_is_not_a_second_similarity() {
     assert_eq!(query.similarities[0].target_field, "embedding");
 }
 
-/// The `_alias` wrapper must not survive into the order key, or the name
-/// comparison against the similarity's alias can never match.
 #[test]
 fn the_alias_ordering_resolves_to_the_bare_alias() {
     let query = similarity_query(&parse(&hybrid_query(None, SIMILARITY_ALIAS, 20)));
@@ -134,9 +113,6 @@ fn the_alias_ordering_resolves_to_the_bare_alias() {
     assert!(order.descending);
 }
 
-/// The BM25-ranked variant of the same query orders by relevance, not by
-/// distance, so its top-k is not the graph's top-k. It must fall back to a
-/// scan rather than return the wrong rows.
 #[test]
 fn the_bm25_ranked_variant_does_not_route() {
     assert_eq!(
@@ -145,8 +121,6 @@ fn the_bm25_ranked_variant_does_not_route() {
     );
 }
 
-/// `limit` is what the caller asked for; the offset is added on top because the
-/// graph has to produce the rows the offset skips.
 #[test]
 fn the_offset_is_added_to_k() {
     let query =
@@ -154,8 +128,6 @@ fn the_offset_is_added_to_k() {
     assert_eq!(route_query(&query).expect("routes").k, 25);
 }
 
-/// A vector whose length disagrees with the index would be scored on its shared
-/// leading elements alone, which is wrong rather than approximate.
 #[test]
 fn a_wrong_length_vector_is_refused() {
     let query = hybrid_query(None, SIMILARITY_ALIAS, 20).replace("0.3, 0.4", "0.3");

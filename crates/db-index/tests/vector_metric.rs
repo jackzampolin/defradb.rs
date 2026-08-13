@@ -271,17 +271,47 @@ fn euclidean_matches_hand_computed_oracle() {
     for_every_width!(check);
 }
 
+/// Dot product is not a metric: it has no identity of indiscernibles, so a
+/// vector is *not* its own nearest neighbour. A longer collinear vector has a
+/// larger product and outranks the query's own twin.
 #[test]
-fn negative_dot_orders_larger_products_as_nearer() {
+fn negative_dot_ranks_a_longer_collinear_vector_above_an_identical_one() {
     fn check<T: Element>(width: &str) {
-        let q = vector::<T>(&[1.0, 0.0]);
-        let near = vector::<T>(&[10.0, 0.0]);
-        let far = vector::<T>(&[1.0, 0.0]);
-        let dn = Metric::NegativeDot.distance(&q, &near);
-        let df = Metric::NegativeDot.distance(&q, &far);
+        let query = vector::<T>(&[1.0, 0.0]);
+        let longer = vector::<T>(&[10.0, 0.0]);
+        let identical = vector::<T>(&[1.0, 0.0]);
+
+        let d_longer = Metric::NegativeDot.distance(&query, &longer);
+        let d_identical = Metric::NegativeDot.distance(&query, &identical);
+
+        assert_eq!(d_longer, -10.0, "{width}: -dot([1,0],[10,0])");
+        assert_eq!(d_identical, -1.0, "{width}: -dot([1,0],[1,0])");
         assert!(
-            dn < df,
-            "{width}: larger dot product must sort nearer: {dn} !< {df}"
+            d_longer < d_identical,
+            "{width}: the longer collinear vector must sort nearer than the \
+             query's own twin: {d_longer} !< {d_identical}"
+        );
+    }
+    for_every_width!(check);
+}
+
+/// The contrast that makes the above safe to rely on: under cosine a vector
+/// *is* its own nearest, because magnitude is normalized away.
+#[test]
+fn cosine_ranks_an_identical_vector_nearest() {
+    fn check<T: Element>(width: &str) {
+        let query = vector::<T>(&[1.0, 0.0]);
+        let longer = vector::<T>(&[10.0, 0.0]);
+        let identical = vector::<T>(&[1.0, 0.0]);
+
+        let d_identical = Metric::Cosine.distance(&query, &identical);
+        let d_longer = Metric::Cosine.distance(&query, &longer);
+
+        assert!(d_identical.abs() < 1e-9, "{width}: {d_identical} != 0");
+        assert!(
+            (d_longer - d_identical).abs() < 1e-9,
+            "{width}: collinear vectors are equidistant under cosine: \
+             {d_longer} vs {d_identical}"
         );
     }
     for_every_width!(check);

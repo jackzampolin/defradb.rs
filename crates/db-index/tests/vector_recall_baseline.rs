@@ -137,21 +137,42 @@ impl<S: VectorNodeStore> VectorNodeStore for Counting<S> {
     }
 }
 
-fn exact(vectors: &[Vec<f32>], query: &[f32]) -> Vec<NodeId> {
+fn exact(metric: Metric, vectors: &[Vec<f32>], query: &[f32]) -> Vec<NodeId> {
     let mut scored: Vec<(NodeId, f64)> = vectors
         .iter()
         .enumerate()
-        .map(|(i, v)| (NodeId(i as u64), Metric::Cosine.distance(query, v)))
+        .map(|(i, v)| (NodeId(i as u64), metric.distance(query, v)))
         .collect();
     scored.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     scored.into_iter().take(K).map(|(id, _)| id).collect()
 }
 
 async fn measure(label: &str, vectors: &[Vec<f32>], dimensions: usize, efs: &[usize]) {
+    measure_with(Metric::Cosine, label, vectors, dimensions, efs).await
+}
+
+async fn measure_with(
+    metric: Metric,
+    label: &str,
+    vectors: &[Vec<f32>],
+    dimensions: usize,
+    efs: &[usize],
+) {
+    measure_m(metric, DEFAULT_M, label, vectors, dimensions, efs).await
+}
+
+async fn measure_m(
+    metric: Metric,
+    m: usize,
+    label: &str,
+    vectors: &[Vec<f32>],
+    dimensions: usize,
+    efs: &[usize],
+) {
     let mut index = Hnsw::new(
         Counting::new(MemoryNodeStore::new()),
-        Metric::Cosine,
-        Params::new(DEFAULT_M),
+        metric,
+        Params::new(m),
         GRAPH_SEED,
     );
     for (i, vector) in vectors.iter().enumerate() {
@@ -161,20 +182,38 @@ async fn measure(label: &str, vectors: &[Vec<f32>], dimensions: usize, efs: &[us
     for &ef in efs {
         let mut queries = Corpus::new(QUERY_SEED);
         let (mut hit, mut total, mut reads) = (0usize, 0usize, 0usize);
+        let mut ratio_sum = 0.0f64;
         for _ in 0..QUERIES {
             let query = queries.vector(dimensions);
-            let want = exact(vectors, &query);
+            let want = exact(metric, vectors, &query);
             index.store().take();
             let got = index.search_with_ef(&query, K, ef).await.unwrap();
             reads += index.store().take();
             hit += got.iter().filter(|n| want.contains(&n.id)).count();
             total += want.len();
+
+            // Distance ratio separates a genuinely worse answer from a swap
+            // between near-ties, which recall@k counts as a full miss.
+            let ideal: f64 = want
+                .iter()
+                .map(|id| metric.distance(&query, &vectors[id.0 as usize]))
+                .sum();
+            let actual: f64 = got
+                .iter()
+                .map(|n| metric.distance(&query, &vectors[n.id.0 as usize]))
+                .sum();
+            ratio_sum += if ideal.abs() > f64::EPSILON {
+                actual / ideal
+            } else {
+                1.0
+            };
         }
         let per_query = reads as f64 / QUERIES as f64;
         println!(
-            "{label:>26} {:>7} {ef:>4} {:>10.4} {:>8.0} {:>7.1}%",
+            "{label:>26} {:>7} {ef:>4} {:>10.4} {:>9.4} {:>8.0} {:>7.1}%",
             vectors.len(),
             hit as f64 / total as f64,
+            ratio_sum / QUERIES as f64,
             per_query,
             100.0 * per_query / vectors.len() as f64
         );
@@ -185,8 +224,8 @@ async fn measure(label: &str, vectors: &[Vec<f32>], dimensions: usize, efs: &[us
 #[ignore = "measurement, minutes long; run with --ignored --nocapture"]
 async fn recall_baseline() {
     println!(
-        "{:>26} {:>7} {:>4} {:>10} {:>8} {:>8}",
-        "corpus", "N", "ef", "recall@10", "reads", "%corpus"
+        "{:>26} {:>7} {:>4} {:>10} {:>9} {:>8} {:>8}",
+        "corpus", "N", "ef", "recall@10", "dist/best", "reads", "%corpus"
     );
     for dimensions in [16usize, 128] {
         for count in [4_000usize, 20_000] {
@@ -210,6 +249,94 @@ async fn recall_baseline() {
             )
             .await;
         }
+    }
+}
+
+/// `M` is the connectivity knob. 16 is tuned for low dimensions; the published
+/// HNSW guidance is 32-48 once the data is high-dimensional, and this measures
+/// what the default costs at d=128.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement; run with --ignored --nocapture"]
+async fn recall_vs_m() {
+    println!(
+        "{:>26} {:>7} {:>4} {:>10} {:>9} {:>8} {:>8}",
+        "corpus", "N", "ef", "recall@10", "dist/best", "reads", "%corpus"
+    );
+    let dimensions = 128;
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let clustered = corpus.clustered(20_000, dimensions, 100, 0.15);
+    for m in [16usize, 32, 48, 64] {
+        measure_m(
+            Metric::Cosine,
+            m,
+            &format!("clustered d=128 M={m}"),
+            &clustered,
+            dimensions,
+            &[64],
+        )
+        .await;
+    }
+}
+
+/// Whether recall is bounded by search effort or by the graph. If it climbs
+/// towards 1.0 with `ef` the structure is sound and the rest is a knob; if it
+/// plateaus, construction is the limit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement; run with --ignored --nocapture"]
+async fn recall_vs_effort() {
+    println!(
+        "{:>26} {:>7} {:>4} {:>10} {:>9} {:>8} {:>8}",
+        "corpus", "N", "ef", "recall@10", "dist/best", "reads", "%corpus"
+    );
+    let dimensions = 128;
+    let mut corpus = Corpus::new(CORPUS_SEED);
+    let clustered = corpus.clustered(20_000, dimensions, 100, 0.15);
+    measure(
+        "clustered d=128",
+        &clustered,
+        dimensions,
+        &[64, 128, 256, 512, 1024],
+    )
+    .await;
+}
+
+/// Dot product is not a metric, and HNSW's greedy descent assumes one. This
+/// measures what that costs against cosine on the same corpus, scaled so
+/// magnitudes actually differ; without the spread the two are the same query.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement; run with --ignored --nocapture"]
+async fn dot_recall() {
+    println!(
+        "{:>26} {:>7} {:>4} {:>10} {:>9} {:>8} {:>8}",
+        "corpus", "N", "ef", "recall@10", "dist/best", "reads", "%corpus"
+    );
+    for dimensions in [16usize, 128] {
+        let mut corpus = Corpus::new(CORPUS_SEED);
+        let mut vectors = corpus.clustered(20_000, dimensions, 100, 0.15);
+        let mut scale = Corpus::new(QUERY_SEED);
+        for vector in &mut vectors {
+            let factor = 0.25 + 4.0 * scale.unit() as f32;
+            for component in vector.iter_mut() {
+                *component *= factor;
+            }
+        }
+
+        measure_with(
+            Metric::Cosine,
+            &format!("cosine d={dimensions}"),
+            &vectors,
+            dimensions,
+            &[32, 64],
+        )
+        .await;
+        measure_with(
+            Metric::NegativeDot,
+            &format!("dot d={dimensions}"),
+            &vectors,
+            dimensions,
+            &[32, 64],
+        )
+        .await;
     }
 }
 

@@ -33,11 +33,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
             });
         };
 
-        // The first vector inserted fixes the width, which is the only thing
-        // that can when an index declares no dimensions because an embedding
-        // model fixes the length. Mixing widths is not an approximation: the
-        // metric would rank on the shared leading elements and silently ignore
-        // the rest.
+        // Mixed widths would rank on the shared leading elements alone.
         if vector.len() != entry.vector.len() {
             return Err(Error::VectorDimensionMismatch {
                 indexed: entry.vector.len(),

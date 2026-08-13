@@ -1,11 +1,5 @@
-//! The width an index holds, when nothing declared it.
-//!
-//! An index may be created with `dimensions: 0`, meaning an embedding model
-//! fixes the length. Nothing in the schema can resolve that: Go's
-//! `VectorEmbeddingDescription` carries a model name and a provider, and the
-//! model name does not determine the width (OpenAI's v3 models take a
-//! `dimensions` parameter). So the first vector inserted fixes it, and the
-//! graph enforces it from there.
+//! An index created with `dimensions: 0` takes its width from the first
+//! vector inserted; nothing in the schema can resolve it.
 
 mod common;
 
@@ -13,9 +7,6 @@ use db_index::vector::engine::ann::VectorIndexEngine;
 
 const SEED: u64 = 0x0D1E_2F30;
 
-/// Mixing widths is not an approximation. Cosine over a shared prefix ranks on
-/// the leading elements and ignores the rest, so a 3-dimension vector in a
-/// 4-dimension index would be scored confidently and wrongly.
 #[tokio::test]
 async fn a_second_vector_of_a_different_width_is_refused() {
     let mut graph = common::graph(SEED);
@@ -36,7 +27,6 @@ async fn a_second_vector_of_a_different_width_is_refused() {
     );
 }
 
-/// A wider one is the same mistake in the other direction.
 #[tokio::test]
 async fn a_wider_vector_is_refused_too() {
     let mut graph = common::graph(SEED);
@@ -50,8 +40,6 @@ async fn a_wider_vector_is_refused_too() {
         .is_err());
 }
 
-/// The check is against what the index holds, not against the first id seen, so
-/// it survives the entry point moving to a later node.
 #[tokio::test]
 async fn the_width_holds_across_many_inserts() {
     let mut graph = common::graph(SEED);
@@ -73,9 +61,6 @@ async fn the_width_holds_across_many_inserts() {
         .is_err());
 }
 
-/// A query of the wrong width must fail loudly rather than return confident,
-/// wrong neighbours. This is the only guard when the index declares no
-/// dimensions, since the planner's check needs a declared width to compare to.
 #[tokio::test]
 async fn a_query_of_the_wrong_width_is_refused() {
     let mut graph = common::graph(SEED);
@@ -97,8 +82,6 @@ async fn a_query_of_the_wrong_width_is_refused() {
         .is_ok());
 }
 
-/// An empty graph has no width to disagree with, so a search returns nothing
-/// rather than an error: there is no wrong answer to give.
 #[tokio::test]
 async fn an_empty_graph_answers_any_width_with_nothing() {
     let graph = common::graph(SEED);
@@ -109,8 +92,6 @@ async fn an_empty_graph_answers_any_width_with_nothing() {
         .is_empty());
 }
 
-/// Every element width reaches the same check, so an integer query against a
-/// float index is caught on its length and not on its type.
 #[tokio::test]
 async fn the_check_applies_to_every_element_width() {
     let mut graph = common::graph(SEED);

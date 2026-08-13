@@ -1,9 +1,4 @@
 //! The vector index running in a browser.
-//!
-//! This code ships to every browser user but had only ever been compiled for
-//! wasm, never executed there. The kernels are compared against a scalar
-//! reference computed in the same module, so the check holds whichever tier the
-//! build selected.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -45,16 +40,11 @@ fn reference_squared_euclidean(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
-/// A SIMD kernel sums lanes in a different order than a straight loop, so the
-/// two agree to within rounding, not exactly.
 fn tolerance(terms: &[f64]) -> f64 {
     let magnitude: f64 = terms.iter().map(|t| t.abs()).sum();
     ((terms.len() + 1) as f64) * f64::EPSILON * magnitude.max(1.0)
 }
 
-/// Without this the agreement tests below pass either way and prove nothing
-/// about the SIMD path: `simd128` is not a default wasm32 feature, so a build
-/// that forgets it silently runs the scalar fallback.
 #[wasm_bindgen_test]
 fn the_build_selected_the_expected_tier() {
     let active = Tier::active();
@@ -72,7 +62,6 @@ fn the_build_selected_the_expected_tier() {
     );
 }
 
-/// Lengths straddle the SIMD lane count so the tail handling runs.
 #[wasm_bindgen_test]
 fn kernels_agree_with_a_scalar_reference() {
     let mut corpus = Corpus(0x5EED_1234);

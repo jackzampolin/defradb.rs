@@ -778,6 +778,7 @@ impl<'a> SdlParser<'a> {
             let hnsw = config.hnsw.clone().unwrap_or_default();
             let metric = match hnsw.metric.as_deref() {
                 None | Some("COSINE") => schema::DistanceMetric::Cosine,
+                Some("DOT") => schema::DistanceMetric::Dot,
                 Some(other) => {
                     return Err(QueryError::parse(format!(
                         "@vectorIndex has no metric named '{other}'"

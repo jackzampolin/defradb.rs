@@ -1,10 +1,5 @@
-//! `DbDocFetcher::vector_search` resolving a collection by name.
-//!
-//! `vector_query_routing.rs` drives the graph through `IndexManager` with a
-//! hardcoded short id, which leaves the fetcher's own lookup untested: resolve
-//! the name, resolve the persisted short id, find the vector index by id on the
-//! collection, and search with it. Every one of those can fail independently of
-//! a correct graph, so this goes through the registered collection instead.
+//! `DbDocFetcher::vector_search` resolving a collection by name, which
+//! `vector_query_routing.rs` bypasses with a hardcoded short id.
 
 use std::sync::Arc;
 
@@ -36,7 +31,6 @@ fn schema() -> CollectionVersion {
     );
     version.indexes = vec![IndexDescription {
         name: "by_embedding".to_string(),
-        // Overwritten from the collection's index-id sequence on create.
         id: 0,
         fields: vec![IndexedFieldDescription {
             name: "embedding".to_string(),
@@ -55,14 +49,11 @@ fn schema() -> CollectionVersion {
     version
 }
 
-/// Directions around a circle, so nearest-neighbour order is unambiguous.
 fn vector_at(i: usize) -> Vec<f64> {
     let angle = i as f64 * 0.37;
     vec![angle.sin(), angle.cos(), (angle * 0.5).sin(), 0.25]
 }
 
-/// A registered collection holding `DOCUMENTS` documents, and the id its vector
-/// index was assigned.
 async fn populated() -> (Arc<DB<MemoryStore>>, u32) {
     let db = Arc::new(DB::new(MemoryStore::new()).expect("a database"));
     db.create_collection(schema())
@@ -122,11 +113,6 @@ async fn the_fetcher_resolves_the_collection_and_searches_its_index() {
     assert_eq!(distinct.len(), hits.len(), "no document twice: {hits:?}");
 }
 
-/// The query is a corpus vector, so the nearest neighbour is that document
-/// itself. Resolving the returned short id back to its title is what proves the
-/// search ran over the right collection's graph rather than returning an
-/// arbitrary set of live ids, and it exercises the seek the planner uses to
-/// turn those ids back into documents.
 #[tokio::test]
 async fn the_nearest_hit_is_the_document_the_query_came_from() {
     let (db, index_id) = populated().await;
@@ -152,7 +138,6 @@ async fn the_nearest_hit_is_the_document_the_query_came_from() {
     );
 }
 
-/// An id that is not a vector index must be named, not silently treated as one.
 #[tokio::test]
 async fn an_unknown_index_id_is_an_error() {
     let (db, index_id) = populated().await;
@@ -169,8 +154,6 @@ async fn an_unknown_index_id_is_an_error() {
     );
 }
 
-/// A collection that does not exist must fail at the lookup rather than return
-/// an empty result that reads as "nothing matched".
 #[tokio::test]
 async fn an_unknown_collection_is_an_error() {
     let (db, index_id) = populated().await;

@@ -45,6 +45,33 @@ impl Corpus {
     pub fn vectors(&mut self, count: usize, dimensions: usize) -> Vec<Vec<f32>> {
         (0..count).map(|_| self.vector(dimensions)).collect()
     }
+
+    fn gaussian(&mut self) -> f32 {
+        let unit = |x: u64| (x >> 11) as f64 / (1u64 << 53) as f64;
+        let u1 = unit(self.next_u64()).max(f64::MIN_POSITIVE);
+        let u2 = unit(self.next_u64());
+        ((-2.0 * u1.ln()).sqrt() * (core::f64::consts::TAU * u2).cos()) as f32
+    }
+
+    /// Centers with gaussian noise around each: the shape a real embedding
+    /// corpus has, rather than the near-orthogonal uniform degenerate case.
+    pub fn clustered(
+        &mut self,
+        count: usize,
+        dimensions: usize,
+        clusters: usize,
+        spread: f32,
+    ) -> Vec<Vec<f32>> {
+        let centers: Vec<Vec<f32>> = (0..clusters).map(|_| self.vector(dimensions)).collect();
+        (0..count)
+            .map(|i| {
+                let center = &centers[i % clusters];
+                (0..dimensions)
+                    .map(|j| center[j] + self.gaussian() * spread)
+                    .collect()
+            })
+            .collect()
+    }
 }
 
 /// Seeds are named so a failure is reproducible from the message alone.
