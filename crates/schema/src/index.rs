@@ -266,16 +266,8 @@ pub enum VectorAlgorithm {
 
 /// How a vector index compares two vectors.
 ///
-/// `COSINE` is the only value the Go implementation defines. `DOT` is a
-/// deliberate **wire divergence**, taken for issue 634's multi-model retrieval:
-/// a collection definition carrying it is not parseable by a Go node, so a
-/// deployment that replicates to one must not use it. Cosine is the default and
-/// nothing selects `DOT` implicitly.
-///
-/// The two differ only in whether magnitude counts. Cosine normalizes on insert
-/// and ranks by direction alone; `DOT` stores vectors as given, so a longer
-/// vector outranks a shorter one pointing the same way. For already-normalized
-/// embeddings the two produce identical orderings.
+/// Go defines only `COSINE`. `DOT` is a deliberate wire divergence: a
+/// definition carrying it is not parseable by a Go node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DistanceMetric {
     #[default]
@@ -286,7 +278,6 @@ pub enum DistanceMetric {
 }
 
 impl DistanceMetric {
-    /// Whether a Go node can parse a collection definition carrying this.
     pub fn is_go_compatible(self) -> bool {
         matches!(self, Self::Cosine)
     }

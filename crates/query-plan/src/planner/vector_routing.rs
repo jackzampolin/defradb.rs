@@ -40,8 +40,7 @@ pub enum NotRouted {
     NotOrderedBySimilarity,
     /// No vector index on the target field.
     NoVectorIndex,
-    /// The query wants deleted documents. The index holds only live ones, so
-    /// narrowing to it would silently drop exactly what was asked for.
+    /// The query wants deleted documents; the index holds only live ones.
     ShowDeleted,
     /// The query vector's length does not match the index's declared
     /// dimensions. Scoring it would silently use the shared prefix only.
@@ -92,9 +91,6 @@ pub struct OrderKey {
 }
 
 /// The routable shape of a parsed query.
-///
-/// The planner and its tests read the shape through this one function, so a
-/// query that routes in a test routes in the planner for the same reasons.
 pub fn similarity_query(select: &Select) -> SimilarityQuery {
     SimilarityQuery {
         limit: select
@@ -118,9 +114,6 @@ pub fn similarity_query(select: &Select) -> SimilarityQuery {
                 _ => None,
             })
             .collect(),
-        // An `_alias` ordering parses to the bare alias, so ordering by an
-        // aliased similarity arrives here the same shape as ordering by the
-        // field directly. That is what lets the hybrid query route.
         sole_order: select
             .order_by
             .as_ref()

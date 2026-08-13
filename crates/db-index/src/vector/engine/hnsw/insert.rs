@@ -33,7 +33,6 @@ impl<S: VectorNodeStore> Hnsw<S> {
             });
         };
 
-        // Mixed widths would rank on the shared leading elements alone.
         if vector.len() != entry.vector.len() {
             return Err(Error::VectorDimensionMismatch {
                 indexed: entry.vector.len(),

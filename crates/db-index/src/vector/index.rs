@@ -50,8 +50,6 @@ impl VectorIndex {
 
         let metric = match vector.metric {
             DistanceMetric::Cosine => Metric::Cosine,
-            // Negated so a larger product sorts as nearer, which is what the
-            // rest of the engine assumes of a distance.
             DistanceMetric::Dot => Metric::NegativeDot,
         };
         match vector.algorithm {

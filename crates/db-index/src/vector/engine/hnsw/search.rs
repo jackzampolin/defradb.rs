@@ -53,10 +53,6 @@ impl<S: VectorNodeStore> Hnsw<S> {
         };
 
         let query = self.prepared(query);
-        // A query of the wrong width would be scored on its shared leading
-        // elements, so it would return confident, wrong neighbours rather than
-        // no answer. The planner catches this when the index declares its
-        // dimensions; this catches it when it does not.
         if query.len() != entry.vector.len() {
             return Err(Error::VectorDimensionMismatch {
                 indexed: entry.vector.len(),

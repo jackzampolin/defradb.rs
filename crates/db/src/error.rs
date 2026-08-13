@@ -135,9 +135,6 @@ impl From<db_index::Error> for Error {
             other @ db_index::Error::VectorEntryPointNotFound { .. } => {
                 Error::Other(other.to_string())
             }
-            // The caller's vector, not the store's state: this is the same
-            // mistake as a declared-dimension mismatch, so it surfaces the
-            // same way.
             other @ db_index::Error::VectorDimensionMismatch { .. } => {
                 Error::InvalidDocument(other.to_string())
             }
