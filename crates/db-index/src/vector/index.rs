@@ -13,6 +13,8 @@ use storage::index::CollectionIndex;
 use super::core::Element;
 use super::core::Metric;
 use super::engine::ann::{Admit, Neighbor, VectorIndexEngine};
+use super::engine::dispatch::Engine;
+use super::engine::flat::Flat;
 use super::engine::hnsw::Hnsw;
 use super::kv_store::KvNodeStore;
 use super::params::Params;
@@ -46,15 +48,16 @@ impl VectorIndex {
         let mut params = Params::new(hnsw.m as usize);
         params.ef_construction = hnsw.ef_construction as usize;
         params.ef_search = hnsw.ef_search as usize;
-        params.validate()?;
+        // Flat has no build parameters, so an HNSW block alongside it is
+        // inert rather than a reason to refuse the index.
+        if vector.algorithm == VectorAlgorithm::Hnsw {
+            params.validate()?;
+        }
 
         let metric = match vector.metric {
             DistanceMetric::Cosine => Metric::Cosine,
             DistanceMetric::Dot => Metric::NegativeDot,
         };
-        match vector.algorithm {
-            VectorAlgorithm::Hnsw => {}
-        }
 
         Ok(Self {
             collection_short_id,
@@ -102,15 +105,13 @@ impl VectorIndex {
         &self,
         txn: &'txn mut T,
     ) -> impl VectorIndexEngine + 'txn {
+        let store = KvNodeStore::new(txn, self.collection_short_id, self.desc.id, LIVE_EPOCH);
         match self.vector.algorithm {
-            VectorAlgorithm::Hnsw => {}
+            VectorAlgorithm::Hnsw => {
+                Engine::Hnsw(Hnsw::new(store, self.metric, self.params, self.seed))
+            }
+            VectorAlgorithm::Flat => Engine::Flat(Flat::new(store, self.metric)),
         }
-        Hnsw::new(
-            KvNodeStore::new(txn, self.collection_short_id, self.desc.id, LIVE_EPOCH),
-            self.metric,
-            self.params,
-            self.seed,
-        )
     }
 
     /// The vector a document contributes, if any.

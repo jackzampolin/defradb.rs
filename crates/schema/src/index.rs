@@ -256,12 +256,25 @@ mod tests {
 }
 
 /// Algorithm a vector index is built and searched with.
+///
+/// Go defines only `HNSW`. `FLAT` is a wire divergence: exact and linear in the
+/// corpus, so it is the right choice for a small collection and the oracle an
+/// approximate index is checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VectorAlgorithm {
     /// Hierarchical Navigable Small World graph.
     #[default]
     #[serde(rename = "HNSW")]
     Hnsw,
+    /// Exhaustive scan. Exact, no build parameters, no tuning.
+    #[serde(rename = "FLAT")]
+    Flat,
+}
+
+impl VectorAlgorithm {
+    pub fn is_go_compatible(self) -> bool {
+        matches!(self, Self::Hnsw)
+    }
 }
 
 /// How a vector index compares two vectors.

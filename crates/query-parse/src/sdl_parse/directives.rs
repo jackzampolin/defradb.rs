@@ -48,7 +48,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
         "fulltext" => &["language", "k1", "b"],
-        "vectorIndex" => &["dimensions", "HNSW"],
+        "vectorIndex" => &["dimensions", "algorithm", "HNSW"],
         "immutable" => &[],
         _ => &[],
     }
@@ -216,6 +216,8 @@ pub struct FullTextConfig {
 pub struct VectorIndexConfig {
     /// Vector length. `None` when an `@embedding` on the same field fixes it.
     pub dimensions: Option<u32>,
+    /// `None` means HNSW, matching the reference where it is the only value.
+    pub algorithm: Option<String>,
     /// Present when the `HNSW` argument was given. Its absence still means
     /// HNSW, with defaults.
     pub hnsw: Option<HnswConfig>,

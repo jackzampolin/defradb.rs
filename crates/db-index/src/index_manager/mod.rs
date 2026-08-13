@@ -22,6 +22,9 @@ mod index_type;
 pub use index_type::IndexType;
 use storage::keys::IndexIDSequenceKey;
 
+pub mod doc_source;
+pub use doc_source::{DocumentSource, SliceSource};
+
 /// How a live unique conflict was resolved during merge (#1111).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeConflictOutcome {
@@ -408,6 +411,20 @@ impl IndexManager {
         documents: &[(u64, Document)],
         schema: &CollectionVersion,
     ) -> Result<BulkIndexResult> {
+        let mut source = SliceSource::new(documents);
+        self.bulk_index_from(datastore, index_name, &mut source, schema)
+            .await
+    }
+
+    /// [`bulk_index`](Self::bulk_index) over a pull-based source, holding one
+    /// document at a time rather than the whole collection.
+    pub async fn bulk_index_from<S: DocumentSource + ?Sized>(
+        &self,
+        datastore: &NamespaceView,
+        index_name: &str,
+        source: &mut S,
+        schema: &CollectionVersion,
+    ) -> Result<BulkIndexResult> {
         let index = self
             .indexes
             .get(index_name)
@@ -417,17 +434,17 @@ impl IndexManager {
         let mut skipped_count = 0;
         let mut mutable_datastore = datastore.clone();
 
-        for (doc_short_id, doc) in documents {
-            if *doc_short_id == 0 {
+        while let Some((doc_short_id, doc)) = source.next().await? {
+            if doc_short_id == 0 {
                 skipped_count += 1;
                 continue;
             }
 
-            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            let value_sets = self.extract_index_values(&doc, index.description(), schema)?;
 
             for values in &value_sets {
                 index
-                    .save(&mut mutable_datastore, *doc_short_id, values)
+                    .save(&mut mutable_datastore, doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }

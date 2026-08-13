@@ -186,3 +186,61 @@ fn the_compat_unique_field_tracks_the_kind() {
     assert_eq!(json["Unique"], true);
     assert_eq!(json["Kind"]["Unique"], true);
 }
+
+/// `FLAT` is the second divergence: Go's `VectorAlgorithm` defines only `HNSW`.
+/// Its `HNSW` block is null, since it has no build parameters.
+#[test]
+fn flat_is_an_algorithm_go_cannot_parse() {
+    assert!(VectorAlgorithm::Hnsw.is_go_compatible());
+    assert!(!VectorAlgorithm::Flat.is_go_compatible());
+
+    assert_eq!(
+        serde_json::to_value(VectorAlgorithm::Hnsw).unwrap(),
+        json!("HNSW")
+    );
+    assert_eq!(
+        serde_json::to_value(VectorAlgorithm::Flat).unwrap(),
+        json!("FLAT")
+    );
+
+    let desc = IndexDescription::new("i")
+        .as_vector(VectorIndexDescription {
+            algorithm: VectorAlgorithm::Flat,
+            hnsw: None,
+            ..vector()
+        })
+        .normalized();
+    let json = serde_json::to_value(&desc).unwrap();
+    assert_eq!(json["Kind"]["Algorithm"], json!("FLAT"));
+    assert_eq!(json["Kind"]["HNSW"], Value::Null);
+
+    let back: IndexDescription = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        back.vector().map(|v| v.algorithm),
+        Some(VectorAlgorithm::Flat)
+    );
+}
+
+/// A definition is exchangeable only when every divergent value is absent.
+#[test]
+fn go_compatibility_is_checkable_across_both_axes() {
+    let ok = vector();
+    assert!(ok.algorithm.is_go_compatible() && ok.metric.is_go_compatible());
+
+    for diverged in [
+        VectorIndexDescription {
+            algorithm: VectorAlgorithm::Flat,
+            hnsw: None,
+            ..vector()
+        },
+        VectorIndexDescription {
+            metric: DistanceMetric::Dot,
+            ..vector()
+        },
+    ] {
+        assert!(
+            !(diverged.algorithm.is_go_compatible() && diverged.metric.is_go_compatible()),
+            "{diverged:?} must be flagged"
+        );
+    }
+}

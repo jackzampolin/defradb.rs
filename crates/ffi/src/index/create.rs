@@ -189,25 +189,23 @@ pub unsafe extern "C" fn create_index(
                         collection.schema(),
                     )
                     .map_err(|e| format!("failed to create index manager: {}", e))?;
-                    let documents: Vec<(u64, document::Document)> = collection
-                        .get_all_with_datastore_short_ids(&datastore, &systemstore, false)
-                        .await
-                        .map_err(|e| format!("failed to get documents: {}", e))?
-                        .into_iter()
-                        .map(|(doc_short_id, doc, _)| (doc_short_id, doc))
-                        .collect();
+                    let mut source = db::BackfillSource::open(
+                        collection.clone(),
+                        datastore.clone(),
+                        systemstore.clone(),
+                    )
+                    .await
+                    .map_err(|e| format!("failed to open the collection: {}", e))?;
 
-                    if !documents.is_empty() {
-                        index_manager
-                            .bulk_index(
-                                &datastore,
-                                &index_desc.name,
-                                &documents,
-                                collection.schema(),
-                            )
-                            .await
-                            .map_err(|e| format!("{}", e))?;
-                    }
+                    index_manager
+                        .bulk_index_from(
+                            &datastore,
+                            &index_desc.name,
+                            &mut source,
+                            collection.schema(),
+                        )
+                        .await
+                        .map_err(|e| format!("{}", e))?;
                     Ok(())
                 }
                 .await;

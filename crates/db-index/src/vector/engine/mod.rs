@@ -7,5 +7,6 @@
 //! full-text index cost and what #1326 exists to prevent.
 
 pub mod ann;
+pub mod dispatch;
 pub mod flat;
 pub mod hnsw;

@@ -527,6 +527,13 @@ impl<'a> SdlParser<'a> {
             None => None,
         };
 
+        let algorithm = match get_directive_arg(directive, "algorithm") {
+            None => None,
+            Some(graphql_parser::schema::Value::String(text))
+            | Some(graphql_parser::schema::Value::Enum(text)) => Some(text.clone()),
+            Some(_) => return Err(QueryError::parse("@vectorIndex algorithm must be a string")),
+        };
+
         let hnsw = match get_directive_arg(directive, "HNSW") {
             None => None,
             Some(graphql_parser::schema::Value::Object(members)) => {
@@ -568,7 +575,11 @@ impl<'a> SdlParser<'a> {
             }
         };
 
-        Ok(super::directives::VectorIndexConfig { dimensions, hnsw })
+        Ok(super::directives::VectorIndexConfig {
+            dimensions,
+            algorithm,
+            hnsw,
+        })
     }
 
     pub(super) fn parse_default_directive(

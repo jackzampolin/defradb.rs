@@ -119,3 +119,64 @@ fn unknown_or_mistyped_arguments_are_refused() {
         assert!(parse_sdl(sdl).is_err(), "should have been refused: {sdl}");
     }
 }
+
+#[test]
+fn the_algorithm_defaults_to_hnsw() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 4)
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::Hnsw);
+    assert!(vector.hnsw.is_some(), "HNSW carries build parameters");
+}
+
+#[test]
+fn the_flat_algorithm_is_selectable() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 4, algorithm: "FLAT")
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::Flat);
+    assert_eq!(vector.dimensions, 4);
+    assert!(
+        vector.hnsw.is_none(),
+        "flat has no build parameters, got {:?}",
+        vector.hnsw
+    );
+}
+
+#[test]
+fn the_algorithm_may_be_written_as_an_enum() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 4, algorithm: FLAT)
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::Flat);
+}
+
+#[test]
+fn an_unknown_algorithm_is_refused() {
+    let err = parse_sdl(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 4, algorithm: "IVFPQ")
+        }"#,
+    )
+    .expect_err("an unknown algorithm must not parse");
+    assert!(
+        err.to_string().contains("IVFPQ"),
+        "the error must name it, got: {err}"
+    );
+}
+
+#[test]
+fn the_dot_metric_is_selectable() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 4, HNSW: { metric: "DOT" })
+        }"#,
+    );
+    assert_eq!(vector.metric, DistanceMetric::Dot);
+}

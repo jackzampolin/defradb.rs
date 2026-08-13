@@ -775,6 +775,16 @@ impl<'a> SdlParser<'a> {
             existing_index_names.push(name.clone());
             index_id_counter += 1;
 
+            let algorithm = match config.algorithm.as_deref() {
+                None | Some("HNSW") => schema::VectorAlgorithm::Hnsw,
+                Some("FLAT") => schema::VectorAlgorithm::Flat,
+                Some(other) => {
+                    return Err(QueryError::parse(format!(
+                        "@vectorIndex has no algorithm named '{other}'"
+                    )))
+                }
+            };
+
             let hnsw = config.hnsw.clone().unwrap_or_default();
             let metric = match hnsw.metric.as_deref() {
                 None | Some("COSINE") => schema::DistanceMetric::Cosine,
@@ -800,15 +810,20 @@ impl<'a> SdlParser<'a> {
                     auto_generated: false,
                 }
                 .as_vector(schema::VectorIndexDescription {
-                    algorithm: schema::VectorAlgorithm::Hnsw,
+                    algorithm,
                     metric,
                     // Zero means an `@embedding` on the field fixes the length.
                     dimensions: config.dimensions.unwrap_or(0),
-                    hnsw: Some(schema::HnswParams {
-                        m: hnsw.m.unwrap_or(defaults.m),
-                        ef_construction: hnsw.ef_construction.unwrap_or(defaults.ef_construction),
-                        ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
-                    }),
+                    hnsw: match algorithm {
+                        schema::VectorAlgorithm::Hnsw => Some(schema::HnswParams {
+                            m: hnsw.m.unwrap_or(defaults.m),
+                            ef_construction: hnsw
+                                .ef_construction
+                                .unwrap_or(defaults.ef_construction),
+                            ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
+                        }),
+                        schema::VectorAlgorithm::Flat => None,
+                    },
                 }),
             );
         }

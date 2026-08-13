@@ -27,11 +27,11 @@ go_version     := "1.25.12"
 jdk_release    := "jdk-21.0.12+8"
 jq_version     := "1.8.1"
 tla_version    := "1.8.0"
-# ci.yml's wasm-check job pins both; the browser tests are the only way the
-# wasm SIMD kernels are ever executed, so these must not drift from it.
+tla_sha256     := "e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
+
+# Pinned to ci.yml's wasm-check job.
 firefox_version     := "153.0.3"
 geckodriver_version := "0.37.1"
-tla_sha256     := "e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
 
 # protoc publishes no per-asset checksum file, so its hashes are embedded.
 # Go and Temurin publish theirs, and are verified against upstream at install
@@ -193,9 +193,6 @@ setup-protoc:
     ln -sf "{{ tooling }}/protoc/bin/protoc" "$target"
     echo "protoc: $("$target" --version)"
 
-# geckodriver, and a Firefox to drive if the system has none. The wasm tests
-# are browser tests, so without this `just test-wasm` cannot run at all and the
-# wasm SIMD kernels stay unexecuted.
 [doc("geckodriver (and Firefox if missing), for the browser wasm tests.")]
 [group('setup')]
 setup-browser:
@@ -404,9 +401,8 @@ build-fast:
 # Browser client, via wasm-pack, into pkg/wasm. The opt-level override
 # matches CI's `Build WASM` step; without it the local artifact differs.
 #
-# simd128 is not a default wasm32 target feature, so without it the vector
-# kernels' SIMD tier is compiled out and every browser distance runs the scalar
-# fallback. It is baseline in Chrome 91, Firefox 89 and Safari 16.4.
+# simd128 is not on by default; without it the vector kernels' SIMD tier is
+# compiled out. Baseline in Chrome 91, Firefox 89, Safari 16.4.
 [group('build')]
 build-wasm:
     CARGO_PROFILE_RELEASE_OPT_LEVEL=z RUSTFLAGS="-C target-feature=+simd128" \
@@ -433,10 +429,8 @@ build-apple:
 test:
     cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
 
-# Browser tests, in headless Firefox, as CI's wasm-check job runs them.
-#
-# The only place the wasm SIMD kernels ever execute: they are compiled out of
-# every host build, so a fault in them is invisible to `just test`.
+# The only place the wasm SIMD kernels execute; they are compiled out of every
+# host build.
 [doc("Browser wasm tests in headless Firefox (needs `just setup-browser`).")]
 [group('test')]
 test-wasm:
