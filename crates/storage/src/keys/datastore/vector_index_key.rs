@@ -77,15 +77,21 @@ impl VectorIndexKey {
     }
 }
 
+/// `/<collShortID>/<indexID>/<epoch>/`, shared by every key in this space.
+fn epoch_prefix(collection_short_id: u32, index_id: u32, epoch: u32) -> Vec<u8> {
+    let mut buf = vec![SEPARATOR];
+    buf = encode_uvarint_ascending(buf, collection_short_id as u64);
+    buf.push(SEPARATOR);
+    buf = encode_uvarint_ascending(buf, index_id as u64);
+    buf.push(SEPARATOR);
+    buf = encode_uvarint_ascending(buf, epoch as u64);
+    buf.push(SEPARATOR);
+    buf
+}
+
 impl Key for VectorIndexKey {
     fn bytes(&self) -> Vec<u8> {
-        let mut buf = vec![SEPARATOR];
-        buf = encode_uvarint_ascending(buf, self.collection_short_id as u64);
-        buf.push(SEPARATOR);
-        buf = encode_uvarint_ascending(buf, self.index_id as u64);
-        buf.push(SEPARATOR);
-        buf = encode_uvarint_ascending(buf, self.epoch as u64);
-        buf.push(SEPARATOR);
+        let mut buf = epoch_prefix(self.collection_short_id, self.index_id, self.epoch);
         if self.is_meta {
             buf.push(META_DISCRIMINATOR);
         } else {
@@ -109,6 +115,62 @@ impl Key for VectorIndexKey {
         format!(
             "/{}/{}/{}/{}",
             self.collection_short_id, self.index_id, self.epoch, tail
+        )
+    }
+}
+
+/// A key in one index kind's private space, beside its graph.
+///
+/// `kind` separates concepts (coarse centroids from codebooks from inverted
+/// lists) and `key` is the kind's own encoding, so a kind adds a concept
+/// without a new key type. `m` and `n` are taken by the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorAuxKey<'k> {
+    pub collection_short_id: u32,
+    pub index_id: u32,
+    pub epoch: u32,
+    pub kind: u8,
+    /// Empty scans every entry of `kind`.
+    pub key: &'k [u8],
+}
+
+impl<'k> VectorAuxKey<'k> {
+    pub fn new(
+        collection_short_id: u32,
+        index_id: u32,
+        epoch: u32,
+        kind: u8,
+        key: &'k [u8],
+    ) -> Self {
+        Self {
+            collection_short_id,
+            index_id,
+            epoch,
+            kind,
+            key,
+        }
+    }
+}
+
+impl Key for VectorAuxKey<'_> {
+    fn bytes(&self) -> Vec<u8> {
+        let mut buf = epoch_prefix(self.collection_short_id, self.index_id, self.epoch);
+        buf.push(self.kind);
+        if !self.key.is_empty() {
+            buf.push(SEPARATOR);
+            buf.extend_from_slice(self.key);
+        }
+        buf
+    }
+
+    fn to_string(&self) -> String {
+        format!(
+            "/{}/{}/{}/{}/{}",
+            self.collection_short_id,
+            self.index_id,
+            self.epoch,
+            self.kind as char,
+            hex::encode(self.key)
         )
     }
 }

@@ -17,6 +17,7 @@ use crate::error::Result;
 pub struct MemoryNodeStore {
     nodes: BTreeMap<NodeId, Node>,
     meta: Option<Meta>,
+    aux: BTreeMap<(u8, Vec<u8>), Vec<u8>>,
 }
 
 impl MemoryNodeStore {
@@ -64,6 +65,27 @@ impl VectorNodeStore for MemoryNodeStore {
                 continue;
             }
             visit(node.clone())?;
+        }
+        Ok(())
+    }
+
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.aux.get(&(kind, key.to_vec())).cloned())
+    }
+
+    async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()> {
+        self.aux.insert((kind, key.to_vec()), value.to_vec());
+        Ok(())
+    }
+
+    async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], mut visit: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<()> + MaybeSend,
+    {
+        for ((entry_kind, key), value) in &self.aux {
+            if *entry_kind == kind && key.starts_with(key_prefix) {
+                visit(key, value)?;
+            }
         }
         Ok(())
     }

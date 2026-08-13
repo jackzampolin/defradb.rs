@@ -92,6 +92,21 @@ impl<S: VectorNodeStore> VectorNodeStore for Counting<S> {
     {
         self.inner.iterate_nodes(visit).await
     }
+
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.inner.get_aux(kind, key).await
+    }
+
+    async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()> {
+        self.inner.put_aux(kind, key, value).await
+    }
+
+    async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], visit: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<()> + MaybeSend,
+    {
+        self.inner.iterate_aux(kind, key_prefix, visit).await
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
