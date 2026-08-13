@@ -71,6 +71,9 @@ cid.workspace = true
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# The browser client reaches the vector index through `db`; the tests reach it
+# directly so a kernel can be compared against its own scalar reference.
+db-index = { path = "../db-index" }
 
 [features]
 default = []
@@ -78,7 +81,9 @@ default = []
 debug = []
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-Oz", "--enable-mutable-globals", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+# --enable-simd is required once the build passes `-C target-feature=+simd128`:
+# wasm-opt refuses a module carrying v128 instructions it was not told to allow.
+wasm-opt = ["-Oz", "--enable-mutable-globals", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd"]
 
 [lints]
 workspace = true

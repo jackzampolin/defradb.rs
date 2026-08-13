@@ -152,7 +152,12 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build WASM
-        run: CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
+        # simd128 is not a default wasm32 target feature. Without it the vector
+        # kernels' SIMD tier is compiled out and every browser distance runs the
+        # scalar fallback. Baseline in Chrome 91, Firefox 89, Safari 16.4.
+        run: |
+          CARGO_PROFILE_RELEASE_OPT_LEVEL=z RUSTFLAGS="-C target-feature=+simd128" \
+            wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
 
       # The wasm tests are browser tests: storage_tests.rs exercises OPFS, which
       # only exists in a browser, so `wasm_bindgen_test_configure!(run_in_browser)`
@@ -208,11 +213,16 @@ jobs:
       - name: Run wasm tests (Firefox, headless)
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          # Must match the Build WASM step, or the tests exercise a different
+          # kernel tier than the artifact ships.
+          RUSTFLAGS: "-C target-feature=+simd128"
         run: |
           set -euo pipefail
           export GECKODRIVER="$BROWSER_CACHE/geckodriver"
           export PATH="$BROWSER_CACHE/firefox:$PATH"
-          cargo test -p defra-wasm --target wasm32-unknown-unknown --lib 2>&1 | tee wasm-test.log
+          # --tests picks up tests/vector.rs, the only place the wasm SIMD
+          # kernels are ever executed.
+          cargo test -p defra-wasm --target wasm32-unknown-unknown --lib --tests 2>&1 | tee wasm-test.log
           # A binary that registers no tests prints "running 0 tests" and exits 0,
           # which is indistinguishable from success. Fail loudly instead.
           if grep -q "running 0 tests" wasm-test.log; then

@@ -3781,6 +3781,7 @@ dependencies = [
  "console_error_panic_hook",
  "crypto",
  "db",
+ "db-index",
  "db-merge",
  "defra-core",
  "document",
