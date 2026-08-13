@@ -6,6 +6,5 @@ use crate::vector::store::NodeId;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Neighbor {
     pub id: NodeId,
-    /// Smaller is nearer.
     pub distance: f64,
 }
