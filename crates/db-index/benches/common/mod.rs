@@ -137,12 +137,10 @@ impl Index {
                 IvfPq::try_new(
                     store,
                     metric,
-                    IvfPqParams {
-                        nlist: 16,
-                        nprobe: 8,
-                        m: 8,
-                        ..IvfPqParams::default()
-                    },
+                    // nlist derived as 4*sqrt(N): a hardcoded small nlist
+                    // makes nprobe probe a large fraction of the corpus, which
+                    // measures a misconfigured index rather than the kind.
+                    IvfPqParams::default(),
                     SEED,
                 )
                 .expect("cosine is rankable by squared distance"),

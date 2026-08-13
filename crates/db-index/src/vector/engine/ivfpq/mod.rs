@@ -24,10 +24,11 @@ pub use params::{
 
 use crate::error::{Error, Result};
 use crate::vector::core::{Element, Metric};
-use crate::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
+use crate::vector::engine::ann::{Admit, Centroids, EngineKind, Neighbor, VectorIndexEngine};
 use crate::vector::engine::flat::Flat;
 use crate::vector::quantize::ProductQuantizer;
 use crate::vector::store::{NodeId, VectorNodeStore};
+use std::sync::OnceLock;
 
 /// A coarse-quantized, product-compressed index.
 #[derive(Debug, Clone)]
@@ -36,6 +37,9 @@ pub struct IvfPq<S> {
     metric: Metric,
     params: IvfPqParams,
     seed: u64,
+    /// Centroids and codebooks are fixed once trained, and decoding them costs
+    /// more than scanning the lists they route to. Loaded once per engine.
+    trained_cache: OnceLock<(Centroids, ProductQuantizer)>,
 }
 
 impl<S: VectorNodeStore> IvfPq<S> {
@@ -53,6 +57,7 @@ impl<S: VectorNodeStore> IvfPq<S> {
             metric,
             params,
             seed,
+            trained_cache: OnceLock::new(),
         })
     }
 
@@ -88,7 +93,22 @@ impl<S: VectorNodeStore> IvfPq<S> {
         Ok(self.trained().await?.is_some())
     }
 
-    async fn quantizer(&self, state: &TrainedState) -> Result<ProductQuantizer> {
+    /// The coarse centroids and the quantizer, decoded once.
+    pub(super) async fn trained_parts(
+        &self,
+        state: &TrainedState,
+    ) -> Result<&(Centroids, ProductQuantizer)> {
+        if let Some(parts) = self.trained_cache.get() {
+            return Ok(parts);
+        }
+        let parts = (
+            self.load_coarse_centroids(state).await?,
+            self.load_quantizer(state).await?,
+        );
+        Ok(self.trained_cache.get_or_init(|| parts))
+    }
+
+    async fn load_quantizer(&self, state: &TrainedState) -> Result<ProductQuantizer> {
         let mut books = Vec::with_capacity(state.m as usize);
         for sub in 0..state.m {
             let bytes = self
@@ -115,12 +135,11 @@ impl<S: VectorNodeStore> VectorIndexEngine for IvfPq<S> {
         self.staging.insert(id, vector).await?;
 
         if let Some(state) = self.trained().await? {
-            let quantizer = self.quantizer(&state).await?;
             let stored =
                 self.store().get_node(id).await?.ok_or_else(|| {
                     Error::Other("vector index: a just-stored node is gone".into())
                 })?;
-            let (list, code) = self.assign(&quantizer, &state, &stored.vector).await?;
+            let (list, code) = self.assign(&state, &stored.vector).await?;
             self.store_mut()
                 .put_aux(codec::LIST, &codec::list_key(list, id), &code)
                 .await?;

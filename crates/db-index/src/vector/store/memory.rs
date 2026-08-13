@@ -78,14 +78,19 @@ impl VectorNodeStore for MemoryNodeStore {
         Ok(())
     }
 
+    /// A range over the ordered map, not a full scan: an inverted-list probe
+    /// is a prefix lookup and must cost what the prefix holds, not what the
+    /// index holds.
     async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], mut visit: F) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<()> + MaybeSend,
     {
-        for ((entry_kind, key), value) in &self.aux {
-            if *entry_kind == kind && key.starts_with(key_prefix) {
-                visit(key, value)?;
+        let start = (kind, key_prefix.to_vec());
+        for ((entry_kind, key), value) in self.aux.range(start..) {
+            if *entry_kind != kind || !key.starts_with(key_prefix) {
+                break;
             }
+            visit(key, value)?;
         }
         Ok(())
     }

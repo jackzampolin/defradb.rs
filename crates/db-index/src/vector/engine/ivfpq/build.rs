@@ -133,11 +133,10 @@ impl<S: VectorNodeStore> IvfPq<S> {
     /// The list a vector belongs to, and its code.
     pub(super) async fn assign(
         &self,
-        quantizer: &ProductQuantizer,
         state: &TrainedState,
         vector: &[f32],
     ) -> Result<(u32, Vec<u8>)> {
-        let coarse = self.coarse_centroids(state).await?;
+        let (coarse, quantizer) = self.trained_parts(state).await?;
         let (list, _) = coarse.nearest(vector);
         let mut residual = vec![0.0f32; state.dimensions as usize];
         subtract_into(vector, coarse.get(list), &mut residual);
@@ -146,7 +145,7 @@ impl<S: VectorNodeStore> IvfPq<S> {
         Ok((list as u32, code))
     }
 
-    pub(super) async fn coarse_centroids(&self, state: &TrainedState) -> Result<Centroids> {
+    pub(super) async fn load_coarse_centroids(&self, state: &TrainedState) -> Result<Centroids> {
         let mut values = Vec::with_capacity(state.nlist as usize * state.dimensions as usize);
         for index in 0..state.nlist {
             let bytes = self
