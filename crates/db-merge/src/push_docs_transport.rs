@@ -8,7 +8,7 @@ use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_common::{load_latest_composite_heads, load_push_dag_blocks};
 use crate::push_docs_creator::resolve_push_creator;
 use crate::push_docs_replay::{
     persist_replay_failures, ReplayDocumentFailure, ReplayPushConfig, ReplayPushGate,
@@ -127,9 +127,6 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
     let blockstore_view = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
-    let encstore_view = txn
-        .encstore()
-        .map_err(|e| format!("failed to get encstore: {}", e))?;
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -222,45 +219,11 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                     continue;
                 }
             };
-            let mut doc_blocks = Vec::new();
-            for head_cid in
-                load_latest_composite_head_cids(&headstore, &blockstore_view, *doc_short_id).await
-            {
-                let block_key = head_cid.to_bytes();
-                let block_data = match blockstore_view.get(&block_key).await {
-                    Ok(Some(data)) => data,
-                    _ => continue,
-                };
-
-                doc_blocks.extend(
-                    load_push_dag_blocks(&blockstore_view, &encstore_view, head_cid, block_data)
-                        .await,
-                );
-            }
+            let doc_heads =
+                load_latest_composite_heads(&headstore, &blockstore_view, *doc_short_id).await;
 
             let mut requests = Vec::new();
-            for (block_cid, block_data) in doc_blocks {
-                // #1043: do not push COUNTER field blocks as PushLog heads. A
-                // counter block pushed as its own head is merged as a standalone
-                // head by the receiver, whose merge then walks and re-applies the
-                // entire counter chain (double-apply against cross-impl peers).
-                // Counter field blocks are fetched by the receiver via DAG sync
-                // from the composite links instead, matching Go's SendUpdate.
-                //
-                // All other blocks (composite + non-counter field blocks, e.g.
-                // encrypted LWW) are still pushed as heads: an encrypted LWW field
-                // block must reach the receiver as a head so its merge triggers a
-                // KMS DEK request, which is how an unauthorized peer's denial fires
-                // (proofs/tests/behavioral/kms.rs). LWW is idempotent on re-walk,
-                // so it carries no double-apply hazard.
-                match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                    Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                        continue;
-                    }
-                }
+            for (block_cid, block_data) in doc_heads {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -571,77 +534,46 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .new_txn(true)
         .await
         .map_err(|e| format!("blockstore txn: {}", e))?;
-    let encstore_view = storage::stores::Blockstore::new_with_namespace(
-        db.store().clone(),
-        true,
-        storage::namespace::Namespace::Encstore,
-    );
-    let enc_txn = encstore_view
-        .new_txn(true)
-        .await
-        .map_err(|e| format!("encstore txn: {}", e))?;
-
     let mut successful_blocks = 0usize;
-    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await {
-        let block_data = match block_txn.get(&head_cid.to_bytes()).await {
-            Ok(Some(data)) => data,
-            _ => continue,
-        };
+    for (block_cid, block_data) in
+        load_latest_composite_heads(&*head_txn, &*block_txn, doc_short_id).await
+    {
+        let mut request = PushLogRequest::new(
+            doc_id.to_string(),
+            Bytes::from(block_cid.to_bytes()),
+            collection_id.to_string(),
+            creator.clone(),
+            Bytes::from(block_data),
+        );
 
-        for (block_cid, block_data) in
-            load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
-        {
-            // #1043: do not push COUNTER field blocks as PushLog heads (see
-            // backfill above). Counter blocks pushed as heads cause double-apply
-            // on cross-impl peers; the receiver fetches them via DAG sync. Other
-            // blocks (composite + non-counter field blocks, e.g. encrypted LWW)
-            // are still pushed as heads so an encrypted LWW field reaches the
-            // receiver and its merge triggers the KMS DEK request.
-            match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                    continue;
-                }
-            }
-            let mut request = PushLogRequest::new(
-                doc_id.to_string(),
-                Bytes::from(block_cid.to_bytes()),
-                collection_id.to_string(),
-                creator.clone(),
-                Bytes::from(block_data),
-            );
+        if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
+            return Err(format!(
+                "failed to sign replay block after {successful_blocks} successful block(s)"
+            ));
+        }
 
-            if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
+        match transport.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => {
                 return Err(format!(
-                    "failed to sign replay block after {successful_blocks} successful block(s)"
+                    "peer rejected replay after {successful_blocks} successful block(s): {}",
+                    reply
+                        .err_message
+                        .as_deref()
+                        .unwrap_or("unknown pushlog error")
                 ));
             }
-
-            match transport.send_two_stream_request(peer_id, request).await {
-                Ok(reply) if reply.err_message.is_some() => {
-                    return Err(format!(
-                        "peer rejected replay after {successful_blocks} successful block(s): {}",
-                        reply
-                            .err_message
-                            .as_deref()
-                            .unwrap_or("unknown pushlog error")
-                    ));
-                }
-                Ok(_) => {
-                    successful_blocks += 1;
-                }
-                Err(error) => {
-                    let prefix = if error.is_connection_like() {
-                        "transport became unavailable"
-                    } else {
-                        "replay push failed"
-                    };
-                    return Err(format!(
-                        "{prefix} after {successful_blocks} successful block(s): {error}"
-                    ));
-                }
+            Ok(_) => {
+                successful_blocks += 1;
+            }
+            Err(error) => {
+                let prefix = if error.is_connection_like() {
+                    "transport became unavailable"
+                } else {
+                    "replay push failed"
+                };
+                return Err(format!(
+                    "{prefix} after {successful_blocks} successful block(s): {error}"
+                ));
             }
         }
     }

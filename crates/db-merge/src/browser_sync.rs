@@ -8,7 +8,7 @@ use defra_core::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 use storage::corekv::{IterOptions, Store};
 
 use crate::merge_handler::DbMergeHandler;
-use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_common::{load_latest_composite_heads, load_push_dag_blocks};
 
 mod validation;
 
@@ -218,27 +218,18 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
         let encstore = txn
             .encstore()
             .map_err(|error| BrowserSyncError::Storage(error.to_string()))?;
-        let roots =
-            load_latest_composite_head_cids(&headstore, &blockstore, document_ref.doc_short_id)
-                .await;
-        if roots.is_empty() {
+        let heads =
+            load_latest_composite_heads(&headstore, &blockstore, document_ref.doc_short_id).await;
+        if heads.is_empty() {
             return Ok(None);
         }
 
         let mut seen = HashSet::new();
         let mut blocks = Vec::new();
         let mut total_bytes = 0usize;
-        for root in &roots {
-            let Some(root_data) = blockstore
-                .get(&root.to_bytes())
-                .await
-                .map_err(|error| BrowserSyncError::Storage(error.to_string()))?
-            else {
-                return Err(BrowserSyncError::Storage(format!(
-                    "document root {root} is missing"
-                )));
-            };
-            for (cid, data) in load_push_dag_blocks(&blockstore, &encstore, *root, root_data).await
+        for (root, root_data) in &heads {
+            for (cid, data) in
+                load_push_dag_blocks(&blockstore, &encstore, *root, root_data.clone()).await
             {
                 if !seen.insert(cid) {
                     continue;
@@ -260,7 +251,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
         let document = BrowserSyncDocument {
             doc_id: document_ref.doc_id.clone(),
             collection_id: document_ref.collection_id.clone(),
-            roots: roots.into_iter().map(|cid| cid.to_string()).collect(),
+            roots: heads.into_iter().map(|(cid, _)| cid.to_string()).collect(),
             blocks,
         };
         self.validate_document(&document)?;

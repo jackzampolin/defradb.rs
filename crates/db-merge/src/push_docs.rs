@@ -6,7 +6,7 @@ use cid::Cid;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_common::{load_latest_composite_heads, load_push_dag_blocks};
 use crate::push_docs_creator::resolve_push_creator;
 use crate::push_docs_replay::{
     persist_replay_failures, ReplayDocumentFailure, ReplayPushConfig, ReplayPushGate,
@@ -131,9 +131,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
     let blockstore_view = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
-    let encstore_view = txn
-        .encstore()
-        .map_err(|e| format!("failed to get encstore: {}", e))?;
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -195,11 +192,8 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             }
         }
 
-        // For each document, push its composite head block(s) and non-counter
-        // field blocks as PushLog heads; counter field blocks are dropped and
-        // DAG-fetched by the receiver instead (see the #1043 filter below). An
-        // encrypted LWW field must arrive as a head so the receiver's merge
-        // triggers the KMS DEK request.
+        // Push only composite heads. The receiver fetches linked field blocks
+        // through DAG sync, matching Go's SendUpdate behavior.
         for (doc_short_id, doc_id) in &doc_ids {
             if let Some(filter) = filters.get(collection.collection_id()) {
                 if !document_matches_filter(
@@ -236,48 +230,11 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     continue;
                 }
             };
-            // Collect phase: pre-load all DAG blocks before spawning tasks.
-            let mut doc_blocks = Vec::new();
-            for head_cid in
-                load_latest_composite_head_cids(&headstore, &blockstore_view, *doc_short_id).await
-            {
-                let block_key = head_cid.to_bytes();
-                let block_data = match blockstore_view.get(&block_key).await {
-                    Ok(Some(data)) => data,
-                    _ => continue,
-                };
+            let doc_heads =
+                load_latest_composite_heads(&headstore, &blockstore_view, *doc_short_id).await;
 
-                doc_blocks.extend(
-                    load_push_dag_blocks(&blockstore_view, &encstore_view, head_cid, block_data)
-                        .await,
-                );
-            }
-
-            // Send phase: build signed requests in DAG dependency order,
-            // then spawn a task to send them sequentially so ordering is preserved.
             let mut requests = Vec::new();
-            for (block_cid, block_data) in doc_blocks {
-                // #1043: do not push COUNTER field blocks as PushLog heads. A
-                // counter block pushed as its own head is merged as a standalone
-                // head by the receiver, whose merge then walks and re-applies the
-                // entire counter chain (double-apply against cross-impl peers).
-                // Counter field blocks are fetched by the receiver via DAG sync
-                // from the composite links instead, matching Go's SendUpdate.
-                //
-                // All other blocks (composite + non-counter field blocks, e.g.
-                // encrypted LWW) are still pushed as heads: an encrypted LWW field
-                // block must reach the receiver as a head so its merge triggers a
-                // KMS DEK request, which is how an unauthorized peer's denial fires
-                // (proofs/tests/behavioral/kms.rs). LWW is idempotent on re-walk,
-                // so it carries no double-apply hazard.
-                match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                    Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                        continue;
-                    }
-                }
+            for (block_cid, block_data) in doc_heads {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -536,9 +493,8 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
 
 /// Retry pushing a single document's composite heads to a replicator peer.
 ///
-/// Reads composite head CIDs from the headstore, loads block data
-/// (field blocks + composite block) from the blockstore, and sends
-/// signed PushLogRequests to the target peer.
+/// Reads composite heads from the headstore and sends signed PushLogRequests
+/// to the target peer. Linked field blocks are fetched through DAG sync.
 #[allow(clippy::too_many_arguments)]
 pub async fn retry_doc<S: Store + 'static>(
     handle: &p2p::P2PHostHandle,
@@ -604,75 +560,44 @@ pub async fn retry_doc<S: Store + 'static>(
         .new_txn(true)
         .await
         .map_err(|e| format!("blockstore txn: {}", e))?;
-    let encstore_view = storage::stores::Blockstore::new_with_namespace(
-        db.store().clone(),
-        true,
-        storage::namespace::Namespace::Encstore,
-    );
-    let enc_txn = encstore_view
-        .new_txn(true)
-        .await
-        .map_err(|e| format!("encstore txn: {}", e))?;
-
     let mut successful_blocks = 0usize;
-    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await {
-        let block_data = match block_txn.get(&head_cid.to_bytes()).await {
-            Ok(Some(data)) => data,
-            _ => continue,
-        };
+    for (block_cid, block_data) in
+        load_latest_composite_heads(&*head_txn, &*block_txn, doc_short_id).await
+    {
+        let mut request = PushLogRequest::new(
+            doc_id.to_string(),
+            Bytes::from(block_cid.to_bytes()),
+            collection_id.to_string(),
+            creator.clone(),
+            Bytes::from(block_data),
+        );
 
-        for (block_cid, block_data) in
-            load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
-        {
-            // #1043: do not push COUNTER field blocks as PushLog heads (see
-            // backfill above). Counter blocks pushed as heads cause double-apply
-            // on cross-impl peers; the receiver fetches them via DAG sync. Other
-            // blocks (composite + non-counter field blocks, e.g. encrypted LWW)
-            // are still pushed as heads so an encrypted LWW field reaches the
-            // receiver and its merge triggers the KMS DEK request.
-            match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                    continue;
-                }
-            }
-            let mut request = PushLogRequest::new(
-                doc_id.to_string(),
-                Bytes::from(block_cid.to_bytes()),
-                collection_id.to_string(),
-                creator.clone(),
-                Bytes::from(block_data),
-            );
+        if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+            return Err(format!(
+                "failed to sign replay block after {successful_blocks} successful block(s)"
+            ));
+        }
 
-            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+        match handle.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => {
                 return Err(format!(
-                    "failed to sign replay block after {successful_blocks} successful block(s)"
+                    "peer rejected replay after {successful_blocks} successful block(s): {}",
+                    reply
+                        .err_message
+                        .as_deref()
+                        .unwrap_or("unknown pushlog error")
                 ));
             }
-
-            match handle.send_two_stream_request(peer_id, request).await {
-                Ok(reply) if reply.err_message.is_some() => {
-                    return Err(format!(
-                        "peer rejected replay after {successful_blocks} successful block(s): {}",
-                        reply
-                            .err_message
-                            .as_deref()
-                            .unwrap_or("unknown pushlog error")
-                    ));
-                }
-                Ok(_) => successful_blocks += 1,
-                Err(error) => {
-                    let prefix = if error.is_connection_like() {
-                        "transport became unavailable"
-                    } else {
-                        "replay push failed"
-                    };
-                    return Err(format!(
-                        "{prefix} after {successful_blocks} successful block(s): {error}"
-                    ));
-                }
+            Ok(_) => successful_blocks += 1,
+            Err(error) => {
+                let prefix = if error.is_connection_like() {
+                    "transport became unavailable"
+                } else {
+                    "replay push failed"
+                };
+                return Err(format!(
+                    "{prefix} after {successful_blocks} successful block(s): {error}"
+                ));
             }
         }
     }
