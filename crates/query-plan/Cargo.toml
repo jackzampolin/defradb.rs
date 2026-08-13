@@ -25,7 +25,6 @@ lens = { path = "../lens", default-features = false }
 async-trait.workspace = true
 async-lock.workspace = true
 futures.workspace = true
-tokio = { version = "1.35", default-features = false, features = ["rt"] }
 
 # Serialization
 serde_json.workspace = true
@@ -39,8 +38,11 @@ tracing.workspace = true
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.35", default-features = false, features = ["rt"] }
+
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 query-parse = { path = "../query-parse" }
 
 [lints]

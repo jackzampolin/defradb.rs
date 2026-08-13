@@ -271,7 +271,7 @@ fn merge_doc_id(short_id: u64) -> document::DocID {
     let mut hasher = Sha256::new();
     hasher.update(format!("merged-{short_id}").as_bytes());
     let mh: multihash::Multihash<64> =
-        multihash::Multihash::wrap(*defra_core::SHA2_256_CODE, &hasher.finalize()).unwrap();
+        multihash::Multihash::wrap(defra_core::SHA2_256_CODE, &hasher.finalize()).unwrap();
     document::DocID::new_v0(cid::Cid::new_v1(0x55, mh))
 }
 

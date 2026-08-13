@@ -4,11 +4,9 @@
 //! All types match the Go implementation in `internal/core/block/` for wire compatibility.
 
 use cid::Cid;
-use multicodec::Codec;
 use multihash::Multihash;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
 
 use crate::{Error, Result};
 
@@ -23,11 +21,13 @@ pub use crate::block_signature::{
     DocumentStatus, Encryption, Signature, SignatureHeader, SignatureType,
 };
 
-/// DAG-CBOR codec identifier (multicodec 0x71)
-pub static DAG_CBOR_CODEC: LazyLock<u64> = LazyLock::new(|| Codec::Dag_Cbor.code() as u64);
+// Multicodec table: https://github.com/multiformats/multicodec/blob/master/table.csv
 
-/// SHA2-256 multihash code
-pub static SHA2_256_CODE: LazyLock<u64> = LazyLock::new(|| Codec::Sha2_256.code() as u64);
+/// DAG-CBOR codec identifier (multicodec 0x71)
+pub const DAG_CBOR_CODEC: u64 = 0x71;
+
+/// SHA2-256 multihash code (multicodec 0x12)
+pub const SHA2_256_CODE: u64 = 0x12;
 
 // ============================================================================
 // Block - The fundamental unit of content-addressed storage
@@ -348,9 +348,9 @@ pub fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     let digest = hasher.finalize();
 
     // Create multihash
-    let mh = Multihash::<64>::wrap(*SHA2_256_CODE, &digest)
+    let mh = Multihash::<64>::wrap(SHA2_256_CODE, &digest)
         .map_err(|e| Error::BlockError(format!("Failed to create multihash: {}", e)))?;
 
     // Create CIDv1 with DAG-CBOR codec
-    Ok(Cid::new_v1(*DAG_CBOR_CODEC, mh))
+    Ok(Cid::new_v1(DAG_CBOR_CODEC, mh))
 }

@@ -18,7 +18,13 @@ schema = { path = "../schema" }
 document = { path = "../document" }
 
 # HTTP client (for embedding generation API calls)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "charset",
+    "http2",
+    "system-proxy",
+    "rustls-tls-native-roots",
+] }
 
 # Serialization
 serde.workspace = true

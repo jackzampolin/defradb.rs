@@ -1,6 +1,7 @@
-use super::doc_id_index::encode_doc_short_id;
+use super::doc_id_index::{decode_doc_short_id_prefix, encode_doc_short_id};
 use crate::corekv::Key;
 use cid::Cid;
+use std::str::FromStr;
 
 const PRIORITY_HEX_WIDTH: usize = 16;
 
@@ -43,6 +44,32 @@ impl HeadstoreDocKey {
         buf.extend_from_slice(field_id.as_bytes());
         buf.push(b'/');
         buf
+    }
+
+    /// Parse a serialized headstore document key from raw bytes.
+    ///
+    /// Decodes the binary `doc_short_id` uvarint without a lossy UTF-8 conversion,
+    /// so a short ID whose encoding is `0x2F` (`/`) cannot create a false separator.
+    /// Modelled on [`super::systemstore::ActionStatusKey::parse`]: fail-closed,
+    /// no trailing garbage.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let rest = bytes.strip_prefix(b"/d/")?;
+        let (rest, doc_short_id) = decode_doc_short_id_prefix(rest).ok()?;
+        let rest = rest.strip_prefix(b"/")?;
+        // SAFETY: `Key::bytes` always writes `field_id` and the CID as UTF-8
+        // (ASCII field names + base32 CID). After the binary short-id segment,
+        // the remainder is only those text fields.
+        let text = unsafe { std::str::from_utf8_unchecked(rest) };
+        let (field_id, cid_str) = text.rsplit_once('/')?;
+        if field_id.is_empty() || cid_str.is_empty() {
+            return None;
+        }
+        let cid = Cid::from_str(cid_str).ok()?;
+        Some(Self {
+            doc_short_id,
+            field_id: field_id.to_string(),
+            cid,
+        })
     }
 }
 
@@ -334,6 +361,59 @@ mod tests {
         expected.extend_from_slice(b"/fieldname/");
         expected.extend_from_slice(cid.to_string().as_bytes());
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_headstore_doc_key_parse_roundtrip() {
+        let cid = test_cid();
+        for doc_short_id in [1u64, 46, 47, 48, 239, 240, 2287, 2288] {
+            let key = HeadstoreDocKey::new(doc_short_id, "fieldname", cid);
+            assert_eq!(HeadstoreDocKey::parse(&key.bytes()), Some(key));
+        }
+        let composite = HeadstoreDocKey::new(47, "C", cid);
+        assert_eq!(HeadstoreDocKey::parse(&composite.bytes()), Some(composite));
+    }
+
+    #[test]
+    fn test_headstore_doc_key_parse_rejects_malformed() {
+        assert_eq!(HeadstoreDocKey::parse(b""), None);
+        assert_eq!(HeadstoreDocKey::parse(b"/c/1/notacid"), None);
+        assert_eq!(HeadstoreDocKey::parse(b"/d/"), None);
+        // prefix only — no field or cid
+        assert_eq!(
+            HeadstoreDocKey::parse(&HeadstoreDocKey::document_prefix(1)),
+            None
+        );
+        // trailing garbage after a valid key
+        let mut bad = HeadstoreDocKey::new(1, "C", test_cid()).bytes();
+        bad.extend_from_slice(b"/extra");
+        assert_eq!(HeadstoreDocKey::parse(&bad), None);
+    }
+
+    /// Documents the encoding hazard: uvarint 47 is raw `0x2F` (`/`), so a naive
+    /// forward `split('/')` after lossy UTF-8 sees a different segment count than
+    /// neighbouring short IDs. Typed [`HeadstoreDocKey::parse`] is immune.
+    #[test]
+    fn test_headstore_doc_key_short_id_47_false_slash_separator() {
+        let cid = test_cid();
+        let segment_count = |doc_short_id: u64| -> usize {
+            let bytes = HeadstoreDocKey::new(doc_short_id, "C", cid).bytes();
+            String::from_utf8_lossy(&bytes).split('/').count()
+        };
+        let count_46 = segment_count(46);
+        let count_47 = segment_count(47);
+        let count_48 = segment_count(48);
+        assert_eq!(count_46, count_48);
+        assert_ne!(
+            count_47, count_46,
+            "doc_short_id=47 must insert a false '/' under naive split"
+        );
+        // And the typed decoder still recovers 47 correctly.
+        let key = HeadstoreDocKey::new(47, "C", cid);
+        let parsed = HeadstoreDocKey::parse(&key.bytes()).expect("parse 47");
+        assert_eq!(parsed.doc_short_id, 47);
+        assert_eq!(parsed.field_id, "C");
+        assert_eq!(parsed.cid, cid);
     }
 
     #[test]

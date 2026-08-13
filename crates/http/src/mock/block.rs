@@ -14,6 +14,14 @@ impl MockBlockOperations {
 
 #[async_trait]
 impl BlockOperations for MockBlockOperations {
+    async fn signed_block_bytes(
+        &self,
+        _cid: &str,
+        _caller_did: Option<&str>,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        Err("mock signed block bytes unavailable".to_string())
+    }
+
     async fn verify_signature(
         &self,
         _cid: &str,

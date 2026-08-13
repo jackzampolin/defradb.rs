@@ -43,12 +43,12 @@ serde_bytes.workspace = true
 serde_ipld_dagcbor.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "fs", "sync", "time"] }
 tracing.workspace = true
 
 [features]
 default = ["native", "wasmtime-runtime", "lark", "redb"]
-native = ["db/native", "db-merge/native", "defra-p2p-adapter/native"]
+native = ["db/native", "db-merge/native", "db-merge/libp2p-transport", "defra-p2p-adapter/native"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
     "db-merge/wasmtime-runtime",
@@ -64,7 +64,7 @@ iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
 [dev-dependencies]
 base64 = { workspace = true }
 tempfile = "3.17"
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 zeroize = "1"
 zstd = "0.13"
 

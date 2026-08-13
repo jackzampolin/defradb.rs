@@ -2,13 +2,12 @@ use integration_test::TestCluster;
 
 #[tokio::test]
 async fn version_json_has_all_fields() {
-    let root = integration_test::workspace_root();
-    let binary = root.join("target/debug/defra");
+    let binary = integration_test::rust_binary();
 
     let output = std::process::Command::new(&binary)
         .args(["version", "--format", "json"])
         .output()
-        .expect("defra binary not found — run `cargo build -p cli` first");
+        .expect("defra binary not found — set DEFRA_RUST_BINARY or run `cargo build -p cli`");
 
     assert!(output.status.success(), "defra version failed");
 

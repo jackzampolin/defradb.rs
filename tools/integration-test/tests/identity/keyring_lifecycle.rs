@@ -1,17 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("failed to canonicalize workspace root")
-}
-
 fn defra_binary() -> PathBuf {
-    std::env::var_os("DEFRA_RUST_BINARY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join("target/debug/defra"))
+    integration_test::rust_binary()
 }
 
 fn is_rust_binary(binary: &Path) -> bool {

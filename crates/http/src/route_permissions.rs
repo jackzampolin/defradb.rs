@@ -244,7 +244,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         // Block
         // =====================================================================
-        "/api/v0/block/verify-signature" => {
+        "/api/v0/block/verify-signature" | "/api/v0/block/signed" => {
             RoutePermission::Required(NodePermission::SignatureVerify)
         }
 
@@ -600,6 +600,17 @@ mod tests {
                 Method::POST,
                 RoutePermission::Required(NodePermission::DocumentUpdate),
             ),
+            // Block
+            (
+                "/api/v0/block/verify-signature",
+                Method::GET,
+                RoutePermission::Required(NodePermission::SignatureVerify),
+            ),
+            (
+                "/api/v0/block/signed",
+                Method::GET,
+                RoutePermission::Required(NodePermission::SignatureVerify),
+            ),
             // Views
             (
                 "/api/v0/views",
@@ -648,6 +659,7 @@ mod tests {
             ("/api/v0/p2p/replicators", Method::DELETE),
             ("/api/v0/acp/node/disable", Method::POST),
             ("/api/v0/backup/export", Method::POST),
+            ("/api/v0/block/signed", Method::GET),
         ] {
             let v1_path = v0_path.replacen("/api/v0", "/api/v1", 1);
             assert_eq!(

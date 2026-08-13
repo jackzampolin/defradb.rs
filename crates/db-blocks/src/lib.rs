@@ -296,6 +296,7 @@ pub async fn get_all_field_heads(
 /// of `/d/{doc_id}/`.
 pub struct DocHeadsSnapshot {
     max_priority: u64,
+    max_priority_by_field: HashMap<String, u64>,
     entries_by_field: HashMap<String, Vec<FieldHeadEntry>>,
 }
 
@@ -314,6 +315,7 @@ impl DocHeadsSnapshot {
             .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
 
         let mut max_priority: u64 = 0;
+        let mut max_priority_by_field: HashMap<String, u64> = HashMap::new();
         let mut entries_by_field: HashMap<String, Vec<FieldHeadEntry>> = HashMap::new();
 
         while let Some(kv_pair) = iter
@@ -331,6 +333,10 @@ impl DocHeadsSnapshot {
             let suffix = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
             if let Some((field_id, cid_str)) = suffix.split_once('/') {
                 if let Ok(cid) = cid_str.parse::<Cid>() {
+                    max_priority_by_field
+                        .entry(field_id.to_string())
+                        .and_modify(|max| *max = (*max).max(priority))
+                        .or_insert(priority);
                     entries_by_field
                         .entry(field_id.to_string())
                         .or_default()
@@ -349,12 +355,20 @@ impl DocHeadsSnapshot {
 
         Ok(Self {
             max_priority,
+            max_priority_by_field,
             entries_by_field,
         })
     }
 
     pub fn max_priority(&self) -> u64 {
         self.max_priority
+    }
+
+    pub fn field_max_priority(&self, field_id: &str) -> u64 {
+        self.max_priority_by_field
+            .get(field_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Get heads for a specific field (returns empty vec if none).

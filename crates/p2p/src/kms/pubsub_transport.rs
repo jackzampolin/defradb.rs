@@ -29,7 +29,6 @@ use kms::{
 };
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::peer_identity::PeerIdentityResolver;
@@ -382,7 +381,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         // identical request every `REPUBLISH_INTERVAL` and give up after
         // `RESPONSE_TIMEOUT` — closing the stream so the caller's `wait_all`
         // resolves instead of hanging forever on a lost gossip message.
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = kms::transport_reply_channel(16);
         let transport = self.transport.clone();
         let correlator = self.correlator.clone();
         tokio::spawn(async move {

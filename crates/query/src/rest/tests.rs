@@ -1,64 +1,36 @@
+use super::operations::json_to_graphql_input;
 use super::*;
 use crate::error::QueryError;
 use serde_json::json;
-use serde_json::Value as JsonValue;
-
-fn json_to_graphql(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => "null".to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::String(s) => {
-            let escaped = s
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("\"{}\"", escaped)
-        }
-        JsonValue::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_to_graphql).collect();
-            format!("[{}]", items.join(", "))
-        }
-        JsonValue::Object(obj) => {
-            let fields: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, json_to_graphql(v)))
-                .collect();
-            format!("{{{}}}", fields.join(", "))
-        }
-    }
-}
 
 #[test]
 fn test_json_to_graphql_null() {
-    assert_eq!(json_to_graphql(&json!(null)), "null");
+    assert_eq!(json_to_graphql_input(&json!(null)), "null");
 }
 
 #[test]
 fn test_json_to_graphql_bool() {
-    assert_eq!(json_to_graphql(&json!(true)), "true");
-    assert_eq!(json_to_graphql(&json!(false)), "false");
+    assert_eq!(json_to_graphql_input(&json!(true)), "true");
+    assert_eq!(json_to_graphql_input(&json!(false)), "false");
 }
 
 #[test]
 fn test_json_to_graphql_number() {
-    assert_eq!(json_to_graphql(&json!(42)), "42");
-    assert_eq!(json_to_graphql(&json!(-17)), "-17");
-    assert_eq!(json_to_graphql(&json!(3.15)), "3.15");
+    assert_eq!(json_to_graphql_input(&json!(42)), "42");
+    assert_eq!(json_to_graphql_input(&json!(-17)), "-17");
+    assert_eq!(json_to_graphql_input(&json!(3.15)), "3.15");
 }
 
 #[test]
 fn test_json_to_graphql_simple_string() {
-    assert_eq!(json_to_graphql(&json!("hello")), "\"hello\"");
-    assert_eq!(json_to_graphql(&json!("")), "\"\"");
+    assert_eq!(json_to_graphql_input(&json!("hello")), "\"hello\"");
+    assert_eq!(json_to_graphql_input(&json!("")), "\"\"");
 }
 
 #[test]
 fn test_json_to_graphql_string_with_quotes() {
     assert_eq!(
-        json_to_graphql(&json!("Hello \"World\"")),
+        json_to_graphql_input(&json!("Hello \"World\"")),
         "\"Hello \\\"World\\\"\""
     );
 }
@@ -66,48 +38,74 @@ fn test_json_to_graphql_string_with_quotes() {
 #[test]
 fn test_json_to_graphql_string_with_backslashes() {
     assert_eq!(
-        json_to_graphql(&json!("path\\to\\file")),
+        json_to_graphql_input(&json!("path\\to\\file")),
         "\"path\\\\to\\\\file\""
     );
 }
 
 #[test]
 fn test_json_to_graphql_string_with_newlines() {
-    assert_eq!(json_to_graphql(&json!("line1\nline2")), "\"line1\\nline2\"");
+    assert_eq!(
+        json_to_graphql_input(&json!("line1\nline2")),
+        "\"line1\\nline2\""
+    );
 }
 
 #[test]
 fn test_json_to_graphql_string_with_carriage_return() {
-    assert_eq!(json_to_graphql(&json!("line1\rline2")), "\"line1\\rline2\"");
+    assert_eq!(
+        json_to_graphql_input(&json!("line1\rline2")),
+        "\"line1\\rline2\""
+    );
 }
 
 #[test]
 fn test_json_to_graphql_string_with_tabs() {
-    assert_eq!(json_to_graphql(&json!("col1\tcol2")), "\"col1\\tcol2\"");
+    assert_eq!(
+        json_to_graphql_input(&json!("col1\tcol2")),
+        "\"col1\\tcol2\""
+    );
+}
+
+#[test]
+fn test_json_to_graphql_string_with_backspace() {
+    assert_eq!(json_to_graphql_input(&json!("a\u{0008}b")), "\"a\\bb\"");
+}
+
+#[test]
+fn test_json_to_graphql_string_with_form_feed() {
+    assert_eq!(json_to_graphql_input(&json!("a\u{000c}b")), "\"a\\fb\"");
+}
+
+#[test]
+fn test_json_to_graphql_string_with_other_controls() {
+    // JSON (and Go valueToGQL) use \uXXXX for controls without a short escape.
+    assert_eq!(json_to_graphql_input(&json!("a\u{0000}b")), "\"a\\u0000b\"");
+    assert_eq!(json_to_graphql_input(&json!("a\u{0007}b")), "\"a\\u0007b\"");
 }
 
 #[test]
 fn test_json_to_graphql_string_with_mixed_escapes() {
     assert_eq!(
-        json_to_graphql(&json!("line1\nline2\t\"quoted\"\r\\end")),
+        json_to_graphql_input(&json!("line1\nline2\t\"quoted\"\r\\end")),
         "\"line1\\nline2\\t\\\"quoted\\\"\\r\\\\end\""
     );
 }
 
 #[test]
 fn test_json_to_graphql_array_empty() {
-    assert_eq!(json_to_graphql(&json!([])), "[]");
+    assert_eq!(json_to_graphql_input(&json!([])), "[]");
 }
 
 #[test]
 fn test_json_to_graphql_array_simple() {
-    assert_eq!(json_to_graphql(&json!([1, 2, 3])), "[1, 2, 3]");
+    assert_eq!(json_to_graphql_input(&json!([1, 2, 3])), "[1, 2, 3]");
 }
 
 #[test]
 fn test_json_to_graphql_array_mixed() {
     assert_eq!(
-        json_to_graphql(&json!(["hello", 42, true, null])),
+        json_to_graphql_input(&json!(["hello", 42, true, null])),
         "[\"hello\", 42, true, null]"
     );
 }
@@ -115,14 +113,14 @@ fn test_json_to_graphql_array_mixed() {
 #[test]
 fn test_json_to_graphql_array_nested() {
     assert_eq!(
-        json_to_graphql(&json!([[1, 2], [3, 4]])),
+        json_to_graphql_input(&json!([[1, 2], [3, 4]])),
         "[[1, 2], [3, 4]]"
     );
 }
 
 #[test]
 fn test_json_to_graphql_object_simple() {
-    let result = json_to_graphql(&json!({"name": "Alice", "age": 30}));
+    let result = json_to_graphql_input(&json!({"name": "Alice", "age": 30}));
     assert!(
         result == "{name: \"Alice\", age: 30}" || result == "{age: 30, name: \"Alice\"}",
         "Unexpected result: {}",
@@ -132,13 +130,13 @@ fn test_json_to_graphql_object_simple() {
 
 #[test]
 fn test_json_to_graphql_object_nested() {
-    let result = json_to_graphql(&json!({"user": {"name": "Bob"}}));
+    let result = json_to_graphql_input(&json!({"user": {"name": "Bob"}}));
     assert_eq!(result, "{user: {name: \"Bob\"}}");
 }
 
 #[test]
 fn test_json_to_graphql_object_with_array() {
-    let result = json_to_graphql(&json!({"tags": ["a", "b"]}));
+    let result = json_to_graphql_input(&json!({"tags": ["a", "b"]}));
     assert_eq!(result, "{tags: [\"a\", \"b\"]}");
 }
 
@@ -151,7 +149,7 @@ fn test_json_to_graphql_complex_nested() {
             "active": true
         }
     });
-    let result = json_to_graphql(&value);
+    let result = json_to_graphql_input(&value);
     assert!(result.contains("name: \"Alice\\nSmith\""));
     assert!(result.contains("tags: [\"admin\", \"user\"]"));
     assert!(result.contains("active: true"));
@@ -159,7 +157,10 @@ fn test_json_to_graphql_complex_nested() {
 
 #[test]
 fn test_json_to_graphql_unicode() {
-    assert_eq!(json_to_graphql(&json!("héllo 世界")), "\"héllo 世界\"");
+    assert_eq!(
+        json_to_graphql_input(&json!("héllo 世界")),
+        "\"héllo 世界\""
+    );
 }
 
 #[test]

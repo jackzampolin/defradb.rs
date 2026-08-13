@@ -13,9 +13,9 @@ use datastore::BasicTxn;
 pub use db_search::EmbeddingClientConfig;
 use events::Bus;
 use identity::{Identity, RawIdentity};
-#[cfg(not(feature = "wasmtime-runtime"))]
-use lens::MemoryTransformStore;
 use lens::TransformStore;
+#[cfg(not(feature = "wasmtime-runtime"))]
+use lens::UnsupportedTransformStore;
 #[cfg(feature = "wasmtime-runtime")]
 use lens::WasmTransformStore;
 use std::collections::{HashMap, HashSet};
@@ -572,7 +572,7 @@ impl<S: Store> DB<S> {
     /// Create the appropriate lens transform store for the current platform.
     #[cfg(not(feature = "wasmtime-runtime"))]
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        Ok(Arc::new(MemoryTransformStore::new()))
+        Ok(Arc::new(UnsupportedTransformStore))
     }
 
     /// Get the current transaction ID counter value.

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 fn doc_id(index: usize) -> document::DocID {
     let mut hasher = Sha256::new();
     hasher.update(format!("seek-path-doc-{index}").as_bytes());
-    let mh: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hasher.finalize()).unwrap();
+    let mh: Multihash<64> = Multihash::wrap(SHA2_256_CODE, &hasher.finalize()).unwrap();
     document::DocID::new_v0(Cid::new_v1(0x55, mh))
 }
 use db::database::DB;
