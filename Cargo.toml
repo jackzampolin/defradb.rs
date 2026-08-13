@@ -45,6 +45,7 @@ members = [
     "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",
+    "tools/pir-poc",
     "proofs",
 ]
 

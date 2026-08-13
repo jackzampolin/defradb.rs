@@ -353,7 +353,7 @@ dependencies = [
  "keccak-asm",
  "paste",
  "proptest",
- "rand 0.9.2",
+ "rand 0.9.1",
  "rapidhash",
  "ruint",
  "rustc-hash",
@@ -1957,6 +1957,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "chalametpir_client"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8ba6654ef3cd341bf59992320bee8b277682636feb669dd95a84bf749f11167"
+dependencies = [
+ "chalametpir_common",
+]
+
+[[package]]
+name = "chalametpir_common"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67b0125b21d302a01048e51f806c4997057ca823d35a65bc490be33918998e99"
+dependencies = [
+ "rand 0.9.1",
+ "rand_chacha 0.9.0",
+ "rayon",
+ "turboshake",
+]
+
+[[package]]
+name = "chalametpir_server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2fa96ee45ec4a84626c495ce24ac56da293db9e612f59678bf5c51a2bb19d19"
+dependencies = [
+ "chalametpir_common",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2109,7 +2139,7 @@ dependencies = [
  "pg-compat",
  "portpicker",
  "query",
- "rand 0.9.2",
+ "rand 0.9.1",
  "replication-filter",
  "reqwest 0.12.28",
  "schema",
@@ -4028,6 +4058,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dpf"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc7b4c44737fe8c2eb159980cad510bc686095e8a89d386052a9cc2f93aba92"
+dependencies = [
+ "aes",
+ "once_cell",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4404,7 +4444,7 @@ checksum = "4e7f34442dbe69c60fe8eaf58a8cafff81a1f278816d8ab4db255b3bef4ac3c4"
 dependencies = [
  "getrandom 0.3.4",
  "libm",
- "rand 0.9.2",
+ "rand 0.9.1",
  "siphasher",
 ]
 
@@ -4954,7 +4994,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "portable-atomic",
  "quanta",
- "rand 0.9.2",
+ "rand 0.9.1",
  "smallvec",
  "spinning_top",
  "web-time",
@@ -5235,7 +5275,7 @@ dependencies = [
  "idna",
  "ipnet",
  "once_cell",
- "rand 0.9.2",
+ "rand 0.9.1",
  "ring",
  "socket2 0.5.10",
  "thiserror 2.0.18",
@@ -5278,7 +5318,7 @@ dependencies = [
  "moka",
  "once_cell",
  "parking_lot 0.12.5",
- "rand 0.9.2",
+ "rand 0.9.1",
  "resolv-conf",
  "smallvec",
  "thiserror 2.0.18",
@@ -5803,7 +5843,7 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-util",
  "log",
- "rand 0.9.2",
+ "rand 0.9.1",
  "tokio",
  "url",
  "xmltree",
@@ -8456,7 +8496,7 @@ dependencies = [
  "futures-util",
  "opentelemetry 0.31.0",
  "percent-encoding",
- "rand 0.9.2",
+ "rand 0.9.1",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -8474,7 +8514,7 @@ dependencies = [
  "opentelemetry 0.32.0",
  "percent-encoding",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.1",
  "thiserror 2.0.18",
 ]
 
@@ -8564,7 +8604,7 @@ dependencies = [
  "p2p",
  "parking_lot 0.12.5",
  "postcard",
- "rand 0.9.2",
+ "rand 0.9.1",
  "rlimit",
  "serde",
  "serde_bytes",
@@ -8929,6 +8969,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pir-poc"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "chalametpir_client",
+ "chalametpir_server",
+ "defra-node",
+ "dpf",
+ "hex",
+ "memory-stats",
+ "query",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pkcs8"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9117,7 +9179,7 @@ dependencies = [
  "hmac",
  "md-5",
  "memchr",
- "rand 0.9.2",
+ "rand 0.9.1",
  "sha2 0.10.9",
  "stringprep",
 ]
@@ -9318,7 +9380,7 @@ dependencies = [
  "bit-vec",
  "bitflags 2.11.0",
  "num-traits",
- "rand 0.9.2",
+ "rand 0.9.1",
  "rand_chacha 0.9.0",
  "rand_xorshift",
  "regex-syntax",
@@ -9709,7 +9771,7 @@ dependencies = [
  "fastbloom 0.14.1",
  "getrandom 0.3.4",
  "lru-slab",
- "rand 0.9.2",
+ "rand 0.9.1",
  "ring",
  "rustc-hash",
  "rustls 0.23.37",
@@ -9776,9 +9838,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.2"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
+checksum = "9fbfd9d094a40bf3ae768db9361049ace4c0e04a4fd6b359518bd7b73a73dd97"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -9889,9 +9951,9 @@ dependencies = [
 
 [[package]]
 name = "rayon"
-version = "1.11.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+checksum = "b418a60154510ca1a002a752ca9714984e21e4241e804d32555251faf8b78ffa"
 dependencies = [
  "either",
  "rayon-core",
@@ -10357,7 +10419,7 @@ dependencies = [
  "primitive-types",
  "proptest",
  "rand 0.8.5",
- "rand 0.9.2",
+ "rand 0.9.1",
  "rlp",
  "ruint-macro",
  "serde_core",
@@ -12611,7 +12673,7 @@ dependencies = [
  "http 1.4.0",
  "httparse",
  "log",
- "rand 0.9.2",
+ "rand 0.9.1",
  "rustls 0.23.37",
  "rustls-pki-types",
  "sha1 0.10.6",
@@ -12630,10 +12692,16 @@ dependencies = [
  "http 1.4.0",
  "httparse",
  "log",
- "rand 0.9.2",
+ "rand 0.9.1",
  "sha1 0.10.6",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "turboshake"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d4d37a9e71fe1ea7b7eecea9a2a4628448aa24bf070152ade05528e9e6f3e14"
 
 [[package]]
 name = "twox-hash"
@@ -14244,7 +14312,7 @@ dependencies = [
  "nohash-hasher",
  "parking_lot 0.12.5",
  "pin-project",
- "rand 0.9.2",
+ "rand 0.9.1",
  "static_assertions",
  "web-time",
 ]
