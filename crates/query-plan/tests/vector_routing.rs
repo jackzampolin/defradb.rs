@@ -27,6 +27,7 @@ fn vector_index(id: u32, field: &str, dimensions: u32) -> IndexDescription {
         metric: DistanceMetric::Cosine,
         dimensions,
         hnsw: Some(HnswParams::default()),
+        ivfpq: None,
     })
 }
 

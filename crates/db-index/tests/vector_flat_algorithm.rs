@@ -36,6 +36,7 @@ fn description(algorithm: VectorAlgorithm, hnsw: Option<HnswParams>) -> IndexDes
         metric: DistanceMetric::Cosine,
         dimensions: DIMENSIONS,
         hnsw,
+        ivfpq: None,
     })
 }
 
@@ -192,4 +193,72 @@ fn the_engine_kinds_are_distinct() {
 fn only_hnsw_is_go_compatible() {
     assert!(VectorAlgorithm::Hnsw.is_go_compatible());
     assert!(!VectorAlgorithm::Flat.is_go_compatible());
+}
+
+/// IVF-PQ dispatched through `VectorIndex`, the way a collection reaches it.
+#[tokio::test]
+async fn the_ivfpq_algorithm_is_selectable() {
+    let mut desc = description(VectorAlgorithm::IvfPq, None);
+    desc = desc.as_vector(schema::VectorIndexDescription {
+        algorithm: VectorAlgorithm::IvfPq,
+        metric: DistanceMetric::Cosine,
+        dimensions: DIMENSIONS,
+        hnsw: None,
+        ivfpq: Some(schema::IvfPqParams {
+            nlist: 4,
+            nprobe: 4,
+            m: 4,
+            ..schema::IvfPqParams::default()
+        }),
+    });
+    let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid IVF-PQ description");
+
+    let store = MemoryStore::new();
+    let mut corpus = common::Corpus::new(0x1F);
+    let vectors = corpus.vectors(60, DIMENSIONS as usize);
+
+    let mut write = txn(&store).await;
+    for (i, vector) in vectors.iter().enumerate() {
+        let wide: Vec<f64> = vector.iter().map(|x| *x as f64).collect();
+        index
+            .save(&mut write, i as u64 + 1, &[NormalValue::Float64Array(wide)])
+            .await
+            .unwrap();
+    }
+    write.commit().await.unwrap();
+
+    // Untrained, so this is an exact scan and must match brute force exactly.
+    let query: Vec<f64> = vectors[3].iter().map(|x| *x as f64).collect();
+    let mut read = txn(&store).await;
+    let got: Vec<u64> = index
+        .search(&mut read, &query, 5, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.id.0)
+        .collect();
+    let want: Vec<u64> = common::scored(&vectors, &vectors[3], 5)
+        .into_iter()
+        .map(|id| id.0 + 1)
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// A metric IVF-PQ cannot rank must be refused where the index is built, not
+/// discovered at query time.
+#[test]
+fn an_ivfpq_index_with_an_unrankable_metric_is_refused() {
+    let desc =
+        description(VectorAlgorithm::IvfPq, None).as_vector(schema::VectorIndexDescription {
+            algorithm: VectorAlgorithm::IvfPq,
+            metric: DistanceMetric::Dot,
+            dimensions: DIMENSIONS,
+            hnsw: None,
+            ivfpq: Some(schema::IvfPqParams::default()),
+        });
+    let err = VectorIndex::try_new(COLLECTION, desc).unwrap_err();
+    assert!(
+        err.to_string().contains("squared distance"),
+        "the error must say why, got: {err}"
+    );
 }

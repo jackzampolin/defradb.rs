@@ -778,6 +778,7 @@ impl<'a> SdlParser<'a> {
             let algorithm = match config.algorithm.as_deref() {
                 None | Some("HNSW") => schema::VectorAlgorithm::Hnsw,
                 Some("FLAT") => schema::VectorAlgorithm::Flat,
+                Some("IVF_PQ") => schema::VectorAlgorithm::IvfPq,
                 Some(other) => {
                     return Err(QueryError::parse(format!(
                         "@vectorIndex has no algorithm named '{other}'"
@@ -822,7 +823,22 @@ impl<'a> SdlParser<'a> {
                                 .unwrap_or(defaults.ef_construction),
                             ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
                         }),
-                        schema::VectorAlgorithm::Flat => None,
+                        schema::VectorAlgorithm::Flat | schema::VectorAlgorithm::IvfPq => None,
+                    },
+                    ivfpq: match algorithm {
+                        schema::VectorAlgorithm::IvfPq => {
+                            let ivfpq = config.ivfpq.clone().unwrap_or_default();
+                            let defaults = schema::IvfPqParams::default();
+                            Some(schema::IvfPqParams {
+                                nlist: ivfpq.nlist.unwrap_or(defaults.nlist),
+                                nprobe: ivfpq.nprobe.unwrap_or(defaults.nprobe),
+                                m: ivfpq.m.unwrap_or(defaults.m),
+                                sample_bytes: ivfpq
+                                    .sample_bytes
+                                    .map_or(defaults.sample_bytes, u64::from),
+                            })
+                        }
+                        _ => None,
                     },
                 }),
             );

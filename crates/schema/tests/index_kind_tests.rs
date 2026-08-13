@@ -12,6 +12,7 @@ fn vector_description() -> VectorIndexDescription {
         metric: DistanceMetric::Cosine,
         dimensions: 768,
         hnsw: Some(HnswParams::default()),
+        ivfpq: None,
     }
 }
 

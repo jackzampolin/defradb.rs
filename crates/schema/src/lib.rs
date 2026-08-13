@@ -38,8 +38,8 @@ pub use field::FieldDescription;
 pub use field_kind::{FieldKind, ScalarArrayKind, ScalarKind};
 pub use index::{
     DistanceMetric, EncryptedIndexDescription, EncryptedIndexType, FullTextIndexDescription,
-    HnswParams, IndexDescription, IndexKind, IndexedFieldDescription, OrderedIndexDescription,
-    VectorAlgorithm, VectorIndexDescription,
+    HnswParams, IndexDescription, IndexKind, IndexedFieldDescription, IvfPqParams,
+    OrderedIndexDescription, VectorAlgorithm, VectorIndexDescription,
 };
 pub use policy::PolicyDescription;
 pub use source::{
