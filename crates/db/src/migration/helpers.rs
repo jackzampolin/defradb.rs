@@ -318,6 +318,30 @@ mod tests {
     }
 
     #[test]
+    fn blob_field_remains_hex_text_after_lens_materialization() {
+        let collection = Collection::new(CollectionVersion::new(
+            "Files",
+            "v2",
+            "files",
+            vec![FieldDescription::new("1", "data", FieldKind::blob())],
+        ));
+        let mut lens_doc = LensDoc::new();
+        lens_doc.insert("data".to_string(), serde_json::json!("00ff"));
+
+        let migrated = lens_doc_to_document(lens_doc, &Document::new(), &collection);
+        assert_eq!(
+            migrated.get("data"),
+            Some(&document::NormalValue::String("00ff".to_string()))
+        );
+
+        let persisted = Document::from_cbor(&migrated.to_cbor().unwrap()).unwrap();
+        assert_eq!(
+            persisted.get("data"),
+            Some(&document::NormalValue::String("00ff".to_string()))
+        );
+    }
+
+    #[test]
     fn lens_removed_field_is_returned_as_explicit_null() {
         let collection = Collection::new(CollectionVersion::new(
             "Users",
