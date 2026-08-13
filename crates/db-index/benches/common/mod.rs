@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod sift;
+
 use db_index::vector::core::Metric;
 use db_index::vector::engine::ann::VectorIndexEngine;
 use db_index::vector::engine::flat::Flat;
@@ -121,8 +123,13 @@ macro_rules! on_index {
 
 impl Index {
     pub fn new(kind: Kind) -> Self {
+        Self::with_metric(kind, Metric::Cosine)
+    }
+
+    /// SIFT's published ground truth is Euclidean, so a benchmark measured
+    /// against it must rank the same way or an exact scan does not score 1.0.
+    pub fn with_metric(kind: Kind, metric: Metric) -> Self {
         let store = MemoryNodeStore::new();
-        let metric = Metric::Cosine;
         match kind {
             Kind::Flat => Index::Flat(Flat::new(store, metric)),
             Kind::Hnsw => Index::Hnsw(Hnsw::new(store, metric, Params::new(DEFAULT_M), SEED)),
@@ -165,6 +172,16 @@ impl Index {
         on_index!(self, index => index.search(query, k, None).await.expect("search").len())
     }
 
+    pub async fn search_ids(&self, query: &[f32], k: usize) -> Vec<u64> {
+        on_index!(self, index => index
+            .search(query, k, None)
+            .await
+            .expect("search")
+            .into_iter()
+            .map(|n| n.id.0)
+            .collect())
+    }
+
     /// Builds the structure a batch-built kind answers from. A no-op for the
     /// kinds that have none, so a caller can treat every kind alike.
     pub async fn build(&mut self) {
@@ -180,7 +197,16 @@ impl Index {
     }
 
     pub async fn filled(kind: Kind, vectors: &[Vec<f32>], built: bool) -> Self {
-        let mut index = Index::new(kind);
+        Self::filled_with(kind, Metric::Cosine, vectors, built).await
+    }
+
+    pub async fn filled_with(
+        kind: Kind,
+        metric: Metric,
+        vectors: &[Vec<f32>],
+        built: bool,
+    ) -> Self {
+        let mut index = Index::with_metric(kind, metric);
         for (i, vector) in vectors.iter().enumerate() {
             index.insert(NodeId(i as u64 + 1), vector).await;
         }

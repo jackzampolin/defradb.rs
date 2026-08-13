@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "vector_search"
 harness = false
+
+[[bench]]
+name = "sift"
+harness = false
