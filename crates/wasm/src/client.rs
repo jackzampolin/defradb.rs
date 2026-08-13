@@ -246,6 +246,9 @@ impl DefraClient {
         let collections = query::sdl_parse::parse_sdl(sdl)
             .map_err(|e| WasmError::Schema(format!("Failed to parse SDL: {}", e)))?;
 
+        schema::definition_validation::validate_new_collections(&collections)
+            .map_err(|e| WasmError::Schema(format!("Failed to validate SDL: {}", e)))?;
+
         // Create each collection in the database
         let mut added = Vec::new();
         for collection in collections {
@@ -533,6 +536,43 @@ mod tests {
             .unwrap();
         let result = client.add_schema("not valid graphql {{{{").await;
         assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_add_schema_rejects_invalid_self_relation_primaries() {
+        let mut client = DefraClient::create(test_config("test_invalid_self_relations"))
+            .await
+            .unwrap();
+
+        for sdl in [
+            r#"
+                type ZeroPrimary {
+                    boss: ZeroPrimary @relation(name: "boss_minion")
+                    minion: ZeroPrimary @relation(name: "boss_minion")
+                }
+            "#,
+            r#"
+                type BothPrimary {
+                    boss: BothPrimary @primary @relation(name: "boss_minion")
+                    minion: BothPrimary @primary @relation(name: "boss_minion")
+                }
+            "#,
+        ] {
+            let error = client.add_schema(sdl).await.unwrap_err();
+            assert!(error
+                .as_string()
+                .unwrap()
+                .contains("relation name is not unique within collection"));
+        }
+
+        let collections: Vec<CollectionInfo> =
+            serde_wasm_bindgen::from_value(client.get_collections().unwrap()).unwrap();
+        assert!(
+            collections
+                .iter()
+                .all(|collection| collection.name != "ZeroPrimary"
+                    && collection.name != "BothPrimary")
+        );
     }
 
     #[wasm_bindgen_test]
