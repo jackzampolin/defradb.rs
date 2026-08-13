@@ -273,3 +273,22 @@ async fn k_zero_returns_nothing() {
         .unwrap()
         .is_empty());
 }
+
+/// A document written after a build must be searchable, or the index silently
+/// stops covering new writes until someone rebuilds it.
+#[tokio::test]
+async fn a_document_written_after_the_build_is_searchable() {
+    let mut corpus = common::Corpus::new(SEED ^ 0x99);
+    let vectors = corpus.clustered(300, DIMENSIONS, 8, 0.2);
+    let mut index = filled(SsgParams::default(), &vectors).await;
+    index.build().await.unwrap();
+
+    let late = vectors[3].clone();
+    index.insert(NodeId(9_999), &late).await.unwrap();
+
+    let hits = index.search(late.as_slice(), 10, None).await.unwrap();
+    assert!(
+        hits.iter().any(|n| n.id == NodeId(9_999)),
+        "the late document was not found: {hits:?}"
+    );
+}

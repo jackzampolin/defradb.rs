@@ -103,6 +103,67 @@ impl<S: VectorNodeStore> Ssg<S> {
         })
     }
 
+    /// Attaches a node written after the build.
+    ///
+    /// Without this the node reaches the HNSW graph but never the pruned one a
+    /// search walks, so it is invisible until the next rebuild.
+    pub(super) async fn attach(&mut self, id: NodeId) -> Result<()> {
+        let Some(node) = self.store().get_node(id).await? else {
+            return Ok(());
+        };
+        let metric = self.metric();
+        let max = self.params().r as usize;
+        let selector = Angular::new(self.params().angle as f32);
+
+        let mut candidates = Vec::new();
+        for neighbour in node.neighbors(0) {
+            if let Some(other) = self.store().get_node(*neighbour).await? {
+                if other.deleted {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    id: other.id,
+                    distance: metric.distance_stored(&node.vector, &other.vector),
+                    vector: other.vector.into(),
+                });
+            }
+        }
+
+        let kept: Vec<NodeId> = selector
+            .select(metric, &node.vector, &candidates, max)
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        self.store_mut()
+            .put_aux(
+                codec::ADJACENCY,
+                &codec::node_key(id),
+                &codec::encode_neighbours(&kept),
+            )
+            .await?;
+
+        // Edges out are not enough: a walk arrives from somewhere, so the
+        // neighbours need edges back or nothing ever reaches the new node.
+        for neighbour in kept {
+            let mut theirs = self.neighbours(neighbour).await?;
+            if theirs.contains(&id) {
+                continue;
+            }
+            if theirs.len() >= max {
+                theirs.pop();
+            }
+            theirs.push(id);
+            self.store_mut()
+                .put_aux(
+                    codec::ADJACENCY,
+                    &codec::node_key(neighbour),
+                    &codec::encode_neighbours(&theirs),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Angular pruning can strand a node: nothing reachable from the entry
     /// point points at it, so no search can ever return it. Each stranded node
     /// is attached to the nearest node the walk *can* reach.

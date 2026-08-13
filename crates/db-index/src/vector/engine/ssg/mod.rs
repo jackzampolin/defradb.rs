@@ -103,7 +103,11 @@ impl<S: VectorNodeStore> VectorIndexEngine for Ssg<S> {
     /// Writes go to the HNSW graph, which is both the staging structure and the
     /// input a later build reads.
     async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
-        self.staging.insert(id, vector).await
+        self.staging.insert(id, vector).await?;
+        if self.is_built().await? {
+            self.attach(id).await?;
+        }
+        Ok(())
     }
 
     async fn delete(&mut self, id: NodeId) -> Result<bool> {
