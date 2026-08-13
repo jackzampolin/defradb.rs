@@ -85,6 +85,15 @@ impl Metric {
             other => other.distance(a, b),
         }
     }
+
+    /// Distance between two vectors already in the form the index stored them.
+    pub fn distance_stored<T: Element>(self, a: &[T], b: &[T]) -> f64 {
+        if self == Metric::Cosine {
+            self.distance_normalized(a, b)
+        } else {
+            self.distance(a, b)
+        }
+    }
 }
 
 /// Euclidean norm of a vector.

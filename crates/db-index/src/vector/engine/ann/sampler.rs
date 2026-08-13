@@ -1,8 +1,5 @@
-//! Drawing a bounded training set from a stream of vectors.
+//! Drawing a bounded training set from a stream.
 
-/// A batch-built kind trains on a sample, never the corpus, so the resident
-/// cost of a build is configured rather than proportional to the collection.
-///
 /// Bounded in **bytes**: the same 100,000 vectors are 6 MB at 16 dimensions and
 /// 300 MB at 768, so a count does not bound what actually fails.
 pub trait Sampler {
