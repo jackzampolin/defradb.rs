@@ -1462,7 +1462,10 @@ impl NodeBuilder {
         let acp_setup =
             node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
         let document_acp = acp_setup.document_acp.clone();
+        #[cfg(feature = "sourcehub")]
         let _strict_replicated_doc_access = acp_setup.sourcehub_acp.is_some();
+        #[cfg(not(feature = "sourcehub"))]
+        let _strict_replicated_doc_access = false;
 
         #[cfg(feature = "p2p")]
         if let Some(wire_document_acp) = p2p_result
@@ -1487,8 +1490,11 @@ impl NodeBuilder {
         };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
+        #[cfg(feature = "sourcehub")]
         let policy_lookup =
             acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.sourcehub_acp);
+        #[cfg(not(feature = "sourcehub"))]
+        let policy_lookup = acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store);
         let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
             database.clone(),
             query_limits,

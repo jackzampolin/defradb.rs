@@ -35,32 +35,38 @@ pub(crate) trait AcpOps: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct PolicyLookup {
     pub(crate) local: Option<Arc<dyn acp::ZanzibarStore>>,
+    #[cfg(feature = "sourcehub")]
     pub(crate) sourcehub: Option<Arc<sourcehub::SourceHubDocumentACP>>,
 }
 
 impl PolicyLookup {
     pub(crate) fn new(
         local: Option<Arc<dyn acp::ZanzibarStore>>,
-        sourcehub: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+        #[cfg(feature = "sourcehub")] sourcehub: Option<Arc<sourcehub::SourceHubDocumentACP>>,
     ) -> Self {
-        Self { local, sourcehub }
+        Self {
+            local,
+            #[cfg(feature = "sourcehub")]
+            sourcehub,
+        }
     }
 
     /// Load a policy from whichever ACP backend this node was built with.
     pub(crate) async fn get_policy(&self, policy_id: &str) -> anyhow::Result<Option<acp::Policy>> {
         if let Some(store) = &self.local {
-            store
+            return store
                 .get_policy(policy_id)
                 .await
-                .map_err(|error| anyhow!("failed to get policy: {error}"))
-        } else if let Some(sourcehub) = &self.sourcehub {
-            sourcehub
-                .get_policy(policy_id)
-                .await
-                .map_err(|error| anyhow!("failed to get policy: {error}"))
-        } else {
-            bail!("operation requires ACP, but ACP not available");
+                .map_err(|error| anyhow!("failed to get policy: {error}"));
         }
+        #[cfg(feature = "sourcehub")]
+        if let Some(sourcehub) = &self.sourcehub {
+            return sourcehub
+                .get_policy(policy_id)
+                .await
+                .map_err(|error| anyhow!("failed to get policy: {error}"));
+        }
+        bail!("operation requires ACP, but ACP not available");
     }
 }
 
@@ -223,6 +229,7 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed).map_err(|error| anyhow!(error))?;
 
+        #[cfg(feature = "sourcehub")]
         if let Some(sourcehub_acp) = &self.policy_lookup.sourcehub {
             return sourcehub_acp
                 .add_policy(identity, policy)

@@ -12,6 +12,7 @@ pub(crate) enum Persistence {
 pub(crate) struct DocumentAcpSetup {
     pub document_acp: Arc<dyn acp::DocumentACP>,
     pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
+    #[cfg(feature = "sourcehub")]
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
 }
 
@@ -69,6 +70,7 @@ fn local_document_acp_setup(
     DocumentAcpSetup {
         document_acp,
         local_zanzibar_store: Some(zanzibar_store),
+        #[cfg(feature = "sourcehub")]
         sourcehub_acp: None,
     }
 }
@@ -92,6 +94,7 @@ mod tests {
             .await
             .unwrap();
 
+        #[cfg(feature = "sourcehub")]
         assert!(acp_setup.sourcehub_acp.is_none());
         let document_acp = acp_setup.document_acp;
         let local_store = acp_setup
