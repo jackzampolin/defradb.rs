@@ -9,10 +9,16 @@
 //! This mirrors pulsejetdb's `index/core` sitting beside `index/hnsw`,
 //! `index/flat`, `index/ivfpq`, `index/ssg` and `index/pq`.
 
+mod clusterer;
 mod engine;
 mod engine_kind;
 mod neighbor;
+mod quantizer;
+mod sampler;
 
+pub use clusterer::{Centroids, Clusterer, Fit};
 pub use engine::{Admit, AdmitAll, VectorIndexEngine};
 pub use engine_kind::EngineKind;
 pub use neighbor::Neighbor;
+pub use quantizer::Quantizer;
+pub use sampler::Sampler;
