@@ -8,7 +8,7 @@ use db_index::vector::store::{MemoryNodeStore, NodeId};
 
 mod common;
 
-const SEED: u64 = 0x1F4_9C0D;
+const SEED: u64 = 0x01F4_9C0D;
 const DIMENSIONS: usize = 16;
 
 fn params(nlist: u32, nprobe: u32) -> IvfPqParams {
