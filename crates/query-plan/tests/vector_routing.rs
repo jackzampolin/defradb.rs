@@ -28,6 +28,7 @@ fn vector_index(id: u32, field: &str, dimensions: u32) -> IndexDescription {
         dimensions,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ssg: None,
     })
 }
 

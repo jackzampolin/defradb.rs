@@ -37,6 +37,7 @@ fn vector_kind() -> IndexKind {
         dimensions: DIMENSIONS,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ssg: None,
     })
 }
 

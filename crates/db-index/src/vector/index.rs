@@ -17,6 +17,7 @@ use super::engine::dispatch::Engine;
 use super::engine::flat::Flat;
 use super::engine::hnsw::Hnsw;
 use super::engine::ivfpq::{IvfPq, IvfPqParams};
+use super::engine::ssg::{Ssg, SsgParams};
 use super::kv_store::KvNodeStore;
 use super::params::Params;
 use super::store::NodeId;
@@ -34,6 +35,7 @@ pub struct VectorIndex {
     vector: VectorIndexDescription,
     params: Params,
     ivfpq: IvfPqParams,
+    ssg: SsgParams,
     metric: Metric,
     seed: u64,
 }
@@ -64,6 +66,16 @@ impl VectorIndex {
             sample_bytes: configured.sample_bytes,
         };
 
+        let configured = vector.ssg.unwrap_or_default();
+        let ssg = SsgParams {
+            r: configured.r,
+            angle: configured.angle,
+            pool: configured.pool,
+        };
+        if vector.algorithm == VectorAlgorithm::Ssg {
+            ssg.validate()?;
+        }
+
         let metric = match vector.metric {
             DistanceMetric::Cosine => Metric::Cosine,
             DistanceMetric::Dot => Metric::NegativeDot,
@@ -84,6 +96,7 @@ impl VectorIndex {
             vector,
             params,
             ivfpq,
+            ssg,
             metric,
         })
     }
@@ -133,6 +146,13 @@ impl VectorIndex {
             VectorAlgorithm::IvfPq => {
                 Engine::IvfPq(IvfPq::try_new(store, self.metric, self.ivfpq, self.seed)?)
             }
+            VectorAlgorithm::Ssg => Engine::Ssg(Ssg::try_new(
+                store,
+                self.metric,
+                self.params,
+                self.ssg,
+                self.seed,
+            )?),
         })
     }
 

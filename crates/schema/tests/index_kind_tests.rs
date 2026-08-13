@@ -13,6 +13,7 @@ fn vector_description() -> VectorIndexDescription {
         dimensions: 768,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ssg: None,
     }
 }
 

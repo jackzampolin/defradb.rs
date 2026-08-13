@@ -37,6 +37,7 @@ fn description(algorithm: VectorAlgorithm, hnsw: Option<HnswParams>) -> IndexDes
         dimensions: DIMENSIONS,
         hnsw,
         ivfpq: None,
+        ssg: None,
     })
 }
 
@@ -210,6 +211,7 @@ async fn the_ivfpq_algorithm_is_selectable() {
             m: 4,
             ..schema::IvfPqParams::default()
         }),
+        ssg: None,
     });
     let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid IVF-PQ description");
 
@@ -255,10 +257,63 @@ fn an_ivfpq_index_with_an_unrankable_metric_is_refused() {
             dimensions: DIMENSIONS,
             hnsw: None,
             ivfpq: Some(schema::IvfPqParams::default()),
+            ssg: None,
         });
     let err = VectorIndex::try_new(COLLECTION, desc).unwrap_err();
     assert!(
         err.to_string().contains("squared distance"),
         "the error must say why, got: {err}"
     );
+}
+
+/// SSG dispatched through `VectorIndex`, the way a collection reaches it.
+#[tokio::test]
+async fn the_ssg_algorithm_is_selectable() {
+    let desc = description(VectorAlgorithm::Ssg, None).as_vector(schema::VectorIndexDescription {
+        algorithm: VectorAlgorithm::Ssg,
+        metric: DistanceMetric::Cosine,
+        dimensions: DIMENSIONS,
+        hnsw: None,
+        ivfpq: None,
+        ssg: Some(schema::SsgParams::default()),
+    });
+    let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid SSG description");
+
+    let store = MemoryStore::new();
+    let mut corpus = common::Corpus::new(0x55);
+    let vectors = corpus.clustered(120, DIMENSIONS as usize, 6, 0.2);
+
+    let mut write = txn(&store).await;
+    for (i, vector) in vectors.iter().enumerate() {
+        let wide: Vec<f64> = vector.iter().map(|x| *x as f64).collect();
+        index
+            .save(&mut write, i as u64 + 1, &[NormalValue::Float64Array(wide)])
+            .await
+            .unwrap();
+    }
+    write.commit().await.unwrap();
+
+    let query: Vec<f64> = vectors[4].iter().map(|x| *x as f64).collect();
+    let mut read = txn(&store).await;
+    let hits = index.search(&mut read, &query, 5, None).await.unwrap();
+    assert_eq!(hits.len(), 5);
+    assert_eq!(hits[0].id.0, 5, "a vector is nearest itself");
+}
+
+/// Out-of-range SSG parameters are refused where the index is built.
+#[test]
+fn out_of_range_ssg_parameters_are_refused() {
+    let desc = description(VectorAlgorithm::Ssg, None).as_vector(schema::VectorIndexDescription {
+        algorithm: VectorAlgorithm::Ssg,
+        metric: DistanceMetric::Cosine,
+        dimensions: DIMENSIONS,
+        hnsw: None,
+        ivfpq: None,
+        ssg: Some(schema::SsgParams {
+            angle: 200,
+            ..schema::SsgParams::default()
+        }),
+    });
+    let err = VectorIndex::try_new(COLLECTION, desc).unwrap_err();
+    assert!(err.to_string().contains("angle"), "got: {err}");
 }

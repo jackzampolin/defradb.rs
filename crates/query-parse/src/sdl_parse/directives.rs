@@ -48,7 +48,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
         "fulltext" => &["language", "k1", "b"],
-        "vectorIndex" => &["dimensions", "algorithm", "HNSW", "IVFPQ"],
+        "vectorIndex" => &["dimensions", "algorithm", "HNSW", "IVFPQ", "SSG"],
         "immutable" => &[],
         _ => &[],
     }
@@ -220,6 +220,8 @@ pub struct VectorIndexConfig {
     pub algorithm: Option<String>,
     /// Present when the `IVFPQ` argument was given.
     pub ivfpq: Option<IvfPqConfig>,
+    /// Present when the `SSG` argument was given.
+    pub ssg: Option<SsgConfig>,
     /// Present when the `HNSW` argument was given. Its absence still means
     /// HNSW, with defaults.
     pub hnsw: Option<HnswConfig>,
@@ -261,4 +263,12 @@ pub struct IvfPqConfig {
     pub nprobe: Option<u32>,
     pub m: Option<u32>,
     pub sample_bytes: Option<u32>,
+}
+
+/// The `SSG` argument of `@vectorIndex`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SsgConfig {
+    pub r: Option<u32>,
+    pub angle: Option<u32>,
+    pub pool: Option<u32>,
 }

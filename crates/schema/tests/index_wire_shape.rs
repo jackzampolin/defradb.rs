@@ -43,6 +43,7 @@ fn vector() -> VectorIndexDescription {
             ef_search: 64,
         }),
         ivfpq: None,
+        ssg: None,
     }
 }
 
@@ -281,6 +282,7 @@ fn ivfpq_is_an_algorithm_go_cannot_parse() {
                 m: 32,
                 sample_bytes: 1 << 20,
             }),
+            ssg: None,
             ..vector()
         })
         .normalized();
@@ -314,4 +316,39 @@ fn an_hnsw_description_carries_no_ivfpq_key() {
         keys(&json["Kind"]),
         ["Algorithm", "Dimensions", "HNSW", "Metric"]
     );
+}
+
+/// `SSG` is the fourth divergence.
+#[test]
+fn ssg_is_an_algorithm_go_cannot_parse() {
+    use schema::SsgParams;
+
+    assert!(!VectorAlgorithm::Ssg.is_go_compatible());
+    assert_eq!(
+        serde_json::to_value(VectorAlgorithm::Ssg).unwrap(),
+        json!("SSG")
+    );
+
+    let desc = IndexDescription::new("i")
+        .as_vector(VectorIndexDescription {
+            algorithm: VectorAlgorithm::Ssg,
+            hnsw: None,
+            ssg: Some(SsgParams {
+                r: 32,
+                angle: 45,
+                pool: 200,
+            }),
+            ..vector()
+        })
+        .normalized();
+
+    let json = serde_json::to_value(&desc).unwrap();
+    assert_eq!(json["Kind"]["Algorithm"], json!("SSG"));
+    assert_eq!(
+        json["Kind"]["SSG"],
+        json!({"R": 32, "Angle": 45, "Pool": 200})
+    );
+
+    let back: IndexDescription = serde_json::from_value(json).unwrap();
+    assert_eq!(back.vector().and_then(|v| v.ssg).map(|p| p.r), Some(32));
 }

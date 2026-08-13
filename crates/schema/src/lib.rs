@@ -39,7 +39,7 @@ pub use field_kind::{FieldKind, ScalarArrayKind, ScalarKind};
 pub use index::{
     DistanceMetric, EncryptedIndexDescription, EncryptedIndexType, FullTextIndexDescription,
     HnswParams, IndexDescription, IndexKind, IndexedFieldDescription, IvfPqParams,
-    OrderedIndexDescription, VectorAlgorithm, VectorIndexDescription,
+    OrderedIndexDescription, SsgParams, VectorAlgorithm, VectorIndexDescription,
 };
 pub use policy::PolicyDescription;
 pub use source::{

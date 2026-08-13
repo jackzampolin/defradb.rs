@@ -22,6 +22,7 @@ fn vector_config(dimensions: u32) -> VectorIndexDescription {
         dimensions,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ssg: None,
     }
 }
 

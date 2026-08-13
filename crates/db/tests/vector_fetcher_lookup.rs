@@ -46,6 +46,7 @@ fn schema() -> CollectionVersion {
         dimensions: DIMENSIONS,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ssg: None,
     })];
     version
 }
