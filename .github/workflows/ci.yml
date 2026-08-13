@@ -4,10 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Every base branch, not just main. The filter matches the PR's *base*, so
-    # limiting it to main means a stacked PR (one targeting the branch below it)
-    # runs no jobs at all and shows an empty, green-looking check list.
+    # Every base branch, not just main. GitHub stacks evaluate each layer as
+    # if it targeted the stack base, but a `main`-only filter still misses
+    # layers whose literal base is the branch below. `ci-scope` then drops
+    # the expensive jobs on middle layers.
     branches: ['**']
+  # Merge-queue entries. Inert until a ruleset on main requires a merge queue —
+  # nothing emits merge_group events before then. Present first so that
+  # enabling the queue does not strand entries waiting on checks that never run.
+  merge_group:
+    branches: [main]
 
 # Only the tip of each ref keeps a run. Superseded PR pushes and main merge
 # trains cancel prior work so intermediate SHAs cannot stack the self-hosted
@@ -15,7 +21,14 @@ on:
 # this concurrency group once the merge ref is gone).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Two refs are never cancelled, for different reasons:
+  #   merge_group — cancelling a queue run ejects that PR from the queue, so
+  #     the queue would stall instead of merging.
+  #   main — a push to main is the only validation merged code ever gets, and
+  #     during a merge train each merge would otherwise cancel the previous
+  #     merge's run, leaving main untested exactly when it changes fastest.
+  # Every other ref keeps tip-only behaviour.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +41,36 @@ env:
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
+  # GitHub stacks fire a full `pull_request` workflow per layer. Lint and
+  # Lean stay on every layer (cheap; the graph harness lives in Lint). The
+  # self-hosted node suites run only on standalone PRs, the stack tip
+  # (whole change), and the lowest unmerged layer (what would land on
+  # main next). Middle layers skip them.
+  ci-scope:
+    name: CI scope
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+    steps:
+      - id: decide
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('full', 'true');
+              return;
+            }
+            const stack = context.payload.pull_request && context.payload.pull_request.stack;
+            if (!stack) {
+              core.setOutput('full', 'true');
+              return;
+            }
+            const isTip = stack.position === stack.size;
+            const isLowest = stack.base && stack.base.ref === context.payload.pull_request.base.ref;
+            const full = isTip || isLowest;
+            core.setOutput('full', full ? 'true' : 'false');
+            core.info(`stack #${stack.number} pos ${stack.position}/${stack.size} full=${full}`);
+
   # Studio jobs are pinned to a runner slot so each job's incremental target
   # state stays warm on one machine (a suite that bounces between hosts turns
   # a small rebuild into a full one) and so same-host exclusivity is
@@ -78,6 +121,10 @@ jobs:
       # defra-node reached a release).
       - run: cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
       - run: cargo clippy -p db --features p2p --all-targets -- -D warnings
+      - run: cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
+      - run: cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
+      - run: cargo check -p p2p --no-default-features --features iroh-transport
+      - run: cargo check -p db-merge --no-default-features --features native
 
       # Dead-dependency gate (#1329). Matches `just machete`; ignores live in
       # each crate's [package.metadata.cargo-machete] for known false positives.
@@ -86,12 +133,19 @@ jobs:
           command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete --locked
           cargo machete
 
+      # Feature-graph contracts for defra-node (#1398–#1400). Not a size check.
+      # Stdout-based; never `--workspace`. Lint does not install `just`.
+      - name: Feature-graph contracts (defra-node)
+        run: bash .github/scripts/assert-defra-node-graph.sh
+
       - name: Show sccache stats
         if: always()
         run: .github/scripts/show-sccache-stats.sh
 
   wasm-check:
     name: WASM Build Check
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     # spark-1: the wasm32 target doesn't care about host arch, and pinning
     # here takes this job off the vps (which now serves release.yml's x86_64
     # builds only) and out of p2p-linux's way. No GitHub-hosted rust-cache:
@@ -123,6 +177,10 @@ jobs:
 
       - name: Clippy (wasm32)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # The panic hook is default-on; this keeps the opt-out path compiling.
+      - name: Clippy (wasm32, no default features)
+        run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --no-default-features --all-targets -- -D warnings
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -208,7 +266,14 @@ jobs:
 
   build:
     name: Build & Test
-    runs-on: [self-hosted, macOS, ARM64, studio, studio-1]
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
+    # Either studio host. Port isolation comes from there being exactly one
+    # `studio`-labelled runner process per box, not from naming a host, so
+    # floating this job still permits only one node-spawning job per box.
+    # Cache warmth is preserved by the peer pull in "Restore or build
+    # binaries" rather than by pinning the producer.
+    runs-on: [self-hosted, macOS, ARM64, studio]
     env:
       # The full workspace test suite launches roughly 187 test executables.
       # Incremental artifacts caused a ~25s startup delay per executable on
@@ -301,6 +366,8 @@ jobs:
 
   conformance:
     name: Conformance
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     # Spawns real `defra` nodes, so it must never co-run with another
     # node-spawning job on the SAME host (harness port allocator TOCTOU bind
     # race — "failed to start rust-0"). Host pinning provides that: this job
@@ -369,7 +436,8 @@ jobs:
 
   integration:
     name: Integration (${{ matrix.suite }})
-    needs: build
+    needs: [ci-scope, build]
+    if: needs.ci-scope.outputs.full == 'true'
     runs-on: [self-hosted, macOS, ARM64, studio, "${{ matrix.host }}"]
     strategy:
       fail-fast: false
@@ -433,16 +501,36 @@ jobs:
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p target/ci "$CACHE_DIR"
 
+          # The two studio hosts share a Thunderbolt link, so a cache miss can
+          # be served by the sibling for the price of copying ~100MB rather
+          # than a full rebuild. Best-effort by design: any failure here falls
+          # through to the build path below, so an unreachable or rebooting
+          # peer costs time, never a red run.
+          case "${RUNNER_NAME:-}" in
+            studio-1*) PEER=studio-2 ;;
+            studio-2*) PEER=studio-1 ;;
+            *)         PEER="" ;;
+          esac
+
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
-            echo "Cache hit — restoring from $CACHE_DIR"
+            echo "Cache hit (local) — restoring from $CACHE_DIR"
+            cp "$CACHE_DIR/defra" target/ci/defra
+            cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
+          elif [ -n "$PEER" ] \
+            && scp -q -o BatchMode=yes -o ConnectTimeout=5 \
+                 "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" 2>/dev/null \
+            && scp -q -o BatchMode=yes -o ConnectTimeout=5 \
+                 "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp" 2>/dev/null; then
+            # Staged via .tmp so an interrupted copy cannot leave a truncated
+            # binary that later runs would treat as a valid cache hit.
+            mv "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra"
+            mv "$CACHE_DIR/defra-iroh.tmp" "$CACHE_DIR/defra-iroh"
+            echo "Cache hit (peer $PEER over Thunderbolt)"
             cp "$CACHE_DIR/defra" target/ci/defra
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
           else
-            # The build job populates this cache on studio-1 only; suites
-            # pinned to the other host self-build once per commit and
-            # populate their own host-local cache so the sibling suite and
-            # any re-run hit it.
-            echo "Cache miss — building binaries"
+            rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
+            echo "Cache miss (local and peer) — building binaries"
             cargo build -p cli
             cp target/debug/defra target/ci/defra
             cp target/debug/defra "$CACHE_DIR/defra"
@@ -658,6 +746,8 @@ jobs:
     # now serves release.yml's x86_64 builds only. Still Linux/epoll — the
     # scheduling-race coverage is arch-independent.
     name: P2P Integration (Linux)
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
     runs-on: [self-hosted, Linux, ARM64, spark, spark-2]
     timeout-minutes: 45
     env:

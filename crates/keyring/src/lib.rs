@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 mod error;
 mod file;
+mod jwe;
 mod key_name;
 mod keyring;
 mod signer;

@@ -4,7 +4,18 @@
 //! downstream binaries can embed a DefraDB instance without duplicating
 //! wiring code.
 //!
-//! P2P uses IROH (QUIC-native) transport for peer-to-peer replication.
+//! P2P uses Iroh/QUIC only. libp2p lives on CLI, FFI, and `embedded`.
+//!
+//! ## Cargo features
+//!
+//! - `lark` / `redb` / `rocksdb` — storage backends. Default: `lark`, `redb`.
+//! - `native` — native host (tokio, event channel). Default-on.
+//! - `sourcehub` — on-chain document ACP. Default-on. Omit for local-only ACP.
+//! - `wasmtime-runtime` — Lens WASM execution. Default-on. Without it,
+//!   [`EmbeddedNode::set_migration`] returns an explicit error.
+//! - `p2p` — Iroh/QUIC replication. Implies `native`. Does **not** compile libp2p.
+//! - `http` — GraphQL HTTP server.
+//! - `otel` — OpenTelemetry exporter.
 
 mod benchmark_data_gen;
 mod benchmark_queries;
@@ -36,11 +47,13 @@ pub use coding_search::{
     CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
     CodingSearchTarget,
 };
+pub use config::DocumentAcpConfig;
 #[cfg(feature = "http")]
 pub use config::HttpConfig;
 #[cfg(feature = "p2p")]
 pub use config::P2PConfig;
-pub use config::{DocumentAcpConfig, SourceHubConfig};
+#[cfg(feature = "sourcehub")]
+pub use config::SourceHubConfig;
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
@@ -375,6 +388,9 @@ impl EmbeddedNode {
     /// Returns the content-addressed [`TransformId`] of the stored transform.
     /// Placeholder versions are created if the source or destination are not
     /// yet materialized, allowing migrations to be registered ahead of patches.
+    ///
+    /// Requires the `wasmtime-runtime` feature (on by default). Without it this
+    /// returns an explicit error instead of registering a no-op transform.
     pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
         self.as_node_identity(self.schema_ops.set_migration(config))
             .await
@@ -833,6 +849,9 @@ impl NodeBuilder {
     }
 
     /// Configure the node to use SourceHub-backed document ACP.
+    ///
+    /// Requires the `sourcehub` feature (on by default).
+    #[cfg(feature = "sourcehub")]
     pub fn with_sourcehub(mut self, config: SourceHubConfig) -> Self {
         self.document_acp = DocumentAcpConfig::SourceHub(config);
         self
@@ -881,7 +900,10 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable P2P networking for replication.
+    /// Enable Iroh/QUIC P2P replication.
+    ///
+    /// Requires the `p2p` feature, which implies `native`. Does not compile
+    /// libp2p; that stack lives on CLI, FFI, and `embedded`.
     #[cfg(feature = "p2p")]
     pub fn with_p2p(mut self, config: P2PConfig) -> Self {
         self.p2p_config = Some(config);

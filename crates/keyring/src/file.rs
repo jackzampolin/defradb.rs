@@ -7,21 +7,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use josekit::jwe::{self, JweHeader, PBES2_HS512_A256KW};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::jwe;
 use crate::key_name::KeyName;
 use crate::keyring::Keyring;
-
-/// Content encryption algorithm — matches Go jwx default (A256GCM).
-const CONTENT_ENCRYPTION: &str = "A256GCM";
-
-/// PBKDF2 iteration count — matches Go jwx default (10000).
-const PBKDF2_ITER_COUNT: usize = 10000;
-
-/// PBKDF2 salt length — matches Go jwx default (32 bytes = AES-256-KW key length).
-const PBKDF2_SALT_LEN: usize = 32;
 
 /// File-based keyring that stores keys in encrypted files using JWE.
 ///
@@ -76,33 +67,14 @@ impl FileKeyring {
     }
 
     fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut header = JweHeader::new();
-        header.set_content_encryption(CONTENT_ENCRYPTION);
-
-        let mut encrypter = PBES2_HS512_A256KW
-            .encrypter_from_bytes(&self.password)
-            .map_err(|e| Error::Encryption(format!("failed to create encrypter: {}", e)))?;
-        encrypter.set_iter_count(PBKDF2_ITER_COUNT);
-        encrypter.set_salt_len(PBKDF2_SALT_LEN);
-
-        let token = jwe::serialize_compact(data, &header, &encrypter)
-            .map_err(|e| Error::Encryption(format!("failed to encrypt: {}", e)))?;
-
+        let token = jwe::encrypt(&self.password, data)?;
         Ok(token.into_bytes())
     }
 
     fn decrypt(&self, cipher: &[u8]) -> Result<Vec<u8>> {
         let token = std::str::from_utf8(cipher)
             .map_err(|e| Error::Decryption(format!("invalid token format: {}", e)))?;
-
-        let decrypter = PBES2_HS512_A256KW
-            .decrypter_from_bytes(&self.password)
-            .map_err(|e| Error::Decryption(format!("failed to create decrypter: {}", e)))?;
-
-        let (data, _header) = jwe::deserialize_compact(token, &decrypter)
-            .map_err(|e| Error::Decryption(format!("failed to decrypt: {}", e)))?;
-
-        Ok(data)
+        jwe::decrypt(&self.password, token)
     }
 }
 

@@ -13,8 +13,15 @@ thiserror.workspace = true
 base64 = "0.22"
 zeroize = "1.8"
 
-# JWE encryption (PBES2-HS512-A256KW) - Go compatible format
-josekit = "0.8"
+# JWE encryption (PBES2-HS512+A256KW / A256GCM) - Go compatible format.
+# Pure Rust: keeps OpenSSL out of every cli graph. See crates/keyring/src/jwe.rs.
+aes = "0.8"
+aes-gcm.workspace = true
+aes-kw = "0.2"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2.workspace = true
+rand.workspace = true
+serde_json.workspace = true
 
 # OS keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager)
 # Renamed to avoid conflict with our crate name.
@@ -34,7 +41,9 @@ keyring_crate = { package = "keyring", version = "3" }
 
 [dev-dependencies]
 tempfile = "3"
-serde_json.workspace = true
+# Asserts our tokens are readable by the josekit/Go-jwx format. Dev-only, so
+# OpenSSL stays out of every shipped cli graph.
+josekit = "0.8"
 serial_test = "3.0"
 
 [lints]

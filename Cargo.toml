@@ -189,6 +189,22 @@ tokio-stream = "0.1"
 opt-level = 0
 debug = true
 
+# Crypto libs (ed25519-dalek, k256, sha2) are unusably slow unoptimized.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Lean sibling of dev for concurrent worktree development: backtraces keep real
+# file:line frames for workspace crates, dependencies carry no debug info at
+# all. Measured 2026-08-06: ~7.5x less object volume than dev, no build-time
+# regression. Builds land in their own target/super-dev/.
+[profile.super-dev]
+inherits = "dev"
+debug = "line-tables-only"
+
+[profile.super-dev.package."*"]
+opt-level = 2
+debug = false
+
 [profile.release]
 opt-level = 3
 lto = true

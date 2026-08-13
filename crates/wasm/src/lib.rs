@@ -83,6 +83,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(start)]
 pub fn wasm_init() {
     // Set panic hook for better error messages
+    #[cfg(feature = "debug")]
     console_error_panic_hook::set_once();
 }
 

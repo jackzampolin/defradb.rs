@@ -110,7 +110,14 @@ hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "de
 defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
 document = { path = "../../crates/document" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "charset",
+    "http2",
+    "system-proxy",
+    "rustls-tls-native-roots",
+] }
 serde_json = "1.0"
 anyhow = "1.0"
 futures = "0.3"

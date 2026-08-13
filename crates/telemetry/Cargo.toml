@@ -15,6 +15,7 @@ default = []
 # at runtime.
 otlp = [
     "dep:reqwest",
+    "dep:tracing-subscriber",
     "dep:thiserror",
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
@@ -38,7 +39,7 @@ otlp = [
 [dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["blocking"], optional = true }
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
+tracing-subscriber = { version = "0.3", features = ["registry", "std"], optional = true }
 thiserror = { workspace = true, optional = true }
 
 opentelemetry = { version = "0.32", features = ["metrics"], optional = true }
