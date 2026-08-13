@@ -30,7 +30,7 @@ use crate::vector::quantize::ProductQuantizer;
 use crate::vector::store::{NodeId, VectorNodeStore};
 
 /// A coarse-quantized, product-compressed index.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IvfPq<S> {
     staging: Flat<S>,
     metric: Metric,

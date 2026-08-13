@@ -39,7 +39,7 @@ use crate::vector::params::Params;
 use crate::vector::store::{Node, NodeId, VectorNodeStore};
 
 /// An approximate-nearest-neighbor graph over a [`VectorNodeStore`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Hnsw<S> {
     store: S,
     params: Params,
