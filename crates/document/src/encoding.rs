@@ -145,7 +145,7 @@ pub fn json_to_normal_value(value: serde_json::Value) -> Result<NormalValue> {
 /// RFC3339 string) so that secondary-index entries are byte-identical whether a
 /// document is freshly written or rebuilt by a reindex. Divergence here
 /// silently corrupts index-seek pagination and range filters on the field: the
-/// index stores `encode_time_*` (nanoseconds) on the write path but would store
+/// index stores `encode_time_*` on the write path but would store
 /// `encode_string_*` (UTF-8) on the reindex path, so seeks land in the wrong
 /// place.
 ///
