@@ -42,6 +42,7 @@ impl PersistentZanzibarStore<RedbStore> {
 const POLICY_COUNTER_KEY: &str = "/zanzibar/counter";
 
 const POLICY_PREFIX: &str = "/zanzibar/policy/";
+const MAX_COUNTER_CONFLICT_RETRIES: u32 = 16;
 
 impl<S: Store> PersistentZanzibarStore<S> {
     fn policy_key(policy_id: &str) -> String {
@@ -138,57 +139,70 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
 
     async fn next_policy_counter(&self) -> Result<u64> {
         let _guard = self.counter_lock.lock().await;
+        let mut conflicts = 0;
 
-        let mut txn = self.store.new_txn(false).await.map_err(|e| {
-            Error::Serialization(format!("next_policy_counter: create transaction: {}", e))
-        })?;
+        loop {
+            let mut txn = self.store.new_txn(false).await.map_err(|e| {
+                Error::Serialization(format!("next_policy_counter: create transaction: {}", e))
+            })?;
 
-        let stored = txn
-            .get(POLICY_COUNTER_KEY.as_bytes())
-            .await
-            .map_err(|e| Error::Serialization(format!("next_policy_counter: get: {}", e)))?;
+            let stored = txn
+                .get(POLICY_COUNTER_KEY.as_bytes())
+                .await
+                .map_err(|e| Error::Serialization(format!("next_policy_counter: get: {}", e)))?;
 
-        let last_issued = match stored {
-            Some(bytes) => {
-                let value: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
-                    Error::Serialization(format!(
-                        "next_policy_counter: expected 8 bytes, found {}",
-                        bytes.len()
-                    ))
-                })?;
-                u64::from_be_bytes(value)
-            }
-            None => {
-                let iter_opts = IterOptions::new().with_prefix(POLICY_PREFIX.as_bytes().to_vec());
-                let mut iter = txn.iterator(iter_opts).await.map_err(|e| {
-                    Error::Serialization(format!("next_policy_counter: create iterator: {}", e))
-                })?;
-
-                let mut seeded = 0u64;
-                while let Some(kv) = iter.next().await.map_err(|e| {
-                    Error::Serialization(format!("next_policy_counter: iterate: {}", e))
-                })? {
-                    // NAC shares this key space but mints its id from a
-                    // constant, so it never consumed a counter value.
-                    if !kv.key.ends_with(crate::nac::NODE_POLICY_ID.as_bytes()) {
-                        seeded += 1;
-                    }
+            let last_issued = match stored {
+                Some(bytes) => {
+                    let value: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                        Error::Serialization(format!(
+                            "next_policy_counter: expected 8 bytes, found {}",
+                            bytes.len()
+                        ))
+                    })?;
+                    u64::from_be_bytes(value)
                 }
-                seeded
+                None => {
+                    let iter_opts =
+                        IterOptions::new().with_prefix(POLICY_PREFIX.as_bytes().to_vec());
+                    let mut iter = txn.iterator(iter_opts).await.map_err(|e| {
+                        Error::Serialization(format!("next_policy_counter: create iterator: {}", e))
+                    })?;
+
+                    let mut seeded = 0u64;
+                    while let Some(kv) = iter.next().await.map_err(|e| {
+                        Error::Serialization(format!("next_policy_counter: iterate: {}", e))
+                    })? {
+                        // NAC shares this key space but mints its id from a
+                        // constant, so it never consumed a counter value.
+                        if !kv.key.ends_with(crate::nac::NODE_POLICY_ID.as_bytes()) {
+                            seeded += 1;
+                        }
+                    }
+                    seeded
+                }
+            };
+
+            let next = last_issued + 1;
+
+            txn.set(POLICY_COUNTER_KEY.as_bytes(), &next.to_be_bytes())
+                .await
+                .map_err(|e| Error::Serialization(format!("next_policy_counter: set: {}", e)))?;
+
+            match txn.commit().await {
+                Ok(()) => return Ok(next),
+                Err(error)
+                    if error.is_txn_conflict() && conflicts < MAX_COUNTER_CONFLICT_RETRIES =>
+                {
+                    conflicts += 1;
+                }
+                Err(error) => {
+                    return Err(Error::Serialization(format!(
+                        "next_policy_counter: commit: {}",
+                        error
+                    )))
+                }
             }
-        };
-
-        let next = last_issued + 1;
-
-        txn.set(POLICY_COUNTER_KEY.as_bytes(), &next.to_be_bytes())
-            .await
-            .map_err(|e| Error::Serialization(format!("next_policy_counter: set: {}", e)))?;
-
-        txn.commit()
-            .await
-            .map_err(|e| Error::Serialization(format!("next_policy_counter: commit: {}", e)))?;
-
-        Ok(next)
+        }
     }
 
     async fn delete_policy(&self, policy_id: &str) -> Result<bool> {

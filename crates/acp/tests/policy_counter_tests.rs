@@ -149,9 +149,7 @@ async fn persistent_store_counter_seeds_at_one_when_empty() {
 }
 
 /// Two store instances over one backing store are past the reach of the
-/// in-process lock, so the transaction's conflict detection is what has to hold.
-/// A losing caller may be told to retry; what it must never do is receive a
-/// counter value another caller already got.
+/// in-process lock, so transaction conflicts must be retried by the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn persistent_store_counter_never_repeats_across_instances() {
     let backing = Arc::new(MemoryStore::new());
@@ -166,21 +164,15 @@ async fn persistent_store_counter_never_repeats_across_instances() {
 
     let mut issued = Vec::new();
     for handle in handles {
-        if let Ok(counter) = handle.await.unwrap() {
-            issued.push(counter);
-        }
+        issued.push(handle.await.unwrap().unwrap());
     }
 
-    let mut deduped = issued.clone();
-    deduped.sort_unstable();
-    deduped.dedup();
+    issued.sort_unstable();
 
-    assert!(!issued.is_empty(), "at least one caller should succeed");
     assert_eq!(
-        deduped.len(),
-        issued.len(),
-        "a counter value was issued twice: {:?}",
-        issued
+        issued,
+        (1..=8).collect::<Vec<u64>>(),
+        "concurrent store instances must each receive a distinct counter value"
     );
 }
 
