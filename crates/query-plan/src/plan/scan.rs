@@ -1,6 +1,7 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use schema::CollectionVersion;
@@ -9,6 +10,7 @@ use tracing::debug;
 
 use crate::doc_stream::DocStream;
 use crate::fetcher::DocFetcher;
+use crate::planner::vector_routing::VectorRoute;
 use crate::planner::{Doc, ExecInfo, PlanNode};
 use query_types::document::{document_to_plan_doc_with_status, DocumentMapping};
 use query_types::error::Result;
@@ -49,6 +51,21 @@ pub struct ScanNode {
     doc_short_ids: Option<Vec<u64>>,
     /// Whether the restriction came from a vector index search.
     vector_indexed: bool,
+    /// The vector index this scan draws its candidates from, when routed.
+    ///
+    /// The search runs in `init()` rather than at plan time because it is
+    /// async, and it lives here rather than in the caller so that every path
+    /// that builds a plan gets it: a similarity query always goes through the
+    /// planner, so a narrowing done anywhere else never runs.
+    vector_route: Option<VectorRoute>,
+    /// Candidate short ids already streamed, so widening never re-reads one.
+    vector_seen: HashSet<u64>,
+    /// Set once the index returned fewer candidates than asked for.
+    vector_exhausted: bool,
+    /// The `k` the last search asked for.
+    vector_k: usize,
+    /// Documents yielded to the parent, which is what the page size counts.
+    emitted: usize,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -90,6 +107,11 @@ impl ScanNode {
             doc_ids: None,
             doc_short_ids: None,
             vector_indexed: false,
+            vector_route: None,
+            vector_seen: HashSet::new(),
+            vector_exhausted: false,
+            vector_k: 0,
+            emitted: 0,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -129,6 +151,99 @@ impl ScanNode {
     pub fn as_vector_indexed(mut self) -> Self {
         self.vector_indexed = true;
         self
+    }
+
+    /// Draw this scan's candidates from a vector index.
+    pub fn with_vector_route(mut self, route: VectorRoute) -> Self {
+        self.vector_route = Some(route);
+        self
+    }
+
+    /// Ask the index for the next, larger batch of candidates and stream the
+    /// ones not already seen.
+    ///
+    /// A filter is applied to documents, not to the graph walk, so the nearest
+    /// `k` overall can contain fewer than `k` matches. Asking for a wider `k`
+    /// and continuing is what makes a filtered similarity query return a full
+    /// page instead of whatever survived filtering the first `k`. Widening
+    /// stops once the index reports fewer candidates than asked for, so an
+    /// unsatisfiable filter costs one pass over the collection rather than
+    /// looping.
+    async fn open_vector_stream(&mut self) -> Result<bool> {
+        let (Some(route), Some(fetcher)) = (self.vector_route.clone(), self.fetcher.clone()) else {
+            return Ok(false);
+        };
+        if self.vector_exhausted {
+            return Ok(false);
+        }
+
+        let next_k = if self.vector_k == 0 {
+            route.k
+        } else {
+            self.vector_k.saturating_mul(2)
+        };
+
+        let candidates = fetcher
+            .vector_search(
+                &self.collection.name,
+                route.index_id,
+                &route.query_vector,
+                next_k,
+                None,
+            )
+            .await?;
+
+        self.vector_exhausted = candidates.len() < next_k;
+        self.vector_k = next_k;
+        self.vector_indexed = true;
+        self.exec_info.indexes_fetched += 1;
+
+        let fresh: Vec<u64> = candidates
+            .into_iter()
+            .filter(|id| self.vector_seen.insert(*id))
+            .collect();
+
+        debug!(
+            collection = %self.collection.name,
+            index_id = route.index_id,
+            k = next_k,
+            fresh = fresh.len(),
+            exhausted = self.vector_exhausted,
+            "vector index candidates"
+        );
+
+        if fresh.is_empty() {
+            return Ok(false);
+        }
+
+        self.stream = Some(
+            fetcher
+                .stream_by_doc_short_ids(&self.collection.name, &fresh, self.show_deleted)
+                .await?,
+        );
+        Ok(true)
+    }
+
+    /// The vector index serving this scan, by name.
+    ///
+    /// `indexFetches` alone cannot say which index was used, so a scan narrowed
+    /// by a vector index names it. Its absence means the scan was not routed,
+    /// which is the difference between "the index answered this" and "some
+    /// index was read".
+    fn vector_index_name(&self) -> Option<&str> {
+        let route = self.vector_route.as_ref()?;
+        self.collection
+            .indexes
+            .iter()
+            .find(|index| index.id == route.index_id)
+            .map(|index| index.name.as_str())
+    }
+
+    /// Whether a short page is worth asking the index to widen for.
+    fn wants_more_candidates(&self) -> bool {
+        self.vector_route
+            .as_ref()
+            .is_some_and(|route| !self.vector_exhausted && self.emitted < route.k)
     }
 
     pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
@@ -190,7 +305,16 @@ impl PlanNode for ScanNode {
         // If docs weren't provided and we have a fetcher, open a stream over the
         // collection instead of materializing it - callers that stop pulling
         // (e.g. a satisfied LimitNode) stop the underlying fetch.
+        self.vector_seen.clear();
+        self.vector_exhausted = false;
+        self.vector_k = 0;
+        self.emitted = 0;
+
         if !self.docs_provided {
+            if self.vector_route.is_some() && self.open_vector_stream().await? {
+                self.initialized = true;
+                return Ok(());
+            }
             if let Some(ref fetcher) = self.fetcher {
                 self.stream = Some(match self.doc_short_ids.as_deref() {
                     Some(ids) => {
@@ -242,15 +366,24 @@ impl PlanNode for ScanNode {
         // borrow through the skip checks and only clones the document that
         // actually passes them - cloning eagerly here would pay for every
         // examined document instead of only the returned ones.
-        if let Some(ref mut stream) = self.stream {
+        if self.stream.is_some() {
             loop {
-                let doc = match stream.next().await? {
+                let pulled = match self.stream.as_mut() {
+                    Some(stream) => stream.next().await?,
+                    None => None,
+                };
+                let doc = match pulled {
                     Some((document, is_deleted)) => document_to_plan_doc_with_status(
                         &document,
                         &self.document_mapping,
                         is_deleted,
                     )?,
-                    None => return Ok(false),
+                    None => {
+                        if self.wants_more_candidates() && self.open_vector_stream().await? {
+                            continue;
+                        }
+                        return Ok(false);
+                    }
                 };
 
                 // Track document fetch
@@ -279,6 +412,7 @@ impl PlanNode for ScanNode {
                     }
                 }
 
+                self.emitted += 1;
                 self.current_doc = doc;
                 return Ok(true);
             }
@@ -419,6 +553,9 @@ impl PlanNode for ScanNode {
         // node reads; matching the reference, which tracks the same gap.
         let index_fetches = self.exec_info.indexes_fetched + u64::from(self.vector_indexed);
         obj.insert("indexFetches".to_string(), serde_json::json!(index_fetches));
+        if let Some(name) = self.vector_index_name() {
+            obj.insert("vectorIndex".to_string(), serde_json::json!(name));
+        }
 
         serde_json::Value::Object(obj)
     }

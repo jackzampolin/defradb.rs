@@ -776,26 +776,20 @@ impl<'a> SdlParser<'a> {
             index_id_counter += 1;
 
             let algorithm = match config.algorithm.as_deref() {
-                None | Some("HNSW") => schema::VectorAlgorithm::Hnsw,
-                Some("FLAT") => schema::VectorAlgorithm::Flat,
-                Some("IVF_PQ") => schema::VectorAlgorithm::IvfPq,
-                Some("SSG") => schema::VectorAlgorithm::Ssg,
-                Some(other) => {
-                    return Err(QueryError::parse(format!(
-                        "@vectorIndex has no algorithm named '{other}'"
-                    )))
-                }
+                None => schema::VectorAlgorithm::default(),
+                Some(name) => schema::VectorAlgorithm::from_sdl_name(name).ok_or_else(|| {
+                    QueryError::parse(format!("@vectorIndex has no algorithm named '{name}'"))
+                })?,
             };
 
             let hnsw = config.hnsw.clone().unwrap_or_default();
-            let metric = match hnsw.metric.as_deref() {
-                None | Some("COSINE") => schema::DistanceMetric::Cosine,
-                Some("DOT") => schema::DistanceMetric::Dot,
-                Some(other) => {
-                    return Err(QueryError::parse(format!(
-                        "@vectorIndex has no metric named '{other}'"
-                    )))
-                }
+            // The top-level argument applies to every algorithm; the HNSW block
+            // is the older spelling and still works.
+            let metric = match config.metric.as_deref().or(hnsw.metric.as_deref()) {
+                None => schema::DistanceMetric::default(),
+                Some(name) => schema::DistanceMetric::from_sdl_name(name).ok_or_else(|| {
+                    QueryError::parse(format!("@vectorIndex has no metric named '{name}'"))
+                })?,
             };
             let defaults = schema::HnswParams::default();
 

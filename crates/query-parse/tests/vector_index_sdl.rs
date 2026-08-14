@@ -281,3 +281,59 @@ fn an_unknown_ssg_argument_is_refused() {
     .expect_err("a misspelled argument must not parse");
     assert!(err.to_string().contains("degree"), "got: {err}");
 }
+
+/// `[Float32!]` is what an `@embedding` field declares, so it must carry a
+/// vector index as readily as `[Float!]`.
+#[test]
+fn a_float32_field_takes_a_vector_index() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float32!] @vectorIndex(dimensions: 8)
+        }"#,
+    );
+    assert_eq!(vector.dimensions, 8);
+    assert_eq!(vector.algorithm, VectorAlgorithm::Hnsw);
+}
+
+/// Every algorithm the engine builds must be selectable by name in SDL.
+#[test]
+fn every_algorithm_is_selectable_by_name() {
+    for algorithm in VectorAlgorithm::ALL {
+        let vector = only_vector(&format!(
+            r#"type Doc {{ embedding: [Float32!] @vectorIndex(dimensions: 8, algorithm: "{}") }}"#,
+            algorithm.as_str()
+        ));
+        assert_eq!(vector.algorithm, *algorithm, "{}", algorithm.as_str());
+    }
+}
+
+/// The metric is a property of the index, not of HNSW, so every algorithm must
+/// accept it from the top-level argument.
+#[test]
+fn every_algorithm_accepts_every_metric() {
+    for algorithm in VectorAlgorithm::ALL {
+        for metric in DistanceMetric::ALL {
+            let vector = only_vector(&format!(
+                r#"type Doc {{ embedding: [Float32!] @vectorIndex(dimensions: 8, algorithm: "{}", metric: "{}") }}"#,
+                algorithm.as_str(),
+                metric.as_str()
+            ));
+            assert_eq!(
+                (vector.algorithm, vector.metric),
+                (*algorithm, *metric),
+                "{} with {}",
+                algorithm.as_str(),
+                metric.as_str()
+            );
+        }
+    }
+}
+
+/// The older spelling still works, so existing schemas keep parsing.
+#[test]
+fn the_hnsw_block_still_carries_the_metric() {
+    let vector = only_vector(
+        r#"type Doc { embedding: [Float!] @vectorIndex(dimensions: 8, HNSW: { metric: "DOT" }) }"#,
+    );
+    assert_eq!(vector.metric, DistanceMetric::Dot);
+}
