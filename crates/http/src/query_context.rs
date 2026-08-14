@@ -43,13 +43,16 @@ async fn execute_once_with_context(
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
 
-    // Fast path: when no signing and no NAC, skip spawn_blocking entirely.
-    // Thread-local defaults are None/false, matching what we'd set.
-    if signing_config.is_none() && state.nac.is_none() {
+    let dac_bypass = resolve_dac_bypass(state, identity).await;
+
+    // Fast path: when there is nothing to put on the thread-locals, skip
+    // spawn_blocking entirely. `dac_bypass` must be part of the condition --
+    // the node-owner shortcut is keyed on identity alone, independent of
+    // signing (Go: `internal/db/collection_acp.go:86`), so a node started with
+    // --no-signing would otherwise silently lose full DAC access.
+    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
         return state.executor.execute(request).await;
     }
-
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
     let executor = state.executor.clone();
     let handle = tokio::runtime::Handle::current();
 
@@ -133,12 +136,13 @@ pub async fn execute_in_txn_with_context(
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
 
-    // Fast path: when no signing and no NAC, skip spawn_blocking entirely.
-    if signing_config.is_none() && state.nac.is_none() {
+    let dac_bypass = resolve_dac_bypass(state, identity).await;
+
+    // Fast path: see the note in `execute_once_with_context`. `dac_bypass`
+    // belongs in the condition for the same reason.
+    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
         return state.executor.execute_in_txn(request, &txn_handle).await;
     }
-
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
 
     let executor = state.executor.clone();
     let handle = tokio::runtime::Handle::current();
@@ -330,5 +334,106 @@ mod tests {
 
         assert_eq!(executor.explicit_txn_attempts.load(Ordering::SeqCst), 1);
         assert!(response.is_transaction_conflict());
+    }
+
+    const OWNER_DID: &str = "did:key:z6MkTestNodeOwner";
+
+    /// Records the `dac_bypass` thread-local as observed by the executor, which
+    /// is the only place the fast path's effect is visible.
+    #[derive(Default)]
+    struct DacBypassRecorder {
+        observed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for DacBypassRecorder {
+        async fn execute(&self, _request: QueryRequest) -> QueryResponse {
+            self.observed
+                .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            _request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> QueryResponse {
+            self.observed
+                .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn owner_identity() -> ExtractIdentity {
+        ExtractIdentity::from_did(Some(identity::Did::new_unchecked(OWNER_DID.to_string())))
+    }
+
+    /// Go gates the node-owner full-access shortcut on identity alone
+    /// (`internal/db/collection_acp.go:86`), with no reference to signing
+    /// anywhere in that file. Disabling signing must not take DAC access with it.
+    #[tokio::test]
+    async fn node_owner_keeps_dac_bypass_when_signing_is_disabled() {
+        let executor = Arc::new(DacBypassRecorder::default());
+        let state = AppStateBuilder::new(executor.clone())
+            .with_node_identity_did(OWNER_DID.to_string())
+            .with_signing_enabled(false)
+            .build();
+
+        execute_once_with_context(
+            &state,
+            &owner_identity(),
+            QueryRequest::new("{ __typename }"),
+        )
+        .await;
+
+        assert!(
+            executor.observed.load(Ordering::SeqCst),
+            "the node owner lost DAC bypass because --no-signing sent the request down the fast path"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stranger_gets_no_dac_bypass() {
+        let executor = Arc::new(DacBypassRecorder::default());
+        let state = AppStateBuilder::new(executor.clone())
+            .with_node_identity_did(OWNER_DID.to_string())
+            .with_signing_enabled(false)
+            .build();
+
+        execute_once_with_context(
+            &state,
+            &ExtractIdentity::from_did(Some(identity::Did::new_unchecked(
+                "did:key:z6MkSomeoneElse".to_string(),
+            ))),
+            QueryRequest::new("{ __typename }"),
+        )
+        .await;
+
+        assert!(!executor.observed.load(Ordering::SeqCst));
     }
 }

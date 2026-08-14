@@ -220,3 +220,40 @@ async fn route_limit_never_exceeds_the_global_limit() {
         "global body limit must still bound a looser per-route limit"
     );
 }
+
+const TEST_DID: &str = "did:key:z6MkTestNodeIdentity";
+
+fn signing_server(config: ServerConfig) -> Server {
+    Server::with_config(MockQueryExecutor::new(), config).with_node_identity_did(TEST_DID.into())
+}
+
+/// Asserts through `app_state()` rather than the private predicate, so that
+/// reverting `with_signing_enabled(self.signing_enabled())` back to a literal
+/// `true` fails the test. Testing the predicate alone would reproduce the exact
+/// defect this change fixes: a value computed correctly and never consumed.
+#[test]
+fn a_node_identity_enables_signing_by_default() {
+    assert!(
+        signing_server(ServerConfig::default())
+            .app_state()
+            .signing_enabled
+    );
+}
+
+#[test]
+fn no_signing_disables_signing_even_with_a_node_identity() {
+    let config = ServerConfig {
+        no_signing: true,
+        ..Default::default()
+    };
+    assert!(
+        !signing_server(config).app_state().signing_enabled,
+        "--no-signing must be honoured; commits were signed regardless"
+    );
+}
+
+#[test]
+fn signing_stays_off_without_a_node_identity() {
+    let server = Server::with_config(MockQueryExecutor::new(), ServerConfig::default());
+    assert!(!server.app_state().signing_enabled);
+}

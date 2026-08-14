@@ -10,6 +10,8 @@ mod document_lifecycle;
 mod lark_crash_reopen;
 #[path = "basic/multi_collection.rs"]
 mod multi_collection;
+#[path = "basic/no_signing.rs"]
+mod no_signing;
 #[path = "basic/patch_secondary_relation_4709.rs"]
 mod patch_secondary_relation_4709;
 #[path = "basic/self_ref_relations_4712.rs"]

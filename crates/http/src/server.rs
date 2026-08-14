@@ -21,11 +21,11 @@ use query::QueryLimits;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state_and_body_limits, AcpOperations, AppStateBuilder, BackupOperations,
-    BlockOperations, BodyLimits, BrowserSyncOperations, CollectionManagementOperations,
-    DocumentAcpOperations, DumpOperations, EncryptedIndexOperations, IndexOperations,
-    LensOperations, ManageRequester, NodeAcpOperations, P2POperations, SchemaOperations,
-    TransactionOperations, ViewOperations,
+    create_router_with_state_and_body_limits, AcpOperations, AppState, AppStateBuilder,
+    BackupOperations, BlockOperations, BodyLimits, BrowserSyncOperations,
+    CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
+    EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
+    P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Default cap on an inline backup import body (100 MiB).
@@ -54,6 +54,9 @@ pub struct ServerConfig {
     /// (`http/handler_store.go:38-51`), ours uploads the backup inline, so this
     /// is the only thing standing between an import and unbounded buffering.
     pub max_backup_size: u64,
+    /// Disable signing of commits, even when a node identity is configured.
+    /// Mirrors Go's `datastore.nosigning` (`cli/start.go:194`).
+    pub no_signing: bool,
     /// Request timeout in seconds (0 = no timeout).
     pub request_timeout: u64,
     /// Max concurrent requests (0 = unlimited).
@@ -72,6 +75,7 @@ impl Default for ServerConfig {
             max_body_size: 0,
             max_schema_size: 0,
             max_backup_size: DEFAULT_MAX_BACKUP_SIZE,
+            no_signing: false,
             request_timeout: 300,
             max_concurrent_requests: 1000,
             max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
@@ -404,17 +408,12 @@ impl Server {
         self
     }
 
-    /// Build the router with all routes and middleware.
+    /// Assemble the router's [`AppState`] from the configured components.
     ///
-    /// CORS configuration matches Go DefraDB behavior:
-    /// - Empty origins = no CORS headers (browsers block cross-origin requests)
-    /// - "*" in origins = allow all origins
-    /// - Otherwise, case-insensitive matching against configured origins
-    ///
-    /// Returns an error if any configured CORS origins are invalid.
-    pub fn router(&self) -> Result<Router> {
-        let cors = self.build_cors_layer()?;
-
+    /// Separated from [`Self::router`] so tests can observe what the server
+    /// actually puts into state -- notably `signing_enabled`, whose whole
+    /// defect class is a value computed correctly and never consumed.
+    pub(crate) fn app_state(&self) -> AppState {
         // Build state with all configured components
         let mut builder = AppStateBuilder::new(Arc::clone(&self.executor));
         if let Some(ref rest) = self.rest {
@@ -473,12 +472,25 @@ impl Server {
         }
         if let Some(ref did) = self.node_identity_did {
             builder = builder.with_node_identity_did(did.clone());
-            builder = builder.with_signing_enabled(true);
+            builder = builder.with_signing_enabled(self.signing_enabled());
         }
         builder = builder.with_dev_mode(self.dev_mode);
         builder = builder.with_max_txn_retries(self.config.max_txn_retries);
         builder = builder.with_query_limits(self.config.query_limits);
-        let state = builder.build();
+        builder.build()
+    }
+
+    /// Build the router with all routes and middleware.
+    ///
+    /// CORS configuration matches Go DefraDB behavior:
+    /// - Empty origins = no CORS headers (browsers block cross-origin requests)
+    /// - "*" in origins = allow all origins
+    /// - Otherwise, case-insensitive matching against configured origins
+    ///
+    /// Returns an error if any configured CORS origins are invalid.
+    pub fn router(&self) -> Result<Router> {
+        let cors = self.build_cors_layer()?;
+        let state = self.app_state();
         let state_for_middleware = state.clone();
         let browser_sync_body_limit = if self.config.max_body_size == 0 {
             defra_core::browser_sync::MAX_SYNC_BODY_BYTES
@@ -639,6 +651,16 @@ impl Server {
     /// Get the configured address.
     pub fn address(&self) -> SocketAddr {
         self.config.address
+    }
+
+    /// Whether commits should be signed.
+    ///
+    /// Signing requires a configured node identity, and `--no-signing` turns it
+    /// off even when one is present. Matches Go, which keeps the identity for
+    /// ACP purposes and gates only the signature
+    /// (`cli/start.go:194`, `internal/db/db.go:164`).
+    fn signing_enabled(&self) -> bool {
+        self.node_identity_did.is_some() && !self.config.no_signing
     }
 
     /// Resolve a per-route body cap, clamped so it can never raise the
