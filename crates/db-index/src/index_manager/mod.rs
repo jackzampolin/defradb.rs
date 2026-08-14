@@ -10,11 +10,20 @@ mod value_extraction;
 use crate::error::{Error, Result};
 use datastore::NamespaceView;
 use document::Document;
-use schema::{CollectionVersion, FieldDescription, IndexDescription, IndexedFieldDescription};
+use schema::{
+    CollectionVersion, FieldDescription, IndexDescription, IndexKind, IndexedFieldDescription,
+    OrderedIndexDescription,
+};
 use std::collections::HashMap;
 use storage::corekv::Key;
-use storage::index::{FullTextIndex, IndexType};
+use storage::index::FullTextIndex;
+
+mod index_type;
+pub use index_type::IndexType;
 use storage::keys::IndexIDSequenceKey;
+
+pub mod doc_source;
+pub use doc_source::{DocumentSource, SliceSource};
 
 /// How a live unique conflict was resolved during merge (#1111).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +176,10 @@ impl IndexManager {
                     desc.name
                 )));
             }
-            let index = IndexType::new(collection_short_id, desc.clone());
+            // `try_new` rather than `new`: a stored vector description that
+            // cannot be built must say so, not quietly load as an ordered index
+            // over the raw vector field.
+            let index = IndexType::try_new(collection_short_id, desc.clone())?;
             manager.indexes.insert(desc.name.clone(), index);
         }
         // Load full-text indexes.
@@ -193,6 +205,7 @@ impl IndexManager {
                     descending: false,
                 }],
                 unique: false,
+                kind: None,
                 auto_generated: false,
             };
             let ft_index = FullTextIndex::new(collection_short_id, desc, ft_desc.clone());
@@ -236,6 +249,32 @@ impl IndexManager {
         name: String,
         fields: Vec<IndexedFieldDescription>,
         unique: bool,
+        schema_fields: &[FieldDescription],
+    ) -> Result<IndexDescription> {
+        self.create_index_of_kind(
+            datastore,
+            collection_name,
+            name,
+            fields,
+            IndexKind::Ordered(OrderedIndexDescription { unique }),
+            schema_fields,
+        )
+        .await
+    }
+
+    /// Creates an index of any kind.
+    ///
+    /// [`create_index`](Self::create_index) is this with an ordered kind. The
+    /// kind is a single argument rather than a `unique` flag plus a config,
+    /// because those two can disagree and the resulting index would be in a
+    /// state that means nothing.
+    pub async fn create_index_of_kind(
+        &mut self,
+        datastore: &NamespaceView,
+        collection_name: &str,
+        name: String,
+        fields: Vec<IndexedFieldDescription>,
+        kind: IndexKind,
         schema_fields: &[FieldDescription],
     ) -> Result<IndexDescription> {
         let name = if name.is_empty() {
@@ -283,11 +322,15 @@ impl IndexManager {
             name: name.clone(),
             id: index_id,
             fields,
-            unique,
+            unique: false,
+            kind: Some(kind),
             auto_generated: false,
-        };
+        }
+        .normalized();
 
-        let index = IndexType::new(self.collection_short_id, desc.clone());
+        // `try_new`, so a vector index with out-of-range parameters is refused
+        // here rather than becoming an ordered index over the vector field.
+        let index = IndexType::try_new(self.collection_short_id, desc.clone())?;
         self.indexes.insert(name, index);
 
         Ok(desc)
@@ -368,6 +411,20 @@ impl IndexManager {
         documents: &[(u64, Document)],
         schema: &CollectionVersion,
     ) -> Result<BulkIndexResult> {
+        let mut source = SliceSource::new(documents);
+        self.bulk_index_from(datastore, index_name, &mut source, schema)
+            .await
+    }
+
+    /// [`bulk_index`](Self::bulk_index) over a pull-based source, holding one
+    /// document at a time rather than the whole collection.
+    pub async fn bulk_index_from<S: DocumentSource + ?Sized>(
+        &self,
+        datastore: &NamespaceView,
+        index_name: &str,
+        source: &mut S,
+        schema: &CollectionVersion,
+    ) -> Result<BulkIndexResult> {
         let index = self
             .indexes
             .get(index_name)
@@ -377,17 +434,17 @@ impl IndexManager {
         let mut skipped_count = 0;
         let mut mutable_datastore = datastore.clone();
 
-        for (doc_short_id, doc) in documents {
-            if *doc_short_id == 0 {
+        while let Some((doc_short_id, doc)) = source.next().await? {
+            if doc_short_id == 0 {
                 skipped_count += 1;
                 continue;
             }
 
-            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            let value_sets = self.extract_index_values(&doc, index.description(), schema)?;
 
             for values in &value_sets {
                 index
-                    .save(&mut mutable_datastore, *doc_short_id, values)
+                    .save(&mut mutable_datastore, doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }

@@ -39,6 +39,7 @@ impl MockIndexOperations {
     /// Create with a pre-existing index.
     pub fn with_index(self, collection: &str, name: &str, fields: Vec<&str>, unique: bool) -> Self {
         self.indexes.write().unwrap().push(IndexInfo {
+            kind: None,
             id: 0,
             name: name.to_string(),
             collection: collection.to_string(),
@@ -64,6 +65,7 @@ impl IndexOperations for MockIndexOperations {
         fields: Vec<String>,
         name: Option<&str>,
         unique: bool,
+        vector: Option<schema::VectorIndexDescription>,
     ) -> Result<IndexInfo, String> {
         let index_name = match name {
             Some(n) => n.to_string(),
@@ -76,6 +78,7 @@ impl IndexOperations for MockIndexOperations {
         };
 
         let index = IndexInfo {
+            kind: vector.map(schema::IndexKind::Vector),
             id: 0,
             name: index_name,
             collection: collection.to_string(),
@@ -144,6 +147,7 @@ impl IndexOperations for FailingMockIndexOperations {
         _fields: Vec<String>,
         _name: Option<&str>,
         _unique: bool,
+        _vector: Option<schema::VectorIndexDescription>,
     ) -> Result<IndexInfo, String> {
         Err(self.error.clone())
     }

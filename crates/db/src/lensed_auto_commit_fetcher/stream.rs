@@ -193,5 +193,56 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
     }
 }
 
+impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
+    /// The seeking counterpart of
+    /// [`stream_all_with_deleted_impl`](Self::stream_all_with_deleted_impl):
+    /// identical but for its source, point reads instead of a prefix scan.
+    pub(super) async fn stream_by_doc_short_ids_impl(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn DocStream>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        let (migration_generation, has_migrations, preloaded_history) =
+            self.load_migration_context(&collection).await?;
+
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        Ok(Box::new(LensedAutoCommitDocStream {
+            inner: Some(Box::new(crate::collection_stream::ShortIdDocStream::new(
+                collection.clone(),
+                datastore,
+                systemstore,
+                doc_short_ids.to_vec(),
+                show_deleted,
+            ))),
+            txn: std::sync::Mutex::new(Some(txn)),
+            fetcher: self.clone_for_stream(),
+            collection,
+            migration_generation,
+            has_migrations,
+            preloaded_history,
+            write_backs: Vec::with_capacity(self.db.options().migration_write_back_batch_size()),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests;

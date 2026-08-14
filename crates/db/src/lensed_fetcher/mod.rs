@@ -194,6 +194,16 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             .await
     }
 
+    async fn stream_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
+        self.stream_by_doc_short_ids_impl(collection_name, doc_short_ids, show_deleted)
+            .await
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,
