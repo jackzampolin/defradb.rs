@@ -605,11 +605,41 @@ impl<'a> SdlParser<'a> {
             }
         };
 
+        let ssg = match get_directive_arg(directive, "SSG") {
+            None => None,
+            Some(graphql_parser::schema::Value::Object(members)) => {
+                let mut config = super::directives::SsgConfig::default();
+                for (name, value) in members {
+                    let slot = match name.as_str() {
+                        "R" => &mut config.r,
+                        "angle" => &mut config.angle,
+                        "pool" => &mut config.pool,
+                        other => {
+                            return Err(QueryError::parse(format!(
+                                "@vectorIndex SSG has no argument named '{other}'"
+                            )))
+                        }
+                    };
+                    *slot =
+                        Some(directive_u32(name, value).map_err(|message| {
+                            QueryError::parse(format!("@vectorIndex {message}"))
+                        })?);
+                }
+                Some(config)
+            }
+            Some(_) => {
+                return Err(QueryError::parse(
+                    "@vectorIndex SSG must be an object of parameters",
+                ))
+            }
+        };
+
         Ok(super::directives::VectorIndexConfig {
             dimensions,
             algorithm,
             hnsw,
             ivfpq,
+            ssg,
         })
     }
 

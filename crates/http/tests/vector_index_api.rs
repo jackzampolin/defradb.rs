@@ -55,6 +55,7 @@ fn the_response_reports_the_kind() {
             dimensions: 4,
             hnsw: Some(HnswParams::default()),
             ivfpq: None,
+            ssg: None,
         })),
     };
     let json = serde_json::to_value(&described).unwrap();

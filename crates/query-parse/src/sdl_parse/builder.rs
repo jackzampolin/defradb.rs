@@ -779,6 +779,7 @@ impl<'a> SdlParser<'a> {
                 None | Some("HNSW") => schema::VectorAlgorithm::Hnsw,
                 Some("FLAT") => schema::VectorAlgorithm::Flat,
                 Some("IVF_PQ") => schema::VectorAlgorithm::IvfPq,
+                Some("SSG") => schema::VectorAlgorithm::Ssg,
                 Some(other) => {
                     return Err(QueryError::parse(format!(
                         "@vectorIndex has no algorithm named '{other}'"
@@ -823,7 +824,9 @@ impl<'a> SdlParser<'a> {
                                 .unwrap_or(defaults.ef_construction),
                             ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
                         }),
-                        schema::VectorAlgorithm::Flat | schema::VectorAlgorithm::IvfPq => None,
+                        schema::VectorAlgorithm::Flat
+                        | schema::VectorAlgorithm::IvfPq
+                        | schema::VectorAlgorithm::Ssg => None,
                     },
                     ivfpq: match algorithm {
                         schema::VectorAlgorithm::IvfPq => {
@@ -836,6 +839,18 @@ impl<'a> SdlParser<'a> {
                                 sample_bytes: ivfpq
                                     .sample_bytes
                                     .map_or(defaults.sample_bytes, u64::from),
+                            })
+                        }
+                        _ => None,
+                    },
+                    ssg: match algorithm {
+                        schema::VectorAlgorithm::Ssg => {
+                            let ssg = config.ssg.clone().unwrap_or_default();
+                            let defaults = schema::SsgParams::default();
+                            Some(schema::SsgParams {
+                                r: ssg.r.unwrap_or(defaults.r),
+                                angle: ssg.angle.unwrap_or(defaults.angle),
+                                pool: ssg.pool.unwrap_or(defaults.pool),
                             })
                         }
                         _ => None,

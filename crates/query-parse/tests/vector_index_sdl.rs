@@ -243,3 +243,41 @@ fn an_ivfpq_block_on_an_hnsw_index_is_inert() {
     assert!(vector.hnsw.is_some());
     assert!(vector.ivfpq.is_none());
 }
+
+#[test]
+fn the_ssg_algorithm_is_selectable() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 8, algorithm: "SSG")
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::Ssg);
+    assert!(vector.hnsw.is_none());
+    assert!(vector.ivfpq.is_none());
+    let ssg = vector.ssg.expect("SSG params");
+    assert_eq!((ssg.r, ssg.angle, ssg.pool), (50, 60, 100));
+}
+
+#[test]
+fn ssg_parameters_are_read() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(
+                dimensions: 128, algorithm: "SSG", SSG: { R: 32, angle: 45, pool: 200 }
+            )
+        }"#,
+    );
+    let ssg = vector.ssg.expect("SSG params");
+    assert_eq!((ssg.r, ssg.angle, ssg.pool), (32, 45, 200));
+}
+
+#[test]
+fn an_unknown_ssg_argument_is_refused() {
+    let err = parse_sdl(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 8, algorithm: "SSG", SSG: { degree: 4 })
+        }"#,
+    )
+    .expect_err("a misspelled argument must not parse");
+    assert!(err.to_string().contains("degree"), "got: {err}");
+}

@@ -25,15 +25,14 @@
 //! transaction, which is what provides the single-writer discipline, and a
 //! `Mutex` held across an `await` is exactly what this workspace lints against.
 
-mod candidate;
 mod insert;
 mod level;
 mod search;
 
-pub use candidate::Candidate;
 pub use level::LevelSampler;
 
-use super::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
+use super::ann::{Admit, Candidate, EdgeSelector, EngineKind, Neighbor, VectorIndexEngine};
+use super::select::Heuristic;
 use crate::error::Result;
 use crate::vector::core::{metric::normalize, Element, Metric};
 use crate::vector::params::Params;
@@ -149,32 +148,8 @@ impl<S: VectorNodeStore> Hnsw<S> {
         Ok(out)
     }
 
-    /// SELECT-NEIGHBORS-HEURISTIC (paper Algorithm 4).
-    ///
-    /// Walks candidates nearest-first and keeps `e` only when it is closer to
-    /// the query than to every neighbor already kept. That diversity condition
-    /// is what stops a node's links from all pointing into the same cluster,
-    /// and it is worth materially more recall than taking the nearest `m`.
-    ///
-    /// The paper's optional `extendCandidates` and `keepPrunedConnections`
-    /// refinements are not implemented, matching the reference.
     fn select_neighbors(&self, candidates: &[Candidate], m: usize) -> Vec<Candidate> {
-        let mut sorted = candidates.to_vec();
-        sorted.sort();
-
-        let mut selected: Vec<Candidate> = Vec::with_capacity(m);
-        for candidate in sorted {
-            if selected.len() >= m {
-                break;
-            }
-            let diverse = selected
-                .iter()
-                .all(|kept| self.distance(&candidate.vector, &kept.vector) >= candidate.distance);
-            if diverse {
-                selected.push(candidate);
-            }
-        }
-        selected
+        Heuristic.select(self.metric, &[], candidates, m)
     }
 }
 

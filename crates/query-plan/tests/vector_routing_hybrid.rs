@@ -30,6 +30,7 @@ fn vector_index() -> Vec<IndexDescription> {
         dimensions: VECTOR.len() as u32,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ssg: None,
     })]
 }
 

@@ -11,3 +11,5 @@ pub mod dispatch;
 pub mod flat;
 pub mod hnsw;
 pub mod ivfpq;
+pub mod select;
+pub mod ssg;

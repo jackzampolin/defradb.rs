@@ -14,6 +14,8 @@ pub enum EngineKind {
     Flat,
     /// Coarse lists of product-quantized codes.
     IvfPq,
+    /// Satellite System Graph: one flat, angle-pruned layer.
+    Ssg,
 }
 
 impl EngineKind {
@@ -22,6 +24,7 @@ impl EngineKind {
             EngineKind::Hnsw => "HNSW",
             EngineKind::Flat => "FLAT",
             EngineKind::IvfPq => "IVF_PQ",
+            EngineKind::Ssg => "SSG",
         }
     }
 }

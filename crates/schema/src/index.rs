@@ -273,6 +273,9 @@ pub enum VectorAlgorithm {
     /// exchange for a code far smaller than the vector it stands for.
     #[serde(rename = "IVF_PQ")]
     IvfPq,
+    /// Satellite System Graph: one flat layer, edges pruned by angle.
+    #[serde(rename = "SSG")]
+    Ssg,
 }
 
 impl VectorAlgorithm {
@@ -285,6 +288,7 @@ impl VectorAlgorithm {
             Self::Hnsw => "HNSW",
             Self::Flat => "FLAT",
             Self::IvfPq => "IVF_PQ",
+            Self::Ssg => "SSG",
         }
     }
 }
@@ -365,6 +369,45 @@ pub struct VectorIndexDescription {
     /// Present when `algorithm` is IVF_PQ.
     #[serde(rename = "IVFPQ", default, skip_serializing_if = "Option::is_none")]
     pub ivfpq: Option<IvfPqParams>,
+    /// Present when `algorithm` is SSG.
+    #[serde(rename = "SSG", default, skip_serializing_if = "Option::is_none")]
+    pub ssg: Option<SsgParams>,
+}
+
+/// SSG build and search parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsgParams {
+    /// Maximum edges kept per node.
+    #[serde(rename = "R", default = "default_ssg_r")]
+    pub r: u32,
+    /// Minimum angle between two kept edges, in degrees.
+    #[serde(rename = "Angle", default = "default_ssg_angle")]
+    pub angle: u32,
+    /// Candidate pool size during search.
+    #[serde(rename = "Pool", default = "default_ssg_pool")]
+    pub pool: u32,
+}
+
+fn default_ssg_r() -> u32 {
+    50
+}
+
+fn default_ssg_angle() -> u32 {
+    60
+}
+
+fn default_ssg_pool() -> u32 {
+    100
+}
+
+impl Default for SsgParams {
+    fn default() -> Self {
+        Self {
+            r: default_ssg_r(),
+            angle: default_ssg_angle(),
+            pool: default_ssg_pool(),
+        }
+    }
 }
 
 /// IVF-PQ build and search parameters.
@@ -453,6 +496,8 @@ struct IndexKindWire {
     hnsw: Option<HnswParams>,
     #[serde(rename = "IVFPQ", default, skip_serializing_if = "Option::is_none")]
     ivfpq: Option<IvfPqParams>,
+    #[serde(rename = "SSG", default, skip_serializing_if = "Option::is_none")]
+    ssg: Option<SsgParams>,
     #[serde(rename = "Unique", default, skip_serializing_if = "Option::is_none")]
     unique: Option<bool>,
 }
@@ -466,6 +511,7 @@ impl From<IndexKindWire> for IndexKind {
                 dimensions: wire.dimensions.unwrap_or_default(),
                 hnsw: wire.hnsw,
                 ivfpq: wire.ivfpq,
+                ssg: wire.ssg,
             })
         } else {
             IndexKind::Ordered(OrderedIndexDescription {
@@ -484,6 +530,7 @@ impl From<IndexKind> for IndexKindWire {
                 dimensions: None,
                 hnsw: None,
                 ivfpq: None,
+                ssg: None,
                 unique: Some(ordered.unique),
             },
             IndexKind::Vector(vector) => Self {
@@ -492,6 +539,7 @@ impl From<IndexKind> for IndexKindWire {
                 dimensions: Some(vector.dimensions),
                 hnsw: vector.hnsw,
                 ivfpq: vector.ivfpq,
+                ssg: vector.ssg,
                 unique: None,
             },
         }
