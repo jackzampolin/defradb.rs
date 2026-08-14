@@ -26,6 +26,8 @@ mod node_access;
 mod p2p;
 #[path = "acp/p2p_lifecycle.rs"]
 mod p2p_lifecycle;
+#[path = "acp/policy_counter_restart.rs"]
+mod policy_counter_restart;
 #[path = "acp/policy_validation.rs"]
 mod policy_validation;
 #[path = "acp/register_ops.rs"]
