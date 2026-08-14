@@ -10,7 +10,7 @@ including across a receiver restart.
 
 | Fact | Source | Model consequence |
 |---|---|---|
-| Filtered replication pushes every non-counter field block, including encrypted LWW blocks, as a head so receipt triggers DEK resolution. | `crates/db-merge/src/push_docs.rs`, `crates/db-merge/src/push_docs_transport.rs` | `FilterMode="PreserveEncrypted"` stores the ciphertext; the red mode drops it and violates `INV_NoFilteredLoss`. |
+| Filtered replay pushes composite heads, and pending-DAG completion fetches their linked encrypted LWW blocks so merge triggers DEK resolution. | `crates/db-merge/src/push_docs.rs`, `crates/db-merge/src/push_docs_transport.rs`, `crates/db-merge/src/merge_handler/composite_fields.rs` | `FilterMode="PreserveEncrypted"` stores the linked ciphertext; the red mode drops it and violates `INV_NoFilteredLoss`. |
 | Only `AccessDenied` is a terminal encrypted-field skip. `KeyUnavailable` and other transient KMS errors abort the merge transaction. | `crates/db-merge/src/merge_handler/composite_fields.rs`, `crates/db-merge/src/merge_handler/mod.rs` | `KmsFailureMode="Retry"` retains the pending merge; the red terminal mode retires it. |
 | Push-originated pending-DAG registrations are persisted before success acknowledgement and removed only after merge or quarantine. | `crates/p2p/src/sync/pending_store.rs`, `crates/p2p/src/sync/manager/process/pending_dag.rs` | `PendingMode="Durable"` restores the retry obligation after a crash. |
 | A verified remotely fetched encryption block is stored before its key is returned to the merge. | `crates/kms/src/defra_kms.rs` | `keyAvailable` survives `Crash`; an in-flight request or envelope does not. |
@@ -51,7 +51,8 @@ winner. Because those siblings are created after the restart, this binds
 while the DEK is unavailable. `INV_AckBacked` therefore remains a conformance
 boundary.
 `tools/integration-test/tests/p2p/filtered_replication.rs` asserts matching
-encrypted documents decrypt on the filtered peer, proving their field heads
-survive selection and trigger DEK resolution, binding `INV_NoFilteredLoss`. The
+encrypted documents backfill and decrypt on the filtered peer, proving their
+composite DAGs retain the linked ciphertext and trigger DEK resolution, binding
+`INV_NoFilteredLoss`. The
 merge/KMS unit tests exercise the deterministic timeout-to-retry classification
 that is hard to schedule reliably through the external harness.

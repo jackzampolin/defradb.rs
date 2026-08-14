@@ -459,10 +459,10 @@ async fn rust_filtered_replicator_cli_requires_filter_field() {
     );
 }
 
-/// #8: the filter must gate the encrypted (SE-artifact) push path too. A
-/// non-matching encrypted document must not reach the filtered peer; matching
-/// documents must arrive with decrypted secrets, proving their field blocks
-/// triggered DEK resolution.
+/// #8: the filter must gate encrypted (SE-artifact) backfill too. A non-matching
+/// encrypted document must not reach the filtered peer; matching documents must
+/// arrive with decrypted secrets, proving composite replay fetched their linked
+/// field blocks and triggered DEK resolution.
 #[tokio::test]
 async fn rust_filtered_replication_encrypted_respects_filter() {
     const SECRET_SCHEMA: &str = "type SecretDoc { agent_did: String @immutable  secret: String }";
@@ -485,8 +485,6 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
     node0
         .p2p_collection_add(&["SecretDoc"])
         .expect("subscribe 0");
-    // Receiver relies on the filtered replicator push only (see note above).
-    add_filtered_replicator(&cluster, 0, &["SecretDoc"], &addr1, "agent_did", ALICE);
 
     let matching = node0
         .query(&format!(
@@ -508,6 +506,9 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
         ))
         .expect("create second matching encrypted doc");
     let matching2_id = extract_doc_id(&matching2, "add_SecretDoc");
+
+    // Add the replicator after all writes so delivery can only come from backfill.
+    add_filtered_replicator(&cluster, 0, &["SecretDoc"], &addr1, "agent_did", ALICE);
 
     let node1_for_poll = cluster.client(1);
     let matching_id_poll = matching_id.clone();

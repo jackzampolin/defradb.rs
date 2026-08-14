@@ -5,12 +5,14 @@
 \* DefraConvergence.PriorityReconcile.lwwCM. It adds a temporal obligation:
 \* an acknowledged ciphertext whose DEK is not available yet must remain
 \* re-drivable across transient KMS failure and restart, and delivery filters
-\* must retain the encrypted field block that triggers the key request.
+\* must retain the composite link to the encrypted field block that triggers
+\* the key request.
 \*
 \* Source anchors:
 \* - crates/db-merge/src/merge_handler/composite_fields.rs propagates transient
 \*   KMS failures so the merge remains pending;
-\* - crates/db-merge/src/push_docs{,_transport}.rs preserve encrypted LWW heads;
+\* - crates/db-merge/src/push_docs{,_transport}.rs replay composite heads whose
+\*   DAG completion fetches linked encrypted LWW blocks;
 \* - crates/p2p/src/sync/pending_store.rs persists acknowledged pending DAGs;
 \* - crates/crdt/src/lww.rs selects the greatest (priority, value) version.
 EXTENDS Naturals
