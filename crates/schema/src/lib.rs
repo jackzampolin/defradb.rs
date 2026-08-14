@@ -37,8 +37,9 @@ pub use error::{Result, SchemaError};
 pub use field::FieldDescription;
 pub use field_kind::{FieldKind, ScalarArrayKind, ScalarKind};
 pub use index::{
-    EncryptedIndexDescription, EncryptedIndexType, FullTextIndexDescription, IndexDescription,
-    IndexedFieldDescription,
+    DistanceMetric, EncryptedIndexDescription, EncryptedIndexType, FullTextIndexDescription,
+    HnswParams, IndexDescription, IndexKind, IndexedFieldDescription, IvfPqParams,
+    OrderedIndexDescription, SsgParams, VectorAlgorithm, VectorIndexDescription,
 };
 pub use policy::PolicyDescription;
 pub use source::{

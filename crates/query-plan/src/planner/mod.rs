@@ -17,6 +17,7 @@ pub mod index_selection;
 mod joins;
 mod mapping;
 mod traits;
+pub mod vector_routing;
 mod view_builder;
 
 pub use builder::{PlanResult, Planner};

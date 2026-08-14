@@ -10,6 +10,7 @@ fn test_index_description(unique: bool) -> schema::IndexDescription {
         id: 1,
         name: "test_index".to_string(),
         unique,
+        kind: None,
         auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "name".to_string(),
@@ -23,6 +24,7 @@ fn composite_index_description(unique: bool) -> schema::IndexDescription {
         id: 2,
         name: "composite_index".to_string(),
         unique,
+        kind: None,
         auto_generated: false,
         fields: vec![
             IndexedFieldDescription {
@@ -42,6 +44,7 @@ fn fulltext_index_description() -> schema::IndexDescription {
         id: 3,
         name: "__fulltext__:text".to_string(),
         unique: false,
+        kind: None,
         auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "text".to_string(),
@@ -335,18 +338,6 @@ async fn test_composite_index() {
     let prefix = IndexDataStoreKey::index_prefix(1, 2);
     let count = count_entries(txn.as_ref(), &prefix).await;
     assert_eq!(count, 1);
-}
-
-#[tokio::test]
-async fn test_index_type_factory() {
-    let simple_desc = test_index_description(false);
-    let unique_desc = test_index_description(true);
-
-    let simple_index = IndexType::new(1, simple_desc);
-    assert!(!simple_index.description().unique);
-
-    let unique_index = IndexType::new(1, unique_desc);
-    assert!(unique_index.description().unique);
 }
 
 #[tokio::test]

@@ -21,6 +21,7 @@ fn single_field_index(field: &str) -> IndexDescription {
         id: 1,
         name: format!("{}_idx", field),
         unique: false,
+        kind: None,
         auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: field.to_string(),
@@ -34,6 +35,7 @@ fn composite_index(fields: &[&str]) -> IndexDescription {
         id: 2,
         name: "composite_idx".to_string(),
         unique: false,
+        kind: None,
         auto_generated: false,
         fields: fields
             .iter()
@@ -50,6 +52,7 @@ fn unique_index(field: &str) -> IndexDescription {
         id: 3,
         name: format!("{}_unique_idx", field),
         unique: true,
+        kind: None,
         auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: field.to_string(),
