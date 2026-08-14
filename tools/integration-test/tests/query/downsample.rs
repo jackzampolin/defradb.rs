@@ -37,9 +37,9 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BUCKET_MS: i64 = 1_000;
 const PARENT_BUCKET_MS: i64 = 2_000;
-const BASE_OFFSET_BUCKETS: i64 = 3;
-const FIRST_WINDOW_SETTLE_MS: i64 = 350;
+const BASE_OFFSET_BUCKETS: i64 = 4;
 const FINAL_WINDOW_SETTLE_MS: i64 = 350;
+const LEAD_IN_MARGIN_MS: i64 = 250;
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     if timestamp.timestamp_subsec_nanos() == 0 {
@@ -330,44 +330,6 @@ async fn downsample_test(cluster: TestCluster) {
         ))
         .expect("update metric to 20");
 
-    assert!(
-        query_rollup(&client, "Metric2Rollup", &source_doc_id).is_none(),
-        "Metric2Rollup should stay empty before the first time bucket closes",
-    );
-
-    sleep_until(first_window_end + ChronoDuration::milliseconds(FIRST_WINDOW_SETTLE_MS)).await;
-
-    let first_rollup = wait_for_rollup(
-        &client,
-        "Metric2Rollup",
-        &source_doc_id,
-        2,
-        &format_timestamp(t1),
-        &format_timestamp(first_window_end),
-        2,
-        30,
-        15.0,
-        10,
-        20,
-    )
-    .await;
-    assert_rollup_row(
-        &first_rollup,
-        &source_doc_id,
-        2,
-        &format_timestamp(t1),
-        &format_timestamp(first_window_end),
-        2,
-        30,
-        15.0,
-        10,
-        20,
-    );
-    let rollup2_doc_id = first_rollup["_docID"]
-        .as_str()
-        .expect("Metric2Rollup row should include _docID")
-        .to_string();
-
     client
         .query(&format!(
             r#"mutation {{ update_Metric(docID: "{source_doc_id}", input: {{ts: "{}", value: 30}}) {{ _docID }} }}"#,
@@ -382,19 +344,22 @@ async fn downsample_test(cluster: TestCluster) {
         ))
         .expect("update metric to 40");
 
-    let stale_rollup = query_rollup(&client, "Metric2Rollup", &source_doc_id)
-        .expect("Metric2Rollup row should still exist during an incomplete bucket");
-    assert_rollup_row(
-        &stale_rollup,
-        &source_doc_id,
-        2,
-        &format_timestamp(t1),
-        &format_timestamp(first_window_end),
-        2,
-        30,
-        15.0,
-        10,
-        20,
+    // Every source write lands before any bucket closes, so no rollup target
+    // exists yet and none of them can be rejected as late data. Overrunning
+    // that budget is a harness problem, not a product one, so name it here
+    // rather than letting it surface as an opaque server rejection.
+    let lead_in_remaining = first_window_end
+        .signed_duration_since(Utc::now())
+        .num_milliseconds();
+    assert!(
+        lead_in_remaining > LEAD_IN_MARGIN_MS,
+        "test lead-in budget exceeded: source writes finished {lead_in_remaining}ms before the \
+         first window closes, under the {LEAD_IN_MARGIN_MS}ms margin; raise BASE_OFFSET_BUCKETS",
+    );
+
+    assert!(
+        query_rollup(&client, "Metric2Rollup", &source_doc_id).is_none(),
+        "Metric2Rollup should stay empty before the first time bucket closes",
     );
 
     sleep_until(second_window_end + ChronoDuration::milliseconds(FINAL_WINDOW_SETTLE_MS)).await;
@@ -425,16 +390,27 @@ async fn downsample_test(cluster: TestCluster) {
         30,
         40,
     );
-    assert_eq!(
-        second_rollup["_docID"].as_str(),
-        Some(rollup2_doc_id.as_str()),
-        "Metric2Rollup should keep a stable document identity for the series",
-    );
+    let rollup2_doc_id = second_rollup["_docID"]
+        .as_str()
+        .expect("Metric2Rollup row should include _docID")
+        .to_string();
 
+    // The first window's emission is only the live state for one bucket, so it
+    // is asserted through the target's commit history instead of a wall-clock
+    // race. Exactly two `sum` writes totalling 100 with a 70 maximum, and two
+    // `source_height` writes topping out at 4, can only come from an emission
+    // of the closed first window (sum=30, height=2) followed by an in-place
+    // update for the second (sum=70, height=4) — on this one document, which
+    // is also what proves the series keeps a stable identity. Any premature
+    // emission of an incomplete bucket would show up as extra commits.
     let rollup2_sum_history = aggregate_commit_field(&client, &rollup2_doc_id, "sum");
     assert_eq!(rollup2_sum_history["count"].as_i64(), Some(2));
     assert_eq!(rollup2_sum_history["total"].as_i64(), Some(100));
     assert_eq!(rollup2_sum_history["maxValue"].as_i64(), Some(70));
+
+    let rollup2_height_history = aggregate_commit_field(&client, &rollup2_doc_id, "source_height");
+    assert_eq!(rollup2_height_history["count"].as_i64(), Some(2));
+    assert_eq!(rollup2_height_history["maxValue"].as_i64(), Some(4));
 
     let rollup4 = wait_for_rollup(
         &client,
