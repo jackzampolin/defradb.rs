@@ -43,6 +43,23 @@ impl Default for MockFetcher {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocFetcher for MockFetcher {
+    /// A mock has no storage, so a document's short id is its 1-based position
+    /// in the collection, mirroring how the real allocator hands them out.
+    async fn stream_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+        let all = self
+            .get_all_with_deleted(collection_name, show_deleted)
+            .await?;
+        let picked = doc_short_ids
+            .iter()
+            .filter_map(|id| all.get(id.checked_sub(1)? as usize).cloned())
+            .collect();
+        Ok(Box::new(crate::doc_stream::VecStream::new(picked)))
+    }
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
         let docs = self.docs.lock().unwrap();
         Ok(docs.get(collection_name).cloned().unwrap_or_default())

@@ -9,6 +9,7 @@
 mod data_store_key;
 mod index_key;
 mod misc;
+mod vector_index_key;
 
 #[cfg(test)]
 mod tests;
@@ -16,6 +17,7 @@ mod tests;
 pub use data_store_key::*;
 pub use index_key::*;
 pub use misc::*;
+pub use vector_index_key::*;
 
 /// Special field ID for storing document schema version.
 ///

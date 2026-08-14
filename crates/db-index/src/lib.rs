@@ -12,6 +12,7 @@
 
 pub mod error;
 pub mod index_manager;
+pub mod vector;
 
 pub use error::{Error, Result};
 pub use index_manager::{fulltext_index_name, BulkIndexResult, IndexManager};
