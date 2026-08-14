@@ -4843,8 +4843,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -5591,7 +5591,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -6068,7 +6068,7 @@ dependencies = [
 [[package]]
 name = "iroh-bitswap"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?rev=d1e12c7cf6dc653d8f0abeb9f804824656fb3621#d1e12c7cf6dc653d8f0abeb9f804824656fb3621"
+source = "git+https://github.com/sourcenetwork/beetle?rev=255e4cfee016697c77ec92136dbe5d57225eb2d5#255e4cfee016697c77ec92136dbe5d57225eb2d5"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -14107,8 +14107,8 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.18",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

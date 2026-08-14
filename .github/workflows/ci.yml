@@ -78,9 +78,10 @@ jobs:
   #
   #   primary (labels ...,studio,studio-N) — one job at a time, so two
   #   node-spawning jobs can only co-run on DIFFERENT hosts, where they
-  #   cannot contend on localhost ports. studio-1 carries build → rust →
-  #   signed-docs (consumers of build's host-local binary cache); studio-2
-  #   carries conformance, go-compat, and iroh (each self-builds on miss).
+  #   cannot contend on localhost ports. studio-1 carries rust and
+  #   signed-docs; studio-2 carries conformance, go-compat, and iroh. `build`
+  #   floats between the two and publishes its binaries to both, so every
+  #   suite restores from its own host's cache whichever host built them.
   #
   #   light (labels ...,defra-light,studio-N-b) — deliberately NOT labeled
   #   `studio`/`studio-N`, so node-spawning jobs can never land there. Serves
@@ -323,6 +324,46 @@ jobs:
           # Symlink for backbone CI consumption
           ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
 
+      # This job floats across both studio hosts but in practice lands on
+      # whichever one is idle, and studio-1's single `studio` slot is usually
+      # still occupied by the previous run's ~100-minute suites — so the
+      # producer keeps landing on studio-2 while the two most expensive
+      # consumers (rust, signed-docs) sit on studio-1 with an empty cache.
+      # Pushing now, while nothing is waiting on this job, is what turns the
+      # sibling's first integration job from a full rebuild into a file copy;
+      # its own pull fallback only ever runs once the clock is already
+      # ticking. Best-effort: a failure is a warning, never a red run, and the
+      # consumer still falls back to building.
+      - name: Publish binaries to sibling studio
+        run: |
+          HASH=$(git rev-parse HEAD)
+          CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
+          PEER=$(.github/scripts/studio-peer.sh)
+
+          if [ -z "$PEER" ]; then
+            echo "No sibling studio for this host — nothing to publish"
+            exit 0
+          fi
+
+          # ServerAlive* bounds a transfer that stalls after connecting: the
+          # whole integration matrix waits on this job, so a hung scp here
+          # would cost more than the rebuild it is trying to avoid.
+          SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+
+          # Staged through .tmp and renamed on the peer, so an interrupted
+          # copy cannot leave a truncated binary that the peer would later
+          # treat as a valid cache hit.
+          if ssh $SSH_OPTS "$PEER" "mkdir -p '$CACHE_DIR'" \
+            && scp -p $SSH_OPTS "$CACHE_DIR/defra" "$PEER:$CACHE_DIR/defra.tmp" \
+            && scp -p $SSH_OPTS "$CACHE_DIR/defra-iroh" "$PEER:$CACHE_DIR/defra-iroh.tmp" \
+            && ssh $SSH_OPTS "$PEER" \
+                 "mv '$CACHE_DIR/defra.tmp' '$CACHE_DIR/defra' \
+                  && mv '$CACHE_DIR/defra-iroh.tmp' '$CACHE_DIR/defra-iroh'"; then
+            echo "Published binaries to $PEER:$CACHE_DIR"
+          else
+            echo "::warning::could not publish binary cache to $PEER — its first integration job will rebuild"
+          fi
+
       # OTel-only tests, run AFTER caching so the otel rebuild of target/debug/defra
       # never pollutes the cached standard binary. The cli otel test spawns a real
       # node against an unreachable collector and asserts the dedup hint fires
@@ -456,9 +497,9 @@ jobs:
       # host runs one defradb.rs runner process (one job at a time), so
       # pinning suites to hosts serializes same-host suites for free while
       # letting the two hosts run in parallel — replacing the old
-      # `max-parallel: 1` whole-matrix serialization. studio-1 suites consume
-      # the binary cache the `build` job (also studio-1) populated; studio-2
-      # suites self-build on miss into their own host-local cache.
+      # `max-parallel: 1` whole-matrix serialization. Both hosts restore from
+      # a host-local binary cache that `build` publishes to each of them; the
+      # self-build below is the fallback for when that publish did not land.
       matrix:
         include:
           # Each host uses sccache with incremental compilation disabled so
@@ -511,26 +552,24 @@ jobs:
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p target/ci "$CACHE_DIR"
 
-          # The two studio hosts share a Thunderbolt link, so a cache miss can
-          # be served by the sibling for the price of copying ~100MB rather
-          # than a full rebuild. Best-effort by design: any failure here falls
-          # through to the build path below, so an unreachable or rebooting
-          # peer costs time, never a red run.
-          case "${RUNNER_NAME:-}" in
-            studio-1*) PEER=studio-2 ;;
-            studio-2*) PEER=studio-1 ;;
-            *)         PEER="" ;;
-          esac
+          # The `build` job pushes its binaries to both hosts, so the local
+          # branch below is the expected path. Pulling from the sibling is the
+          # backstop for when that push failed. Best-effort by design: any
+          # failure here falls through to the build path below, so an
+          # unreachable or rebooting peer costs time, never a red run. Errors
+          # are NOT discarded — a silent pull failure is indistinguishable from
+          # a peer that never had the binaries, and that ambiguity is what let
+          # a 41-minute rebuild hide on every run for days.
+          PEER=$(.github/scripts/studio-peer.sh)
+          SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
             echo "Cache hit (local) — restoring from $CACHE_DIR"
             cp "$CACHE_DIR/defra" target/ci/defra
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
           elif [ -n "$PEER" ] \
-            && scp -q -o BatchMode=yes -o ConnectTimeout=5 \
-                 "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" 2>/dev/null \
-            && scp -q -o BatchMode=yes -o ConnectTimeout=5 \
-                 "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp" 2>/dev/null; then
+            && scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" \
+            && scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp"; then
             # Staged via .tmp so an interrupted copy cannot leave a truncated
             # binary that later runs would treat as a valid cache hit.
             mv "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra"
@@ -540,7 +579,8 @@ jobs:
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
           else
             rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
-            echo "Cache miss (local and peer) — building binaries"
+            echo "::warning::binary cache missed on this host and on peer '${PEER:-none}' — rebuilding (~40 min)"
+            echo "Cache miss (local and peer ${PEER:-none}) — building binaries"
             cargo build -p cli
             cp target/debug/defra target/ci/defra
             cp target/debug/defra "$CACHE_DIR/defra"
@@ -735,6 +775,13 @@ jobs:
           cargo test -p integration-test
           --test p2p_iroh
           -- --test-threads=1 connection::
+
+      # Every other studio job reports these; this matrix did not, which left
+      # the fallback rebuild above as the one compile in CI with no visibility
+      # into whether sccache was serving it.
+      - name: Show sccache stats
+        if: always()
+        run: .github/scripts/show-sccache-stats.sh
 
       - name: Cleanup
         if: always()
