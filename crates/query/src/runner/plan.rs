@@ -190,6 +190,11 @@ pub(crate) enum ScanSource {
     Docs(Vec<Doc>),
     /// A fetcher the scan streams from, so a bounded query stops the fetch.
     Fetcher(Arc<dyn DocFetcher>),
+    /// A fetcher restricted to documents a vector index selected, in order.
+    VectorNarrowed {
+        fetcher: Arc<dyn DocFetcher>,
+        doc_short_ids: Vec<u64>,
+    },
 }
 
 /// Build a plan tree from a Select operation and a document source.
@@ -210,6 +215,13 @@ pub(crate) fn build_plan(
     let mut scan = match source {
         ScanSource::Docs(docs) => scan.with_docs(docs),
         ScanSource::Fetcher(fetcher) => scan.with_fetcher(fetcher),
+        ScanSource::VectorNarrowed {
+            fetcher,
+            doc_short_ids,
+        } => scan
+            .with_fetcher(fetcher)
+            .with_doc_short_ids(doc_short_ids)
+            .as_vector_indexed(),
     }
     .with_show_deleted(select.show_deleted);
 

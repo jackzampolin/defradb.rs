@@ -92,3 +92,34 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         }))
     }
 }
+
+impl<S: Store + 'static> LensedDocFetcher<S> {
+    /// The seeking counterpart of
+    /// [`stream_all_with_deleted_impl`](Self::stream_all_with_deleted_impl).
+    /// Identical but for its source: point reads instead of a prefix scan, so
+    /// the lens still sees one document at a time.
+    pub(super) async fn stream_by_doc_short_ids_impl(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn DocStream>> {
+        let (collection, datastore, systemstore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
+
+        Ok(Box::new(LensedDocStream {
+            inner: Box::new(crate::collection_stream::ShortIdDocStream::new(
+                collection.clone(),
+                datastore.clone(),
+                systemstore,
+                doc_short_ids.to_vec(),
+                show_deleted,
+            )),
+            fetcher: self.stream_clone(),
+            collection,
+            datastore,
+            has_migrations,
+        }))
+    }
+}
