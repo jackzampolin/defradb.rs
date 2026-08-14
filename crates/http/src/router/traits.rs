@@ -478,14 +478,17 @@ pub struct AcpLightClientStatus {
 pub trait IndexOperations: Send + Sync {
     /// Create an index on a collection. Returns the created index info.
     ///
-    /// If `name` is `None`, an index name will be auto-generated.
-    /// The `unique` flag enforces uniqueness constraints on the indexed fields.
+    /// `name` of `None` auto-generates one. `vector` makes this a vector index,
+    /// in which case `unique` does not apply. Both are parameters rather than a
+    /// defaulted second method so an implementor cannot quietly ignore the
+    /// vector config and build an ordinary index over the vector field.
     async fn create_index(
         &self,
         collection: &str,
         fields: Vec<String>,
         name: Option<&str>,
         unique: bool,
+        vector: Option<schema::VectorIndexDescription>,
     ) -> Result<IndexInfo, String>;
 
     /// List indexes, optionally filtered by collection.
@@ -509,6 +512,9 @@ pub struct IndexInfo {
     pub fields: Vec<IndexFieldInfo>,
     #[serde(default)]
     pub unique: bool,
+    /// Kind-specific config, absent for an ordinary index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<schema::IndexKind>,
 }
 
 /// Index field information.
