@@ -18,6 +18,8 @@ mod config;
 mod dedup;
 mod handle;
 mod metrics;
+#[cfg(feature = "otlp")]
+mod util;
 
 pub use config::TelemetryConfig;
 #[cfg(feature = "otlp")]
