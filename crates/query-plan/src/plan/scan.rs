@@ -39,6 +39,16 @@ pub struct ScanNode {
     filter: Option<Filter>,
     /// Optional document IDs supplied separately from the scan filter
     doc_ids: Option<Vec<String>>,
+    /// Documents this scan is restricted to, by short id.
+    ///
+    /// Unlike [`ScanNode::doc_ids`], which drops non-matching documents after
+    /// reading them, this narrows the read itself: the fetcher seeks each one.
+    /// A query that already knows which documents it wants, such as one
+    /// narrowed by a vector index, costs what it asked for rather than the
+    /// size of the collection.
+    doc_short_ids: Option<Vec<u64>>,
+    /// Whether the restriction came from a vector index search.
+    vector_indexed: bool,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -78,6 +88,8 @@ impl ScanNode {
             document_mapping,
             filter: None,
             doc_ids: None,
+            doc_short_ids: None,
+            vector_indexed: false,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -98,6 +110,27 @@ impl ScanNode {
     }
 
     /// Set document IDs supplied separately from the scan filter.
+    /// Restricts this scan to the given documents, read by seeking rather
+    /// than by scanning and discarding.
+    ///
+    /// An empty list means no documents match, which is different from no
+    /// restriction: the scan yields nothing rather than everything.
+    ///
+    /// Applies to the fetcher path only. Pre-loaded documents carry no short
+    /// id, so a restriction cannot address them; `ScanSource` yields either
+    /// documents or a fetcher, never both, so the two do not meet.
+    pub fn with_doc_short_ids(mut self, doc_short_ids: Vec<u64>) -> Self {
+        self.doc_short_ids = Some(doc_short_ids);
+        self
+    }
+
+    /// Marks the restriction as coming from a vector index, which explain
+    /// reports as one index fetch.
+    pub fn as_vector_indexed(mut self) -> Self {
+        self.vector_indexed = true;
+        self
+    }
+
     pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
         // Only set if non-empty; empty means scan entire collection
         if !doc_ids.is_empty() {
@@ -159,11 +192,18 @@ impl PlanNode for ScanNode {
         // (e.g. a satisfied LimitNode) stop the underlying fetch.
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
-                self.stream = Some(
-                    fetcher
-                        .stream_all_with_deleted(&self.collection.name, self.show_deleted)
-                        .await?,
-                );
+                self.stream = Some(match self.doc_short_ids.as_deref() {
+                    Some(ids) => {
+                        fetcher
+                            .stream_by_doc_short_ids(&self.collection.name, ids, self.show_deleted)
+                            .await?
+                    }
+                    None => {
+                        fetcher
+                            .stream_all_with_deleted(&self.collection.name, self.show_deleted)
+                            .await?
+                    }
+                });
             } else {
                 // No docs provided and no fetcher - this is a programming error.
                 // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
@@ -374,10 +414,11 @@ impl PlanNode for ScanNode {
             "fieldFetches".to_string(),
             serde_json::json!(self.exec_info.fields_fetched),
         );
-        obj.insert(
-            "indexFetches".to_string(),
-            serde_json::json!(self.exec_info.indexes_fetched),
-        );
+        // A vector-index hit counts as one fetch. Unlike a scalar index, which
+        // counts each entry read, this does not reflect the graph search's real
+        // node reads; matching the reference, which tracks the same gap.
+        let index_fetches = self.exec_info.indexes_fetched + u64::from(self.vector_indexed);
+        obj.insert("indexFetches".to_string(), serde_json::json!(index_fetches));
 
         serde_json::Value::Object(obj)
     }
@@ -545,6 +586,23 @@ mod stream_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl DocFetcher for CountingFetcher {
+        /// A mock has no storage, so a document's short id is its 1-based position
+        /// in the collection, mirroring how the real allocator hands them out.
+        async fn stream_by_doc_short_ids(
+            &self,
+            collection_name: &str,
+            doc_short_ids: &[u64],
+            show_deleted: bool,
+        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
+            let all = self
+                .get_all_with_deleted(collection_name, show_deleted)
+                .await?;
+            let picked = doc_short_ids
+                .iter()
+                .filter_map(|id| all.get(id.checked_sub(1)? as usize).cloned())
+                .collect();
+            Ok(Box::new(crate::doc_stream::VecStream::new(picked)))
+        }
         async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
             Ok(self.docs.iter().map(|(doc, _)| doc.clone()).collect())
         }

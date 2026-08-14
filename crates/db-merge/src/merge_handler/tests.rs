@@ -2904,6 +2904,7 @@ async fn make_handler_with_unique_index_schema() -> (
                 descending: false,
             }],
             unique: true,
+            kind: None,
             auto_generated: false,
         }),
     )
