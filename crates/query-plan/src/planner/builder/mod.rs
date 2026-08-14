@@ -258,9 +258,21 @@ impl Planner {
         // matching document to be scored, so resolving this first and suppressing
         // scalar selection keeps the choice deterministic rather than dependent
         // on which indexes a collection happens to carry.
+        //
+        // A row rejected above the scan is invisible to it, and the scan is what
+        // widens the candidate set when a page comes up short. An `OrderNode`
+        // blocks and consumes everything, so widening cannot instead be driven by
+        // the consumer still pulling. Rather than return a short page, these
+        // shapes take the exhaustive path, which scores every matching document
+        // and is therefore always right.
+        let rows_rejected_above_the_scan = filter_has_relations
+            || is_complex_filter
+            || (self.acp.is_some() && collection.policy.is_some());
+
         let vector_route = self
             .fetcher
             .as_ref()
+            .filter(|_| !rows_rejected_above_the_scan)
             .filter(|fetcher| fetcher.supports_vector_search())
             .and_then(|_| {
                 match crate::planner::vector_routing::route(

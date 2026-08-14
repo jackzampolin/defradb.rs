@@ -62,10 +62,10 @@ pub struct ScanNode {
     vector_seen: HashSet<u64>,
     /// Set once the index returned fewer candidates than asked for.
     vector_exhausted: bool,
+    /// Documents this scan produced, which is what a page of `k` counts.
+    emitted: usize,
     /// The `k` the last search asked for.
     vector_k: usize,
-    /// Documents yielded to the parent, which is what the page size counts.
-    emitted: usize,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -110,8 +110,8 @@ impl ScanNode {
             vector_route: None,
             vector_seen: HashSet::new(),
             vector_exhausted: false,
-            vector_k: 0,
             emitted: 0,
+            vector_k: 0,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -166,9 +166,9 @@ impl ScanNode {
     /// `k` overall can contain fewer than `k` matches. Asking for a wider `k`
     /// and continuing is what makes a filtered similarity query return a full
     /// page instead of whatever survived filtering the first `k`. Widening
-    /// stops once the index reports fewer candidates than asked for, so an
-    /// unsatisfiable filter costs one pass over the collection rather than
-    /// looping.
+    /// stops once the index reports fewer candidates than asked for, or offers
+    /// nothing it has not already offered, so an unsatisfiable filter costs one
+    /// pass over the collection rather than looping.
     async fn open_vector_stream(&mut self) -> Result<bool> {
         let (Some(route), Some(fetcher)) = (self.vector_route.clone(), self.fetcher.clone()) else {
             return Ok(false);
@@ -195,8 +195,6 @@ impl ScanNode {
 
         self.vector_exhausted = candidates.len() < next_k;
         self.vector_k = next_k;
-        self.vector_indexed = true;
-        self.exec_info.indexes_fetched += 1;
 
         let fresh: Vec<u64> = candidates
             .into_iter()
@@ -213,14 +211,29 @@ impl ScanNode {
         );
 
         if fresh.is_empty() {
+            // Nothing new at this width. Widening again would re-read the same
+            // ids, so the index has no more to offer this query.
+            self.vector_exhausted = true;
             return Ok(false);
         }
 
+        // A stream flushes deferred per-document work on close, so the exhausted
+        // one is closed before it is replaced rather than dropped: for the
+        // auto-commit fetcher that flush releases the read transaction and
+        // persists lens write-backs.
+        if let Some(mut previous) = self.stream.take() {
+            previous.close().await?;
+        }
         self.stream = Some(
             fetcher
                 .stream_by_doc_short_ids(&self.collection.name, &fresh, self.show_deleted)
                 .await?,
         );
+
+        // Only once a stream is actually open, so an explain never names an
+        // index for a scan that fell through to reading the whole collection.
+        self.vector_indexed = true;
+        self.exec_info.indexes_fetched += 1;
         Ok(true)
     }
 
@@ -231,6 +244,9 @@ impl ScanNode {
     /// which is the difference between "the index answered this" and "some
     /// index was read".
     fn vector_index_name(&self) -> Option<&str> {
+        if !self.vector_indexed {
+            return None;
+        }
         let route = self.vector_route.as_ref()?;
         self.collection
             .indexes
@@ -240,6 +256,11 @@ impl ScanNode {
     }
 
     /// Whether a short page is worth asking the index to widen for.
+    ///
+    /// Counted at this scan, which is sound only because the planner refuses to
+    /// route a query whose rows can be rejected above it: an `OrderNode` blocks
+    /// and consumes everything, so widening cannot be driven by the consumer
+    /// still pulling.
     fn wants_more_candidates(&self) -> bool {
         self.vector_route
             .as_ref()

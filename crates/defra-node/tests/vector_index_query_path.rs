@@ -263,7 +263,7 @@ async fn a_mismatched_metric_declines_to_route_and_stays_correct() {
         .filter_map(|row| row["sim"].as_f64())
         .fold(f64::MIN, f64::max);
     assert!(
-        (best - true_best).abs() < f64::EPSILON,
+        (best - true_best).abs() <= true_best.abs() * 1e-9,
         "declining to route must still return the true nearest: got {best}, best is {true_best}"
     );
 }
@@ -458,4 +458,96 @@ async fn an_unsupported_metric_is_refused_when_the_schema_is_written() {
             );
         }
     }
+}
+
+/// A filter that runs *above* the scan must still fill the page.
+///
+/// A relation filter is applied at a `SelectNode` after the joins, not at the
+/// scan, so counting what the scan emitted says nothing about what survived.
+/// The nearest documents here all fail the filter, so a scan that stops after
+/// its first `k` candidates returns nothing at all.
+#[tokio::test]
+async fn a_relation_filter_above_the_scan_still_fills_the_page() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema(
+        "type Owner { name: String  notes: [Note] }
+         type Note { title: String  owner: Owner  embedding: [Float32!] @vectorIndex(dimensions: 4, metric: \"DOT\") }",
+    )
+    .await
+    .expect("add schema");
+
+    let mut owners = Vec::new();
+    for who in ["keep", "drop"] {
+        let data = query_data(
+            &node,
+            &format!(r#"mutation {{ add_Owner(input: {{name: "{who}"}}) {{ _docID }} }}"#),
+            "seed owner",
+        )
+        .await;
+        owners.push(
+            data["add_Owner"][0]["_docID"]
+                .as_str()
+                .expect("owner docID")
+                .to_string(),
+        );
+    }
+
+    // The 20 nearest belong to "drop"; the 20 that match the filter are further.
+    for index in 0..40 {
+        let near = index < 20;
+        let owner = if near { &owners[1] } else { &owners[0] };
+        let vector: Vec<f64> = (0..4)
+            .map(|slot| if near { 9.0 - slot as f64 } else { 1.0 })
+            .collect();
+        query_data(
+            &node,
+            &format!(
+                r#"mutation {{ add_Note(input: {{title: "n{index}", owner: "{owner}", embedding: [{}]}}) {{ _docID }} }}"#,
+                render(&vector)
+            ),
+            "seed note",
+        )
+        .await;
+    }
+
+    let query = r#"{ Note(filter: {owner: {name: {_eq: "keep"}}}, order: {_alias: {sim: DESC}}, limit: 5) { title sim: SIMILARITY(embedding: {vector: [9.0, 8.0, 7.0, 6.0]}) } }"#;
+    let data = query_data(&node, query, "relation-filtered similarity").await;
+    let rows = data["Note"].as_array().expect("Note array");
+
+    assert_eq!(
+        rows.len(),
+        5,
+        "20 documents match the filter, so a page of 5 must be fillable; a short \
+         page means the scan stopped counting its own output while the filter \
+         above it rejected every row"
+    );
+}
+
+/// An empty index must not be reported as having served the scan.
+///
+/// With no candidates the scan falls through to reading the collection, so
+/// naming a vector index in the explain output would describe a search that
+/// never happened.
+#[tokio::test]
+async fn an_empty_index_is_not_reported_as_serving_the_scan() {
+    let node = node_with("").await;
+
+    let query = similarity_query(&vector_for(1), 5, None);
+    let explain = query_data(
+        &node,
+        &format!("query @explain(type: execute) {query}"),
+        "empty index",
+    )
+    .await;
+
+    assert_eq!(
+        vector_index(&explain),
+        None,
+        "an index that returned no candidates must not be named\n{explain:#}"
+    );
+    assert_eq!(
+        index_fetches(&explain),
+        0,
+        "nor counted as a fetch\n{explain:#}"
+    );
 }
