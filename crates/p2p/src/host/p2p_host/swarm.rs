@@ -1,14 +1,30 @@
 //! Swarm event handling.
 
 use iroh_bitswap::Store;
+use libp2p::core::ConnectedPoint;
+use libp2p::multiaddr::Protocol;
 use libp2p::swarm::{ConnectionId, SwarmEvent};
 use libp2p::PeerId;
 use tracing::{debug, error, info, warn};
 
 use crate::behaviour::DefraEvent;
 
+use super::connection_manager::ConnectionPath;
 use super::P2PHost;
 use crate::host::event::HostEvent;
+
+/// Whether a connection reaches the peer directly or through a circuit relay.
+fn connection_path(endpoint: &ConnectedPoint) -> ConnectionPath {
+    let address = match endpoint {
+        ConnectedPoint::Dialer { address, .. } => address,
+        ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr,
+    };
+    if address.iter().any(|part| part == Protocol::P2pCircuit) {
+        ConnectionPath::Relayed
+    } else {
+        ConnectionPath::Direct
+    }
+}
 
 impl<S: Store> P2PHost<S> {
     /// Handle a swarm event.
@@ -37,11 +53,34 @@ impl<S: Store> P2PHost<S> {
                 ..
             } => {
                 info!(peer_id = %peer_id, "Peer connected");
+                let local_peer_id = *self.swarm.local_peer_id();
                 self.connection_manager.on_established(
                     connection_id,
                     peer_id,
+                    connection_path(&endpoint),
+                    endpoint.is_dialer(),
                     tokio::time::Instant::now(),
                 );
+
+                let mut superseded = false;
+                for redundant in self
+                    .connection_manager
+                    .redundant_connections(local_peer_id, peer_id)
+                {
+                    superseded |= redundant == connection_id;
+                    debug!(
+                        peer_id = %peer_id,
+                        connection_id = %redundant,
+                        "Closing redundant connection; one connection per peer"
+                    );
+                    self.swarm.close_connection(redundant);
+                }
+                // A superseded connection contributes nothing: its address is
+                // about to disappear, and `PeerConnected` already fired for the
+                // connection that survives.
+                if superseded {
+                    return false;
+                }
 
                 // Store the remote peer's address from the connection endpoint.
                 // For dialer: the address we dialed (peer's listen addr).
