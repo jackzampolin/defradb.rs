@@ -16,6 +16,9 @@
 //!
 //! [`shutdown`]: TelemetryHandle::shutdown
 
+#[cfg(feature = "otlp")]
+use crate::util::panic_message;
+
 pub struct TelemetryHandle {
     #[cfg(feature = "otlp")]
     pub(crate) tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
@@ -90,11 +93,7 @@ impl Drop for TelemetryHandle {
                 self.shutdown_providers();
             }));
             if let Err(panic) = result {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("<non-string panic>");
+                let msg = panic_message(&panic);
                 eprintln!("warning: OpenTelemetry shutdown panicked during drop: {msg}");
             }
         }

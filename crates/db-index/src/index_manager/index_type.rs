@@ -1,28 +1,65 @@
 use document::NormalValue;
 use schema::IndexDescription;
 
-use crate::corekv::{MaybeSend, Reader, Result, Writer};
-
-use super::{
+use storage::corekv::{MaybeSend, Reader, Result, Writer};
+use storage::index::{
     Bound, CollectionIndex, ExactMatchIterator, FullTextIndex, RangeIterator, SimpleIndex,
     UniqueIndex,
 };
 
-/// Enum for index types (avoids dyn trait issues).
+use crate::vector::index::VectorIndex;
+
+/// Which concrete index a collection entry is, and the dispatch over them.
+///
+/// An enum rather than `dyn CollectionIndex`, because that trait's methods are
+/// generic over the transaction type and so not object-safe. It lives beside
+/// the manager that dispatches on it rather than in `storage` with the
+/// implementations, so a kind whose engine lives here can be a variant.
 #[non_exhaustive]
 pub enum IndexType {
     Simple(SimpleIndex),
     Unique(UniqueIndex),
     FullText(FullTextIndex),
+    Vector(VectorIndex),
 }
 
 impl IndexType {
     /// Create the appropriate index type based on description.
+    ///
+    /// A vector description reaches [`IndexType::try_new`] instead, because a
+    /// vector index can be rejected (out-of-range parameters) and this cannot
+    /// report that. A vector description here falls back to an ordered index
+    /// rather than silently mis-indexing.
     pub fn new(collection_short_id: u32, desc: IndexDescription) -> Self {
-        if desc.unique {
+        if desc.is_vector() {
+            if let Ok(index) = VectorIndex::try_new(collection_short_id, desc.clone()) {
+                return IndexType::Vector(index);
+            }
+        }
+        if desc.resolved_unique() {
             IndexType::Unique(UniqueIndex::new(collection_short_id, desc))
         } else {
             IndexType::Simple(SimpleIndex::new(collection_short_id, desc))
+        }
+    }
+
+    /// Like [`IndexType::new`], but surfaces why a vector description was
+    /// refused rather than quietly building something else.
+    pub fn try_new(collection_short_id: u32, desc: IndexDescription) -> crate::error::Result<Self> {
+        if desc.is_vector() {
+            return Ok(IndexType::Vector(VectorIndex::try_new(
+                collection_short_id,
+                desc,
+            )?));
+        }
+        Ok(Self::new(collection_short_id, desc))
+    }
+
+    /// Get a reference to the VectorIndex if this is one.
+    pub fn as_vector(&self) -> Option<&VectorIndex> {
+        match self {
+            IndexType::Vector(idx) => Some(idx),
+            _ => None,
         }
     }
 
@@ -32,6 +69,7 @@ impl IndexType {
             IndexType::Simple(idx) => idx.description(),
             IndexType::Unique(idx) => idx.description(),
             IndexType::FullText(idx) => idx.description(),
+            IndexType::Vector(idx) => idx.description(),
         }
     }
 
@@ -54,6 +92,7 @@ impl IndexType {
             IndexType::Simple(idx) => idx.save(txn, doc_short_id, values).await,
             IndexType::Unique(idx) => idx.save(txn, doc_short_id, values).await,
             IndexType::FullText(idx) => idx.save(txn, doc_short_id, values).await,
+            IndexType::Vector(idx) => idx.save(txn, doc_short_id, values).await,
         }
     }
 
@@ -69,6 +108,7 @@ impl IndexType {
             IndexType::Simple(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
             IndexType::Unique(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
             IndexType::FullText(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
+            IndexType::Vector(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
         }
     }
 
@@ -83,6 +123,7 @@ impl IndexType {
             IndexType::Simple(idx) => idx.delete(txn, doc_short_id, values).await,
             IndexType::Unique(idx) => idx.delete(txn, doc_short_id, values).await,
             IndexType::FullText(idx) => idx.delete(txn, doc_short_id, values).await,
+            IndexType::Vector(idx) => idx.delete(txn, doc_short_id, values).await,
         }
     }
 
@@ -92,6 +133,7 @@ impl IndexType {
             IndexType::Simple(idx) => idx.remove_all(txn).await,
             IndexType::Unique(idx) => idx.remove_all(txn).await,
             IndexType::FullText(idx) => idx.remove_all(txn).await,
+            IndexType::Vector(idx) => idx.remove_all(txn).await,
         }
     }
 
@@ -104,8 +146,10 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.get(txn, values).await,
             IndexType::Unique(idx) => idx.get(txn, values).await,
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
-                "exact match get not supported on full-text indexes".to_string(),
+            IndexType::FullText(_) | IndexType::Vector(_) => Err(storage::corekv::Error::Other(
+                "exact match get is not supported on full-text or vector indexes: neither \
+                 stores entries in key order"
+                    .to_string(),
             )),
         }
     }
@@ -119,8 +163,10 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.scan(txn, reverse).await,
             IndexType::Unique(idx) => idx.scan(txn, reverse).await,
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
-                "scan not supported on full-text indexes".to_string(),
+            IndexType::FullText(_) | IndexType::Vector(_) => Err(storage::corekv::Error::Other(
+                "scan is not supported on full-text or vector indexes: neither \
+                 stores entries in key order"
+                    .to_string(),
             )),
         }
     }
@@ -135,8 +181,10 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
             IndexType::Unique(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
-                "scan_prefix not supported on full-text indexes".to_string(),
+            IndexType::FullText(_) | IndexType::Vector(_) => Err(storage::corekv::Error::Other(
+                "scan_prefix is not supported on full-text or vector indexes: neither \
+                 stores entries in key order"
+                    .to_string(),
             )),
         }
     }
@@ -159,8 +207,10 @@ impl IndexType {
                 idx.scan_range(txn, prefix_values, lower, upper, reverse)
                     .await
             }
-            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
-                "scan_range not supported on full-text indexes".to_string(),
+            IndexType::FullText(_) | IndexType::Vector(_) => Err(storage::corekv::Error::Other(
+                "scan_range is not supported on full-text or vector indexes: neither \
+                 stores entries in key order"
+                    .to_string(),
             )),
         }
     }

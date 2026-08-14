@@ -118,6 +118,7 @@ async fn unique_json_index_rejects_duplicate_array_values() {
             descending: false,
         }],
         unique: true,
+        kind: None,
         auto_generated: false,
     }];
     let manager = IndexManager::from_collection(1, &schema).unwrap();
@@ -350,6 +351,7 @@ async fn test_from_collection_with_indexes() {
                 descending: false,
             }],
             unique: false,
+            kind: None,
             auto_generated: false,
         },
         IndexDescription {
@@ -360,6 +362,7 @@ async fn test_from_collection_with_indexes() {
                 descending: false,
             }],
             unique: true,
+            kind: None,
             auto_generated: false,
         },
     ];
@@ -981,6 +984,7 @@ async fn test_from_collection_with_empty_fields_fails() {
         id: 1,
         fields: vec![], // Empty fields - invalid
         unique: false,
+        kind: None,
         auto_generated: false,
     }];
 
@@ -1391,6 +1395,7 @@ async fn test_unique_constraint_violation_returns_error() {
                 descending: false,
             }],
             unique: true,
+            kind: None,
             auto_generated: false,
         };
 
@@ -1703,6 +1708,7 @@ mod unique_boundaries {
                 descending: false,
             }],
             unique: true,
+            kind: None,
             auto_generated: false,
         }];
         schema
