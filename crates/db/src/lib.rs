@@ -63,6 +63,7 @@ pub(crate) mod collection_provider;
 mod collection_retriever;
 pub(crate) mod collection_snapshot;
 pub(crate) mod collection_stream;
+pub use collection_stream::BackfillSource;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
 #[cfg(test)]

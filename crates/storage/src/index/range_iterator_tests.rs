@@ -9,6 +9,7 @@ fn test_index_description() -> IndexDescription {
         id: 1,
         name: "test_index".to_string(),
         unique: false,
+        kind: None,
         auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "age".to_string(),
@@ -22,6 +23,7 @@ fn composite_index_description() -> IndexDescription {
         id: 2,
         name: "composite_index".to_string(),
         unique: false,
+        kind: None,
         auto_generated: false,
         fields: vec![
             IndexedFieldDescription {
