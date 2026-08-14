@@ -27,8 +27,7 @@ impl<S: VectorNodeStore> IvfPq<S> {
             normalize(&mut query);
         }
 
-        let coarse = self.coarse_centroids(state).await?;
-        let quantizer = self.quantizer(state).await?;
+        let (coarse, quantizer) = self.trained_parts(state).await?;
 
         // `effort` overrides nprobe the way ef_search does for a graph.
         let nprobe = effort

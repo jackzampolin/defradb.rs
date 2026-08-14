@@ -11,7 +11,7 @@ use crate::vector::core::{Element, Metric};
 use crate::vector::store::{Node, NodeId, VectorNodeStore};
 
 /// Every live node, scored and ranked.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Flat<S> {
     store: S,
     metric: Metric,

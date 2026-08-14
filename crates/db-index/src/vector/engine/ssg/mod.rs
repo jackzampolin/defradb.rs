@@ -29,7 +29,7 @@ use crate::vector::engine::hnsw::Hnsw;
 use crate::vector::params::Params;
 use crate::vector::store::{NodeId, VectorNodeStore};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ssg<S> {
     staging: Hnsw<S>,
     metric: Metric,

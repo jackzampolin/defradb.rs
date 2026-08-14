@@ -33,6 +33,10 @@ tla_sha256     := "e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c73
 firefox_version     := "153.0.3"
 geckodriver_version := "0.37.1"
 
+# SIFT-small: 10k base vectors, 100 queries, published ground truth. The only
+# real (non-synthetic) corpus the vector benchmarks measure recall against.
+sift_sha256 := "b8f1e59b20319ac44279d5251706909dd3a5b8ca5ce2a11ddb1e73902252770e"
+
 # protoc publishes no per-asset checksum file, so its hashes are embedded.
 # Go and Temurin publish theirs, and are verified against upstream at install
 # time rather than duplicated here.
@@ -251,6 +255,40 @@ setup-browser:
     rm -rf "{{ tooling }}/firefox"
     tar -C "{{ tooling }}" -xJf "$tmp/firefox.tar.xz"
     echo "firefox: $("{{ tooling }}/firefox/firefox" --version) (.tooling)"
+
+# SIFT-small, for the vector benchmarks' recall measurement. Not part of
+# `just setup`: the benches skip cleanly without it, and it is a network fetch
+# most work does not need.
+[doc("SIFT-small corpus (5 MB), for real-data vector recall.")]
+[group('setup')]
+setup-sift:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ tooling }}/sift"
+    if [ -f "$root/siftsmall/siftsmall_base.fvecs" ]; then
+        echo "sift: already present at $root"; exit 0
+    fi
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    echo "fetching siftsmall from the TEXMEX corpus"
+    curl -fsSL -o "$tmp/siftsmall.tar.gz" \
+        "ftp://ftp.irisa.fr/local/texmex/corpus/siftsmall.tar.gz"
+    got="$(just _sha256 "$tmp/siftsmall.tar.gz")"
+    [ "$got" = "{{ sift_sha256 }}" ] || {
+        echo "error: siftsmall checksum mismatch" >&2
+        echo "  expected {{ sift_sha256 }}" >&2
+        echo "  got      $got" >&2
+        exit 1
+    }
+    mkdir -p "$root"
+    tar -C "$root" -xzf "$tmp/siftsmall.tar.gz"
+    echo "sift: $root/siftsmall"
+
+# Vector index benchmarks, including the SIFT-small recall measurement when
+# `just setup-sift` has been run.
+[doc("Vector index benchmarks (insert/update/delete/search/kernels).")]
+[group('test')]
+bench-vector *args:
+    cargo bench -p db-index {{ args }}
 
 # Go, for the FFI compatibility harness and the Go-parity integration suites.
 [doc("Go, for the FFI harness and the Go-parity suites.")]
