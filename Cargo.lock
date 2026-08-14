@@ -11841,6 +11841,7 @@ dependencies = [
  "opentelemetry-otlp 0.32.0",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.32.1",
+ "reqwest 0.13.3",
  "thiserror 2.0.18",
  "tracing",
  "tracing-opentelemetry 0.33.0",
