@@ -678,34 +678,40 @@ jobs:
             exit 1
           fi
 
-      # `basic` is serialized because its tests start rust nodes and the
-      # harness port allocator (`defra-harness::ports`) has a TOCTOU race
-      # between dropping the port guard listener and the child process
-      # binding. Under high parallelism the race triggers EADDRINUSE.
-      # Track the underlying harness fix in the backbone repo; this flag
-      # is the tactical mitigation.
-      - name: Run rust integration tests (serialized — port race)
+      # Parallelism is bounded at 8 rather than left to libtest's default.
+      # The guard-release port race that once forced `--test-threads=1` is
+      # handled in the harness (`defra-harness` retries a node start with
+      # fresh ports, 3 attempts, on an EADDRINUSE exit), so serializing is
+      # no longer the mitigation it was.
+      #
+      # 8 is the knee of the measured curve: it recovers 3.8x of the 4.3x
+      # total speedup available at 16 threads while halving the number of
+      # concurrently live node clusters. That headroom is deliberate —
+      # studio-1 also hosts runners for seven other repos, and
+      # `Cluster::restart_node` re-binds a node's original port holding no
+      # guard and with no retry, so the steal window widens with concurrency.
+      - name: Run rust integration tests (basic)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test basic
-          -- --test-threads=1 --skip ::go_
+          -- --test-threads=8 --skip ::go_
 
-      - name: Run rust integration tests (serialized — port race)
+      - name: Run rust integration tests (core suites)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test query --test acp --test nac
           --test encryption --test identity
           --test backup --test fts
-          -- --test-threads=1 --skip ::go_
+          -- --test-threads=8 --skip ::go_
 
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test p2p
-          -- --test-threads=1 --skip ::go_
+          -- --test-threads=8 --skip ::go_
 
       # go-compat runs the `go_*` half of every dual-runtime test against
       # the upstream Go DefraDB binary. Catches cross-implementation
@@ -849,8 +855,11 @@ jobs:
           "$DEFRA_IROH_BINARY" version --format json
 
       # Same selection as the macOS rust leg: pure-Rust P2P topologies only
-      # (`--skip ::go_` drops the go_go_/go_rust_ variants). Serialized because
-      # the harness port allocator has a TOCTOU bind race under parallelism.
+      # (`--skip ::go_` drops the go_go_/go_rust_ variants). Kept serial while
+      # the macOS legs run at 8: this leg exists to expose Linux scheduling
+      # races, so a fixed serial schedule keeps a failure attributable to the
+      # code under test rather than to harness contention, and at ~6 minutes
+      # it is nowhere near the critical path.
       - name: Run rust P2P integration tests
         run: >-
           cargo test -p integration-test
