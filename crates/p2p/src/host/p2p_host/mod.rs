@@ -16,8 +16,13 @@ use futures::StreamExt;
 use iroh_bitswap::Store;
 use libp2p::{
     identity::Keypair,
+    multiaddr::Protocol,
     noise, request_response,
-    swarm::{behaviour::toggle::Toggle, dial_opts::DialOpts},
+    swarm::{
+        behaviour::toggle::Toggle,
+        dial_opts::{DialOpts, PeerCondition},
+        DialError,
+    },
     tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
@@ -715,25 +720,49 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
     }
 
     /// Dial a peer at the given addresses.
+    ///
+    /// Naming the peer lets libp2p skip the dial when one is already connected
+    /// or in flight, so a repeated connect cannot stack a second connection
+    /// (#1449). Like Go's `Connect`, which returns nil once connected, a
+    /// skipped dial is success rather than an error.
     pub(super) fn dial_peer(&mut self, peer_id: PeerId, addrs: Vec<Multiaddr>) -> Result<()> {
-        for addr in addrs {
-            let dial_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
-            // Preserve ephemeral source ports now that TCP config no longer controls reuse.
-            let dial_opts = DialOpts::unknown_peer_id()
-                .address(dial_addr.clone())
-                .allocate_new_port()
-                .build();
-            match self.swarm.dial(dial_opts) {
-                Ok(_) => {
-                    debug!("Dialing peer {} at {}", peer_id, dial_addr);
-                    return Ok(());
+        let dial_addrs: Vec<Multiaddr> = addrs
+            .into_iter()
+            .map(|addr| {
+                if addr.iter().any(|part| matches!(part, Protocol::P2p(_))) {
+                    addr
+                } else {
+                    addr.with(Protocol::P2p(peer_id))
                 }
-                Err(e) => {
-                    warn!("Failed to dial {}: {}", dial_addr, e);
-                }
+            })
+            .collect();
+        if dial_addrs.is_empty() {
+            return Err(Error::Dial(format!("no addresses to dial peer {peer_id}")));
+        }
+
+        // `allocate_new_port` keeps outbound dials on an ephemeral source port.
+        // libp2p 0.56 moved that choice from the TCP transport to the dial, so
+        // dropping it would restore the persistent `EADDRINUSE` dial failures
+        // that #1021 traced to binding dials to the listen port.
+        let dial_opts = DialOpts::peer_id(peer_id)
+            .condition(PeerCondition::DisconnectedAndNotDialing)
+            .addresses(dial_addrs.clone())
+            .allocate_new_port()
+            .build();
+        match self.swarm.dial(dial_opts) {
+            Ok(()) => {
+                debug!("Dialing peer {} at {:?}", peer_id, dial_addrs);
+                Ok(())
+            }
+            Err(DialError::DialPeerConditionFalse(_)) => {
+                debug!("Peer {} already connected or being dialed", peer_id);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to dial {}: {}", peer_id, e);
+                Err(Error::Dial(format!("Failed to dial peer {peer_id}: {e}")))
             }
         }
-        Err(Error::Dial(format!("Failed to dial peer {}", peer_id)))
     }
 
     /// Send a PushLog response through the given channel.
