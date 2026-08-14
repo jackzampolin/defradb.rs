@@ -7,6 +7,7 @@
 use super::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use super::flat::Flat;
 use super::hnsw::Hnsw;
+use super::ivfpq::IvfPq;
 use crate::error::Result;
 use crate::vector::core::Element;
 use crate::vector::store::{NodeId, VectorNodeStore};
@@ -15,6 +16,7 @@ use crate::vector::store::{NodeId, VectorNodeStore};
 pub enum Engine<S> {
     Hnsw(Hnsw<S>),
     Flat(Flat<S>),
+    IvfPq(IvfPq<S>),
 }
 
 macro_rules! dispatch {
@@ -22,6 +24,7 @@ macro_rules! dispatch {
         match $self {
             Engine::Hnsw($engine) => $call,
             Engine::Flat($engine) => $call,
+            Engine::IvfPq($engine) => $call,
         }
     };
 }

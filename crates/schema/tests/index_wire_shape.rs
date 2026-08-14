@@ -42,6 +42,7 @@ fn vector() -> VectorIndexDescription {
             ef_construction: 128,
             ef_search: 64,
         }),
+        ivfpq: None,
     }
 }
 
@@ -131,9 +132,11 @@ fn a_partial_kind_resolves_as_go_resolves_it() {
     assert!(ordered.resolved_unique());
 }
 
-/// `HNSW` is a pointer in Go, so it is `null` when absent rather than missing.
+/// `HNSW` is a nil pointer in Go, which `encoding/json` emits as `null`; serde
+/// omits the key instead. Go's decoder reads a missing field as nil, so the two
+/// round-trip, but the emitted bytes differ and that is worth knowing.
 #[test]
-fn an_absent_hnsw_block_is_null_and_parses_back() {
+fn an_absent_hnsw_block_is_omitted_and_parses_back() {
     let desc = IndexDescription::new("i")
         .as_vector(VectorIndexDescription {
             hnsw: None,
@@ -141,10 +144,21 @@ fn an_absent_hnsw_block_is_null_and_parses_back() {
         })
         .normalized();
     let json = serde_json::to_value(&desc).unwrap();
-    assert_eq!(json["Kind"]["HNSW"], Value::Null);
+    assert!(
+        !json["Kind"].as_object().unwrap().contains_key("HNSW"),
+        "serde omits the key rather than emitting null"
+    );
 
     let back: IndexDescription = serde_json::from_value(json).unwrap();
     assert_eq!(back.vector().map(|v| v.hnsw), Some(None));
+
+    // Go's `null` must still parse, since that is what a Go node sends.
+    let from_go: IndexDescription = serde_json::from_value(json!({
+        "Name": "i", "ID": 1,
+        "Kind": {"Algorithm": "HNSW", "Metric": "COSINE", "Dimensions": 4, "HNSW": null}
+    }))
+    .unwrap();
+    assert_eq!(from_go.vector().map(|v| v.hnsw), Some(None));
 }
 
 /// `DOT` is ours alone: Go's `DistanceMetric` defines only `COSINE`, so a
@@ -212,7 +226,7 @@ fn flat_is_an_algorithm_go_cannot_parse() {
         .normalized();
     let json = serde_json::to_value(&desc).unwrap();
     assert_eq!(json["Kind"]["Algorithm"], json!("FLAT"));
-    assert_eq!(json["Kind"]["HNSW"], Value::Null);
+    assert!(!json["Kind"].as_object().unwrap().contains_key("HNSW"));
 
     let back: IndexDescription = serde_json::from_value(json).unwrap();
     assert_eq!(
@@ -243,4 +257,61 @@ fn go_compatibility_is_checkable_across_both_axes() {
             "{diverged:?} must be flagged"
         );
     }
+}
+
+/// `IVF_PQ` is the third divergence, and it brings a parameter block Go has no
+/// field for at all.
+#[test]
+fn ivfpq_is_an_algorithm_go_cannot_parse() {
+    use schema::IvfPqParams;
+
+    assert!(!VectorAlgorithm::IvfPq.is_go_compatible());
+    assert_eq!(
+        serde_json::to_value(VectorAlgorithm::IvfPq).unwrap(),
+        json!("IVF_PQ")
+    );
+
+    let desc = IndexDescription::new("i")
+        .as_vector(VectorIndexDescription {
+            algorithm: VectorAlgorithm::IvfPq,
+            hnsw: None,
+            ivfpq: Some(IvfPqParams {
+                nlist: 256,
+                nprobe: 16,
+                m: 32,
+                sample_bytes: 1 << 20,
+            }),
+            ..vector()
+        })
+        .normalized();
+
+    let json = serde_json::to_value(&desc).unwrap();
+    assert_eq!(json["Kind"]["Algorithm"], json!("IVF_PQ"));
+    assert_eq!(
+        json["Kind"]["IVFPQ"],
+        json!({"NList": 256, "NProbe": 16, "M": 32, "SampleBytes": 1_048_576})
+    );
+    assert!(!json["Kind"].as_object().unwrap().contains_key("HNSW"));
+
+    let back: IndexDescription = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        back.vector().map(|v| v.algorithm),
+        Some(VectorAlgorithm::IvfPq)
+    );
+    assert_eq!(
+        back.vector().and_then(|v| v.ivfpq).map(|p| p.nlist),
+        Some(256)
+    );
+}
+
+/// An HNSW description must not grow an IVFPQ key, or every Go-compatible
+/// definition would start carrying a field Go cannot parse.
+#[test]
+fn an_hnsw_description_carries_no_ivfpq_key() {
+    let json =
+        serde_json::to_value(IndexDescription::new("i").as_vector(vector()).normalized()).unwrap();
+    assert_eq!(
+        keys(&json["Kind"]),
+        ["Algorithm", "Dimensions", "HNSW", "Metric"]
+    );
 }

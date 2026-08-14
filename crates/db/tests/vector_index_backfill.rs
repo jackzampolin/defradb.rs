@@ -34,6 +34,7 @@ fn vector_kind() -> IndexKind {
         metric: DistanceMetric::Cosine,
         dimensions: DIMENSIONS,
         hnsw: Some(HnswParams::default()),
+        ivfpq: None,
     })
 }
 

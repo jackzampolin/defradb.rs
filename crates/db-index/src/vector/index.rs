@@ -16,6 +16,7 @@ use super::engine::ann::{Admit, Neighbor, VectorIndexEngine};
 use super::engine::dispatch::Engine;
 use super::engine::flat::Flat;
 use super::engine::hnsw::Hnsw;
+use super::engine::ivfpq::{IvfPq, IvfPqParams};
 use super::kv_store::KvNodeStore;
 use super::params::Params;
 use super::store::NodeId;
@@ -32,6 +33,7 @@ pub struct VectorIndex {
     desc: IndexDescription,
     vector: VectorIndexDescription,
     params: Params,
+    ivfpq: IvfPqParams,
     metric: Metric,
     seed: u64,
 }
@@ -48,16 +50,30 @@ impl VectorIndex {
         let mut params = Params::new(hnsw.m as usize);
         params.ef_construction = hnsw.ef_construction as usize;
         params.ef_search = hnsw.ef_search as usize;
-        // Flat has no build parameters, so an HNSW block alongside it is
-        // inert rather than a reason to refuse the index.
+        // Each algorithm validates only its own block, so parameters belonging
+        // to another are inert rather than a reason to refuse the index.
         if vector.algorithm == VectorAlgorithm::Hnsw {
             params.validate()?;
         }
+
+        let configured = vector.ivfpq.unwrap_or_default();
+        let ivfpq = IvfPqParams {
+            nlist: configured.nlist,
+            nprobe: configured.nprobe,
+            m: configured.m,
+            sample_bytes: configured.sample_bytes,
+        };
 
         let metric = match vector.metric {
             DistanceMetric::Cosine => Metric::Cosine,
             DistanceMetric::Dot => Metric::NegativeDot,
         };
+
+        // Refused here rather than at query time, so a description that can
+        // never answer is rejected where it is created.
+        if vector.algorithm == VectorAlgorithm::IvfPq {
+            IvfPq::try_new(super::store::MemoryNodeStore::new(), metric, ivfpq, 0)?;
+        }
 
         Ok(Self {
             collection_short_id,
@@ -67,6 +83,7 @@ impl VectorIndex {
             desc,
             vector,
             params,
+            ivfpq,
             metric,
         })
     }
@@ -83,7 +100,7 @@ impl VectorIndex {
         k: usize,
         effort: Option<usize>,
     ) -> Result<Vec<Neighbor>> {
-        self.engine(txn).search(query, k, effort).await
+        self.engine(txn)?.search(query, k, effort).await
     }
 
     /// [`search`](Self::search) restricted to the documents `admit` accepts.
@@ -95,7 +112,9 @@ impl VectorIndex {
         effort: Option<usize>,
         admit: &A,
     ) -> Result<Vec<Neighbor>> {
-        self.engine(txn).search_where(query, k, effort, admit).await
+        self.engine(txn)?
+            .search_where(query, k, effort, admit)
+            .await
     }
 
     /// Returns the configured algorithm behind [`VectorIndexEngine`] rather
@@ -104,14 +123,17 @@ impl VectorIndex {
     fn engine<'txn, T: Reader + Writer + MaybeSend>(
         &self,
         txn: &'txn mut T,
-    ) -> impl VectorIndexEngine + 'txn {
+    ) -> Result<impl VectorIndexEngine + 'txn> {
         let store = KvNodeStore::new(txn, self.collection_short_id, self.desc.id, LIVE_EPOCH);
-        match self.vector.algorithm {
+        Ok(match self.vector.algorithm {
             VectorAlgorithm::Hnsw => {
                 Engine::Hnsw(Hnsw::new(store, self.metric, self.params, self.seed))
             }
             VectorAlgorithm::Flat => Engine::Flat(Flat::new(store, self.metric)),
-        }
+            VectorAlgorithm::IvfPq => {
+                Engine::IvfPq(IvfPq::try_new(store, self.metric, self.ivfpq, self.seed)?)
+            }
+        })
     }
 
     /// The vector a document contributes, if any.
@@ -218,7 +240,7 @@ impl CollectionIndex for VectorIndex {
             return Ok(());
         };
         let id = NodeId(doc_short_id);
-        let mut engine = self.engine(txn);
+        let mut engine = self.engine(txn).map_err(into_storage)?;
         match indexable {
             Indexable::Narrow(v) => engine.insert(id, v).await,
             Indexable::Wide(v) => engine.insert(id, v).await,
@@ -252,6 +274,7 @@ impl CollectionIndex for VectorIndex {
         _values: &[NormalValue],
     ) -> storage::corekv::Result<()> {
         self.engine(txn)
+            .map_err(into_storage)?
             .delete(NodeId(doc_short_id))
             .await
             .map(|_| ())

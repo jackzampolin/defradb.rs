@@ -180,3 +180,66 @@ fn the_dot_metric_is_selectable() {
     );
     assert_eq!(vector.metric, DistanceMetric::Dot);
 }
+
+#[test]
+fn the_ivfpq_algorithm_is_selectable() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 8, algorithm: "IVF_PQ")
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::IvfPq);
+    assert!(vector.hnsw.is_none(), "IVF-PQ carries no HNSW block");
+    let ivfpq = vector.ivfpq.expect("IVF-PQ params");
+    assert_eq!(ivfpq.nprobe, 8);
+    assert_eq!(ivfpq.nlist, 0, "zero derives nlist from the corpus");
+    assert_eq!(ivfpq.m, 0, "zero derives m from the width");
+}
+
+#[test]
+fn ivfpq_parameters_are_read() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(
+                dimensions: 128,
+                algorithm: "IVF_PQ",
+                IVFPQ: { nlist: 256, nprobe: 16, m: 16, sampleBytes: 1048576 }
+            )
+        }"#,
+    );
+    let ivfpq = vector.ivfpq.expect("IVF-PQ params");
+    assert_eq!(
+        (ivfpq.nlist, ivfpq.nprobe, ivfpq.m, ivfpq.sample_bytes),
+        (256, 16, 16, 1_048_576)
+    );
+}
+
+#[test]
+fn an_unknown_ivfpq_argument_is_refused() {
+    let err = parse_sdl(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(
+                dimensions: 8, algorithm: "IVF_PQ", IVFPQ: { nlists: 4 }
+            )
+        }"#,
+    )
+    .expect_err("a misspelled argument must not parse");
+    assert!(
+        err.to_string().contains("nlists"),
+        "the error must name it, got: {err}"
+    );
+}
+
+/// An IVFPQ block on an HNSW index is inert rather than an error, the same way
+/// an HNSW block is inert on a flat index.
+#[test]
+fn an_ivfpq_block_on_an_hnsw_index_is_inert() {
+    let vector = only_vector(
+        r#"type Doc {
+            embedding: [Float!] @vectorIndex(dimensions: 8, IVFPQ: { nlist: 4 })
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::Hnsw);
+    assert!(vector.hnsw.is_some());
+    assert!(vector.ivfpq.is_none());
+}

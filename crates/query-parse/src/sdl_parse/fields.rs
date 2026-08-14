@@ -575,10 +575,41 @@ impl<'a> SdlParser<'a> {
             }
         };
 
+        let ivfpq = match get_directive_arg(directive, "IVFPQ") {
+            None => None,
+            Some(graphql_parser::schema::Value::Object(members)) => {
+                let mut config = super::directives::IvfPqConfig::default();
+                for (name, value) in members {
+                    let slot = match name.as_str() {
+                        "nlist" => &mut config.nlist,
+                        "nprobe" => &mut config.nprobe,
+                        "m" => &mut config.m,
+                        "sampleBytes" => &mut config.sample_bytes,
+                        other => {
+                            return Err(QueryError::parse(format!(
+                                "@vectorIndex IVFPQ has no argument named '{other}'"
+                            )))
+                        }
+                    };
+                    *slot =
+                        Some(directive_u32(name, value).map_err(|message| {
+                            QueryError::parse(format!("@vectorIndex {message}"))
+                        })?);
+                }
+                Some(config)
+            }
+            Some(_) => {
+                return Err(QueryError::parse(
+                    "@vectorIndex IVFPQ must be an object of parameters",
+                ))
+            }
+        };
+
         Ok(super::directives::VectorIndexConfig {
             dimensions,
             algorithm,
             hnsw,
+            ivfpq,
         })
     }
 

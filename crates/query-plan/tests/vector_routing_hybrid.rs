@@ -29,6 +29,7 @@ fn vector_index() -> Vec<IndexDescription> {
         metric: DistanceMetric::Cosine,
         dimensions: VECTOR.len() as u32,
         hnsw: Some(HnswParams::default()),
+        ivfpq: None,
     })]
 }
 

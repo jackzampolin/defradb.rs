@@ -9,4 +9,5 @@ pub mod engine;
 pub mod index;
 pub mod kv_store;
 pub mod params;
+pub mod quantize;
 pub mod store;

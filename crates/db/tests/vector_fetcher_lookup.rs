@@ -45,6 +45,7 @@ fn schema() -> CollectionVersion {
         metric: DistanceMetric::Cosine,
         dimensions: DIMENSIONS,
         hnsw: Some(HnswParams::default()),
+        ivfpq: None,
     })];
     version
 }

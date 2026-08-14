@@ -269,11 +269,23 @@ pub enum VectorAlgorithm {
     /// Exhaustive scan. Exact, no build parameters, no tuning.
     #[serde(rename = "FLAT")]
     Flat,
+    /// Coarse lists of product-quantized codes. Approximate and lossy, in
+    /// exchange for a code far smaller than the vector it stands for.
+    #[serde(rename = "IVF_PQ")]
+    IvfPq,
 }
 
 impl VectorAlgorithm {
     pub fn is_go_compatible(self) -> bool {
         matches!(self, Self::Hnsw)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hnsw => "HNSW",
+            Self::Flat => "FLAT",
+            Self::IvfPq => "IVF_PQ",
+        }
     }
 }
 
@@ -350,6 +362,48 @@ pub struct VectorIndexDescription {
     /// Present when `algorithm` is HNSW.
     #[serde(rename = "HNSW", default, skip_serializing_if = "Option::is_none")]
     pub hnsw: Option<HnswParams>,
+    /// Present when `algorithm` is IVF_PQ.
+    #[serde(rename = "IVFPQ", default, skip_serializing_if = "Option::is_none")]
+    pub ivfpq: Option<IvfPqParams>,
+}
+
+/// IVF-PQ build and search parameters.
+///
+/// `0` means derive from the corpus: `nlist` from its size, `m` from the
+/// vector width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IvfPqParams {
+    /// Coarse centroids, and therefore inverted lists.
+    #[serde(rename = "NList", default)]
+    pub nlist: u32,
+    /// Lists probed per query.
+    #[serde(rename = "NProbe", default = "default_ivfpq_nprobe")]
+    pub nprobe: u32,
+    /// Subquantizers, and therefore bytes per code.
+    #[serde(rename = "M", default)]
+    pub m: u32,
+    /// Cap on the resident training sample.
+    #[serde(rename = "SampleBytes", default = "default_ivfpq_sample_bytes")]
+    pub sample_bytes: u64,
+}
+
+fn default_ivfpq_nprobe() -> u32 {
+    8
+}
+
+fn default_ivfpq_sample_bytes() -> u64 {
+    128 << 20
+}
+
+impl Default for IvfPqParams {
+    fn default() -> Self {
+        Self {
+            nlist: 0,
+            nprobe: default_ivfpq_nprobe(),
+            m: 0,
+            sample_bytes: default_ivfpq_sample_bytes(),
+        }
+    }
 }
 
 /// Configuration of an ordered index: one that stores field values in key
@@ -397,6 +451,8 @@ struct IndexKindWire {
     dimensions: Option<u32>,
     #[serde(rename = "HNSW", default, skip_serializing_if = "Option::is_none")]
     hnsw: Option<HnswParams>,
+    #[serde(rename = "IVFPQ", default, skip_serializing_if = "Option::is_none")]
+    ivfpq: Option<IvfPqParams>,
     #[serde(rename = "Unique", default, skip_serializing_if = "Option::is_none")]
     unique: Option<bool>,
 }
@@ -409,6 +465,7 @@ impl From<IndexKindWire> for IndexKind {
                 metric: wire.metric.unwrap_or_default(),
                 dimensions: wire.dimensions.unwrap_or_default(),
                 hnsw: wire.hnsw,
+                ivfpq: wire.ivfpq,
             })
         } else {
             IndexKind::Ordered(OrderedIndexDescription {
@@ -426,6 +483,7 @@ impl From<IndexKind> for IndexKindWire {
                 metric: None,
                 dimensions: None,
                 hnsw: None,
+                ivfpq: None,
                 unique: Some(ordered.unique),
             },
             IndexKind::Vector(vector) => Self {
@@ -433,6 +491,7 @@ impl From<IndexKind> for IndexKindWire {
                 metric: Some(vector.metric),
                 dimensions: Some(vector.dimensions),
                 hnsw: vector.hnsw,
+                ivfpq: vector.ivfpq,
                 unique: None,
             },
         }

@@ -86,4 +86,20 @@ pub trait VectorNodeStore: MaybeSendSync {
     async fn iterate_nodes<F>(&self, visit: F) -> Result<()>
     where
         F: FnMut(Node) -> Result<()> + MaybeSend;
+
+    /// A namespaced blob space private to this index and epoch, for whatever a
+    /// kind needs beyond nodes: coarse centroids, codebooks, inverted lists.
+    ///
+    /// `kind` separates concepts and `key` is the kind's own encoding, so a
+    /// kind adds a concept without a port change. Graph-only kinds never call
+    /// these.
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()>;
+
+    /// Visits every entry of `kind` whose key starts with `key_prefix`, in key
+    /// order, one at a time.
+    async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], visit: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<()> + MaybeSend;
 }

@@ -12,6 +12,8 @@ pub enum EngineKind {
     Hnsw,
     /// Exhaustive scan. Exact, and linear in the corpus.
     Flat,
+    /// Coarse lists of product-quantized codes.
+    IvfPq,
 }
 
 impl EngineKind {
@@ -19,6 +21,7 @@ impl EngineKind {
         match self {
             EngineKind::Hnsw => "HNSW",
             EngineKind::Flat => "FLAT",
+            EngineKind::IvfPq => "IVF_PQ",
         }
     }
 }

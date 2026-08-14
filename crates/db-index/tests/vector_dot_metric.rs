@@ -33,6 +33,7 @@ fn index(metric: DistanceMetric) -> VectorIndex {
         metric,
         dimensions: 2,
         hnsw: Some(HnswParams::default()),
+        ivfpq: None,
     });
     VectorIndex::try_new(COLLECTION, desc).expect("a valid vector description")
 }

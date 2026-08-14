@@ -48,7 +48,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
         "fulltext" => &["language", "k1", "b"],
-        "vectorIndex" => &["dimensions", "algorithm", "HNSW"],
+        "vectorIndex" => &["dimensions", "algorithm", "HNSW", "IVFPQ"],
         "immutable" => &[],
         _ => &[],
     }
@@ -218,6 +218,8 @@ pub struct VectorIndexConfig {
     pub dimensions: Option<u32>,
     /// `None` means HNSW, matching the reference where it is the only value.
     pub algorithm: Option<String>,
+    /// Present when the `IVFPQ` argument was given.
+    pub ivfpq: Option<IvfPqConfig>,
     /// Present when the `HNSW` argument was given. Its absence still means
     /// HNSW, with defaults.
     pub hnsw: Option<HnswConfig>,
@@ -249,4 +251,14 @@ pub enum IndexDirection {
     #[default]
     Asc,
     Desc,
+}
+
+/// The `IVFPQ` argument of `@vectorIndex`. Every member is optional; an omitted
+/// one keeps its default, and a zero is derived from the corpus.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IvfPqConfig {
+    pub nlist: Option<u32>,
+    pub nprobe: Option<u32>,
+    pub m: Option<u32>,
+    pub sample_bytes: Option<u32>,
 }

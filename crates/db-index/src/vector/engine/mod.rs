@@ -10,3 +10,4 @@ pub mod ann;
 pub mod dispatch;
 pub mod flat;
 pub mod hnsw;
+pub mod ivfpq;

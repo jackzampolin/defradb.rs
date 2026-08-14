@@ -54,6 +54,7 @@ fn the_response_reports_the_kind() {
             metric: DistanceMetric::Cosine,
             dimensions: 4,
             hnsw: Some(HnswParams::default()),
+            ivfpq: None,
         })),
     };
     let json = serde_json::to_value(&described).unwrap();

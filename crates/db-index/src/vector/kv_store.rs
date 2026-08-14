@@ -6,7 +6,7 @@
 
 use defra_core::thread_bounds::MaybeSend;
 use storage::corekv::{IterOptions, Key, Reader, Writer};
-use storage::keys::datastore::VectorIndexKey;
+use storage::keys::datastore::{VectorAuxKey, VectorIndexKey};
 
 use super::codec::{decode_meta, decode_node, encode_meta, encode_node};
 use super::store::{Meta, Node, NodeId, VectorNodeStore};
@@ -34,6 +34,17 @@ impl<'txn, T> KvNodeStore<'txn, T> {
     /// Which build of the index this reads and writes.
     pub fn epoch(&self) -> u32 {
         self.epoch
+    }
+
+    fn aux_key(&self, kind: u8, key: &[u8]) -> Vec<u8> {
+        VectorAuxKey::new(
+            self.collection_short_id,
+            self.index_id,
+            self.epoch,
+            kind,
+            key,
+        )
+        .bytes()
     }
 
     fn node_key(&self, id: NodeId) -> Vec<u8> {
@@ -128,6 +139,38 @@ impl<T: Reader + Writer + MaybeSend> VectorNodeStore for KvNodeStore<'_, T> {
                 continue;
             }
             visit(node)?;
+        }
+        Ok(())
+    }
+
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.txn.get(&self.aux_key(kind, key)).await?)
+    }
+
+    async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()> {
+        let full = self.aux_key(kind, key);
+        self.txn.set(&full, value).await?;
+        Ok(())
+    }
+
+    /// Streams one kind's entries, holding one at a time. The prefix stops at
+    /// this epoch's discriminator, so a scan cannot reach the graph or another
+    /// kind.
+    async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], mut visit: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<()> + MaybeSend,
+    {
+        let prefix = self.aux_key(kind, key_prefix);
+        // Every stored entry has a separator after the discriminator, whether
+        // or not the scan narrowed by a prefix.
+        let strip = self.aux_key(kind, &[]).len() + 1;
+        let mut iter = self
+            .txn
+            .iterator(IterOptions::default().with_prefix(prefix))
+            .await?;
+        while let Some(pair) = iter.next().await? {
+            let key = pair.key.get(strip..).unwrap_or_default();
+            visit(key, &pair.value)?;
         }
         Ok(())
     }
