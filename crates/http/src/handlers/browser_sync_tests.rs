@@ -14,8 +14,8 @@ use defra_core::browser_sync::{
 
 use crate::mock::{MockNodeAcpOperations, MockQueryExecutor};
 use crate::router::{
-    create_router_with_state, create_router_with_state_and_sync_body_limit, AppStateBuilder,
-    BrowserSyncOperations, BrowserSyncResult, NodeAcpOperations,
+    create_router_with_state, create_router_with_state_and_body_limits, AppStateBuilder,
+    BodyLimits, BrowserSyncOperations, BrowserSyncResult, NodeAcpOperations,
 };
 
 #[derive(Default)]
@@ -203,7 +203,13 @@ async fn sync_honors_stricter_body_limit() {
     let state = AppStateBuilder::new(executor)
         .with_browser_sync(sync.clone())
         .build();
-    let router = create_router_with_state_and_sync_body_limit(state, 15);
+    let router = create_router_with_state_and_body_limits(
+        state,
+        BodyLimits {
+            sync: 15,
+            ..BodyLimits::unlimited()
+        },
+    );
     let response = router
         .oneshot(
             Request::builder()

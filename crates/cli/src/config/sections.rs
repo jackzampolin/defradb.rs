@@ -56,7 +56,7 @@ pub struct ApiConfig {
     /// Max schema request body size in bytes (0 = unlimited). Default: 0 (no limit).
     #[serde(default)]
     pub max_schema_size: u64,
-    /// Max backup import body size in bytes (0 = unlimited). Default: 0 (no limit).
+    /// Max backup import body size in bytes (0 = unlimited). Default: 100 MiB.
     #[serde(default)]
     pub max_backup_size: u64,
     /// Request timeout in seconds (0 = no timeout). Default: 300 (5 minutes).
@@ -130,7 +130,7 @@ impl Default for ApiConfig {
             privkey_path: String::new(),
             max_body_size: 0,
             max_schema_size: 0,
-            max_backup_size: 0,
+            max_backup_size: defra_http::DEFAULT_MAX_BACKUP_SIZE,
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent(),
             query_timeout: default_query_timeout(),

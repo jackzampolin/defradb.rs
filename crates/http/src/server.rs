@@ -21,11 +21,19 @@ use query::QueryLimits;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state_and_sync_body_limit, AcpOperations, AppStateBuilder, BackupOperations,
-    BlockOperations, BrowserSyncOperations, CollectionManagementOperations, DocumentAcpOperations,
-    DumpOperations, EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester,
-    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    create_router_with_state_and_body_limits, AcpOperations, AppStateBuilder, BackupOperations,
+    BlockOperations, BodyLimits, BrowserSyncOperations, CollectionManagementOperations,
+    DocumentAcpOperations, DumpOperations, EncryptedIndexOperations, IndexOperations,
+    LensOperations, ManageRequester, NodeAcpOperations, P2POperations, SchemaOperations,
+    TransactionOperations, ViewOperations,
 };
+
+/// Default cap on an inline backup import body (100 MiB).
+///
+/// Replaces a hardcoded check that used to live in the import handler, where
+/// it silently overrode the flag: `0` did not mean unlimited, and a larger
+/// flag value could not raise the bound.
+pub const DEFAULT_MAX_BACKUP_SIZE: u64 = 100 * 1024 * 1024;
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -40,6 +48,11 @@ pub struct ServerConfig {
     /// Max schema request body size in bytes (0 = unlimited).
     pub max_schema_size: u64,
     /// Max backup import body size in bytes (0 = unlimited).
+    ///
+    /// Defaults to 100 MiB rather than 0. Unlike Go, whose import reads from a
+    /// server-side filepath and has no request body to bound
+    /// (`http/handler_store.go:38-51`), ours uploads the backup inline, so this
+    /// is the only thing standing between an import and unbounded buffering.
     pub max_backup_size: u64,
     /// Request timeout in seconds (0 = no timeout).
     pub request_timeout: u64,
@@ -58,7 +71,7 @@ impl Default for ServerConfig {
             allowed_origins: Vec::new(),
             max_body_size: 0,
             max_schema_size: 0,
-            max_backup_size: 0,
+            max_backup_size: DEFAULT_MAX_BACKUP_SIZE,
             request_timeout: 300,
             max_concurrent_requests: 1000,
             max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
@@ -472,8 +485,12 @@ impl Server {
         } else {
             defra_core::browser_sync::MAX_SYNC_BODY_BYTES.min(self.config.max_body_size as usize)
         };
-        let mut router =
-            create_router_with_state_and_sync_body_limit(state, browser_sync_body_limit);
+        let limits = BodyLimits {
+            sync: browser_sync_body_limit,
+            schema: self.route_body_limit(self.config.max_schema_size),
+            backup_import: self.route_body_limit(self.config.max_backup_size),
+        };
+        let mut router = create_router_with_state_and_body_limits(state, limits);
 
         // Global auth middleware: enforces route-level permissions before handlers
         // run, and binds the caller's identity to the request task for DB-layer
@@ -623,4 +640,26 @@ impl Server {
     pub fn address(&self) -> SocketAddr {
         self.config.address
     }
+
+    /// Resolve a per-route body cap, clamped so it can never raise the
+    /// effective cap above the global `max_body_size`.
+    ///
+    /// `0` means unlimited for both, matching the CLI flags' documented
+    /// meaning: an unset route cap leaves the route bound only by the global
+    /// limit, and an unset global limit leaves the route cap standing alone.
+    fn route_body_limit(&self, route_limit: u64) -> Option<usize> {
+        if route_limit == 0 {
+            return None;
+        }
+        let effective = if self.config.max_body_size == 0 {
+            route_limit
+        } else {
+            route_limit.min(self.config.max_body_size)
+        };
+        Some(effective as usize)
+    }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
