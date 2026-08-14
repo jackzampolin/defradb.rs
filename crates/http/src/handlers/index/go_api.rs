@@ -31,6 +31,9 @@ pub struct GoCreateIndexRequest {
     /// Whether to create a unique index.
     #[serde(rename = "Unique", default)]
     pub unique: bool,
+    /// Vector index config. Present iff this is a vector index request.
+    #[serde(rename = "Vector", default)]
+    pub vector: Option<schema::VectorIndexDescription>,
 }
 
 /// Go-compatible indexed field description.
@@ -59,6 +62,9 @@ pub struct GoIndexDescription {
     /// Whether the index enforces uniqueness.
     #[serde(rename = "Unique")]
     pub unique: bool,
+    /// Kind-specific config, omitted for an ordinary index.
+    #[serde(rename = "Kind", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<schema::IndexKind>,
 }
 
 /// Go v1 index description paired with its lifecycle state.
@@ -78,6 +84,7 @@ fn ready_index(index: crate::router::IndexInfo) -> GoListIndexesResult {
         ..Default::default()
     };
     let description = GoIndexDescription {
+        kind: index.kind,
         name: index.name,
         id: index.id,
         fields: index
@@ -152,6 +159,7 @@ pub async fn go_create_index(
             field_names,
             request.name.as_deref(),
             request.unique,
+            request.vector,
         )
         .await
         .map_err(http_error_from_backend_message)?;
@@ -162,6 +170,7 @@ pub async fn go_create_index(
         id: index.id,
         fields: request.fields,
         unique: index.unique,
+        kind: index.kind,
     };
 
     Ok(Json(response))
@@ -297,6 +306,7 @@ mod tests {
     #[test]
     fn test_go_index_description_serialize() {
         let desc = GoIndexDescription {
+            kind: None,
             name: "idx_email".to_string(),
             id: 1,
             fields: vec![GoIndexedFieldDescription {

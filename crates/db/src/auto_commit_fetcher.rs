@@ -126,6 +126,45 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         result
     }
 
+    async fn stream_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn DocStream>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // The read transaction must outlive the stream, so it is handed over
+        // rather than dropped here, exactly as the full-scan stream does.
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        Ok(Box::new(AutoCommitDocStream {
+            inner: Some(Box::new(crate::collection_stream::ShortIdDocStream::new(
+                collection,
+                datastore,
+                systemstore,
+                doc_short_ids.to_vec(),
+                show_deleted,
+            ))),
+            txn: std::sync::Mutex::new(Some(txn)),
+        }))
+    }
+
     async fn stream_all_with_deleted(
         &self,
         collection_name: &str,

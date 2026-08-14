@@ -139,6 +139,28 @@ pub trait DocFetcher: MaybeSendSync {
         Ok(docs.into_iter().map(|d| (d, false)).collect())
     }
 
+    /// Stream named documents by short id, without scanning the collection.
+    ///
+    /// A stream rather than a `Vec` for the same reason
+    /// [`stream_all_with_deleted`](Self::stream_all_with_deleted) is one: the
+    /// caller decides how many it pulls, and a consumer that stops early stops
+    /// the reads. Nothing here holds more than one document.
+    ///
+    /// Required, not defaulted. A default is how a delegating wrapper silently
+    /// loses the ability: `FetcherWrapper` forwards only what it overrides, so
+    /// a default would have left the query runner unable to seek while every
+    /// layer beneath it could.
+    ///
+    /// Absent ids are skipped, since a caller holding an id from an index may
+    /// hold one whose document has since gone. Documents arrive in the order
+    /// asked for.
+    async fn stream_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> Result<Box<dyn crate::doc_stream::DocStream>>;
+
     /// Stream documents from a collection with their deletion status.
     ///
     /// Unlike [`Self::get_all_with_deleted`], the returned stream yields one
@@ -250,6 +272,36 @@ pub trait DocFetcher: MaybeSendSync {
     ///
     /// Returns true if `get_by_index_scan` is implemented and functional.
     fn supports_index_queries(&self) -> bool {
+        false
+    }
+
+    /// Nearest documents to `query_vector` under a vector index, nearest first.
+    ///
+    /// Returns document short ids, which is what a scan can be narrowed by.
+    /// `admit` restricts what may be *returned* without restricting what may be
+    /// traversed, so a filtered query still gets a full `k` whenever `k`
+    /// matching documents exist.
+    ///
+    /// Follows the same capability shape as
+    /// [`get_by_index_scan`](Self::get_by_index_scan): defaulted to an error
+    /// and gated by [`supports_vector_search`](Self::supports_vector_search),
+    /// so a fetcher without storage access is never asked.
+    async fn vector_search(
+        &self,
+        collection_name: &str,
+        index_id: u32,
+        query_vector: &[f64],
+        k: usize,
+        effort: Option<usize>,
+    ) -> Result<Vec<u64>> {
+        let _ = (collection_name, index_id, query_vector, k, effort);
+        Err(query_types::error::QueryError::execution(
+            "Vector search is not supported by this fetcher".to_string(),
+        ))
+    }
+
+    /// Whether [`vector_search`](Self::vector_search) can be used.
+    fn supports_vector_search(&self) -> bool {
         false
     }
 

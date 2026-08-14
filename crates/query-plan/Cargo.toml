@@ -43,6 +43,7 @@ tokio = { version = "1.35", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
+query-parse = { path = "../query-parse" }
 
 [lints]
 workspace = true

@@ -132,6 +132,12 @@ impl From<db_index::Error> for Error {
         match err {
             db_index::Error::Storage(e) => Error::Storage(e),
             db_index::Error::InvalidDocument(msg) => Error::InvalidDocument(msg),
+            other @ db_index::Error::VectorEntryPointNotFound { .. } => {
+                Error::Other(other.to_string())
+            }
+            other @ db_index::Error::VectorDimensionMismatch { .. } => {
+                Error::InvalidDocument(other.to_string())
+            }
             db_index::Error::Other(msg) => Error::Other(msg),
         }
     }
