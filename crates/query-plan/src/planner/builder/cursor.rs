@@ -357,6 +357,7 @@ mod tests {
             name: name.to_string(),
             id: 0,
             unique,
+            kind: None,
             auto_generated: false,
             fields: fields
                 .into_iter()
