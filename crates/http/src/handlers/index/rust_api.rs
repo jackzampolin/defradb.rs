@@ -93,6 +93,7 @@ pub async fn create_index(
             request.fields,
             request.name.as_deref(),
             request.unique,
+            None,
         )
         .await
         .map_err(http_error_from_backend_message)?;
@@ -219,6 +220,7 @@ mod tests {
     #[test]
     fn test_index_info_serialize() {
         let info = IndexInfo {
+            kind: None,
             id: 0,
             name: "idx_name".to_string(),
             collection: "Users".to_string(),
