@@ -205,7 +205,21 @@ pub struct DatastoreConfig {
     pub store: DatastoreType,
     pub path: String,
     pub max_txn_retries: u32,
-    pub valuelogfilesize: u64,
+    /// Datastore value log file size in bytes. Set only by `--valuelogfilesize`.
+    ///
+    /// `None` means unset: each backend keeps its own default. Deliberately not
+    /// defaulted to Go's 1 GiB -- that is Badger's own default, so passing it
+    /// through is a no-op in Go, whereas lark and rocksdb default their
+    /// compaction output target to 64 MiB and would be moved 16x by it.
+    ///
+    /// `skip` rather than `default`, because the old `u64` field carried that
+    /// 1 GiB default and `create_if_missing` serialized it into every generated
+    /// `config.yaml`. Deserializing it back would apply the 16x change to any
+    /// node that had ever been started, so a persisted value must not be
+    /// mistaken for an operator having asked for it. Skipping also stops the
+    /// key being written again, so the ambiguity cannot recur.
+    #[serde(skip)]
+    pub valuelogfilesize: Option<u64>,
     pub no_encryption: bool,
     pub no_searchable_encryption: bool,
     pub no_signing: bool,
@@ -240,7 +254,7 @@ impl Default for DatastoreConfig {
             store: DatastoreType::Lark,
             path: "data".to_string(),
             max_txn_retries: 5,
-            valuelogfilesize: 1 << 30, // 1GB
+            valuelogfilesize: None,
             no_encryption: false,
             no_searchable_encryption: false,
             no_signing: false,

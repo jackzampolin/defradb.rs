@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{Config, DatastoreType};
 use crate::error::Result;
@@ -224,6 +224,12 @@ impl Node {
             info!("Searchable encryption key loaded from keyring");
         }
 
+        if let Some(message) =
+            valuelogfilesize_warning(config.datastore.store, config.datastore.valuelogfilesize)
+        {
+            warn!("{message}");
+        }
+
         // Initialize storage, database, and set up P2P and HTTP server
         let servers = match config.datastore.store {
             DatastoreType::Memory => {
@@ -299,8 +305,7 @@ impl Node {
                     "Using RocksDB datastore at {}",
                     config.data_path().display()
                 );
-                let opts =
-                    RocksDbStoreOptions::from_env().with_durability(config.datastore.durability);
+                let opts = rocksdb_options(&config);
                 let backend = storage::RocksDbStore::open_with_options(config.data_path(), opts)?;
                 let store = Self::wrap_store(&config, backend)?;
                 Self::init_persistent_store_and_server(
@@ -322,8 +327,7 @@ impl Node {
             #[cfg(feature = "lark")]
             DatastoreType::Lark => {
                 info!("Using Lark datastore at {}", config.data_path().display());
-                let opts =
-                    LarkStoreOptions::from_env().with_durability(config.datastore.durability);
+                let opts = lark_options(&config);
                 let backend = storage::LarkStore::open_with_options(config.data_path(), opts)?;
                 let store = Self::wrap_store(&config, backend)?;
                 Self::init_persistent_store_and_server(
@@ -359,5 +363,164 @@ impl Node {
             shutdown_rx,
             user_identity,
         })
+    }
+}
+
+/// Whether a backend has a knob `--valuelogfilesize` can map onto.
+///
+/// Go wires the flag to Badger's `ValueLogFileSize` (`node/store_badger.go:34`),
+/// and its config key is namespaced `datastore.badger.valuelogfilesize`. Rust
+/// has no Badger backend, so the flag maps onto the nearest equivalent -- the
+/// compaction output target file size -- on the two backends that have one.
+fn supports_valuelogfilesize(store: DatastoreType) -> bool {
+    matches!(store, DatastoreType::Lark | DatastoreType::RocksDb)
+}
+
+/// Build lark options from config.
+///
+/// `--valuelogfilesize` is applied after `from_env` so the CLI flag wins over
+/// `LARK_TARGET_FILE_MB`, and only when explicitly set -- leaving it unset must
+/// preserve lark's own 64 MiB default rather than imposing Go's Badger-derived
+/// 1 GiB, which would be a 16x change for every operator who never set it.
+#[cfg(feature = "lark")]
+fn lark_options(config: &Config) -> LarkStoreOptions {
+    lark_options_from(LarkStoreOptions::from_env(), config)
+}
+
+/// Apply config over an already-resolved base, so precedence is testable
+/// without mutating process environment.
+#[cfg(feature = "lark")]
+fn lark_options_from(base: LarkStoreOptions, config: &Config) -> LarkStoreOptions {
+    let mut opts = base.with_durability(config.datastore.durability);
+    if let Some(bytes) = config.datastore.valuelogfilesize {
+        opts = opts.with_target_file_size(bytes);
+    }
+    opts
+}
+
+/// Build rocksdb options from config. Same precedence rule as [`lark_options`],
+/// against `ROCKS_TARGET_FILE_MB`.
+#[cfg(feature = "rocksdb")]
+fn rocksdb_options(config: &Config) -> RocksDbStoreOptions {
+    rocksdb_options_from(RocksDbStoreOptions::from_env(), config)
+}
+
+/// See [`lark_options_from`].
+#[cfg(feature = "rocksdb")]
+fn rocksdb_options_from(base: RocksDbStoreOptions, config: &Config) -> RocksDbStoreOptions {
+    let mut opts = base.with_durability(config.datastore.durability);
+    if let Some(bytes) = config.datastore.valuelogfilesize {
+        opts = opts.with_target_file_size_base(bytes);
+    }
+    opts
+}
+
+/// Message to log when the flag was set but the selected backend cannot honour
+/// it. Accepting an option and silently doing nothing is the defect this fix
+/// exists to close, so the no-op is announced rather than hidden.
+fn valuelogfilesize_warning(store: DatastoreType, value: Option<u64>) -> Option<String> {
+    match value {
+        Some(bytes) if !supports_valuelogfilesize(store) => Some(format!(
+            "--valuelogfilesize={bytes} has no effect on the {store:?} backend \
+             and is being ignored; it applies to the lark and rocksdb backends only"
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod valuelogfilesize_tests {
+    use super::*;
+
+    #[test]
+    fn an_ignored_flag_is_reported_rather_than_silently_dropped() {
+        assert!(
+            valuelogfilesize_warning(DatastoreType::Redb, Some(1 << 20)).is_some(),
+            "silently ignoring the flag reproduces the defect being fixed"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_the_backend_honours_it() {
+        assert!(valuelogfilesize_warning(DatastoreType::Lark, Some(1 << 20)).is_none());
+    }
+
+    fn config_with(store: DatastoreType, size: Option<u64>) -> Config {
+        let mut config = Config::default();
+        config.datastore.store = store;
+        config.datastore.valuelogfilesize = size;
+        config
+    }
+
+    /// The wiring the issue was about: the value must actually reach the
+    /// backend's options, not merely land in the config struct.
+    #[cfg(feature = "lark")]
+    #[test]
+    fn lark_receives_an_explicitly_set_value() {
+        let opts = lark_options(&config_with(DatastoreType::Lark, Some(4 * 1024 * 1024)));
+        assert_eq!(opts.target_file_size(), 4 * 1024 * 1024);
+    }
+
+    /// An unset flag must leave whatever the environment resolved to alone --
+    /// applying Go's 1 GiB here would be a 16x change for operators who never
+    /// set it. Asserted against the resolved base rather than a hardcoded
+    /// constant, so this does not break when the storage crate retunes.
+    #[cfg(feature = "lark")]
+    #[test]
+    fn lark_keeps_the_resolved_default_when_unset() {
+        let base = LarkStoreOptions::from_env();
+        let expected = base.target_file_size();
+        let opts = lark_options_from(base, &config_with(DatastoreType::Lark, None));
+        assert_eq!(opts.target_file_size(), expected);
+    }
+
+    /// Settled precedence: CLI flag beats `LARK_TARGET_FILE_MB`. Expressed by
+    /// handing in a base that already carries an env-derived value.
+    #[cfg(feature = "lark")]
+    #[test]
+    fn lark_cli_flag_beats_the_env_var() {
+        let from_env = LarkStoreOptions::new().with_target_file_size(8 * 1024 * 1024);
+        let opts = lark_options_from(
+            from_env,
+            &config_with(DatastoreType::Lark, Some(4 * 1024 * 1024)),
+        );
+        assert_eq!(
+            opts.target_file_size(),
+            4 * 1024 * 1024,
+            "the CLI flag must win over the environment"
+        );
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_receives_an_explicitly_set_value() {
+        let opts = rocksdb_options(&config_with(DatastoreType::RocksDb, Some(4 * 1024 * 1024)));
+        assert_eq!(opts.target_file_size_base(), 4 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_keeps_the_resolved_default_when_unset() {
+        let base = RocksDbStoreOptions::from_env();
+        let expected = base.target_file_size_base();
+        let opts = rocksdb_options_from(base, &config_with(DatastoreType::RocksDb, None));
+        assert_eq!(opts.target_file_size_base(), expected);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_cli_flag_beats_the_env_var() {
+        let from_env = RocksDbStoreOptions::new().with_target_file_size_base(8 * 1024 * 1024);
+        let opts = rocksdb_options_from(
+            from_env,
+            &config_with(DatastoreType::RocksDb, Some(4 * 1024 * 1024)),
+        );
+        assert_eq!(opts.target_file_size_base(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn no_warning_when_the_flag_was_never_set() {
+        assert!(valuelogfilesize_warning(DatastoreType::Redb, None).is_none());
+        assert!(valuelogfilesize_warning(DatastoreType::Memory, None).is_none());
     }
 }

@@ -425,7 +425,7 @@ impl StartArgs {
             config.datastore.store = store.parse()?;
         }
         if let Some(size) = self.valuelogfilesize {
-            config.datastore.valuelogfilesize = size;
+            config.datastore.valuelogfilesize = Some(size);
         }
         if let Some(ref addrs) = self.p2paddr {
             config.net.p2p_addresses = addrs.clone();
