@@ -22,9 +22,13 @@ storage = { path = "../storage" }
 
 # Error handling
 thiserror.workspace = true
+serde.workspace = true
 
 # Async
 async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

@@ -53,6 +53,18 @@ struct FailingFetcher {
 
 #[async_trait]
 impl DocFetcher for FailingFetcher {
+    /// Fails like every other read here, so a seeking caller sees the same
+    /// failure a scanning one would.
+    async fn stream_by_doc_short_ids(
+        &self,
+        collection_name: &str,
+        _doc_short_ids: &[u64],
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
+        self.stream_all_with_deleted(collection_name, show_deleted)
+            .await
+    }
+
     async fn stream_all_with_deleted(
         &self,
         collection_name: &str,

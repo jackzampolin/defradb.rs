@@ -92,6 +92,9 @@ impl<'a> SdlParser<'a> {
                         self.get_float_with_warning(directive, "b", &type_name, Some(field_name));
                     result.fulltext = Some(super::directives::FullTextConfig { language, k1, b });
                 }
+                "vectorIndex" => {
+                    result.vector_index = Some(self.parse_vector_index_directive(directive)?);
+                }
                 "immutable" => result.immutable = true,
                 "embedding" => {
                     let provider = get_directive_string(directive, "provider").unwrap_or_default();
@@ -505,6 +508,78 @@ impl<'a> SdlParser<'a> {
                 Some((field_name, descending))
             })
             .collect()
+    }
+
+    /// Reads `@vectorIndex(dimensions: Int, HNSW: { ... })`.
+    ///
+    /// An unrecognised member is an error rather than an ignored typo: a
+    /// silently dropped `efSearch` would build a differently-shaped index than
+    /// the schema asks for, and nothing downstream could tell.
+    pub(super) fn parse_vector_index_directive(
+        &self,
+        directive: &graphql_parser::schema::Directive<'_, String>,
+    ) -> Result<super::directives::VectorIndexConfig> {
+        use super::directives::{directive_u32, get_directive_arg, get_directive_u32, HnswConfig};
+
+        let dimensions = match get_directive_u32(directive, "dimensions") {
+            Some(Ok(value)) => Some(value),
+            Some(Err(message)) => return Err(QueryError::parse(format!("@vectorIndex {message}"))),
+            None => None,
+        };
+
+        let algorithm = match get_directive_arg(directive, "algorithm") {
+            None => None,
+            Some(graphql_parser::schema::Value::String(text))
+            | Some(graphql_parser::schema::Value::Enum(text)) => Some(text.clone()),
+            Some(_) => return Err(QueryError::parse("@vectorIndex algorithm must be a string")),
+        };
+
+        let hnsw = match get_directive_arg(directive, "HNSW") {
+            None => None,
+            Some(graphql_parser::schema::Value::Object(members)) => {
+                let mut config = HnswConfig::default();
+                for (name, value) in members {
+                    let slot = match name.as_str() {
+                        "metric" => {
+                            config.metric = match value {
+                                graphql_parser::schema::Value::String(text)
+                                | graphql_parser::schema::Value::Enum(text) => Some(text.clone()),
+                                _ => {
+                                    return Err(QueryError::parse(
+                                        "@vectorIndex HNSW metric must be a string",
+                                    ))
+                                }
+                            };
+                            continue;
+                        }
+                        "M" => &mut config.m,
+                        "efConstruction" => &mut config.ef_construction,
+                        "efSearch" => &mut config.ef_search,
+                        other => {
+                            return Err(QueryError::parse(format!(
+                                "@vectorIndex HNSW has no argument named '{other}'"
+                            )))
+                        }
+                    };
+                    *slot =
+                        Some(directive_u32(name, value).map_err(|message| {
+                            QueryError::parse(format!("@vectorIndex {message}"))
+                        })?);
+                }
+                Some(config)
+            }
+            Some(_) => {
+                return Err(QueryError::parse(
+                    "@vectorIndex HNSW must be an object of parameters",
+                ))
+            }
+        };
+
+        Ok(super::directives::VectorIndexConfig {
+            dimensions,
+            algorithm,
+            hnsw,
+        })
     }
 
     pub(super) fn parse_default_directive(

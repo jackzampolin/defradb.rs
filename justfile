@@ -29,6 +29,10 @@ jq_version     := "1.8.1"
 tla_version    := "1.8.0"
 tla_sha256     := "e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
 
+# Pinned to ci.yml's wasm-check job.
+firefox_version     := "153.0.3"
+geckodriver_version := "0.37.1"
+
 # protoc publishes no per-asset checksum file, so its hashes are embedded.
 # Go and Temurin publish theirs, and are verified against upstream at install
 # time rather than duplicated here.
@@ -75,7 +79,7 @@ _sha256 file:
 
 # Install every dependency needed to develop, test and verify the database.
 [group('setup')]
-setup: setup-rust setup-jq setup-cargo-tools setup-protoc setup-go setup-jdk setup-lean setup-tla
+setup: setup-rust setup-jq setup-cargo-tools setup-protoc setup-go setup-jdk setup-lean setup-tla setup-browser
     @echo
     @just doctor
 
@@ -194,6 +198,59 @@ setup-protoc:
     chmod 0755 "{{ tooling }}/protoc/bin/protoc"
     ln -sf "{{ tooling }}/protoc/bin/protoc" "$target"
     echo "protoc: $("$target" --version)"
+
+[doc("geckodriver (and Firefox if missing), for the browser wasm tests.")]
+[group('setup')]
+setup-browser:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="{{ tooling_bin }}/geckodriver"
+    if [ -x "$target" ] && "$target" --version 2>/dev/null | grep -q " {{ geckodriver_version }} "; then
+        echo "geckodriver: {{ geckodriver_version }} already installed"
+    else
+        case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64|Linux-amd64)   asset="linux64.tar.gz" ;;
+            Linux-aarch64|Linux-arm64)  asset="linux-aarch64.tar.gz" ;;
+            Darwin-x86_64)              asset="macos.tar.gz" ;;
+            Darwin-arm64)               asset="macos-aarch64.tar.gz" ;;
+            *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+        esac
+        url="https://github.com/mozilla/geckodriver/releases/download/v{{ geckodriver_version }}/geckodriver-v{{ geckodriver_version }}-${asset}"
+        tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+        echo "fetching geckodriver {{ geckodriver_version }} for $(uname -s)-$(uname -m)"
+        curl -fsSL -o "$tmp/gd.tar.gz" "$url"
+        mkdir -p "{{ tooling_bin }}"
+        tar -C "{{ tooling_bin }}" -xzf "$tmp/gd.tar.gz"
+        chmod 0755 "$target"
+        echo "geckodriver: $("$target" --version | head -1)"
+    fi
+    # A system Firefox is used when present; the pinned build is only fetched
+    # when there is nothing to drive, so this stays cheap on a normal machine.
+    if command -v firefox >/dev/null 2>&1; then
+        echo "firefox: $(firefox --version) (system)"; exit 0
+    fi
+    if [ -x "{{ tooling }}/firefox/firefox" ]; then
+        echo "firefox: $("{{ tooling }}/firefox/firefox" --version) (.tooling)"; exit 0
+    fi
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64|Linux-amd64)  ff_platform="linux-x86_64" ;;
+        Linux-aarch64|Linux-arm64) ff_platform="linux-aarch64" ;;
+        *) echo "error: no firefox on PATH and no pinned build for $(uname -s)-$(uname -m)" >&2
+           echo "       install Firefox, then re-run: just setup-browser" >&2; exit 1 ;;
+    esac
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    url="https://download-installer.cdn.mozilla.net/pub/firefox/releases/{{ firefox_version }}/${ff_platform}/en-US/firefox-{{ firefox_version }}.tar.xz"
+    echo "fetching firefox {{ firefox_version }} for ${ff_platform}"
+    curl -fsSL -o "$tmp/firefox.tar.xz" "$url"
+    # Mozilla publishes a digest per release; verify rather than trust.
+    want="$(curl -fsSL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/{{ firefox_version }}/SHA256SUMS" \
+            | awk -v p="${ff_platform}/en-US/firefox-{{ firefox_version }}.tar.xz" '$2 == p {print $1}')"
+    got="$(just _sha256 "$tmp/firefox.tar.xz")"
+    [ -n "$want" ] || { echo "error: no published digest for ${ff_platform}" >&2; exit 1; }
+    [ "$want" = "$got" ] || { echo "error: firefox checksum mismatch" >&2; echo "  expected $want" >&2; echo "  got      $got" >&2; exit 1; }
+    rm -rf "{{ tooling }}/firefox"
+    tar -C "{{ tooling }}" -xJf "$tmp/firefox.tar.xz"
+    echo "firefox: $("{{ tooling }}/firefox/firefox" --version) (.tooling)"
 
 # Go, for the FFI compatibility harness and the Go-parity integration suites.
 [doc("Go, for the FFI harness and the Go-parity suites.")]
@@ -349,9 +406,13 @@ build-fast:
 
 # Browser client, via wasm-pack, into pkg/wasm. The opt-level override
 # matches CI's `Build WASM` step; without it the local artifact differs.
+#
+# simd128 is not on by default; without it the vector kernels' SIMD tier is
+# compiled out. Baseline in Chrome 91, Firefox 89, Safari 16.4.
 [group('build')]
 build-wasm:
-    CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=z RUSTFLAGS="-C target-feature=+simd128" \
+        wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
 
 # Regenerate the C header for the FFI surface.
 [group('build')]
@@ -373,6 +434,22 @@ build-apple:
 [group('test')]
 test:
     cargo test --workspace --profile {{ profile }} --exclude integration-test --exclude ffi-test --exclude conformance
+
+# The only place the wasm SIMD kernels execute; they are compiled out of every
+# host build.
+[doc("Browser wasm tests in headless Firefox (needs `just setup-browser`).")]
+[group('test')]
+test-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v geckodriver >/dev/null 2>&1 || { echo "error: no geckodriver; run: just setup-browser" >&2; exit 1; }
+    if ! command -v firefox >/dev/null 2>&1 && [ -x "{{ tooling }}/firefox/firefox" ]; then
+        export PATH="{{ tooling }}/firefox:$PATH"
+    fi
+    command -v firefox >/dev/null 2>&1 || { echo "error: no firefox; run: just setup-browser" >&2; exit 1; }
+    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
+    export RUSTFLAGS="-C target-feature=+simd128"
+    cargo test -p defra-wasm --target wasm32-unknown-unknown --lib --tests
 
 # Unit tests for one crate: `just test-crate crdt`.
 [group('test')]

@@ -3469,8 +3469,10 @@ dependencies = [
  "defra-core",
  "document",
  "schema",
+ "serde",
  "storage",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -3764,6 +3766,7 @@ dependencies = [
  "console_error_panic_hook",
  "crypto",
  "db",
+ "db-index",
  "db-merge",
  "defra-core",
  "document",
@@ -9606,6 +9609,7 @@ dependencies = [
  "futures",
  "identity",
  "lens",
+ "query-parse",
  "query-types",
  "schema",
  "serde_json",
