@@ -170,6 +170,22 @@ fn test_validate_encrypted_index_field_is_unique() {
     ));
 }
 
+#[test]
+fn test_validate_relation_id_field_kind() {
+    let fields = vec![
+        FieldDescription::new("1", "author", FieldKind::relation("users", false))
+            .with_relation_name("post_author"),
+        FieldDescription::new("2", "_authorID", FieldKind::string()),
+    ];
+    let coll = CollectionVersion::new("posts", "v1", "coll-1", fields);
+
+    assert!(matches!(
+        coll.validate().unwrap_err(),
+        SchemaError::InvalidRelationIdFieldKind { field_name, actual }
+            if field_name == "_authorID" && actual == "String"
+    ));
+}
+
 // ============================================================================
 // Policy Validation Tests
 // ============================================================================

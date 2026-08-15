@@ -27,6 +27,11 @@ pub enum SchemaError {
     #[error("relation primary conflict: exactly one side of relation {relation_name} must be marked primary")]
     RelationPrimaryConflict { relation_name: String },
 
+    #[error(
+        "relational id field of invalid kind. Field: {field_name}, Expected: ID, Actual: {actual}"
+    )]
+    InvalidRelationIdFieldKind { field_name: String, actual: String },
+
     #[error("duplicate collection name: {0}")]
     DuplicateCollectionName(String),
 
