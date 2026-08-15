@@ -164,6 +164,7 @@ async fn unique_typed_array_index_deduplicates_repeated_values() {
             descending: false,
         }],
         unique: true,
+        kind: None,
         auto_generated: false,
     }];
     let manager = IndexManager::from_collection(1, &schema).unwrap();
