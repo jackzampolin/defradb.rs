@@ -14,12 +14,15 @@ async fn main() -> Result<()> {
             let profile = profile(args.get(1));
             print_json(&pir_poc::benchmark::run(profile)?)
         }
-        Some("compare") => {
+        Some("bench-opt") => {
             let profile = profile(args.get(1));
-            print_json(&pir_poc::comparison::run(profile)?)
+            print_json(&pir_poc::benchmark::run_optimizations(profile)?)
         }
-        #[cfg(feature = "dpf-compare")]
-        Some("compare-dpf") => print_json(&pir_poc::comparison::run_dpf()?),
+        Some("subscription-demo") => print_json(&pir_poc::subscription::demo().await?),
+        Some("bench-subscriptions") => {
+            let profile = profile(args.get(1));
+            print_json(&pir_poc::subscription::benchmark(profile)?)
+        }
         Some("build") => build(&args[1..]),
         Some("serve") => serve(&args[1..]).await,
         Some("query") => query(&args[1..]).await,
@@ -40,11 +43,12 @@ fn build(args: &[String]) -> Result<()> {
     let bucket_count = (records.len().saturating_mul(2))
         .next_power_of_two()
         .max(16);
-    let snapshot = Snapshot::build(
+    let snapshot = Snapshot::build_paged(
         records,
         SnapshotConfig {
             bucket_count,
             bucket_capacity: 8,
+            values_per_page: 4,
             max_key_bytes: 128,
             max_value_bytes: 1024,
             source: format!("{}.{}->{}", args[2], args[3], args[4]),
@@ -64,10 +68,11 @@ async fn serve(args: &[String]) -> Result<()> {
 }
 
 async fn query(args: &[String]) -> Result<()> {
-    if args.len() != 3 {
-        bail!("query requires KEY SERVER_A SERVER_B");
+    if args.len() < 3 {
+        bail!("query requires KEY SERVER [SERVER ...]");
     }
-    let (_, values) = pir_poc::http::private_lookup(args[0].as_bytes(), &args[1], &args[2]).await?;
+    let client = pir_poc::http::PirClient::connect(&args[1..]).await?;
+    let values = client.private_lookup(args[0].as_bytes()).await?;
     let rendered = values
         .into_iter()
         .map(|value| String::from_utf8(value.clone()).unwrap_or_else(|_| hex::encode(value)))
@@ -92,6 +97,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "pir-poc commands:\n  demo\n  bench [quick|full]\n  compare [quick|full]\n  compare-dpf (requires --features dpf-compare)\n  build INPUT OUTPUT COLLECTION KEY_FIELD VALUE_FIELD\n  serve SNAPSHOT_DIR BIND_ADDRESS\n  query KEY SERVER_A SERVER_B"
+        "pir-poc commands:\n  demo\n  subscription-demo\n  bench [quick|full]\n  bench-opt [quick|full]\n  bench-subscriptions [quick|full]\n  build INPUT OUTPUT COLLECTION KEY_FIELD VALUE_FIELD\n  serve SNAPSHOT_DIR BIND_ADDRESS\n  query KEY SERVER [SERVER ...]"
     );
 }

@@ -1,14 +1,16 @@
+mod layout;
+
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
-const FORMAT_VERSION: u32 = 1;
-const SLOT_HEADER_SIZE: usize = 6;
-const HASH_DOMAIN: &str = "defradb-pir-poc-bucket-v1";
+pub use layout::{bucket_for_key, page_key, Manifest, SnapshotConfig, SnapshotView};
+use layout::{FORMAT_VERSION, HASH_DOMAIN, PAGE_KEY_OVERHEAD, SLOT_HEADER_SIZE};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -26,86 +28,6 @@ impl Record {
 }
 
 #[derive(Clone, Debug)]
-pub struct SnapshotConfig {
-    pub bucket_count: usize,
-    pub bucket_capacity: usize,
-    pub max_key_bytes: usize,
-    pub max_value_bytes: usize,
-    pub source: String,
-    pub source_cutoff: String,
-}
-
-impl SnapshotConfig {
-    pub fn row_size(&self) -> Result<usize> {
-        let slot_size = SLOT_HEADER_SIZE
-            .checked_add(self.max_key_bytes)
-            .and_then(|size| size.checked_add(self.max_value_bytes))
-            .context("slot size overflow")?;
-        slot_size
-            .checked_mul(self.bucket_capacity)
-            .context("row size overflow")
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Manifest {
-    pub format_version: u32,
-    pub source: String,
-    pub source_cutoff: String,
-    pub hash_domain: String,
-    pub bucket_count: usize,
-    pub bucket_capacity: usize,
-    pub max_key_bytes: usize,
-    pub max_value_bytes: usize,
-    pub row_size: usize,
-    pub record_count: usize,
-    pub snapshot_id: String,
-}
-
-impl Manifest {
-    pub fn validate(&self) -> Result<()> {
-        if self.format_version != FORMAT_VERSION {
-            bail!(
-                "unsupported snapshot format version {}",
-                self.format_version
-            );
-        }
-        if self.hash_domain != HASH_DOMAIN {
-            bail!("unsupported snapshot hash domain");
-        }
-        if !self.bucket_count.is_power_of_two() {
-            bail!("bucket count must be a non-zero power of two");
-        }
-        if self.bucket_capacity == 0 || self.max_key_bytes == 0 || self.max_value_bytes == 0 {
-            bail!("capacity and key/value limits must be non-zero");
-        }
-        if self.max_key_bytes > u16::MAX as usize || self.max_value_bytes > u32::MAX as usize {
-            bail!("manifest key/value limit cannot be represented in the row format");
-        }
-        let expected_row_size = SLOT_HEADER_SIZE
-            .checked_add(self.max_key_bytes)
-            .and_then(|size| size.checked_add(self.max_value_bytes))
-            .and_then(|size| size.checked_mul(self.bucket_capacity))
-            .context("manifest row size overflow")?;
-        if self.row_size != expected_row_size {
-            bail!("manifest row size does not match its slot layout");
-        }
-        let capacity = self
-            .bucket_count
-            .checked_mul(self.bucket_capacity)
-            .context("manifest capacity overflow")?;
-        if self.record_count > capacity {
-            bail!("manifest record count exceeds snapshot capacity");
-        }
-        let id = hex::decode(&self.snapshot_id).context("snapshot ID is not hexadecimal")?;
-        if id.len() != blake3::OUT_LEN {
-            bail!("snapshot ID must be a BLAKE3 digest");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct Snapshot {
     pub manifest: Manifest,
     rows: Arc<[u8]>,
@@ -119,14 +41,54 @@ struct ManifestSeed<'a> {
     hash_domain: &'a str,
     bucket_count: usize,
     bucket_capacity: usize,
+    values_per_page: usize,
     max_key_bytes: usize,
     max_value_bytes: usize,
     row_size: usize,
     record_count: usize,
+    lookup_page_count: usize,
 }
 
 impl Snapshot {
-    pub fn build(mut records: Vec<Record>, config: SnapshotConfig) -> Result<Self> {
+    pub fn build(records: Vec<Record>, config: SnapshotConfig) -> Result<Self> {
+        Self::build_encoded(records, config, 0)
+    }
+
+    pub fn build_paged(records: Vec<Record>, mut config: SnapshotConfig) -> Result<Self> {
+        validate_config(&config)?;
+        let mut by_key = BTreeMap::<Vec<u8>, Vec<Vec<u8>>>::new();
+        for record in records {
+            validate_record(&record, &config)?;
+            by_key.entry(record.key).or_default().push(record.value);
+        }
+        for values in by_key.values_mut() {
+            values.sort();
+        }
+        let lookup_page_count = by_key
+            .values()
+            .map(|values| values.len().div_ceil(config.values_per_page))
+            .max()
+            .unwrap_or(1);
+        config.max_key_bytes = config
+            .max_key_bytes
+            .checked_add(PAGE_KEY_OVERHEAD)
+            .context("paged key size overflow")?;
+
+        let mut paged = Vec::new();
+        for (key, values) in by_key {
+            for (page, values) in values.chunks(config.values_per_page).enumerate() {
+                let key = page_key(&key, page)?;
+                paged.extend(values.iter().map(|value| Record::new(&key, value)));
+            }
+        }
+        Self::build_encoded(paged, config, lookup_page_count)
+    }
+
+    fn build_encoded(
+        mut records: Vec<Record>,
+        config: SnapshotConfig,
+        lookup_page_count: usize,
+    ) -> Result<Self> {
         validate_config(&config)?;
         records.sort_by(|left, right| {
             left.key
@@ -161,7 +123,7 @@ impl Snapshot {
             }
         }
 
-        Self::from_parts(rows, config, record_count)
+        Self::from_parts(rows, config, record_count, lookup_page_count)
     }
 
     pub fn benchmark(bucket_count: usize, row_size: usize, seed: u64) -> Result<Self> {
@@ -184,6 +146,7 @@ impl Snapshot {
         let config = SnapshotConfig {
             bucket_count,
             bucket_capacity: 1,
+            values_per_page: 1,
             max_key_bytes: 1,
             max_value_bytes: row_size - SLOT_HEADER_SIZE - 1,
             source: "synthetic-benchmark".into(),
@@ -196,10 +159,12 @@ impl Snapshot {
             hash_domain: HASH_DOMAIN,
             bucket_count,
             bucket_capacity: 1,
+            values_per_page: 1,
             max_key_bytes: 1,
             max_value_bytes: config.max_value_bytes,
             row_size,
             record_count: bucket_count,
+            lookup_page_count: 0,
         };
         let snapshot_id = snapshot_id(&seed_manifest, &rows)?;
         Ok(Self {
@@ -210,17 +175,24 @@ impl Snapshot {
                 hash_domain: HASH_DOMAIN.into(),
                 bucket_count,
                 bucket_capacity: 1,
+                values_per_page: 1,
                 max_key_bytes: 1,
                 max_value_bytes: config.max_value_bytes,
                 row_size,
                 record_count: bucket_count,
+                lookup_page_count: 0,
                 snapshot_id,
             },
             rows: rows.into(),
         })
     }
 
-    fn from_parts(rows: Vec<u8>, config: SnapshotConfig, record_count: usize) -> Result<Self> {
+    fn from_parts(
+        rows: Vec<u8>,
+        config: SnapshotConfig,
+        record_count: usize,
+        lookup_page_count: usize,
+    ) -> Result<Self> {
         let row_size = config.row_size()?;
         let seed = ManifestSeed {
             format_version: FORMAT_VERSION,
@@ -229,10 +201,12 @@ impl Snapshot {
             hash_domain: HASH_DOMAIN,
             bucket_count: config.bucket_count,
             bucket_capacity: config.bucket_capacity,
+            values_per_page: config.values_per_page,
             max_key_bytes: config.max_key_bytes,
             max_value_bytes: config.max_value_bytes,
             row_size,
             record_count,
+            lookup_page_count,
         };
         let id = snapshot_id(&seed, &rows)?;
         Ok(Self {
@@ -243,10 +217,12 @@ impl Snapshot {
                 hash_domain: HASH_DOMAIN.into(),
                 bucket_count: config.bucket_count,
                 bucket_capacity: config.bucket_capacity,
+                values_per_page: config.values_per_page,
                 max_key_bytes: config.max_key_bytes,
                 max_value_bytes: config.max_value_bytes,
                 row_size,
                 record_count,
+                lookup_page_count,
                 snapshot_id: id,
             },
             rows: rows.into(),
@@ -254,40 +230,19 @@ impl Snapshot {
     }
 
     pub fn row(&self, index: usize) -> Result<&[u8]> {
-        if index >= self.manifest.bucket_count {
-            bail!("row index {index} is outside the snapshot");
-        }
-        let start = index * self.manifest.row_size;
-        Ok(&self.rows[start..start + self.manifest.row_size])
+        self.view().row(index)
     }
 
     pub fn rows(&self) -> &[u8] {
         &self.rows
     }
 
-    pub fn values_from_row(&self, row: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
-        if row.len() != self.manifest.row_size {
-            bail!("row size mismatch");
+    pub fn view(&self) -> SnapshotView<'_> {
+        SnapshotView {
+            rows: &self.rows,
+            bucket_count: self.manifest.bucket_count,
+            row_size: self.manifest.row_size,
         }
-        let slot_size =
-            SLOT_HEADER_SIZE + self.manifest.max_key_bytes + self.manifest.max_value_bytes;
-        let mut values = Vec::new();
-        for slot in row.chunks_exact(slot_size) {
-            let key_len = u16::from_le_bytes([slot[0], slot[1]]) as usize;
-            let value_len = u32::from_le_bytes([slot[2], slot[3], slot[4], slot[5]]) as usize;
-            if key_len == 0 && value_len == 0 {
-                continue;
-            }
-            if key_len > self.manifest.max_key_bytes || value_len > self.manifest.max_value_bytes {
-                bail!("encoded row contains invalid lengths");
-            }
-            let key_start = SLOT_HEADER_SIZE;
-            let value_start = key_start + self.manifest.max_key_bytes;
-            if &slot[key_start..key_start + key_len] == key {
-                values.push(slot[value_start..value_start + value_len].to_vec());
-            }
-        }
-        Ok(values)
     }
 
     pub fn save(&self, directory: &Path) -> Result<()> {
@@ -320,10 +275,12 @@ impl Snapshot {
             hash_domain: &manifest.hash_domain,
             bucket_count: manifest.bucket_count,
             bucket_capacity: manifest.bucket_capacity,
+            values_per_page: manifest.values_per_page,
             max_key_bytes: manifest.max_key_bytes,
             max_value_bytes: manifest.max_value_bytes,
             row_size: manifest.row_size,
             record_count: manifest.record_count,
+            lookup_page_count: manifest.lookup_page_count,
         };
         let actual_id = snapshot_id(&seed, &rows)?;
         if actual_id != manifest.snapshot_id {
@@ -334,15 +291,6 @@ impl Snapshot {
             rows: rows.into(),
         })
     }
-}
-
-pub fn bucket_for_key(key: &[u8], bucket_count: usize) -> usize {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(HASH_DOMAIN.as_bytes());
-    hasher.update(key);
-    let bytes = hasher.finalize();
-    let prefix = u64::from_le_bytes(bytes.as_bytes()[..8].try_into().expect("fixed prefix"));
-    prefix as usize & (bucket_count - 1)
 }
 
 pub fn records_from_json(
@@ -382,6 +330,9 @@ fn validate_config(config: &SnapshotConfig) -> Result<()> {
     if config.bucket_capacity == 0 || config.max_key_bytes == 0 || config.max_value_bytes == 0 {
         bail!("capacity and key/value limits must be non-zero");
     }
+    if config.values_per_page == 0 || config.values_per_page > config.bucket_capacity {
+        bail!("values per page must be between one and the bucket capacity");
+    }
     if config.max_key_bytes > u16::MAX as usize || config.max_value_bytes > u32::MAX as usize {
         bail!("configured key/value limit cannot be represented in the row format");
     }
@@ -420,7 +371,7 @@ fn encode_slot(slot: &mut [u8], record: &Record, config: &SnapshotConfig) {
 
 fn snapshot_id(seed: &ManifestSeed<'_>, rows: &[u8]) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"defradb-pir-poc-snapshot-v1");
+    hasher.update(b"defradb-pir-poc-snapshot-v2");
     hasher.update(&serde_json::to_vec(seed)?);
     hasher.update(rows);
     Ok(hasher.finalize().to_hex().to_string())
@@ -434,6 +385,7 @@ mod tests {
         SnapshotConfig {
             bucket_count: 16,
             bucket_capacity: 4,
+            values_per_page: 2,
             max_key_bytes: 16,
             max_value_bytes: 32,
             source: "Test".into(),
@@ -455,6 +407,7 @@ mod tests {
 
         let bucket = bucket_for_key(b"alice", first.manifest.bucket_count);
         let values = first
+            .manifest
             .values_from_row(first.row(bucket).unwrap(), b"alice")
             .unwrap();
         assert_eq!(values, vec![b"one".to_vec(), b"three".to_vec()]);
@@ -465,8 +418,35 @@ mod tests {
         let mut cfg = config();
         cfg.bucket_count = 1;
         cfg.bucket_capacity = 1;
+        cfg.values_per_page = 1;
         let error =
             Snapshot::build(vec![Record::new("a", "1"), Record::new("b", "2")], cfg).unwrap_err();
         assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn paged_snapshot_supports_high_cardinality_keys_and_pads_queries() {
+        let mut records = (0..9)
+            .map(|index| Record::new("popular", format!("value-{index}")))
+            .collect::<Vec<_>>();
+        records.push(Record::new("rare", "only"));
+        let mut cfg = config();
+        cfg.bucket_count = 64;
+        let snapshot = Snapshot::build_paged(records, cfg).unwrap();
+        assert_eq!(snapshot.manifest.lookup_page_count, 5);
+
+        let lookup_keys = snapshot.manifest.lookup_keys(b"rare").unwrap();
+        assert_eq!(lookup_keys.len(), 5);
+        let values = lookup_keys
+            .iter()
+            .flat_map(|lookup_key| {
+                let bucket = bucket_for_key(lookup_key, snapshot.manifest.bucket_count);
+                snapshot
+                    .manifest
+                    .values_from_row(snapshot.row(bucket).unwrap(), lookup_key)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![b"only".to_vec()]);
     }
 }

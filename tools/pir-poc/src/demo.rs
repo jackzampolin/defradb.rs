@@ -27,13 +27,17 @@ pub struct DemoReport {
     pub snapshot_id: String,
     pub bucket_count: usize,
     pub row_size: usize,
+    pub lookup_pages: usize,
+    pub server_count: usize,
     pub query_share_bytes_per_server: usize,
+    pub total_query_bytes: usize,
     pub answer_share_bytes_per_server: usize,
-    pub server_a: String,
-    pub server_b: String,
+    pub total_answer_bytes: usize,
+    pub servers: Vec<String>,
     pub queried_key: String,
     pub recovered_value: String,
-    pub elapsed_ms: f64,
+    pub client_connect_ms: f64,
+    pub private_query_ms: f64,
 }
 
 pub async fn run() -> Result<DemoReport> {
@@ -53,11 +57,12 @@ pub async fn run() -> Result<DemoReport> {
     let data = response.data.context("DefraDB query returned no data")?;
     let records = records_from_json(&data, Some("PrivateRecord"), "lookupKey", "payload")?;
     let document_count = records.len();
-    let snapshot = Arc::new(Snapshot::build(
+    let snapshot = Arc::new(Snapshot::build_paged(
         records,
         SnapshotConfig {
             bucket_count: 64,
             bucket_capacity: 4,
+            values_per_page: 2,
             max_key_bytes: 64,
             max_value_bytes: 256,
             source: "PrivateRecord.lookupKey->payload".into(),
@@ -65,14 +70,24 @@ pub async fn run() -> Result<DemoReport> {
         },
     )?);
 
-    let server_a = http::spawn(Arc::clone(&snapshot), "127.0.0.1:0").await?;
-    let server_b = http::spawn(Arc::clone(&snapshot), "127.0.0.1:0").await?;
-    let url_a = format!("http://{}", server_a.address);
-    let url_b = format!("http://{}", server_b.address);
+    let server_count = 3;
+    let mut running_servers = Vec::with_capacity(server_count);
+    for _ in 0..server_count {
+        running_servers.push(http::spawn(Arc::clone(&snapshot), "127.0.0.1:0").await?);
+    }
+    let servers = running_servers
+        .iter()
+        .map(|server| format!("http://{}", server.address))
+        .collect::<Vec<_>>();
     let key = "account:alice";
+    let connect_started = Instant::now();
+    let client = http::PirClient::connect(&servers).await?;
+    let client_connect_ms = connect_started.elapsed().as_secs_f64() * 1_000.0;
+    let manifest = client.manifest().clone();
+    let lookup_pages = manifest.lookup_keys(key.as_bytes())?.len();
     let started = Instant::now();
-    let (manifest, values) = http::private_lookup(key.as_bytes(), &url_a, &url_b).await?;
-    let elapsed = started.elapsed();
+    let values = client.private_lookup(key.as_bytes()).await?;
+    let private_query_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let value = values
         .first()
         .context("private lookup returned no matching value")?;
@@ -87,13 +102,19 @@ pub async fn run() -> Result<DemoReport> {
         snapshot_id: manifest.snapshot_id,
         bucket_count: manifest.bucket_count,
         row_size: manifest.row_size,
+        lookup_pages,
+        server_count,
         query_share_bytes_per_server: crate::dense::query_size(manifest.bucket_count),
+        total_query_bytes: crate::dense::query_size(manifest.bucket_count)
+            * server_count
+            * lookup_pages,
         answer_share_bytes_per_server: manifest.row_size,
-        server_a: url_a,
-        server_b: url_b,
+        total_answer_bytes: manifest.row_size * server_count * lookup_pages,
+        servers,
         queried_key: key.into(),
         recovered_value,
-        elapsed_ms: elapsed.as_secs_f64() * 1_000.0,
+        client_connect_ms,
+        private_query_ms,
     })
 }
 

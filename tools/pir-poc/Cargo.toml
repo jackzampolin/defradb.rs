@@ -13,21 +13,19 @@ anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
 blake3 = "1.8"
-chalametpir_client = "=0.8.0"
-chalametpir_server = "=0.8.0"
 defra-node = { path = "../../crates/defra-node", default-features = false, features = ["native"] }
-dpf = { version = "0.2.0", optional = true }
+events = { path = "../../crates/events" }
+fss-rs = { version = "0.6", default-features = false, features = ["prg", "stable"] }
 hex.workspace = true
 memory-stats = "1.2"
 query = { path = "../../crates/query" }
 rand.workspace = true
+rayon = "1.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-
-[features]
-dpf-compare = ["dep:dpf"]
 
 [lints]
 workspace = true
