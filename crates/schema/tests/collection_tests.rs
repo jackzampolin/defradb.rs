@@ -8,8 +8,8 @@
 //! - Serialization roundtrip
 
 use schema::{
-    CType, CollectionBuilder, CollectionVersion, FieldDescription, FieldKind, PolicyDescription,
-    SchemaError,
+    CType, CollectionBuilder, CollectionVersion, EncryptedIndexDescription, FieldDescription,
+    FieldKind, PolicyDescription, SchemaError,
 };
 use std::collections::HashMap;
 
@@ -143,6 +143,31 @@ fn test_validate_invalid_crdt_fails() {
 fn test_validate_valid_collection() {
     let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields());
     assert!(coll.validate().is_ok());
+}
+
+#[test]
+fn test_validate_encrypted_index_field_exists() {
+    let mut coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields());
+    coll.encrypted_indexes = vec![EncryptedIndexDescription::new("missing")];
+
+    assert!(matches!(
+        coll.validate().unwrap_err(),
+        SchemaError::EncryptedIndexUnknownField(field) if field == "missing"
+    ));
+}
+
+#[test]
+fn test_validate_encrypted_index_field_is_unique() {
+    let mut coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields());
+    coll.encrypted_indexes = vec![
+        EncryptedIndexDescription::new("name"),
+        EncryptedIndexDescription::new("name"),
+    ];
+
+    assert!(matches!(
+        coll.validate().unwrap_err(),
+        SchemaError::EncryptedIndexAlreadyExists(field) if field == "name"
+    ));
 }
 
 // ============================================================================

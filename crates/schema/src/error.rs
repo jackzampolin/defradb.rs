@@ -60,6 +60,12 @@ pub enum SchemaError {
     #[error("index with name already exists. Name: {0}")]
     DuplicateIndexName(String),
 
+    #[error("encrypted index on non-existent field. Field: {0}")]
+    EncryptedIndexUnknownField(String),
+
+    #[error("encrypted index already exists on this field. Field: {0}")]
+    EncryptedIndexAlreadyExists(String),
+
     #[error("invalid downsample configuration: {0}")]
     InvalidDownsample(String),
 
