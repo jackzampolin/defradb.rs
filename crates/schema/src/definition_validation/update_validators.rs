@@ -136,7 +136,6 @@ pub(super) fn validate_id_unique(
 }
 
 /// Matches Go's validateSingleVersionActive.
-#[allow(dead_code)]
 pub(super) fn validate_single_version_active(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,
