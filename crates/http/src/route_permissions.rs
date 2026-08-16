@@ -147,6 +147,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         "/api/v0/p2p/shareable-address" => RoutePermission::Required(NodePermission::P2pPeerInfo),
         "/api/v0/p2p/active-peers" => RoutePermission::Required(NodePermission::P2pPeerActive),
         "/api/v0/p2p/connect" => RoutePermission::Required(NodePermission::P2pPeerConnect),
+        "/api/v0/p2p/disconnect" => RoutePermission::Required(NodePermission::P2pPeerDisconnect),
         "/api/v0/p2p/peers" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::P2pPeerConnect),
             Method::POST => RoutePermission::Required(NodePermission::P2pPeerConnect),

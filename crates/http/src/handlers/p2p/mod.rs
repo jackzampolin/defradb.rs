@@ -44,8 +44,8 @@ pub use collections::{
 pub use documents::{add_documents, list_documents, remove_documents, sync_documents};
 pub use manage::{manage, manage_query};
 pub use peers::{
-    active_peers, connect, connect_peer, get_info, get_shareable_address, list_peers, sync_status,
-    ConnectPeerRequest, P2pInfoResponse, PeerInfo, ShareableAddressResponse,
+    active_peers, connect, connect_peer, disconnect, get_info, get_shareable_address, list_peers,
+    sync_status, ConnectPeerRequest, P2pInfoResponse, PeerInfo, ShareableAddressResponse,
 };
 pub use replicators::{
     add_replicator, list_replicators, remove_replicator, ReplicatorDeleteRequest,
