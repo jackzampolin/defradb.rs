@@ -329,23 +329,26 @@ jobs:
 
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
 
-      # Cache binaries BEFORE any feature-on rebuild. `cargo test --workspace`
-      # above left a default-feature `defra` at target/debug/defra; the otel
-      # steps below recompile it with `--features otel`, so caching must happen
-      # first or the integration matrix would restore a telemetry-enabled
-      # binary as its "standard" defra.
+      # The cached node binaries are built with the `super-dev` profile
+      # (Cargo.toml): dependencies at opt-level 2 with no debug info,
+      # workspace crates with line tables. Integration nodes spend their time
+      # in dependency code (crypto, storage, tokio), so opt-level 2 deps make
+      # the suites materially faster at runtime, and the slimmer objects cut
+      # the link time that dominates warm rebuilds. The separate
+      # target/super-dev tree also means the otel feature builds below can
+      # never pollute what gets cached. Kept before the otel steps so the
+      # publish to the sibling happens as early as possible.
       - name: Cache pre-built binaries
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p "$CACHE_DIR"
 
-          # Standard (default-feature) binary — compiled by cargo test above.
-          cp target/debug/defra "$CACHE_DIR/defra"
+          cargo build -p cli --profile super-dev
+          cp target/super-dev/defra "$CACHE_DIR/defra"
 
-          # Iroh binary — needs feature build
-          cargo build -p cli --features iroh
-          cp target/debug/defra "$CACHE_DIR/defra-iroh"
+          cargo build -p cli --profile super-dev --features iroh
+          cp target/super-dev/defra "$CACHE_DIR/defra-iroh"
 
           # Symlink for backbone CI consumption
           ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
@@ -399,11 +402,11 @@ jobs:
             echo "::warning::could not publish binary cache to $PEER after 2 attempts — its first integration job will rebuild"
           fi
 
-      # OTel-only tests, run AFTER caching so the otel rebuild of target/debug/defra
-      # never pollutes the cached standard binary. The cli otel test spawns a real
-      # node against an unreachable collector and asserts the dedup hint fires
-      # exactly once — the Docker-free regression guard for the SDK's
-      # `internal-logs` feature. Issue #977 / #1004.
+      # OTel-only tests. These build in target/debug, a different tree from
+      # the cached super-dev binaries, so ordering is publish-latency only.
+      # The cli otel test spawns a real node against an unreachable collector
+      # and asserts the dedup hint fires exactly once — the Docker-free
+      # regression guard for the SDK's `internal-logs` feature. Issue #977 / #1004.
       - run: cargo test -p telemetry --features otlp
       - run: cargo test -p cli --features otel --test telemetry_dedup
 
@@ -605,12 +608,12 @@ jobs:
             rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
             echo "::warning::binary cache missed on this host and on peer '${PEER:-none}' — rebuilding (~40 min)"
             echo "Cache miss (local and peer ${PEER:-none}) — building binaries"
-            cargo build -p cli
-            cp target/debug/defra target/ci/defra
-            cp target/debug/defra "$CACHE_DIR/defra"
-            cargo build -p cli --features iroh
-            cp target/debug/defra target/ci/defra-iroh
-            cp target/debug/defra "$CACHE_DIR/defra-iroh"
+            cargo build -p cli --profile super-dev
+            cp target/super-dev/defra target/ci/defra
+            cp target/super-dev/defra "$CACHE_DIR/defra"
+            cargo build -p cli --profile super-dev --features iroh
+            cp target/super-dev/defra target/ci/defra-iroh
+            cp target/super-dev/defra "$CACHE_DIR/defra-iroh"
           fi
 
           chmod +x target/ci/defra target/ci/defra-iroh
@@ -714,17 +717,21 @@ jobs:
       # studio-1 also hosts runners for seven other repos, and
       # `Cluster::restart_node` re-binds a node's original port holding no
       # guard and with no retry, so the steal window widens with concurrency.
+      # `--profile super-dev` matches the cached node binaries: the test
+      # binaries link ~7.5x less debug object volume, which is where the
+      # first leg's in-step compile toll went, and sccache keys per flag set
+      # so the profile costs one warmup compile per host.
       - name: Run rust integration tests (basic)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test basic
           -- --test-threads=8 --skip ::go_
 
       - name: Run rust integration tests (core suites)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test query --test acp --test nac
           --test encryption --test identity
           --test backup --test fts
@@ -733,7 +740,7 @@ jobs:
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test p2p
           -- --test-threads=8 --skip ::go_
 
@@ -750,7 +757,7 @@ jobs:
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test basic --test query --test acp --test nac --test backup --test p2p
           --test identity
           -- --test-threads=1 go_
@@ -802,7 +809,7 @@ jobs:
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test p2p_iroh
           -- --test-threads=1 connection::
 
@@ -871,10 +878,10 @@ jobs:
       - name: Build defra binaries
         run: |
           mkdir -p target/ci
-          cargo build -p cli
-          cp target/debug/defra target/ci/defra
-          cargo build -p cli --features iroh
-          cp target/debug/defra target/ci/defra-iroh
+          cargo build -p cli --profile super-dev
+          cp target/super-dev/defra target/ci/defra
+          cargo build -p cli --profile super-dev --features iroh
+          cp target/super-dev/defra target/ci/defra-iroh
           "$DEFRA_RUST_BINARY" version --format json
           "$DEFRA_IROH_BINARY" version --format json
 
@@ -886,7 +893,7 @@ jobs:
       # it is nowhere near the critical path.
       - name: Run rust P2P integration tests
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test p2p
           -- --test-threads=1 --skip ::go_
 
