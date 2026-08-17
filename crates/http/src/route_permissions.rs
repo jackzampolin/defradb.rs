@@ -101,9 +101,6 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         "/api/v0/collections/:name/describe" => {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
-        "/api/v0/collections/:name/identity" => {
-            RoutePermission::Required(NodePermission::CollectionGet)
-        }
         "/api/v0/collections/:name/exists" => {
             RoutePermission::Required(NodePermission::CollectionGet)
         }

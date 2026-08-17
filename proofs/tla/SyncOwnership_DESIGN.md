@@ -166,6 +166,11 @@ ack protection. `p2p_admission_restart` continues to bind durable
 register-then-ack, and the mixed Go/Rust suite plus the Go-emitted PushLog byte
 fixture bind wire compatibility.
 
+The outbound backlog retains its queue-wide resident-byte admission cap as a
+hard memory bound for variable-sized head blocks. This is not CID-valued
+delivery state: bytes are counted only while a bounded head-hint job is resident
+and are never persisted or used as a retry identity.
+
 `issue1154_repro` adds the restart/liveness fence that the small A/B cannot: it
 success-acks hundreds of durable receiver obligations, restarts the hub with a
 one-root admission bound, and requires every current document to merge through

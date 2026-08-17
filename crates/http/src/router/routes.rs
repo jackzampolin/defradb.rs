@@ -95,10 +95,6 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
                 .delete(handlers::delete_collection),
         )
         .route("/{name}/describe", get(handlers::describe_collection))
-        .route(
-            "/{name}/identity",
-            get(handlers::observe_collection_identity),
-        )
         .route("/{name}/exists", get(handlers::collection_exists))
         .route("/{name}/truncate", delete(handlers::truncate_collection))
         .route("/{name}/document/{docID}", get(handlers::get_document))

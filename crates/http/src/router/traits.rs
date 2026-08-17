@@ -715,17 +715,6 @@ pub trait SchemaOperations: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
 }
 
-/// Narrow read-only collection identity observation.
-///
-/// Embedded runtimes use this independently of collection management so
-/// operational qualification can map a configured name to its stable ID
-/// without exposing schema mutation, truncation, purge, or deletion methods.
-#[async_trait::async_trait]
-pub trait CollectionObservationOperations: Send + Sync {
-    /// Return the stable collection ID for the active collection named `name`.
-    async fn collection_id_by_name(&self, name: &str) -> Result<Option<String>, String>;
-}
-
 /// Trait for collection management operations beyond basic CRUD.
 ///
 /// Provides schema patching, version activation, and truncation operations

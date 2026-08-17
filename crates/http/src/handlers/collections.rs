@@ -39,38 +39,6 @@ pub struct CollectionDocIdsResponse {
     pub limit: usize,
 }
 
-/// Minimal read-only identity returned by embedded collection observation.
-#[derive(Debug, Clone, Serialize)]
-pub struct CollectionIdentityResponse {
-    #[serde(rename = "Name")]
-    pub name: String,
-    #[serde(rename = "CollectionID")]
-    pub collection_id: String,
-}
-
-/// Resolve an active collection name to its stable collection ID.
-///
-/// GET /api/v0/collections/{name}/identity
-pub async fn observe_collection_identity(
-    State(state): State<AppState>,
-    identity: ExtractIdentity,
-    Path(name): Path<String>,
-) -> Result<Json<CollectionIdentityResponse>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
-    let observation = state.require_collection_observation()?;
-    match observation.collection_id_by_name(&name).await {
-        Ok(Some(collection_id)) => Ok(Json(CollectionIdentityResponse {
-            name,
-            collection_id,
-        })),
-        Ok(None) => Err(HttpError::NotFound(format!(
-            "collection '{}' not found",
-            name
-        ))),
-        Err(error) => Err(http_error_from_backend_message(error)),
-    }
-}
-
 impl From<CollectionDocIdsPage> for CollectionDocIdsResponse {
     fn from(page: CollectionDocIdsPage) -> Self {
         Self {

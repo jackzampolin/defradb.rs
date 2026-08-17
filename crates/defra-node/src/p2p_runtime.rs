@@ -517,21 +517,13 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 }
             };
             let result = if failure.acknowledged {
-                let retry = storage::stores::PersistedPushRetry {
-                    doc_id: failure.doc_id.clone(),
-                    collection_id: failure.collection_id.clone(),
-                    cid: String::new(),
-                    priority: 0,
-                    pending: true,
-                    scope: if failure.doc_id.is_empty() {
-                        storage::stores::RetryScope::CollectionCommit
-                    } else {
-                        storage::stores::RetryScope::Document
-                    },
-                    retry_info: storage::stores::RetryInfo::new_initial(),
-                };
                 peerstore
-                    .complete_retry_document(&failure.peer_id, &retry)
+                    .complete_retry_scope(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        failure.doc_id.is_empty(),
+                    )
                     .await
             } else if failure.create_retry {
                 let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
@@ -547,20 +539,12 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                         &failure.peer_id,
                         &failure.doc_id,
                         &failure.collection_id,
-                        &failure.cid,
-                        failure.head_priority,
                         &info_bytes,
                     )
                     .await
             } else {
                 peerstore
-                    .observe_push_head(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        &failure.cid,
-                        failure.head_priority,
-                    )
+                    .observe_push_head(&failure.peer_id, &failure.doc_id, &failure.collection_id)
                     .await
             };
             if let Err(error) = result {
@@ -719,10 +703,11 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                             );
                             p2p::sync::reschedule_persisted_push_retry(
                                 &mut retry.retry_info,
-                                &format!("{peer_id_str}:{}", retry.cid),
                                 &error,
                             );
-                            let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
+                            let _ = peerstore
+                                .update_retry_document(&peer_id_str, &retry.retry_info)
+                                .await;
                             fast_failures += 1;
                             if fast_failures >= 3 {
                                 break;
@@ -734,10 +719,10 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                                 peer_id = %peer_id,
                                 "retry push timed out"
                             );
-                            retry
-                                .retry_info
-                                .bump_for(&format!("{peer_id_str}:{}", retry.cid));
-                            let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
+                            retry.retry_info.bump();
+                            let _ = peerstore
+                                .update_retry_document(&peer_id_str, &retry.retry_info)
+                                .await;
                             break;
                         }
                     }

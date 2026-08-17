@@ -1530,7 +1530,7 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
     }));
 
     coordinator
-        .push_dag_to_replicators(&root_cid, &root_data, "doc1", "collection1")
+        .push_to_replicators(&root_cid, &root_data, "doc1", "collection1")
         .await;
 
     let snapshot = timeout(Duration::from_secs(5), async {

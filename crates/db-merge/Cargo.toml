@@ -16,7 +16,6 @@ default = ["native", "wasmtime-runtime", "libp2p-transport"]
 native = ["db/native"]
 wasmtime-runtime = ["db/wasmtime-runtime"]
 libp2p-transport = ["dep:libp2p", "p2p/libp2p-transport"]
-bench-redb = ["storage/redb"]
 
 [dependencies]
 # Async
@@ -80,7 +79,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 blst = "0.3"
 getrandom = "0.2"
 criterion.workspace = true
-tempfile = "3.8"
 
 [[bench]]
 name = "merge_dag"

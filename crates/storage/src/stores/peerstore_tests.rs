@@ -90,11 +90,11 @@ async fn test_delete_replicator() {
     peerstore.create_replicator(peer_id, data).await.unwrap();
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
     peerstore
-        .record_push_failure(peer_id, "doc", "collection", "doc-cid", 1, &retry_info)
+        .record_push_failure(peer_id, "doc", "collection", &retry_info)
         .await
         .unwrap();
     peerstore
-        .record_push_failure(peer_id, "", "collection", "commit-cid", 1, &retry_info)
+        .record_push_failure(peer_id, "", "collection", &retry_info)
         .await
         .unwrap();
     assert!(peerstore.has_replicator(peer_id).await.unwrap());
@@ -200,7 +200,7 @@ async fn delete_replicator_clears_orphaned_retry_state() {
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
-        .record_push_failure("orphan", "doc", "collection", "cid", 1, &retry_info)
+        .record_push_failure("orphan", "doc", "collection", &retry_info)
         .await
         .unwrap();
     peerstore.delete_replicator("orphan").await.unwrap();
@@ -221,7 +221,7 @@ async fn retry_sweep_peers_require_persisted_replicators() {
 
     for peer_id in ["active", "orphan"] {
         peerstore
-            .record_push_failure(peer_id, "doc", "collection", "cid", 1, &retry_info)
+            .record_push_failure(peer_id, "doc", "collection", &retry_info)
             .await
             .unwrap();
     }
@@ -309,15 +309,15 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
-        .record_push_failure("peer", "doc", "collection", "old-cid", 1, &initial)
+        .record_push_failure("peer", "doc", "collection", &initial)
         .await
         .unwrap();
     peerstore
-        .record_push_failure("peer", "", "collection", "commit-cid", 1, &initial)
+        .record_push_failure("peer", "", "collection", &initial)
         .await
         .unwrap();
     peerstore
-        .observe_push_head("peer", "doc", "collection", "new-cid", 2)
+        .observe_push_head("peer", "doc", "collection")
         .await
         .unwrap();
 
@@ -338,8 +338,6 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
 
     let retries = peerstore.get_retry_documents("peer").await.unwrap();
     assert_eq!(retries.len(), 2);
-    assert!(retries.iter().all(|retry| retry.cid.is_empty()));
-    assert!(retries.iter().all(|retry| retry.priority == 0));
     assert_eq!(
         retries[0].retry_info.next_retry_unix,
         retries[1].retry_info.next_retry_unix
@@ -353,11 +351,11 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
-        .record_push_failure("peer", "doc", "collection", "cid", 1, &initial)
+        .record_push_failure("peer", "doc", "collection", &initial)
         .await
         .unwrap();
     peerstore
-        .record_push_failure("peer", "", "collection", "commit", 1, &initial)
+        .record_push_failure("peer", "", "collection", &initial)
         .await
         .unwrap();
 
@@ -392,19 +390,18 @@ async fn collection_updates_coalesce_to_one_rederivable_scope() {
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
-        .record_push_failure("peer", "", "collection", "collection-cid", 1, &initial)
+        .record_push_failure("peer", "", "collection", &initial)
         .await
         .unwrap();
 
     peerstore
-        .record_push_failure("peer", "", "collection", "newer-cid", 2, &initial)
+        .record_push_failure("peer", "", "collection", &initial)
         .await
         .unwrap();
     let retries = peerstore.get_retry_documents("peer").await.unwrap();
     assert_eq!(retries.len(), 1);
     assert!(retries[0].is_collection_commit());
     assert_eq!(retries[0].collection_id, "collection");
-    assert!(retries[0].cid.is_empty());
 }
 
 #[tokio::test]
@@ -414,15 +411,15 @@ async fn retry_marker_stats_report_scope_counts_and_oldest_peer_clock() {
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
-        .record_push_failure("peer-a", "doc-a", "collection", "cid-a", 1, &initial)
+        .record_push_failure("peer-a", "doc-a", "collection", &initial)
         .await
         .unwrap();
     peerstore
-        .record_push_failure("peer-a", "", "collection", "commit-a", 1, &initial)
+        .record_push_failure("peer-a", "", "collection", &initial)
         .await
         .unwrap();
     peerstore
-        .record_push_failure("peer-b", "doc-b", "collection", "cid-b", 1, &initial)
+        .record_push_failure("peer-b", "doc-b", "collection", &initial)
         .await
         .unwrap();
 
@@ -433,8 +430,7 @@ async fn retry_marker_stats_report_scope_counts_and_oldest_peer_clock() {
     assert!(stats.oldest_scheduled_retry_unix.is_some());
 }
 
-/// A versionless doc-less failure (SE artifact, no CID) still has nothing
-/// to replay and must not create state.
+/// An empty scope has nothing to replay and must not create state.
 #[tokio::test]
 async fn versionless_empty_document_failure_creates_no_retry_state() {
     let store = Arc::new(MemoryStore::new());
@@ -442,13 +438,10 @@ async fn versionless_empty_document_failure_creates_no_retry_state() {
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
-        .record_push_failure("peer", "", "collection", "", 1, &initial)
+        .record_push_failure("peer", "", "", &initial)
         .await
         .unwrap();
-    peerstore
-        .observe_push_head("peer", "", "collection", "", 1)
-        .await
-        .unwrap();
+    peerstore.observe_push_head("peer", "", "").await.unwrap();
 
     assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
     assert!(peerstore
@@ -475,7 +468,6 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
     assert_eq!(legacy.len(), 1);
     assert_eq!(legacy[0].doc_id, "doc");
     assert!(legacy[0].collection_id.is_empty());
-    assert!(legacy[0].cid.is_empty());
     let txn = peerstore.store.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
@@ -513,7 +505,6 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
     assert_eq!(retries.len(), 1);
     assert!(retries[0].is_collection_commit());
     assert_eq!(retries[0].collection_id, "collection");
-    assert!(retries[0].cid.is_empty());
 
     let txn = peerstore.store.new_txn(true).await.unwrap();
     for cid in ["commit-a", "commit-b"] {
@@ -535,15 +526,6 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
 async fn sweep_clear_removes_preexisting_empty_document_retry() {
     let store = Arc::new(MemoryStore::new());
     let peerstore = Peerstore::new(store);
-    let retry = super::super::PersistedPushRetry {
-        doc_id: String::new(),
-        collection_id: "collection".to_string(),
-        cid: "collection-cid".to_string(),
-        priority: 1,
-        pending: true,
-        scope: super::super::RetryScope::CollectionCommit,
-        retry_info: super::super::RetryInfo::new_initial(),
-    };
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     txn.set(
         &ReplicatorRetryIDKey::new("peer").bytes(),
@@ -553,7 +535,7 @@ async fn sweep_clear_removes_preexisting_empty_document_retry() {
     .unwrap();
     txn.set(
         &ReplicatorRetryDocIDKey::new("peer", "").bytes(),
-        &retry.to_bytes().unwrap(),
+        b"legacy-payload",
     )
     .await
     .unwrap();
@@ -575,18 +557,11 @@ async fn peer_reconnect_activates_schedule_without_resetting_ladder() {
     let store = Arc::new(MemoryStore::new());
     let peerstore = Peerstore::new(store);
     let mut retry = super::super::RetryInfo::new_initial();
-    retry.bump_for("peer");
-    retry.bump_for("peer");
+    retry.bump();
+    retry.bump();
     let original_rung = retry.num_retries;
     peerstore
-        .record_push_failure(
-            "peer",
-            "doc",
-            "collection",
-            "cid",
-            1,
-            &retry.to_bytes().unwrap(),
-        )
+        .record_push_failure("peer", "doc", "collection", &retry.to_bytes().unwrap())
         .await
         .unwrap();
 

@@ -22,10 +22,9 @@ use query::QueryLimits;
 use crate::error::Result;
 use crate::router::{
     create_router_with_state_and_sync_body_limit, AcpOperations, AppStateBuilder, BackupOperations,
-    BlockOperations, BrowserSyncOperations, CollectionManagementOperations,
-    CollectionObservationOperations, DocumentAcpOperations, DumpOperations,
-    EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
-    P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    BlockOperations, BrowserSyncOperations, CollectionManagementOperations, DocumentAcpOperations,
+    DumpOperations, EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester,
+    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Server configuration options.
@@ -85,7 +84,6 @@ pub struct Server {
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
-    collection_observation: Option<Arc<dyn CollectionObservationOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     view: Option<Arc<dyn ViewOperations>>,
     dump: Option<Arc<dyn DumpOperations>>,
@@ -114,7 +112,6 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
-            collection_observation: None,
             doc_acp: None,
             view: None,
             dump: None,
@@ -143,7 +140,6 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
-            collection_observation: None,
             doc_acp: None,
             view: None,
             dump: None,
@@ -172,7 +168,6 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
-            collection_observation: None,
             doc_acp: None,
             view: None,
             dump: None,
@@ -201,7 +196,6 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
-            collection_observation: None,
             doc_acp: None,
             view: None,
             dump: None,
@@ -351,15 +345,6 @@ impl Server {
         self
     }
 
-    /// Set the narrow read-only collection observation operations.
-    pub fn with_collection_observation_arc(
-        mut self,
-        collection_observation: Arc<dyn CollectionObservationOperations>,
-    ) -> Self {
-        self.collection_observation = Some(collection_observation);
-        self
-    }
-
     /// Set view operations from an Arc.
     pub fn with_view_arc(mut self, view: Arc<dyn ViewOperations>) -> Self {
         self.view = Some(view);
@@ -457,9 +442,6 @@ impl Server {
         }
         if let Some(ref collection_mgmt) = self.collection_mgmt {
             builder = builder.with_collection_mgmt(Arc::clone(collection_mgmt));
-        }
-        if let Some(ref collection_observation) = self.collection_observation {
-            builder = builder.with_collection_observation(Arc::clone(collection_observation));
         }
         if let Some(ref doc_acp) = self.doc_acp {
             builder = builder.with_doc_acp(Arc::clone(doc_acp));

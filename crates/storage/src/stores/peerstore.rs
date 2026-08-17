@@ -262,7 +262,7 @@ impl<S: Store> Peerstore<S> {
             if !txn.has(&id_key.bytes()).await? {
                 let mut info = super::RetryInfo::from_bytes(retry_info_bytes)
                     .unwrap_or_else(|_| super::RetryInfo::new_initial());
-                info.bump_for(peer_id);
+                info.bump();
                 txn.set(
                     &id_key.bytes(),
                     &info.to_bytes().map_err(crate::corekv::Error::Other)?,
@@ -358,7 +358,7 @@ impl<S: Store> Peerstore<S> {
                 let id_key = ReplicatorRetryIDKey::new(&peer);
                 if !txn.has(&id_key.bytes()).await? {
                     let mut info = super::RetryInfo::new_initial();
-                    info.bump_for(&peer);
+                    info.bump();
                     txn.set(
                         &id_key.bytes(),
                         &info.to_bytes().map_err(crate::corekv::Error::Other)?,
@@ -382,14 +382,11 @@ impl<S: Store> Peerstore<S> {
         peer_id: &str,
         doc_id: &str,
         collection_id: &str,
-        cid: &str,
-        priority: u64,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
-        if doc_id.is_empty() && cid.is_empty() {
+        if doc_id.is_empty() && collection_id.is_empty() {
             return Ok(());
         }
-        let _ = priority;
         self.register_scope_marker(peer_id, doc_id, collection_id, retry_info_bytes)
             .await
     }
@@ -400,13 +397,10 @@ impl<S: Store> Peerstore<S> {
         peer_id: &str,
         doc_id: &str,
         collection_id: &str,
-        cid: &str,
-        priority: u64,
     ) -> Result<()> {
-        if doc_id.is_empty() && cid.is_empty() {
+        if doc_id.is_empty() && collection_id.is_empty() {
             return Ok(());
         }
-        let _ = priority;
         let initial = super::RetryInfo::new_initial()
             .to_bytes()
             .map_err(crate::corekv::Error::Other)?;
@@ -414,7 +408,7 @@ impl<S: Store> Peerstore<S> {
             .await
     }
 
-    async fn load_scope_markers(&self, peer_id: &str) -> Result<Vec<super::PersistedPushRetry>> {
+    async fn load_scope_markers(&self, peer_id: &str) -> Result<Vec<super::PushRetryMarker>> {
         self.migrate_push_retry_markers(Some(peer_id)).await?;
         let retry_info = self
             .get_retry_info(peer_id)
@@ -435,12 +429,9 @@ impl<S: Store> Peerstore<S> {
                 continue;
             };
             if !doc_id.is_empty() {
-                result.push(super::PersistedPushRetry {
+                result.push(super::PushRetryMarker {
                     doc_id: doc_id.to_string(),
                     collection_id: String::new(),
-                    cid: String::new(),
-                    priority: 0,
-                    pending: true,
                     scope: super::RetryScope::Document,
                     retry_info: retry_info.clone(),
                 });
@@ -459,12 +450,9 @@ impl<S: Store> Peerstore<S> {
                 continue;
             };
             if !collection_id.is_empty() {
-                result.push(super::PersistedPushRetry {
+                result.push(super::PushRetryMarker {
                     doc_id: String::new(),
                     collection_id: collection_id.to_string(),
-                    cid: String::new(),
-                    priority: 0,
-                    pending: true,
                     scope: super::RetryScope::CollectionCommit,
                     retry_info: retry_info.clone(),
                 });
@@ -480,10 +468,7 @@ impl<S: Store> Peerstore<S> {
     }
 
     /// Load presence-only document and collection scopes on the peer clock.
-    pub async fn get_retry_documents(
-        &self,
-        peer_id: &str,
-    ) -> Result<Vec<super::PersistedPushRetry>> {
+    pub async fn get_retry_documents(&self, peer_id: &str) -> Result<Vec<super::PushRetryMarker>> {
         self.load_scope_markers(peer_id).await
     }
 
@@ -542,12 +527,9 @@ impl<S: Store> Peerstore<S> {
     pub async fn update_retry_document(
         &self,
         peer_id: &str,
-        retry: &super::PersistedPushRetry,
+        retry_info: &super::RetryInfo,
     ) -> Result<()> {
-        let bytes = retry
-            .retry_info
-            .to_bytes()
-            .map_err(crate::corekv::Error::Other)?;
+        let bytes = retry_info.to_bytes().map_err(crate::corekv::Error::Other)?;
         retry_push_txn_conflicts(|| async {
             let mut txn = self.store.new_txn(false).await?;
             txn.set(&ReplicatorRetryIDKey::new(peer_id).bytes(), &bytes)
@@ -584,7 +566,7 @@ impl<S: Store> Peerstore<S> {
     pub async fn complete_retry_document(
         &self,
         peer_id: &str,
-        retry: &super::PersistedPushRetry,
+        retry: &super::PushRetryMarker,
     ) -> Result<()> {
         self.complete_retry_scope(
             peer_id,

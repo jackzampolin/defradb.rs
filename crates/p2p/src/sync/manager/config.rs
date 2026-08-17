@@ -84,7 +84,7 @@ pub struct SyncConfig {
     /// Maximum number of concurrent push tasks for sending blocks to replicators.
     ///
     /// Sizes the fixed worker pool that drains the outbound push backlog, so
-    /// fan-out from `push_dag_to_replicators` and `push_to_replicators` cannot
+    /// fan-out from `push_to_replicators` cannot
     /// exhaust resources when many documents are created in a burst.
     pub max_concurrent_push_tasks: usize,
 

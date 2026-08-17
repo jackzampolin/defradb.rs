@@ -76,8 +76,6 @@ pub(crate) async fn persist_replay_failures<S: storage::corekv::Store>(
                 peer_id.as_str(),
                 &failure.doc_id,
                 &failure.collection_id,
-                "",
-                0,
                 &retry_info,
             )
             .await

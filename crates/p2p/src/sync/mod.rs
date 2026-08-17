@@ -68,7 +68,6 @@ pub const PERSISTED_RETRY_SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 /// a document delivery failure.
 pub fn reschedule_persisted_push_retry(
     retry_info: &mut storage::stores::RetryInfo,
-    retry_key: &str,
     error_message: &str,
 ) {
     if error_message.contains(crate::error::AT_CAPACITY_MESSAGE)
@@ -76,7 +75,7 @@ pub fn reschedule_persisted_push_retry(
     {
         retry_info.defer_for(PERSISTED_RETRY_SWEEP_INTERVAL);
     } else {
-        retry_info.bump_for(retry_key);
+        retry_info.bump();
     }
 }
 
@@ -93,7 +92,6 @@ mod tests {
 
         reschedule_persisted_push_retry(
             &mut retry_info,
-            "peer:cid",
             &format!(
                 "peer rejected replay: {}",
                 crate::error::AT_CAPACITY_MESSAGE
@@ -106,7 +104,6 @@ mod tests {
         retry_info.next_retry_unix = 0;
         reschedule_persisted_push_retry(
             &mut retry_info,
-            "peer:cid",
             &format!(
                 "peer rejected replay: {}",
                 crate::error::RATE_LIMITED_MESSAGE
@@ -116,7 +113,7 @@ mod tests {
         assert_eq!(retry_info.num_retries, 4);
         assert!(!retry_info.is_due());
 
-        reschedule_persisted_push_retry(&mut retry_info, "peer:cid", "connection lost");
+        reschedule_persisted_push_retry(&mut retry_info, "connection lost");
 
         assert_eq!(retry_info.num_retries, 5);
         assert!(!retry_info.is_due());

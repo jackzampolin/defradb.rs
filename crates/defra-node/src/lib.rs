@@ -130,22 +130,6 @@ trait SchemaOps: Send + Sync {
     async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
 }
 
-#[cfg(feature = "http")]
-struct EmbeddedCollectionObservation {
-    schema_ops: Arc<dyn SchemaOps>,
-}
-
-#[cfg(feature = "http")]
-#[async_trait::async_trait]
-impl defra_http::router::CollectionObservationOperations for EmbeddedCollectionObservation {
-    async fn collection_id_by_name(&self, name: &str) -> Result<Option<String>, String> {
-        self.schema_ops
-            .get_collection(name)
-            .map(|collection| collection.map(|version| version.collection_id))
-            .map_err(|error| error.to_string())
-    }
-}
-
 #[async_trait::async_trait]
 trait BlockOps: Send + Sync {
     async fn signed_block_bytes(
@@ -1229,10 +1213,7 @@ impl NodeBuilder {
             };
             let server =
                 defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
-                    .with_event_bus_arc(node.event_bus.clone())
-                    .with_collection_observation_arc(Arc::new(EmbeddedCollectionObservation {
-                        schema_ops: Arc::clone(&node.schema_ops),
-                    }));
+                    .with_event_bus_arc(node.event_bus.clone());
 
             let server = if let Some(did) = node_identity_did.as_ref() {
                 server.with_node_identity_did(did.clone())
@@ -1615,52 +1596,6 @@ mod tests {
         assert_eq!(config.transaction_idle_timeout, Duration::from_secs(900));
         assert_eq!(config.transaction_cleanup_interval, Duration::from_secs(30));
         assert!(config.extra_routes.is_some());
-    }
-
-    #[cfg(feature = "http")]
-    #[tokio::test]
-    async fn embedded_http_exposes_read_only_collection_identity_without_management() {
-        let reservation = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("reserve HTTP port");
-        let address = reservation.local_addr().unwrap();
-        drop(reservation);
-
-        let node = EmbeddedNode::builder()
-            .with_http(HttpConfig::with_addr(address))
-            .build()
-            .await
-            .expect("build embedded HTTP node");
-        node.add_schema("type QualificationProbe { value: String }")
-            .await
-            .expect("add probe schema");
-        let expected_id = node
-            .get_collection("QualificationProbe")
-            .expect("read probe schema")
-            .expect("probe schema should exist")
-            .collection_id;
-        let url = format!("http://{address}/api/v0/collections/QualificationProbe/identity");
-
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        let observed = loop {
-            if let Ok(response) = reqwest::get(&url).await {
-                if response.status().is_success() {
-                    break response
-                        .json::<serde_json::Value>()
-                        .await
-                        .expect("decode collection identity");
-                }
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "collection identity endpoint did not become ready"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        };
-
-        assert_eq!(observed["Name"], "QualificationProbe");
-        assert_eq!(observed["CollectionID"], expected_id);
-        node.shutdown().await;
     }
 
     #[test]

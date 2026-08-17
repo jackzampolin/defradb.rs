@@ -293,7 +293,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     return Ok(());
                 };
                 peerstore
-                    .observe_push_head(peer_key.as_str(), doc_id, collection.collection_id(), "", 0)
+                    .observe_push_head(peer_key.as_str(), doc_id, collection.collection_id())
                     .await
                     .map_err(|error| format!("failed to register replay marker: {error}"))?;
                 let push_h = handle.clone();
@@ -401,17 +401,8 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     });
                     continue;
                 }
-                let retry = storage::stores::PersistedPushRetry {
-                    doc_id: doc_id.clone(),
-                    collection_id: collection_id.clone(),
-                    cid: String::new(),
-                    priority: 0,
-                    pending: true,
-                    scope: storage::stores::RetryScope::Document,
-                    retry_info: storage::stores::RetryInfo::new_initial(),
-                };
                 peerstore
-                    .complete_retry_document(peer_key.as_str(), &retry)
+                    .complete_retry_scope(peer_key.as_str(), &doc_id, &collection_id, false)
                     .await
                     .map_err(|error| format!("failed to clear replay marker: {error}"))?;
             }

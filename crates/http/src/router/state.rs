@@ -8,9 +8,9 @@ use query::QueryLimits;
 
 use super::{
     AcpOperations, BackupOperations, BlockOperations, BrowserSyncOperations,
-    CollectionManagementOperations, CollectionObservationOperations, DocumentAcpOperations,
-    DumpOperations, EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester,
-    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
+    EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
+    P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Application state shared across handlers.
@@ -30,7 +30,6 @@ pub struct AppState {
     pub lens: Option<Arc<dyn LensOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
     pub collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
-    pub collection_observation: Option<Arc<dyn CollectionObservationOperations>>,
     pub doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     pub view: Option<Arc<dyn ViewOperations>>,
     pub dump: Option<Arc<dyn DumpOperations>>,
@@ -83,13 +82,6 @@ impl std::fmt::Debug for AppState {
                     .collection_mgmt
                     .as_ref()
                     .map(|_| "<CollectionManagementOperations>"),
-            )
-            .field(
-                "collection_observation",
-                &self
-                    .collection_observation
-                    .as_ref()
-                    .map(|_| "<CollectionObservationOperations>"),
             )
             .field(
                 "doc_acp",
@@ -214,17 +206,6 @@ impl AppState {
         })
     }
 
-    /// Get read-only collection observation operations.
-    pub fn require_collection_observation(
-        &self,
-    ) -> Result<&Arc<dyn CollectionObservationOperations>, crate::error::HttpError> {
-        self.collection_observation.as_ref().ok_or_else(|| {
-            crate::error::HttpError::ServiceUnavailable(
-                "Collection observation operations are not enabled.".into(),
-            )
-        })
-    }
-
     /// Get document ACP operations or return ServiceUnavailable error.
     pub fn require_doc_acp(
         &self,
@@ -287,7 +268,6 @@ pub struct AppStateBuilder {
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
-    collection_observation: Option<Arc<dyn CollectionObservationOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     view: Option<Arc<dyn ViewOperations>>,
     dump: Option<Arc<dyn DumpOperations>>,
@@ -318,7 +298,6 @@ impl AppStateBuilder {
             lens: None,
             nac: None,
             collection_mgmt: None,
-            collection_observation: None,
             doc_acp: None,
             view: None,
             dump: None,
@@ -416,15 +395,6 @@ impl AppStateBuilder {
         self
     }
 
-    /// Set read-only collection observation operations.
-    pub fn with_collection_observation(
-        mut self,
-        collection_observation: Arc<dyn CollectionObservationOperations>,
-    ) -> Self {
-        self.collection_observation = Some(collection_observation);
-        self
-    }
-
     /// Set document ACP operations.
     pub fn with_doc_acp(mut self, doc_acp: Arc<dyn DocumentAcpOperations>) -> Self {
         self.doc_acp = Some(doc_acp);
@@ -502,7 +472,6 @@ impl AppStateBuilder {
             lens: self.lens,
             nac: self.nac,
             collection_mgmt: self.collection_mgmt,
-            collection_observation: self.collection_observation,
             doc_acp: self.doc_acp,
             view: self.view,
             dump: self.dump,

@@ -432,7 +432,7 @@ mod tests {
             .await
             .unwrap();
         peerstore
-            .observe_push_head(peer_id, doc_id, collection_id, "new", 2)
+            .observe_push_head(peer_id, doc_id, collection_id)
             .await
             .unwrap();
 

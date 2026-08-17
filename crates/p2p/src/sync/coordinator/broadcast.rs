@@ -159,41 +159,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .map_err(crate::error::Error::GossipSubPublish)
     }
 
-    /// Announce a current document head to replicator peers. The receiver pulls
-    /// any missing linked blocks through the rooted CAR path.
-    pub async fn push_dag_to_replicators(
-        &self,
-        cid: &Cid,
-        block: &[u8],
-        doc_id: &str,
-        collection_id: &str,
-    ) {
-        self.push_dag_to_replicators_with_creator(cid, block, doc_id, collection_id, None)
-            .await
-    }
-
-    /// Announce a document head to replicators with optional creator override.
-    pub async fn push_dag_to_replicators_with_creator(
-        &self,
-        cid: &Cid,
-        block: &[u8],
-        doc_id: &str,
-        collection_id: &str,
-        creator_override: Option<&str>,
-    ) {
-        let creator = creator_override.unwrap_or(&self.access.local_peer_id);
-        self.coalesce_replicator_push(PendingPush {
-            cid: *cid,
-            block: Bytes::copy_from_slice(block),
-            doc_id: doc_id.to_string(),
-            collection_id: collection_id.to_string(),
-            creator: creator.to_string(),
-            document: None,
-        })
-        .await;
-    }
-
-    /// Push a single block to replicator peers (no DAG expansion).
+    /// Announce one current head block to replicator peers. The receiver pulls
+    /// missing linked blocks through the rooted CAR path.
     pub async fn push_to_replicators(
         &self,
         cid: &Cid,
@@ -205,7 +172,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .await
     }
 
-    /// Push a single block to replicators with optional creator override.
+    /// Announce one current head with an optional creator override.
     pub async fn push_to_replicators_with_creator(
         &self,
         cid: &Cid,
