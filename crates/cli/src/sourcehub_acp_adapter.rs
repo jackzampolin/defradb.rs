@@ -124,7 +124,7 @@ impl AcpOperations for SourceHubAcpAdapter {
             .map_err(|e| format!("SourceHub create policy failed: {}", e))?;
 
         // The schema references the on-chain id, and doc_acp_adapter validates
-        // against this store. Go caches nothing here, querying SourceHub instead.
+        // against this store.
         policy.id = policy_id.clone();
         self.local_store
             .store_policy_with_options(&policy, &options)
