@@ -395,10 +395,11 @@ async fn install_filtered_one_way_replicator(
         .add_collections(collection_names.clone())
         .await
         .expect("add collections to sender p2p");
-    receiver_p2p
-        .add_collections(collection_names.clone())
-        .await
-        .expect("add collections to receiver p2p");
+    // Keep the receiver off the collection-wide gossip topic. A filtered
+    // replicator is selective on the directed PushLog path, not an access
+    // boundary for peers that separately subscribe to every collection head.
+    // Subscribing here would make the test observe the unfiltered gossip path
+    // instead of the behavior its name and assertions are intended to cover.
     receiver_p2p
         .add_replicator(
             collection_names.clone(),
