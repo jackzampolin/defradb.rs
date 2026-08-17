@@ -1,17 +1,10 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
-use crate::policy_yaml::ParsedPolicy;
-
-/// In-memory policy store for DAC policies.
-///
-/// Generates Go-compatible policy IDs using parsed-field hashing
-/// combined with a monotonic sequence counter.
+/// In-memory cache of DAC policy documents, keyed by policy ID.
 pub struct PolicyStore {
     policies: RwLock<HashMap<String, String>>,
-    counter: AtomicU64,
 }
 
 impl Default for PolicyStore {
@@ -25,24 +18,7 @@ impl PolicyStore {
     pub fn new() -> Self {
         Self {
             policies: RwLock::new(HashMap::new()),
-            counter: AtomicU64::new(1), // Go's counter starts at 1 (GetNext returns currID + 1)
         }
-    }
-
-    /// Add a policy and return its Go-compatible ID.
-    pub fn add_policy(&self, policy: &str, parsed: &ParsedPolicy) -> String {
-        let policy_id = self.next_policy_id(parsed);
-        self.policies
-            .write()
-            .insert(policy_id.clone(), policy.to_string());
-
-        policy_id
-    }
-
-    /// Generate the next Go-compatible policy ID without storing the policy body.
-    pub fn next_policy_id(&self, parsed: &ParsedPolicy) -> String {
-        let counter_val = self.counter.fetch_add(1, Ordering::SeqCst);
-        acp::policy_yaml::generate_policy_id(parsed, counter_val)
     }
 
     /// Store a policy with a known ID (used for SourceHub-created policies).
