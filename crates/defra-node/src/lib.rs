@@ -150,6 +150,8 @@ pub struct EmbeddedNode {
     runner: Arc<dyn QueryExecutor>,
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
+    #[cfg(feature = "http")]
+    collection_mgmt_ops: Arc<dyn defra_http::router::CollectionManagementOperations>,
     block_ops: Arc<dyn BlockOps>,
     acp_ops: Arc<dyn acp_ops::AcpOps>,
     document_acp: Arc<dyn acp::DocumentACP>,
@@ -1213,7 +1215,8 @@ impl NodeBuilder {
             };
             let server =
                 defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
-                    .with_event_bus_arc(node.event_bus.clone());
+                    .with_event_bus_arc(node.event_bus.clone())
+                    .with_collection_mgmt_arc(Arc::clone(&node.collection_mgmt_ops));
 
             let server = if let Some(did) = node_identity_did.as_ref() {
                 server.with_node_identity_did(did.clone())
@@ -1501,6 +1504,12 @@ impl NodeBuilder {
             document_acp.clone(),
             policy_lookup.clone(),
         ));
+        #[cfg(feature = "http")]
+        let collection_mgmt_ops: Arc<
+            dyn defra_http::router::CollectionManagementOperations,
+        > = Arc::new(db_impls::DbCollectionManagementOps::new(Arc::clone(
+            &database,
+        )));
         let acp_ops: Arc<dyn acp_ops::AcpOps> = Arc::new(acp_ops::DbAcpOps::new(
             database.clone(),
             document_acp.clone(),
@@ -1524,6 +1533,8 @@ impl NodeBuilder {
             runner,
             event_bus,
             schema_ops,
+            #[cfg(feature = "http")]
+            collection_mgmt_ops,
             block_ops,
             acp_ops,
             document_acp,
@@ -1596,6 +1607,50 @@ mod tests {
         assert_eq!(config.transaction_idle_timeout, Duration::from_secs(900));
         assert_eq!(config.transaction_cleanup_interval, Duration::from_secs(30));
         assert!(config.extra_routes.is_some());
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn embedded_http_exposes_collection_versions() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+
+        let node = EmbeddedNode::builder()
+            .with_http(HttpConfig::with_addr(address))
+            .build()
+            .await
+            .unwrap();
+        node.add_schema("type Book { title: String }")
+            .await
+            .unwrap();
+
+        let url = format!("http://{address}/api/v0/collections/versions");
+        let client = reqwest::Client::new();
+        let versions = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(response) = client.get(&url).send().await {
+                    if response.status().is_success() {
+                        break response
+                            .json::<Vec<schema::CollectionVersion>>()
+                            .await
+                            .unwrap();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("embedded HTTP server did not expose collection versions");
+
+        let book = versions
+            .iter()
+            .find(|version| version.name == "Book")
+            .expect("Book collection version should be returned");
+        assert!(!book.collection_id.is_empty());
+        assert!(!book.version_id.is_empty());
+
+        node.shutdown().await;
     }
 
     #[test]
