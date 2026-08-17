@@ -140,6 +140,47 @@ async fn unique_json_index_rejects_duplicate_array_values() {
 }
 
 #[tokio::test]
+async fn unique_typed_array_index_deduplicates_repeated_values() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    let datastore = txn.datastore().unwrap();
+
+    let mut schema = CollectionVersion::new(
+        "users",
+        "v1",
+        "col-users",
+        vec![FieldDescription::new(
+            "1",
+            "tags",
+            FieldKind::string_array(),
+        )],
+    );
+    schema.indexes = vec![IndexDescription {
+        name: "idx_tags".to_string(),
+        id: 1,
+        fields: vec![IndexedFieldDescription {
+            name: "tags".to_string(),
+            descending: false,
+        }],
+        unique: true,
+        kind: None,
+        auto_generated: false,
+    }];
+    let manager = IndexManager::from_collection(1, &schema).unwrap();
+    let mut first = Document::new();
+    first.set(
+        "tags",
+        NormalValue::StringArray(vec!["a".to_string(), "a".to_string(), "b".to_string()]),
+    );
+
+    manager
+        .on_document_create(&datastore, &first, next_test_doc_short_id(), &schema)
+        .await
+        .expect("repeated values in one typed array must share one index entry");
+}
+
+#[tokio::test]
 async fn test_create_duplicate_index_fails() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();
