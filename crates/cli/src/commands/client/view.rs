@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 
-use super::http_client::HttpClient;
+use super::http_client::{HttpClient, ViewRefreshSelectors};
 use super::ClientContext;
 use crate::error::Result;
 
@@ -47,12 +47,38 @@ pub struct ViewAddArgs {
     pub lens_cid: Option<String>,
 }
 
-/// Arguments for view refresh command
+/// Arguments for view refresh command.
+///
+/// The selectors mirror Go's `client view refresh` flags; with none of them
+/// every view is refreshed.
 #[derive(Args, Debug)]
 pub struct ViewRefreshArgs {
     /// Collection name to refresh (refreshes all if not specified)
     #[arg(long = "collection-name")]
     pub name: Option<String>,
+
+    /// Collection ID to refresh
+    #[arg(long = "collection-id")]
+    pub collection_id: Option<String>,
+
+    /// Collection version ID to refresh
+    #[arg(long = "version-id")]
+    pub version_id: Option<String>,
+
+    /// Include inactive collection versions
+    #[arg(long = "get-inactive")]
+    pub get_inactive: bool,
+}
+
+impl ViewRefreshArgs {
+    pub fn selectors(&self) -> ViewRefreshSelectors {
+        ViewRefreshSelectors {
+            name: self.name.clone(),
+            collection_id: self.collection_id.clone(),
+            version_id: self.version_id.clone(),
+            get_inactive: self.get_inactive,
+        }
+    }
 }
 
 /// Arguments for manual downsample GC command
@@ -116,8 +142,7 @@ impl ViewRefreshArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let names = self.name.as_ref().map(|n| vec![n.clone()]);
-        let result = client.view_refresh(names).await?;
+        let result = client.view_refresh(&self.selectors()).await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }

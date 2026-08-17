@@ -19,22 +19,75 @@ use tokio::task::JoinHandle;
 use tokio::time::{self, Instant, MissedTickBehavior};
 
 /// Options for refreshing materialized views.
+///
+/// The selectors mirror Go's collection lookup (`internal/db/collection.go`
+/// `getCollections`), which is what Go's `RefreshViews` selects with.
 #[derive(Debug, Clone, Default)]
 pub struct RefreshViewsOptions {
     /// Only refresh views with these names (None = all views)
     pub names: Option<Vec<String>>,
+    /// Only refresh the view with this collection version id.
+    pub version_id: Option<String>,
+    /// Only refresh views belonging to this collection id.
+    pub collection_id: Option<String>,
+    /// Include inactive collection versions.
+    pub get_inactive: bool,
 }
 
 impl RefreshViewsOptions {
     /// Create options that refresh all views.
     pub fn all() -> Self {
-        Self { names: None }
+        Self::default()
     }
 
     /// Create options that refresh only the named views.
     pub fn with_names(names: Vec<String>) -> Self {
-        Self { names: Some(names) }
+        Self {
+            names: Some(names),
+            ..Self::default()
+        }
     }
+
+    /// Whether inactive versions have to be loaded to answer this selection.
+    ///
+    /// A named version is returned whether or not it is active, so asking for
+    /// one requires the full listing just as `get_inactive` does.
+    pub fn needs_all_versions(&self) -> bool {
+        self.get_inactive || self.version_id.is_some()
+    }
+
+    /// Whether this collection version is selected.
+    pub fn selects(&self, collection: &CollectionVersion) -> bool {
+        let version_matches = self
+            .version_id
+            .as_ref()
+            .is_none_or(|id| &collection.version_id == id);
+        let name_matches = self
+            .names
+            .as_ref()
+            .is_none_or(|names| names.contains(&collection.name));
+        let collection_matches = !self.applies_collection_id()
+            || self
+                .collection_id
+                .as_ref()
+                .is_none_or(|id| &collection.collection_id == id);
+        let visible = self.get_inactive || collection.is_active || self.version_id.is_some();
+
+        version_matches && name_matches && collection_matches && visible
+    }
+
+    /// Go picks candidates by collection id only when neither a name nor a
+    /// version already picked them, so those two take precedence over it.
+    fn applies_collection_id(&self) -> bool {
+        self.version_id.is_none() && !(self.names.is_some() && !self.get_inactive)
+    }
+}
+
+/// Whether this collection version is a view whose cache can be rebuilt.
+///
+/// Embedded-only views are excluded, unlike Go: they cannot be queried.
+pub fn is_refreshable_view(collection: &CollectionVersion) -> bool {
+    collection.query.is_some() && collection.is_materialized && !collection.is_embedded_only
 }
 
 /// Scheduled refresh metadata for a downsampled materialized view.
@@ -79,26 +132,22 @@ async fn delete_prefix(store: &NamespaceView, prefix: Vec<u8>) -> Result<()> {
 impl<S: Store> crate::database::DB<S> {
     /// Refresh all materialized views matching the options.
     ///
-    /// This clears and rebuilds the view cache for each materialized view.
-    /// If options.names is provided, only views with matching names are refreshed.
-    /// Otherwise, all materialized views are refreshed.
-    pub async fn refresh_views(&self, options: Option<RefreshViewsOptions>) -> Result<()>
+    /// Clears and rebuilds the view cache for each materialized view the
+    /// options select. Without options, every materialized view is refreshed.
+    pub async fn refresh_views(&self, options: RefreshViewsOptions) -> Result<()>
     where
         S: 'static,
     {
-        // Get all collections
-        let collections = self.get_all_active_collections_internal()?;
+        let collections = if options.needs_all_versions() {
+            self.get_all_collection_versions().await?
+        } else {
+            self.get_all_active_collections_internal()?
+        };
 
-        // Filter to materialized views (excluding embedded-only types which can't be queried)
-        let names_filter = options.as_ref().and_then(|o| o.names.as_ref());
         let views_to_refresh: Vec<_> = collections
             .iter()
-            .filter(|col| col.query.is_some() && col.is_materialized && !col.is_embedded_only)
-            .filter(|col| {
-                names_filter
-                    .map(|names| names.contains(&col.name))
-                    .unwrap_or(true)
-            })
+            .filter(|col| is_refreshable_view(col))
+            .filter(|col| options.selects(col))
             .collect();
 
         for view in views_to_refresh {
@@ -214,7 +263,7 @@ impl<S: Store> crate::database::DB<S> {
 
                 for name in due_names {
                     if let Err(error) = self
-                        .refresh_views(Some(RefreshViewsOptions::with_names(vec![name.clone()])))
+                        .refresh_views(RefreshViewsOptions::with_names(vec![name.clone()]))
                         .await
                     {
                         tracing::warn!(

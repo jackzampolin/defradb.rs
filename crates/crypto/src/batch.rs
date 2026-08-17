@@ -114,7 +114,7 @@ pub fn verify_batch_signature(sig: &BatchSignature, cids: &[Cid]) -> Result<bool
     }
 }
 
-/// Serde helper for hex-encoding Vec<u8> fields.
+/// Serde helper for hex-encoding `Vec<u8>` fields.
 mod hex_bytes {
     use serde::{self, Deserialize, Deserializer, Serializer};
 

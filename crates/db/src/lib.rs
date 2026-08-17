@@ -160,7 +160,7 @@ pub use txn_registry::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
 };
 pub use versioned_fetcher::VersionedFetcher;
-pub use view_ops::RefreshViewsOptions;
+pub use view_ops::{is_refreshable_view, RefreshViewsOptions};
 
 // P2P merge/sync extracted to standalone db-merge crate.
 // Consumer crates (cli, embedded, defra-node, ffi) should depend on db-merge directly.

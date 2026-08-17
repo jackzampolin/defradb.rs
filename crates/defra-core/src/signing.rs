@@ -359,8 +359,22 @@ mod tests {
         }
     }
 
+    /// `IDENTITY_STORE` is process-global, so the tests that clear and refill it
+    /// cannot run concurrently: one test's `store_identity` lands between
+    /// another's `clear_identity_store` and its assertion. Poisoning is
+    /// recovered from rather than propagated, so one failure does not cascade
+    /// into the others.
+    static IDENTITY_STORE_GUARD: Mutex<()> = Mutex::new(());
+
+    fn lock_identity_store() -> std::sync::MutexGuard<'static, ()> {
+        IDENTITY_STORE_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn resolve_signing_config_uses_request_identity_when_registered() {
+        let _guard = lock_identity_store();
         clear_identity_store();
         store_identity("did:key:request", make_config("request"));
         store_identity("did:key:node", make_config("node"));
@@ -378,6 +392,7 @@ mod tests {
 
     #[test]
     fn resolve_signing_config_falls_back_to_node_identity_when_request_identity_missing() {
+        let _guard = lock_identity_store();
         clear_identity_store();
         store_identity("did:key:node", make_config("node"));
 
@@ -390,6 +405,7 @@ mod tests {
 
     #[test]
     fn find_remote_signer_did_returns_registered_remote_signer() {
+        let _guard = lock_identity_store();
         struct NoopRemoteSigner;
 
         impl RemoteSigner for NoopRemoteSigner {

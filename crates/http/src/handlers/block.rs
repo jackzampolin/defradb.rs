@@ -55,7 +55,7 @@ pub async fn signed_block(
 
 /// Verify the signature of a block.
 ///
-/// GET /api/v0/block/verify-signature?cid=<cid>&public-key=<key>&type=<type>
+/// GET `/api/v0/block/verify-signature?cid=<cid>&public-key=<key>&type=<type>`
 ///
 /// Requires `SignatureVerify` permission when NAC is enabled.
 pub async fn verify_signature(

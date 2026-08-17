@@ -17,7 +17,7 @@ mod purge;
 mod query;
 mod tx;
 mod validation;
-mod view;
+pub mod view;
 
 use std::path::PathBuf;
 

@@ -8,6 +8,8 @@ mod cross_object;
 mod custom_policy;
 #[path = "acp/events_sse.rs"]
 mod events_sse;
+#[path = "acp/go_policy_path.rs"]
+mod go_policy_path;
 #[path = "acp/index.rs"]
 mod index;
 #[path = "acp/link_collection.rs"]

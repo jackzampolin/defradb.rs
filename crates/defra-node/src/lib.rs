@@ -1644,6 +1644,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_retry_loop_retries_conflicts_until_success() {
+        // Asserts a delta on process-global conflict metrics, so it cannot run
+        // beside the other tests that drive the embedded execute path. They
+        // already take this guard.
+        let _serial = SIGNING_STORE_GUARD.lock().await;
         let metrics_before = telemetry::conflict_metrics_snapshot().embedded_execute;
         let attempts = Arc::new(AtomicUsize::new(0));
         let policy =

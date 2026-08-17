@@ -164,6 +164,8 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
     // ACP routes
     let acp_routes = Router::new()
         .route("/status", get(handlers::acp::get_status))
+        // /acp/policy is Rust's original path, kept as an alias.
+        .route("/document/policy", post(handlers::acp::add_policy))
         .route("/policy", post(handlers::acp::add_policy))
         .route("/policy", get(handlers::acp::list_policies))
         .route("/policy/{id}", get(handlers::acp::get_policy))
@@ -235,10 +237,13 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
         .route("/disable", post(handlers::nac::disable))
         .route("/re-enable", post(handlers::nac::re_enable));
 
-    // View routes
-    let view_routes = Router::new()
+    // /views is Rust's original mount and carries the Rust-only /gc route.
+    // Deriving it from the Go set keeps the two mounts from drifting.
+    let go_view_routes = Router::new()
         .route("/", post(handlers::views::add_view))
-        .route("/refresh", post(handlers::views::refresh_views))
+        .route("/refresh", post(handlers::views::refresh_views));
+    let view_routes = go_view_routes
+        .clone()
         .route("/gc", post(handlers::views::gc_downsample_histories));
 
     // Versioned API routes
@@ -274,6 +279,7 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
         .nest("/backup", backup_routes)
         // View endpoints
         .nest("/views", view_routes)
+        .nest("/view", go_view_routes)
         // Block endpoints
         .nest("/block", block_routes)
         // Lens migration endpoints

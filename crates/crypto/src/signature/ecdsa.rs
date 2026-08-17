@@ -6,8 +6,8 @@
 //! # Implementation Note
 //!
 //! The actual signing and verification implementations are located in the key modules:
-//! - [`crate::keys::secp256k1::Secp256k1PrivateKey::sign`] - ECDSA signing
-//! - [`crate::keys::secp256k1::Secp256k1PublicKey::verify`] - ECDSA verification
+//! - [`crate::keys::PrivateKey::sign`] on `Secp256k1PrivateKey` - ECDSA signing
+//! - [`crate::keys::PublicKey::verify`] on `Secp256k1PublicKey` - ECDSA verification
 //!
 //! This architectural decision keeps signature operations closely tied to their
 //! respective key types, making the API more ergonomic and type-safe.

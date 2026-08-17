@@ -1,6 +1,10 @@
 //! View endpoint handlers.
 
-use axum::{extract::State, Json};
+use axum::{
+    body::Bytes,
+    extract::{Query, State},
+    Json,
+};
 
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
@@ -15,7 +19,8 @@ pub struct AddViewRequest {
     pub query: String,
     #[serde(rename = "SDL")]
     pub sdl: String,
-    #[serde(rename = "Transform", default)]
+    /// `Transform` is Rust's original name for Go's `TransformCID`.
+    #[serde(rename = "TransformCID", alias = "Transform", default)]
     pub transform: Option<String>,
 }
 
@@ -26,9 +31,38 @@ pub struct ViewNamesRequest {
     pub names: Option<Vec<String>>,
 }
 
+/// Query selectors for refreshing views, matching Go's `RefreshViews` client.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RefreshViewsQuery {
+    pub name: Option<String>,
+    pub version_id: Option<String>,
+    pub collection_id: Option<String>,
+    pub get_inactive: Option<bool>,
+}
+
+impl RefreshViewsQuery {
+    /// Combine the query selectors with the optional body's name list.
+    pub fn into_options(self, body_names: Option<Vec<String>>) -> db::RefreshViewsOptions {
+        let mut names = body_names;
+        if let Some(name) = self.name {
+            let names = names.get_or_insert_with(Vec::new);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+
+        db::RefreshViewsOptions {
+            names,
+            version_id: self.version_id,
+            collection_id: self.collection_id,
+            get_inactive: self.get_inactive.unwrap_or(false),
+        }
+    }
+}
+
 /// Add a view.
 ///
-/// POST /api/v0/views
+/// POST /api/v1/view (Go-compatible), POST /api/v1/views
 ///
 /// Creates a new Defra View from a GQL query and SDL schema.
 ///
@@ -36,9 +70,11 @@ pub struct ViewNamesRequest {
 pub async fn add_view(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(body): Json<AddViewRequest>,
+    body: Bytes,
 ) -> Result<Json<Vec<CollectionVersion>>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewAdd).await?;
+
+    let body: AddViewRequest = required_body(&body)?;
 
     let view_ops = state.require_view()?;
 
@@ -50,22 +86,46 @@ pub async fn add_view(
     Ok(Json(result))
 }
 
+/// Parse a required JSON body.
+///
+/// Not `Json`, which answers 422 where Go answers 400 for the same body
+/// (`http/handler_store.go:236`), and which discards a body sent without a JSON
+/// content type.
+fn required_body<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, HttpError> {
+    serde_json::from_slice(body)
+        .map_err(|e| HttpError::BadRequest(format!("invalid request body: {e}")))
+}
+
+/// Read an optional `Names` body, absent when empty.
+///
+/// Dropping a caller's selection here silently widens the work from one view to
+/// every view, so a body that is present but unparseable is refused.
+fn view_names_from_body(body: &Bytes) -> Result<Option<Vec<String>>, HttpError> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    Ok(required_body::<ViewNamesRequest>(body)?.names)
+}
+
 /// Refresh materialized view caches.
 ///
-/// POST /api/v0/views/refresh
+/// POST /api/v1/view/refresh (Go-compatible), POST /api/v1/views/refresh
 ///
-/// Refreshes all or specific materialized views.
+/// Go's client sends no body and selects with query parameters, so the body is
+/// optional here. Its `Names` and the query's `name` are both "restrict to
+/// these views" and are unioned; neither one refreshes everything.
 pub async fn refresh_views(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(body): Json<ViewNamesRequest>,
+    Query(query): Query<RefreshViewsQuery>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewRefresh).await?;
 
     let view_ops = state.require_view()?;
 
     view_ops
-        .refresh_views(body.names)
+        .refresh_views(query.into_options(view_names_from_body(&body)?))
         .await
         .map_err(http_error_from_backend_message)?;
 
@@ -80,14 +140,16 @@ pub async fn refresh_views(
 pub async fn gc_downsample_histories(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(body): Json<ViewNamesRequest>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewGc).await?;
+
+    let names = view_names_from_body(&body)?;
 
     let view_ops = state.require_view()?;
 
     view_ops
-        .gc_downsample_histories(body.names)
+        .gc_downsample_histories(names)
         .await
         .map_err(http_error_from_backend_message)?;
 

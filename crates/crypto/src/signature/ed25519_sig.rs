@@ -5,8 +5,8 @@
 //! # Implementation Note
 //!
 //! The actual signing and verification implementations are located in the key modules:
-//! - [`crate::keys::ed25519::Ed25519PrivateKey::sign`] - Ed25519 signing
-//! - [`crate::keys::ed25519::Ed25519PublicKey::verify`] - Ed25519 verification
+//! - [`crate::keys::PrivateKey::sign`] on `Ed25519PrivateKey` - Ed25519 signing
+//! - [`crate::keys::PublicKey::verify`] on `Ed25519PublicKey` - Ed25519 verification
 //!
 //! This architectural decision keeps signature operations closely tied to their
 //! respective key types, making the API more ergonomic and type-safe.

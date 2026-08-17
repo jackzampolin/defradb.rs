@@ -205,9 +205,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         if !materialized_names.is_empty() {
             self.database
-                .refresh_views(Some(db::RefreshViewsOptions::with_names(
-                    materialized_names,
-                )))
+                .refresh_views(db::RefreshViewsOptions::with_names(materialized_names))
                 .await
                 .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
         }

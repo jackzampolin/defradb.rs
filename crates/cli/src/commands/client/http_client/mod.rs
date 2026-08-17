@@ -10,6 +10,10 @@ use url::Url;
 
 use crate::error::{Error, Result};
 
+pub use defra_http::go_paths::{
+    ACP_POLICY as GO_ACP_POLICY, VIEW_ADD as GO_VIEW_ADD, VIEW_REFRESH as GO_VIEW_REFRESH,
+};
+
 mod acp;
 mod backup;
 mod block;
@@ -34,6 +38,7 @@ pub use p2p::{
     P2pReplicatorRequest,
 };
 pub use types::{ErrorResponse, GraphQLError, GraphQLRequest, GraphQLResponse, TxBeginResponse};
+pub use view::{AddViewRequest, ViewRefreshSelectors};
 
 /// Default timeout for HTTP requests (30 seconds)
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -148,6 +153,31 @@ impl HttpClient {
     /// Get the base URL for the client
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// The Go wire path for a policy registration, under the default API
+    /// version. Defined by the server crate so the client cannot drift from
+    /// the routes it calls.
+    pub fn acp_policy_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.base_url,
+            defra_http::go_paths::v0(GO_ACP_POLICY)
+        )
+    }
+
+    /// The Go wire path for adding a view.
+    pub fn view_add_url(&self) -> String {
+        format!("{}{}", self.base_url, defra_http::go_paths::v0(GO_VIEW_ADD))
+    }
+
+    /// The Go wire path for refreshing views.
+    pub fn view_refresh_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.base_url,
+            defra_http::go_paths::v0(GO_VIEW_REFRESH)
+        )
     }
 
     /// Check if an error is retryable (connection errors, timeouts)
