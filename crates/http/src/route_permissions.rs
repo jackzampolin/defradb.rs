@@ -343,3 +343,4 @@ fn normalize_api_version(path: &str) -> Cow<'_, str> {
         None => Cow::Borrowed(path),
     }
 }
+
