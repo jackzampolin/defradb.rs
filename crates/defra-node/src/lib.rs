@@ -151,7 +151,7 @@ pub struct EmbeddedNode {
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
     #[cfg(feature = "http")]
-    collection_mgmt_ops: Arc<dyn defra_http::router::CollectionManagementOperations>,
+    collection_version_ops: Arc<dyn defra_http::router::CollectionVersionOperations>,
     block_ops: Arc<dyn BlockOps>,
     acp_ops: Arc<dyn acp_ops::AcpOps>,
     document_acp: Arc<dyn acp::DocumentACP>,
@@ -1216,7 +1216,7 @@ impl NodeBuilder {
             let server =
                 defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
                     .with_event_bus_arc(node.event_bus.clone())
-                    .with_collection_mgmt_arc(Arc::clone(&node.collection_mgmt_ops));
+                    .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
 
             let server = if let Some(did) = node_identity_did.as_ref() {
                 server.with_node_identity_did(did.clone())
@@ -1505,11 +1505,9 @@ impl NodeBuilder {
             policy_lookup.clone(),
         ));
         #[cfg(feature = "http")]
-        let collection_mgmt_ops: Arc<
-            dyn defra_http::router::CollectionManagementOperations,
-        > = Arc::new(db_impls::DbCollectionManagementOps::new(Arc::clone(
-            &database,
-        )));
+        let collection_version_ops: Arc<
+            dyn defra_http::router::CollectionVersionOperations,
+        > = Arc::new(db_impls::DbCollectionVersionOps::new(Arc::clone(&database)));
         let acp_ops: Arc<dyn acp_ops::AcpOps> = Arc::new(acp_ops::DbAcpOps::new(
             database.clone(),
             document_acp.clone(),
@@ -1534,7 +1532,7 @@ impl NodeBuilder {
             event_bus,
             schema_ops,
             #[cfg(feature = "http")]
-            collection_mgmt_ops,
+            collection_version_ops,
             block_ops,
             acp_ops,
             document_acp,
@@ -1611,7 +1609,7 @@ mod tests {
 
     #[cfg(feature = "http")]
     #[tokio::test]
-    async fn embedded_http_exposes_collection_versions() {
+    async fn embedded_http_exposes_only_read_collection_versions() {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = probe.local_addr().unwrap();
         drop(probe);
@@ -1649,6 +1647,18 @@ mod tests {
             .expect("Book collection version should be returned");
         assert!(!book.collection_id.is_empty());
         assert!(!book.version_id.is_empty());
+
+        let delete_response = client
+            .delete(&url)
+            .json(&vec![book.version_id.clone()])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            delete_response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "embedded collection observation must not enable destructive management"
+        );
 
         node.shutdown().await;
     }

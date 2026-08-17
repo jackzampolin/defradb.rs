@@ -10,12 +10,12 @@ use crate::acp_ops::PolicyLookup;
 use crate::{BlockOps, SchemaOps};
 
 #[cfg(feature = "http")]
-pub(crate) struct DbCollectionManagementOps<S: storage::corekv::Store + 'static> {
+pub(crate) struct DbCollectionVersionOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
 }
 
 #[cfg(feature = "http")]
-impl<S: storage::corekv::Store + 'static> DbCollectionManagementOps<S> {
+impl<S: storage::corekv::Store + 'static> DbCollectionVersionOps<S> {
     pub(crate) fn new(database: Arc<db::DB<S>>) -> Self {
         Self { database }
     }
@@ -23,124 +23,12 @@ impl<S: storage::corekv::Store + 'static> DbCollectionManagementOps<S> {
 
 #[cfg(feature = "http")]
 #[async_trait::async_trait]
-impl<S: storage::corekv::Store + 'static> defra_http::router::CollectionManagementOperations
-    for DbCollectionManagementOps<S>
+impl<S: storage::corekv::Store + 'static> defra_http::router::CollectionVersionOperations
+    for DbCollectionVersionOps<S>
 {
-    async fn list_actions(&self) -> Result<Vec<defra_core::ActionExecution>, String> {
-        self.database
-            .list_actions()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn patch_collection(
-        &self,
-        collection_name: &str,
-        patch: &str,
-    ) -> Result<serde_json::Value, String> {
-        let version = self
-            .database
-            .patch_collection(collection_name, patch, None)
-            .await
-            .map_err(|error| error.to_string())?;
-
-        serde_json::to_value(&version)
-            .map_err(|error| format!("failed to serialize collection version: {error}"))
-    }
-
-    async fn set_active_version(&self, version_id: &str) -> Result<(), String> {
-        self.database
-            .set_active_collection_version(version_id)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn truncate_collection(&self, name: &str) -> Result<(), String> {
-        self.database
-            .truncate_collection(name, None)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn purge(&self) -> Result<(), String> {
-        let collections = self
-            .database
-            .list_collections()
-            .map_err(|error| error.to_string())?;
-        for name in collections {
-            self.database
-                .delete_collection(&name)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
-    }
-
-    async fn get_collection_by_name(
-        &self,
-        name: &str,
-    ) -> Result<Option<schema::CollectionVersion>, String> {
-        self.database
-            .get_collection(name)
-            .map(|collection| collection.map(|collection| collection.schema().clone()))
-            .map_err(|error| error.to_string())
-    }
-
-    async fn has_collection(&self, name: &str) -> Result<bool, String> {
-        self.database
-            .has_collection(name)
-            .map_err(|error| error.to_string())
-    }
-
-    async fn find_collection_by_id(
-        &self,
-        collection_id: &str,
-    ) -> Result<Option<schema::CollectionVersion>, String> {
-        self.database
-            .find_collection_by_id(collection_id)
-            .map(|collection| collection.map(|collection| collection.schema().clone()))
-            .map_err(|error| error.to_string())
-    }
-
-    async fn get_collection_by_version_id(
-        &self,
-        version_id: &str,
-    ) -> Result<Option<schema::CollectionVersion>, String> {
-        self.database
-            .get_collection_by_version_id_full(version_id)
-            .await
-            .map(|collection| collection.map(|collection| collection.schema().clone()))
-            .map_err(|error| error.to_string())
-    }
-
-    async fn delete_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String> {
-        self.database
-            .delete_collection_versions_batch(version_ids)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
     async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
         self.database
             .get_all_collection_versions()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn delete_collection(&self, name: &str) -> Result<(), String> {
-        self.database
-            .delete_collection(name)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn delete_collections(
-        &self,
-        names: Vec<String>,
-        active_only: bool,
-    ) -> Result<(), String> {
-        self.database
-            .delete_collections(names, active_only)
             .await
             .map_err(|error| error.to_string())
     }
