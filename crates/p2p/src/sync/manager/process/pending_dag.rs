@@ -16,6 +16,18 @@ use crate::sync::pending_store::{PersistedPendingDag, PersistedQuarantinedDag};
 
 use super::SyncManager;
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDagLease {
+    root_cid: Cid,
+    pending: Arc<parking_lot::RwLock<crate::sync::manager::pending::PendingDagRegistry>>,
+}
+
+impl PendingDagLease {
+    pub(crate) fn is_current(&self) -> bool {
+        self.pending.read().contains_key(&self.root_cid)
+    }
+}
+
 /// Match the outbound backlog's fairness policy: one peer may occupy at most
 /// one quarter of the global pending-DAG capacity.
 const PENDING_DAG_PEER_CAPACITY_DIVISOR: usize = 4;
@@ -25,9 +37,14 @@ const PENDING_DAG_PEER_CAPACITY_DIVISOR: usize = 4;
 /// The rejection variants carry the limit that tripped so the caller's nack
 /// reports the number the operator will see in logs (global vs per-peer).
 pub(super) enum PendingDagAdmission {
-    Admitted,
+    Admitted {
+        superseded: Box<Option<(Cid, PendingDag)>>,
+    },
+    CoveredByCurrent,
     GlobalCapacity,
-    PeerQuota { max_per_peer: usize },
+    PeerQuota {
+        max_per_peer: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +74,12 @@ fn evict_expired_pending_dags(
 }
 
 impl<B: Blockstore + 'static> SyncManager<B> {
+    pub(crate) fn pending_dag_lease(&self, root_cid: Cid) -> PendingDagLease {
+        PendingDagLease {
+            root_cid,
+            pending: Arc::clone(&self.pending_dags),
+        }
+    }
     /// Get the pending DAGs count (for testing/monitoring).
     pub fn pending_dag_count(&self) -> usize {
         self.pending_dags.read().len()
@@ -260,7 +283,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
         matches!(
             self.try_insert_pending_dag(root_cid, dag),
-            PendingDagAdmission::Admitted
+            PendingDagAdmission::Admitted { .. } | PendingDagAdmission::CoveredByCurrent
         )
     }
 
@@ -272,7 +295,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         let mut pending = self.pending_dags.write();
         evict_expired_pending_dags(&mut pending, Instant::now());
 
-        if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
+        use crate::sync::manager::pending::ScopeHeadDecision;
+        let scope_decision = pending.scope_head_decision(root_cid, &dag);
+        if matches!(scope_decision, ScopeHeadDecision::CoveredByCurrent) {
+            return PendingDagAdmission::CoveredByCurrent;
+        }
+        let superseded_root = match scope_decision {
+            ScopeHeadDecision::Supersedes(root) => Some(root),
+            _ => None,
+        };
+
+        if pending.len() >= self.max_pending_dags
+            && !pending.contains_key(&root_cid)
+            && superseded_root.is_none()
+        {
             return PendingDagAdmission::GlobalCapacity;
         }
 
@@ -283,13 +319,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             let max_per_peer = self.max_pending_dags_per_peer();
             if existing_source != Some(source_peer)
                 && pending.source_count(source_peer) >= max_per_peer
+                && superseded_root.is_none()
             {
                 return PendingDagAdmission::PeerQuota { max_per_peer };
             }
         }
 
+        let superseded =
+            superseded_root.and_then(|root| pending.remove(&root).map(|previous| (root, previous)));
         pending.insert(root_cid, dag);
-        PendingDagAdmission::Admitted
+        self.diagnostics.observe_pending_dag_depth(pending.len());
+        PendingDagAdmission::Admitted {
+            superseded: Box::new(superseded),
+        }
     }
 
     fn update_pending_dag_missing_if_current(
@@ -616,12 +658,28 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             roots.retain(|root| record_roots.contains(root) || pending.contains_key(root));
             roots.extend(record_roots);
         }
+        {
+            let record_roots: std::collections::HashSet<Cid> =
+                records.iter().map(|(cid, _)| *cid).collect();
+            self.persisted_scope_heads
+                .write()
+                .retain(|_, version| record_roots.contains(&version.cid));
+            for (root_cid, record) in &records {
+                self.remember_persisted_scope_head(
+                    *root_cid,
+                    record.source_peer.as_deref(),
+                    &record.collection_id,
+                    &record.doc_id,
+                    record.head_priority,
+                );
+            }
+        }
         if records.is_empty() {
             return 0;
         }
 
         let mut restored = 0usize;
-        for (root_cid, record) in records {
+        for (root_cid, mut record) in records {
             {
                 let mut pending = self.pending_dags.write();
                 match pending.get(&root_cid) {
@@ -657,19 +715,47 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 continue;
             }
 
-            let missing: Vec<Cid> = match self.blockstore.get(&root_cid).await {
-                Ok(Some(data)) => {
-                    match find_all_missing_links(self.blockstore.as_ref(), &data).await {
-                        Ok(missing) => missing,
-                        Err(_) => vec![root_cid],
+            let (missing, decoded_head_priority): (Vec<Cid>, Option<u64>) =
+                match self.blockstore.get(&root_cid).await {
+                    Ok(Some(data)) => {
+                        let priority = defra_core::Block::from_dag_cbor(&data)
+                            .ok()
+                            .map(|block| block.delta.priority());
+                        let missing = find_all_missing_links(self.blockstore.as_ref(), &data)
+                            .await
+                            .unwrap_or_else(|_| vec![root_cid]);
+                        (missing, priority)
                     }
+                    _ => (vec![root_cid], None),
+                };
+            let head_priority = decoded_head_priority.or(record.head_priority);
+
+            // One-way upgrade for records written before scope-current
+            // coalescing: once the root block is locally decodable, persist
+            // its monotonic priority so restart/TTL admission remains able to
+            // retire obsolete heads without retaining payload/CID ledgers.
+            if record.head_priority.is_none() && head_priority.is_some() {
+                record.head_priority = head_priority;
+                match store.put(&root_cid, &record).await {
+                    Ok(()) => self.remember_persisted_scope_head(
+                        root_cid,
+                        record.source_peer.as_deref(),
+                        &record.collection_id,
+                        &record.doc_id,
+                        head_priority,
+                    ),
+                    Err(error) => tracing::warn!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Failed to upgrade legacy pending DAG scope metadata; obligation remains independently replayable"
+                    ),
                 }
-                _ => vec![root_cid],
-            };
+            }
 
             let dag = PendingDag {
                 doc_id: record.doc_id.clone(),
                 collection_id: record.collection_id.clone(),
+                head_priority,
                 creator: record.creator.clone(),
                 missing: missing.iter().copied().collect(),
                 source_peer: record.source_peer.clone(),
@@ -687,16 +773,30 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 dispatches: 0,
             };
 
-            if !self.insert_pending_dag(root_cid, dag.clone()) {
-                tracing::warn!(
-                    root_cid = %root_cid,
-                    doc_id = %record.doc_id,
-                    max = self.max_pending_dags,
-                    max_per_peer = self.max_pending_dags_per_peer(),
-                    source_peer = ?record.source_peer,
-                    "Pending DAGs at capacity during resync; record kept for the next sweep"
-                );
-                continue;
+            let superseded = match self.try_insert_pending_dag(root_cid, dag.clone()) {
+                PendingDagAdmission::Admitted { superseded } => *superseded,
+                PendingDagAdmission::CoveredByCurrent => {
+                    self.remove_persisted_pending(&root_cid).await;
+                    continue;
+                }
+                PendingDagAdmission::GlobalCapacity | PendingDagAdmission::PeerQuota { .. } => {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        doc_id = %record.doc_id,
+                        max = self.max_pending_dags,
+                        max_per_peer = self.max_pending_dags_per_peer(),
+                        source_peer = ?record.source_peer,
+                        "Pending DAGs at capacity during resync; record kept for the next sweep"
+                    );
+                    continue;
+                }
+            };
+            if let Some((old_root, _)) = superseded {
+                // Both records survived the restart, so deleting the older
+                // one after the newer one is live cannot create an ownership
+                // gap. A failed idempotent delete remains visible and the
+                // forced resync sweep retries it.
+                self.remove_persisted_pending(&old_root).await;
             }
 
             // A restored entry is immediately due (`insert_pending_dag`
@@ -815,6 +915,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // resync sweep's `is_quarantined` check (Task 4) cleans up that
             // leftover independently of this in-memory set.
             self.persisted_roots.write().remove(root_cid);
+            self.forget_persisted_scope_root(root_cid);
         }
 
         self.pending_dags.write().remove(root_cid);
@@ -851,6 +952,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .map(|dag| PersistedPendingDag {
                     doc_id: dag.doc_id.clone(),
                     collection_id: dag.collection_id.clone(),
+                    head_priority: dag.head_priority,
                     creator: dag.creator.clone(),
                     source_peer: dag.source_peer.clone(),
                     is_explicit_replicator: dag.is_explicit_replicator,
@@ -862,6 +964,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .unwrap_or_else(|| PersistedPendingDag {
                     doc_id: String::new(),
                     collection_id: String::new(),
+                    head_priority: None,
                     creator: String::new(),
                     source_peer: None,
                     is_explicit_replicator: false,

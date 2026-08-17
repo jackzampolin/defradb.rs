@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::backends::MemoryStore;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 
 fn test_cid() -> Cid {
     Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
@@ -136,7 +136,20 @@ struct PollFetchTransport {
     blockstore: Arc<DefraBlockstore<MemoryStore>>,
     child_cid: Cid,
     child_data: Vec<u8>,
+    source_blockstore: Option<Arc<DefraBlockstore<MemoryStore>>>,
+    car_request_calls: Arc<AtomicUsize>,
+    car_requested_cids: Arc<AtomicUsize>,
+    car_present_blocks: Arc<AtomicUsize>,
+    car_served_blocks: Arc<AtomicUsize>,
+    car_filtered_blocks: Arc<AtomicUsize>,
+    car_served_bytes: Arc<AtomicUsize>,
     sync_blocks_calls: Arc<AtomicUsize>,
+    sync_requested_cids: Arc<AtomicUsize>,
+    sync_present_blocks: Arc<AtomicUsize>,
+    sync_served_blocks: Arc<AtomicUsize>,
+    sync_served_bytes: Arc<AtomicUsize>,
+    sync_completion:
+        Arc<parking_lot::Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
 }
 
 impl PollFetchTransport {
@@ -151,18 +164,116 @@ impl PollFetchTransport {
             blockstore,
             child_cid,
             child_data,
+            source_blockstore: None,
+            car_request_calls: Arc::new(AtomicUsize::new(0)),
+            car_requested_cids: Arc::new(AtomicUsize::new(0)),
+            car_present_blocks: Arc::new(AtomicUsize::new(0)),
+            car_served_blocks: Arc::new(AtomicUsize::new(0)),
+            car_filtered_blocks: Arc::new(AtomicUsize::new(0)),
+            car_served_bytes: Arc::new(AtomicUsize::new(0)),
             sync_blocks_calls: Arc::new(AtomicUsize::new(0)),
+            sync_requested_cids: Arc::new(AtomicUsize::new(0)),
+            sync_present_blocks: Arc::new(AtomicUsize::new(0)),
+            sync_served_blocks: Arc::new(AtomicUsize::new(0)),
+            sync_served_bytes: Arc::new(AtomicUsize::new(0)),
+            sync_completion: Arc::new(parking_lot::Mutex::new(None)),
         }
+    }
+
+    fn with_car_source(
+        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        source_blockstore: Arc<DefraBlockstore<MemoryStore>>,
+    ) -> Self {
+        Self {
+            peer_id: PeerId::new("local-peer".to_string()),
+            pubkey: vec![1, 2, 3],
+            blockstore,
+            child_cid: test_cid(),
+            child_data: Vec::new(),
+            source_blockstore: Some(source_blockstore),
+            car_request_calls: Arc::new(AtomicUsize::new(0)),
+            car_requested_cids: Arc::new(AtomicUsize::new(0)),
+            car_present_blocks: Arc::new(AtomicUsize::new(0)),
+            car_served_blocks: Arc::new(AtomicUsize::new(0)),
+            car_filtered_blocks: Arc::new(AtomicUsize::new(0)),
+            car_served_bytes: Arc::new(AtomicUsize::new(0)),
+            sync_blocks_calls: Arc::new(AtomicUsize::new(0)),
+            sync_requested_cids: Arc::new(AtomicUsize::new(0)),
+            sync_present_blocks: Arc::new(AtomicUsize::new(0)),
+            sync_served_blocks: Arc::new(AtomicUsize::new(0)),
+            sync_served_bytes: Arc::new(AtomicUsize::new(0)),
+            sync_completion: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    fn car_request_calls(&self) -> usize {
+        self.car_request_calls.load(Ordering::SeqCst)
+    }
+
+    fn car_served_blocks(&self) -> usize {
+        self.car_served_blocks.load(Ordering::SeqCst)
+    }
+
+    fn car_requested_cids(&self) -> usize {
+        self.car_requested_cids.load(Ordering::SeqCst)
+    }
+
+    fn car_present_blocks(&self) -> usize {
+        self.car_present_blocks.load(Ordering::SeqCst)
+    }
+
+    fn car_filtered_blocks(&self) -> usize {
+        self.car_filtered_blocks.load(Ordering::SeqCst)
+    }
+
+    fn car_served_bytes(&self) -> usize {
+        self.car_served_bytes.load(Ordering::SeqCst)
     }
 
     fn sync_blocks_calls(&self) -> usize {
         self.sync_blocks_calls.load(Ordering::SeqCst)
+    }
+
+    fn sync_requested_cids(&self) -> usize {
+        self.sync_requested_cids.load(Ordering::SeqCst)
+    }
+
+    fn sync_present_blocks(&self) -> usize {
+        self.sync_present_blocks.load(Ordering::SeqCst)
+    }
+
+    fn sync_served_blocks(&self) -> usize {
+        self.sync_served_blocks.load(Ordering::SeqCst)
+    }
+
+    fn sync_served_bytes(&self) -> usize {
+        self.sync_served_bytes.load(Ordering::SeqCst)
+    }
+
+    fn set_sync_completion(&self, completion: crate::sync::manager::BlockSyncCompletionTracker) {
+        *self.sync_completion.lock() = Some(completion);
+    }
+
+    fn signal_sync_complete(&self, query_id: QueryId) {
+        let completion = self.sync_completion.lock().clone();
+        tokio::spawn(async move {
+            // The real transport emits completion after `sync_blocks` returns
+            // and the poll owner registers its waiter.
+            tokio::task::yield_now().await;
+            if let Some(completion) = completion {
+                completion.complete(query_id, true);
+            }
+        });
     }
 }
 
 #[async_trait]
 impl P2PTransport for PollFetchTransport {
     type ResponseToken = ();
+
+    fn supports_cancellable_rooted_sync(&self) -> bool {
+        true
+    }
 
     fn local_peer_id(&self) -> &PeerId {
         &self.peer_id
@@ -276,7 +387,32 @@ impl P2PTransport for PollFetchTransport {
         Ok(())
     }
 
-    async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> P2PResult<()> {
+    async fn send_car_request(&self, _peer_id: &PeerId, root_cid: Cid) -> P2PResult<()> {
+        self.car_request_calls.fetch_add(1, Ordering::SeqCst);
+        self.car_requested_cids.fetch_add(1, Ordering::SeqCst);
+        if let Some(source) = &self.source_blockstore {
+            let collected =
+                crate::sync::car::collect_dag_blocks(source.as_ref(), &root_cid).await?;
+            let block_refs: Vec<_> = collected
+                .blocks
+                .iter()
+                .map(|(cid, data)| (cid, data.as_ref()))
+                .collect();
+            let car = crate::sync::car::encode_car(&[root_cid], &block_refs)?;
+            let (_roots, blocks) = crate::sync::car::decode_car(&car)?;
+            self.car_served_blocks
+                .fetch_add(blocks.len(), Ordering::SeqCst);
+            self.car_present_blocks
+                .fetch_add(blocks.len(), Ordering::SeqCst);
+            self.car_served_bytes.fetch_add(car.len(), Ordering::SeqCst);
+            for (cid, data) in blocks {
+                self.blockstore
+                    .put(&cid, &data)
+                    .await
+                    .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            }
+            return Ok(());
+        }
         self.blockstore
             .put(&self.child_cid, &self.child_data)
             .await
@@ -322,12 +458,67 @@ impl P2PTransport for PollFetchTransport {
 
     async fn sync_blocks(
         &self,
-        _root: Cid,
+        root: Cid,
         _providers: Vec<PeerId>,
-        _missing: Vec<Cid>,
+        missing: Vec<Cid>,
     ) -> P2PResult<QueryId> {
         self.sync_blocks_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(QueryId(1))
+        self.sync_requested_cids
+            .fetch_add(missing.len(), Ordering::SeqCst);
+        if missing.is_empty() {
+            if let Some(source) = &self.source_blockstore {
+                let collected =
+                    crate::sync::car::collect_dag_blocks(source.as_ref(), &root).await?;
+                for (cid, data) in collected.blocks {
+                    self.sync_present_blocks.fetch_add(1, Ordering::SeqCst);
+                    self.blockstore
+                        .put(&cid, &data)
+                        .await
+                        .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+                    self.sync_served_blocks.fetch_add(1, Ordering::SeqCst);
+                    self.sync_served_bytes
+                        .fetch_add(data.len(), Ordering::SeqCst);
+                }
+            } else {
+                self.sync_present_blocks.fetch_add(1, Ordering::SeqCst);
+                self.blockstore
+                    .put(&self.child_cid, &self.child_data)
+                    .await
+                    .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+                self.sync_served_blocks.fetch_add(1, Ordering::SeqCst);
+                self.sync_served_bytes
+                    .fetch_add(self.child_data.len(), Ordering::SeqCst);
+            }
+            let query_id = QueryId(1);
+            self.signal_sync_complete(query_id);
+            return Ok(query_id);
+        }
+        for cid in missing {
+            let data = if let Some(source) = &self.source_blockstore {
+                source
+                    .get(&cid)
+                    .await
+                    .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?
+            } else if cid == self.child_cid {
+                Some(self.child_data.clone().into())
+            } else {
+                None
+            };
+            let Some(data) = data else {
+                continue;
+            };
+            self.sync_present_blocks.fetch_add(1, Ordering::SeqCst);
+            self.blockstore
+                .put(&cid, &data)
+                .await
+                .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            self.sync_served_blocks.fetch_add(1, Ordering::SeqCst);
+            self.sync_served_bytes
+                .fetch_add(data.len(), Ordering::SeqCst);
+        }
+        let query_id = QueryId(1);
+        self.signal_sync_complete(query_id);
+        Ok(query_id)
     }
 
     async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
@@ -1006,7 +1197,6 @@ async fn test_retryable_skip_remains_unmerged_until_replayed() {
         continue_on_error: true,
         rebroadcast_on_merge: false,
         batch_size: 1,
-        max_workers: 1,
     };
     let handler = RetryThenMergeHandler::new();
 
@@ -1084,6 +1274,7 @@ async fn coordinator_with_live_pending_dag(
             &crate::sync::pending_store::PersistedPendingDag {
                 doc_id: "doc1".to_string(),
                 collection_id: "col1".to_string(),
+                head_priority: None,
                 creator: "peer1".to_string(),
                 source_peer: Some("sender1".to_string()),
                 is_explicit_replicator: true,
@@ -1449,6 +1640,7 @@ async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
     )
     .await
     .unwrap();
+    transport_handle.set_sync_completion(coordinator.manager().block_sync_completion_tracker());
 
     coordinator
         .handle_transport_event(TransportEvent::TwoStreamRequest {
@@ -1514,7 +1706,7 @@ async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
         }
         other => panic!("expected DagReady, got {:?}", other),
     }
-    assert_eq!(transport_handle.sync_blocks_calls(), 0);
+    assert_eq!(transport_handle.sync_blocks_calls(), 1);
     assert!(blockstore.has(&child_cid).await.unwrap());
 
     let merge_result = process_event(
@@ -1530,6 +1722,348 @@ async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
         ReplicationResult::Merged { cid, .. } if cid == root_cid
     ));
     assert_eq!(coordinator.pending_dag_count(), 0);
+}
+
+#[derive(Debug)]
+struct ReceiverOwnershipArm {
+    pushlogs_scheduled: usize,
+    pushlogs_transmitted: usize,
+    announced_bytes: usize,
+    pending_high_water: usize,
+    persisted_pending_high_water: usize,
+    car_requests: usize,
+    car_requested_cids: usize,
+    car_present_blocks: usize,
+    car_served_blocks: usize,
+    car_filtered_blocks: usize,
+    car_served_bytes: usize,
+    selective_requests: usize,
+    selective_requested_cids: usize,
+    selective_present_blocks: usize,
+    selective_served_blocks: usize,
+    selective_served_bytes: usize,
+    provider_rotations: u64,
+    sender_retry_dispatches: u64,
+    retry_dispatches: u64,
+    retry_suppressions: u64,
+    exhausted_roots: u64,
+    capacity_nacks: u64,
+    registered_terminal: u64,
+    merged_terminal: u64,
+    quarantined_terminal: u64,
+    pending_at_quiescence: usize,
+    persisted_pending_at_quiescence: usize,
+    retained_handles_at_quiescence: usize,
+    source_has_current_head: bool,
+    receiver_had_current_head_after_first_wave: bool,
+    receiver_has_current_head: bool,
+}
+
+/// Run one frozen sender-ownership arm through the real receiving coordinator.
+///
+/// The full-DAG arm presents the field block as a standalone PushLog before
+/// the composite head. Both blocks depend on the same signature payload, so a
+/// one-root receiver admission bound is saturated before its paced fetch owner
+/// runs. The head-hint arm presents only the composite root and lets the CAR
+/// fetcher acquire the entire DAG under that one durable obligation.
+async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
+    use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let signature_data = defra_core::cbor::to_vec(&"signature-metadata").unwrap();
+    let signature_cid = defra_core::block::generate_cid_from_bytes(&signature_data).unwrap();
+    let field = Block::new_with_options(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "value".to_string(),
+            priority: 1,
+            schema_version_id: "schema".to_string(),
+            data: b"current".to_vec(),
+        }),
+        vec![],
+        vec![],
+        None,
+        Some(signature_cid),
+    );
+    let field_data = field.to_dag_cbor().unwrap();
+    let field_cid = field.generate_cid().unwrap();
+    let root = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "schema".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("value", field_cid)],
+    );
+    let root_data = root.to_dag_cbor().unwrap();
+    let root_cid = root.generate_cid().unwrap();
+
+    let source_store = Arc::new(MemoryStore::new());
+    let source = Arc::new(DefraBlockstore::new(source_store, true));
+    source.put(&signature_cid, &signature_data).await.unwrap();
+    source.put(&field_cid, &field_data).await.unwrap();
+    source.put(&root_cid, &root_data).await.unwrap();
+    source.mark_as_merged(&root_cid).await.unwrap();
+
+    let receiver_store = Arc::new(MemoryStore::new());
+    let receiver = Arc::new(DefraBlockstore::new(receiver_store, true));
+    let transport = PollFetchTransport::with_car_source(receiver.clone(), source.clone());
+    let transport_handle = transport.clone();
+    let config = crate::sync::SyncConfig {
+        max_pending_dags: 1,
+        ..Default::default()
+    };
+    let (coordinator, mut events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
+        transport,
+        receiver.clone(),
+        config,
+        AccessMode::Open,
+        Arc::new(crate::ReplicatorRegistry::new()),
+        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(EqOnlyFilterMatcher),
+    )
+    .await
+    .unwrap();
+    transport_handle.set_sync_completion(coordinator.manager().block_sync_completion_tracker());
+    let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    coordinator
+        .install_pending_dag_store(pending_store.clone())
+        .await;
+
+    let peer_id = PeerId::new("source-peer".to_string());
+    let request = |cid: Cid, data: Vec<u8>| TransportEvent::TwoStreamRequest {
+        peer_id: peer_id.clone(),
+        request: PushLogRequest::new(
+            "doc".to_string(),
+            bytes::Bytes::from(cid.to_bytes()),
+            "collection".to_string(),
+            "creator".to_string(),
+            bytes::Bytes::from(data),
+        ),
+        token: None,
+        is_explicit_replicator: true,
+        explicit_replay_authorization: None,
+    };
+
+    let mut announced_bytes = 0usize;
+    let mut pushlogs_transmitted = 0usize;
+    let first_event = if expand_dag {
+        announced_bytes += field_data.len();
+        pushlogs_transmitted += 1;
+        coordinator
+            .handle_transport_event(request(field_cid, field_data.clone()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("field pending event should arrive")
+            .expect("field pending event should be present")
+    } else {
+        announced_bytes += root_data.len();
+        pushlogs_transmitted += 1;
+        coordinator
+            .handle_transport_event(request(root_cid, root_data.clone()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("root pending event should arrive")
+            .expect("root pending event should be present")
+    };
+
+    assert_eq!(coordinator.pending_dag_count(), 1);
+    assert_eq!(coordinator.manager().persisted_pending_count(), 1);
+
+    if expand_dag {
+        announced_bytes += root_data.len();
+        pushlogs_transmitted += 1;
+        let error = coordinator
+            .handle_transport_event(request(root_cid, root_data.clone()))
+            .await
+            .expect_err("full-DAG feedback must hit the fixed admission bound");
+        assert!(matches!(
+            error,
+            crate::error::Error::PendingDagCapacity { max: 1 }
+        ));
+    }
+
+    let handler = TestMergeHandler::new(true, false);
+    let started = process_event(
+        &coordinator,
+        first_event,
+        &handler,
+        &ReplicationConfig::default(),
+    )
+    .await;
+    assert!(matches!(started, ReplicationResult::DagFetchStarted { .. }));
+    let ready = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("CAR completion should emit DagReady")
+        .expect("DagReady should be present");
+    let merged = process_event(&coordinator, ready, &handler, &ReplicationConfig::default()).await;
+    assert!(matches!(merged, ReplicationResult::Merged { .. }));
+
+    let receiver_had_current_head_after_first_wave = receiver.is_merged(&root_cid).await.unwrap();
+    let mut sender_retry_dispatches = 0;
+
+    // The frozen full-DAG sender retains its logical-head marker after the
+    // actionable capacity nack. Once the field obligation drains, exercise
+    // that marker's retry/re-offer path and require the same final state as the
+    // head-hint arm. This establishes amplification and an avoidable durable
+    // retry cycle without claiming that a fair old sender can never recover.
+    if expand_dag {
+        sender_retry_dispatches += 1;
+        announced_bytes += root_data.len();
+        pushlogs_transmitted += 1;
+        coordinator
+            .handle_transport_event(request(root_cid, root_data.clone()))
+            .await
+            .expect("sender retry should re-offer the nacked logical head");
+        let retry_pending = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("retried root pending event should arrive")
+            .expect("retried root pending event should be present");
+        let retry_started = process_event(
+            &coordinator,
+            retry_pending,
+            &handler,
+            &ReplicationConfig::default(),
+        )
+        .await;
+        match retry_started {
+            // The first field-root recovery already acquired the shared
+            // dependency frontier, so the composite re-offer normally merges
+            // without another CAR owner.
+            ReplicationResult::Merged { .. } => {}
+            ReplicationResult::DagFetchStarted { .. } => {
+                let retry_ready = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                    .await
+                    .expect("retried CAR completion should emit DagReady")
+                    .expect("retried DagReady should be present");
+                let retry_merged = process_event(
+                    &coordinator,
+                    retry_ready,
+                    &handler,
+                    &ReplicationConfig::default(),
+                )
+                .await;
+                assert!(matches!(retry_merged, ReplicationResult::Merged { .. }));
+            }
+            other => panic!("retried logical head did not converge: {other:?}"),
+        }
+    }
+
+    let persisted = pending_store.load_all().await.unwrap();
+    coordinator.shutdown().await;
+    let status = coordinator.sync_status();
+    ReceiverOwnershipArm {
+        pushlogs_scheduled: if expand_dag { 3 } else { 1 },
+        pushlogs_transmitted,
+        announced_bytes,
+        pending_high_water: status.pending_dag_high_water as usize,
+        persisted_pending_high_water: status.persisted_pending_dag_high_water as usize,
+        car_requests: transport_handle.car_request_calls(),
+        car_requested_cids: transport_handle.car_requested_cids(),
+        car_present_blocks: transport_handle.car_present_blocks(),
+        car_served_blocks: transport_handle.car_served_blocks(),
+        car_filtered_blocks: transport_handle.car_filtered_blocks(),
+        car_served_bytes: transport_handle.car_served_bytes(),
+        selective_requests: transport_handle.sync_blocks_calls(),
+        selective_requested_cids: transport_handle.sync_requested_cids(),
+        selective_present_blocks: transport_handle.sync_present_blocks(),
+        selective_served_blocks: transport_handle.sync_served_blocks(),
+        selective_served_bytes: transport_handle.sync_served_bytes(),
+        provider_rotations: status.provider_rotations,
+        sender_retry_dispatches,
+        retry_dispatches: status.pending_dag_retry_dispatched,
+        retry_suppressions: status.pending_dag_retry_suppressed,
+        exhausted_roots: status.pending_dag_fetch_exhausted,
+        capacity_nacks: status.pending_dag_capacity_shed,
+        registered_terminal: status.pending_dag_registered,
+        merged_terminal: status.pending_dag_terminal_merged,
+        quarantined_terminal: status.pending_dag_terminal_quarantined,
+        pending_at_quiescence: status.pending_dags,
+        persisted_pending_at_quiescence: persisted.len(),
+        retained_handles_at_quiescence: status.retained_background_tasks,
+        source_has_current_head: source.is_merged(&root_cid).await.unwrap(),
+        receiver_had_current_head_after_first_wave,
+        receiver_has_current_head: receiver.is_merged(&root_cid).await.unwrap(),
+    }
+}
+
+/// Deterministic ownership A/B with the same two-peer topology, logical DAG,
+/// admission bound, and CAR transport. The frozen full-DAG sender produces a
+/// capacity nack and misses the logical head on the first wave. Its retained
+/// sender marker then retries the head and eventually drains. One head hint
+/// completes on the first wave with no sender retry cycle.
+#[tokio::test]
+async fn ownership_ab_full_dag_amplifies_admission_and_requires_sender_retry() {
+    let full_dag = run_receiver_ownership_arm(true).await;
+    let head_hint = run_receiver_ownership_arm(false).await;
+
+    assert_eq!(full_dag.pushlogs_scheduled, 3);
+    assert_eq!(head_hint.pushlogs_scheduled, 1);
+    assert_eq!(full_dag.pushlogs_transmitted, 3);
+    assert_eq!(head_hint.pushlogs_transmitted, 1);
+    assert!(full_dag.announced_bytes > head_hint.announced_bytes);
+    assert_eq!(full_dag.pending_high_water, 1);
+    assert_eq!(head_hint.pending_high_water, 1);
+    assert_eq!(full_dag.persisted_pending_high_water, 1);
+    assert_eq!(head_hint.persisted_pending_high_water, 1);
+    assert_eq!(full_dag.car_requests, 0);
+    assert_eq!(head_hint.car_requests, 0);
+    assert_eq!(full_dag.car_requested_cids, 0);
+    assert_eq!(head_hint.car_requested_cids, 0);
+    assert_eq!(full_dag.car_present_blocks, 0);
+    assert_eq!(head_hint.car_present_blocks, 0);
+    assert_eq!(full_dag.car_served_blocks, 0);
+    assert_eq!(head_hint.car_served_blocks, 0);
+    assert_eq!(full_dag.car_filtered_blocks, 0);
+    assert_eq!(head_hint.car_filtered_blocks, 0);
+    assert_eq!(full_dag.car_served_bytes, 0);
+    assert_eq!(head_hint.car_served_bytes, 0);
+    assert_eq!(full_dag.selective_requests, 1);
+    assert_eq!(head_hint.selective_requests, 1);
+    assert_eq!(full_dag.selective_requested_cids, 0);
+    // Empty exact-CID count identifies the bounded rooted discovery request;
+    // it returns both present DAG blocks and needs no selective fallback.
+    assert_eq!(head_hint.selective_requested_cids, 0);
+    assert_eq!(full_dag.selective_present_blocks, 2);
+    assert_eq!(head_hint.selective_present_blocks, 3);
+    assert_eq!(full_dag.selective_served_blocks, 2);
+    assert_eq!(head_hint.selective_served_blocks, 3);
+    assert!(full_dag.selective_served_bytes > 0);
+    assert!(head_hint.selective_served_bytes > full_dag.selective_served_bytes);
+    assert_eq!(full_dag.provider_rotations, 0);
+    assert_eq!(head_hint.provider_rotations, 0);
+    assert_eq!(full_dag.sender_retry_dispatches, 1);
+    assert_eq!(head_hint.sender_retry_dispatches, 0);
+    assert_eq!(full_dag.retry_dispatches, 1);
+    assert_eq!(head_hint.retry_dispatches, 1);
+    assert_eq!(full_dag.retry_suppressions, 0);
+    assert_eq!(head_hint.retry_suppressions, 0);
+    assert_eq!(full_dag.exhausted_roots, 0);
+    assert_eq!(head_hint.exhausted_roots, 0);
+    assert_eq!(full_dag.capacity_nacks, 1);
+    assert_eq!(head_hint.capacity_nacks, 0);
+    assert_eq!(full_dag.registered_terminal, 1);
+    assert_eq!(head_hint.registered_terminal, 1);
+    assert_eq!(full_dag.merged_terminal, 1);
+    assert_eq!(head_hint.merged_terminal, 1);
+    assert_eq!(full_dag.quarantined_terminal, 0);
+    assert_eq!(head_hint.quarantined_terminal, 0);
+    assert_eq!(full_dag.pending_at_quiescence, 0);
+    assert_eq!(head_hint.pending_at_quiescence, 0);
+    assert_eq!(full_dag.persisted_pending_at_quiescence, 0);
+    assert_eq!(head_hint.persisted_pending_at_quiescence, 0);
+    assert_eq!(full_dag.retained_handles_at_quiescence, 0);
+    assert_eq!(head_hint.retained_handles_at_quiescence, 0);
+    assert!(full_dag.source_has_current_head);
+    assert!(head_hint.source_has_current_head);
+    assert!(!full_dag.receiver_had_current_head_after_first_wave);
+    assert!(head_hint.receiver_had_current_head_after_first_wave);
+    assert!(full_dag.receiver_has_current_head);
+    assert!(head_hint.receiver_has_current_head);
 }
 
 #[tokio::test]
@@ -1580,67 +2114,7 @@ async fn test_replication_result_merged_but_broadcast_failed() {
 }
 
 #[tokio::test]
-async fn test_run_parallel_exits_cleanly_when_worker_semaphore_closed() {
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let (coordinator, _events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
-        NoopTransport::new(),
-        blockstore,
-        crate::sync::SyncConfig::default(),
-        AccessMode::Open,
-        Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
-        Arc::new(EqOnlyFilterMatcher),
-    )
-    .await
-    .unwrap();
-
-    let (tx, rx) = mpsc::channel(1);
-    tx.send(SyncEvent::BlockReceived {
-        cid: test_cid(),
-        doc_id: "doc1".to_string(),
-        collection_id: "col1".to_string(),
-        creator: "peer1".to_string(),
-        sender_peer: None,
-        is_explicit_replicator: false,
-        explicit_replay_authorization: None,
-    })
-    .await
-    .unwrap();
-    drop(tx);
-
-    let semaphore = Arc::new(Semaphore::new(1));
-    semaphore.close();
-
-    let callback_count = Arc::new(AtomicUsize::new(0));
-    let callback_count_clone = callback_count.clone();
-    let handler = Arc::new(TestMergeHandler::new(true, false));
-
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        ReplicationLoop::run_parallel_with_semaphore(
-            Arc::new(coordinator),
-            rx,
-            handler,
-            ReplicationConfig::default(),
-            move |_| {
-                callback_count_clone.fetch_add(1, Ordering::SeqCst);
-            },
-            semaphore,
-        ),
-    )
-    .await
-    .expect("parallel replication loop should exit when semaphore is closed");
-
-    assert_eq!(
-        callback_count.load(Ordering::SeqCst),
-        0,
-        "closed semaphore should stop the loop before any worker starts"
-    );
-}
-
-#[tokio::test]
-async fn test_run_parallel_serializes_duplicate_cids() {
+async fn test_run_serializes_duplicate_cids() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
@@ -1677,18 +2151,14 @@ async fn test_run_parallel_serializes_duplicate_cids() {
     let handler = Arc::new(SlowMergeHandler::new());
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
 
-    ReplicationLoop::run_parallel_with_semaphore(
+    ReplicationLoop::run(
         Arc::new(coordinator),
         rx,
         handler.clone(),
-        ReplicationConfig {
-            max_workers: 2,
-            ..Default::default()
-        },
+        ReplicationConfig::default(),
         move |result| {
-            let _ = result_tx.send(result);
+            let _ = result_tx.send(result.clone());
         },
-        Arc::new(Semaphore::new(2)),
     )
     .await;
 
@@ -1729,6 +2199,63 @@ async fn test_run_parallel_serializes_duplicate_cids() {
 // =========================================================================
 
 #[tokio::test]
+async fn test_run_uses_one_observable_batch_merge_pipeline() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
+        NoopTransport::new(),
+        blockstore.clone(),
+        crate::sync::SyncConfig::default(),
+        AccessMode::Open,
+        Arc::new(crate::ReplicatorRegistry::new()),
+        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(EqOnlyFilterMatcher),
+    )
+    .await
+    .unwrap();
+
+    let (tx, rx) = mpsc::channel(2);
+    for i in 0..2 {
+        let data = format!("canonical-batch-{i}");
+        let cid = make_cid(data.as_bytes());
+        blockstore.put(&cid, data.as_bytes()).await.unwrap();
+        tx.send(SyncEvent::BlockReceived {
+            cid,
+            doc_id: format!("doc{i}"),
+            collection_id: "col1".to_string(),
+            creator: "peer1".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+
+    let handler = Arc::new(BatchTestHandler::new());
+    let observed_merges = Arc::new(AtomicUsize::new(0));
+    let observed_merges_for_loop = observed_merges.clone();
+    ReplicationLoop::run(
+        Arc::new(coordinator),
+        rx,
+        handler.clone(),
+        ReplicationConfig::default(),
+        move |result| {
+            if matches!(result, ReplicationResult::Merged { .. }) {
+                observed_merges_for_loop.fetch_add(1, Ordering::SeqCst);
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(handler.batch_calls(), 1);
+    assert_eq!(handler.batch_block_count(), 2);
+    assert_eq!(handler.per_block_calls(), 0);
+    assert_eq!(observed_merges.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn test_process_next_batch_caps_drain_at_config_batch_size() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
@@ -1766,7 +2293,6 @@ async fn test_process_next_batch_caps_drain_at_config_batch_size() {
         continue_on_error: true,
         rebroadcast_on_merge: false,
         batch_size: 3,
-        max_workers: 1,
     };
     let handler = BatchTestHandler::new();
 
@@ -1813,7 +2339,6 @@ async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
         continue_on_error: true,
         rebroadcast_on_merge: true,
         batch_size: 50,
-        max_workers: 1,
     };
     let handler = BatchTestHandler::new();
 
@@ -1828,6 +2353,60 @@ async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
         2,
         "document and collection topics should be rebroadcast"
     );
+}
+
+#[tokio::test]
+async fn rapid_collection_commits_publish_only_the_current_head() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let (coordinator, _events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
+        transport,
+        blockstore,
+        crate::sync::SyncConfig::default(),
+        AccessMode::Open,
+        Arc::new(crate::ReplicatorRegistry::new()),
+        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(EqOnlyFilterMatcher),
+    )
+    .await
+    .unwrap();
+
+    let head = |priority| {
+        let block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "schema".to_string(),
+                priority,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+        );
+        let data = block.to_dag_cbor().unwrap();
+        let cid = block.generate_cid().unwrap();
+        (cid, data)
+    };
+    let first = head(1);
+    let second = head(2);
+    let current = head(3);
+
+    let (first_result, second_result, current_result) = tokio::join!(
+        coordinator.broadcast_local_update(&first.0, &first.1, "", "collection"),
+        coordinator.broadcast_local_update(&second.0, &second.1, "", "collection"),
+        coordinator.broadcast_local_update(&current.0, &current.1, "", "collection"),
+    );
+    assert!(first_result.is_ok());
+    assert!(second_result.is_ok());
+    assert!(current_result.is_ok());
+    assert_eq!(
+        transport_handle.publish_calls(),
+        2,
+        "one current collection head must be published once to its document and collection topics"
+    );
+    assert_eq!(coordinator.sync_status().broadcast_coalesced_total, 2);
 }
 
 #[tokio::test]

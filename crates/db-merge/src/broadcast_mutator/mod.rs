@@ -288,18 +288,35 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
 
+        // Transfer durable head-hint ownership before returning the committed
+        // mutation. The remaining gossip/artifact work may be asynchronous,
+        // but a crash must not land between commit and scope-marker creation.
+        let creator_ref = creator_did.as_deref();
         self.sync
-            .spawn_background_task("broadcast_document_update", async move {
-                let creator_ref = creator_did.as_deref();
-                sync.push_document_to_replicators_with_creator(
-                    &block_result.cid,
-                    &block_result.block,
-                    &block_result.doc_id,
+            .push_document_to_replicators_with_creator(
+                &block_result.cid,
+                &block_result.block,
+                &block_result.doc_id,
+                &collection_id,
+                &document_json,
+                creator_ref,
+            )
+            .await;
+        if let Some(col_block_result) = branchable_data.as_ref() {
+            self.sync
+                .push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
                     &collection_id,
-                    &document_json,
                     creator_ref,
                 )
                 .await;
+        }
+
+        self.sync
+            .spawn_non_authoritative_broadcast_task("broadcast_document_update", async move {
+                let creator_ref = creator_did.as_deref();
                 sync.push_se_artifacts_to_replicators_for_document(
                     &collection_id,
                     se_artifacts,
@@ -318,14 +335,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
                 );
 
                 if let Some(col_block_result) = branchable_data {
-                    sync.push_to_replicators_with_creator(
-                        &col_block_result.cid,
-                        &col_block_result.block,
-                        &col_block_result.doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
                     log_broadcast_failure(
                         &broadcast_with_retry_with_creator(
                             &sync,
@@ -460,23 +469,36 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let return_cid = block_result.cid;
         let return_block = block_result.block.clone();
 
-        // The local transaction is already committed, so return without
-        // waiting for network delivery.
+        // Register the document/collection scope markers before the committed
+        // mutation is returned. Network transmission remains queue-owned.
+        let creator_ref = creator_did.as_deref();
         self.sync
-            .spawn_background_task("broadcast_document_create", async move {
-                let creator_ref = creator_did.as_deref();
-
-                // Match Go DefraDB's live replicator model: push the new head block
-                // and let the receiver resolve any missing links via DAG sync.
-                sync.push_document_to_replicators_with_creator(
-                    &block_result.cid,
-                    &block_result.block,
-                    &block_result.doc_id,
+            .push_document_to_replicators_with_creator(
+                &block_result.cid,
+                &block_result.block,
+                &block_result.doc_id,
+                &collection_id,
+                &document_json,
+                creator_ref,
+            )
+            .await;
+        if let Some(col_block_result) = branchable_data.as_ref() {
+            self.sync
+                .push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
                     &collection_id,
-                    &document_json,
                     creator_ref,
                 )
                 .await;
+        }
+
+        // The local transaction is already committed. Do not wait for gossip
+        // delivery; sender durability is already held by the scope marker.
+        self.sync
+            .spawn_non_authoritative_broadcast_task("broadcast_document_create", async move {
+                let creator_ref = creator_did.as_deref();
                 sync.push_se_artifacts_to_replicators_for_document(
                     &collection_id,
                     se_artifacts,
@@ -498,14 +520,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
                 // For branchable collections, also broadcast the collection block.
                 if let Some(col_block_result) = branchable_data {
-                    sync.push_to_replicators_with_creator(
-                        &col_block_result.cid,
-                        &col_block_result.block,
-                        &col_block_result.doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
                     log_broadcast_failure(
                         &broadcast_with_retry_with_creator(
                             &sync,
@@ -641,22 +655,42 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             let sync = self.sync.clone();
             let collection_name_owned = collection_name.to_string();
 
-            self.sync
-                .spawn_background_task("broadcast_document_create_many", async move {
+            // Batch commit is already durable. Install every scope marker
+            // before handing only the non-authoritative gossip/artifact work
+            // to the background task.
+            let creator_ref = creator_did.as_deref();
+            for (block_result, branchable_data, _, document_json) in &broadcast_work {
+                self.sync
+                    .push_document_to_replicators_with_creator(
+                        &block_result.cid,
+                        &block_result.block,
+                        &block_result.doc_id,
+                        &collection_id,
+                        document_json,
+                        creator_ref,
+                    )
+                    .await;
+                if let Some(col_block_result) = branchable_data {
+                    self.sync
+                        .push_to_replicators_with_creator(
+                            &col_block_result.cid,
+                            &col_block_result.block,
+                            &col_block_result.doc_id,
+                            &collection_id,
+                            creator_ref,
+                        )
+                        .await;
+                }
+            }
+
+            self.sync.spawn_non_authoritative_broadcast_task(
+                "broadcast_document_create_many",
+                async move {
                     let creator_ref = creator_did.as_deref();
 
                     for (block_result, branchable_data, se_artifacts, document_json) in
                         &broadcast_work
                     {
-                        sync.push_document_to_replicators_with_creator(
-                            &block_result.cid,
-                            &block_result.block,
-                            &block_result.doc_id,
-                            &collection_id,
-                            document_json,
-                            creator_ref,
-                        )
-                        .await;
                         sync.push_se_artifacts_to_replicators_for_document(
                             &collection_id,
                             se_artifacts.clone(),
@@ -676,14 +710,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                         );
 
                         if let Some(col_block_result) = branchable_data {
-                            sync.push_to_replicators_with_creator(
-                                &col_block_result.cid,
-                                &col_block_result.block,
-                                &col_block_result.doc_id,
-                                &collection_id,
-                                creator_ref,
-                            )
-                            .await;
                             log_broadcast_failure(
                                 &broadcast_with_retry_with_creator(
                                     &sync,
@@ -696,7 +722,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                             );
                         }
                     }
-                });
+                },
+            );
         }
 
         Ok(broadcast_results)
@@ -825,33 +852,49 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
 
-        // The local transaction is already committed, so return without
-        // waiting for network delivery.
-        self.sync
-            .spawn_background_task("broadcast_document_delete", async move {
-                let creator_ref = creator_did.as_deref();
+        // Preserve the committed delete as a durable scope obligation before
+        // returning. Deletes and branchable collection commits use the same
+        // head-hint queue as creates and updates.
+        let creator_ref = creator_did.as_deref();
+        if let Some(document_json) = pre_delete_document_json.as_ref() {
+            self.sync
+                .push_document_to_replicators_with_creator(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
+                    &collection_id,
+                    document_json,
+                    creator_ref,
+                )
+                .await;
+        } else {
+            self.sync
+                .push_to_replicators_with_creator(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+        }
+        if let Some(col_block_result) = branchable_data.as_ref() {
+            self.sync
+                .push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+        }
 
-                // Push to replicators (single block for delete, not full DAG).
-                if let Some(document_json) = pre_delete_document_json.as_ref() {
-                    sync.push_document_to_replicators_with_creator(
-                        &block_result.cid,
-                        &block_result.block,
-                        &block_result.doc_id,
-                        &collection_id,
-                        document_json,
-                        creator_ref,
-                    )
-                    .await;
-                } else {
-                    sync.push_to_replicators_with_creator(
-                        &block_result.cid,
-                        &block_result.block,
-                        &block_result.doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
-                }
+        // The local transaction is already committed; gossip remains
+        // fire-and-forget after durable marker registration above.
+        self.sync
+            .spawn_non_authoritative_broadcast_task("broadcast_document_delete", async move {
+                let creator_ref = creator_did.as_deref();
 
                 // Broadcast via GossipSub with retry for InsufficientPeers
                 log_broadcast_failure(
@@ -867,14 +910,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
                 // For branchable collections, also broadcast the collection block.
                 if let Some(col_block_result) = branchable_data {
-                    sync.push_to_replicators_with_creator(
-                        &col_block_result.cid,
-                        &col_block_result.block,
-                        &col_block_result.doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
                     log_broadcast_failure(
                         &broadcast_with_retry_with_creator(
                             &sync,

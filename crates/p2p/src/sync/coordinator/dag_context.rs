@@ -40,6 +40,10 @@ pub(crate) struct DagFetchContext {
     pub(crate) is_explicit_replicator: bool,
     explicit_replicator_collections: Option<Vec<String>>,
     pub(crate) explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    pending_lease: Option<crate::sync::manager::PendingDagLease>,
+    block_sync_completions: Option<crate::sync::manager::BlockSyncCompletionTracker>,
+    rooted_car_completions: Option<crate::sync::manager::RootedCarCompletionTracker>,
+    rooted_provider_discovery: bool,
 }
 
 impl DagFetchContext {
@@ -58,6 +62,10 @@ impl DagFetchContext {
             is_explicit_replicator: false,
             explicit_replicator_collections: None,
             explicit_replay_authorization: None,
+            pending_lease: None,
+            block_sync_completions: None,
+            rooted_car_completions: None,
+            rooted_provider_discovery: false,
         }
     }
 
@@ -99,6 +107,75 @@ impl DagFetchContext {
     ) -> Self {
         self.explicit_replay_authorization = authorization;
         self
+    }
+
+    pub(crate) fn with_pending_lease(
+        mut self,
+        lease: crate::sync::manager::PendingDagLease,
+    ) -> Self {
+        self.pending_lease = Some(lease);
+        self
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        self.pending_lease
+            .as_ref()
+            .is_none_or(|lease| lease.is_current())
+    }
+
+    pub(crate) fn with_block_sync_completions(
+        mut self,
+        tracker: crate::sync::manager::BlockSyncCompletionTracker,
+    ) -> Self {
+        self.block_sync_completions = Some(tracker);
+        self
+    }
+
+    pub(crate) fn with_rooted_car_completions(
+        mut self,
+        tracker: crate::sync::manager::RootedCarCompletionTracker,
+    ) -> Self {
+        self.rooted_car_completions = Some(tracker);
+        self
+    }
+
+    pub(crate) fn with_rooted_provider_discovery(mut self) -> Self {
+        self.rooted_provider_discovery = true;
+        self
+    }
+
+    pub(crate) fn needs_rooted_provider_discovery(&self) -> bool {
+        self.rooted_provider_discovery
+    }
+
+    pub(crate) fn track_block_sync(
+        &self,
+        query_id: crate::QueryId,
+    ) -> Option<tokio::sync::oneshot::Receiver<bool>> {
+        self.block_sync_completions
+            .as_ref()
+            .map(|tracker| tracker.register(query_id))
+    }
+
+    pub(crate) fn cancel_block_sync_tracking(&self, query_id: crate::QueryId) {
+        if let Some(tracker) = &self.block_sync_completions {
+            tracker.cancel(query_id);
+        }
+    }
+
+    pub(crate) fn track_rooted_car(
+        &self,
+        root_cid: Cid,
+    ) -> Option<tokio::sync::oneshot::Receiver<bool>> {
+        self.rooted_car_completions
+            .as_ref()
+            .map(|tracker| tracker.register(root_cid))
+    }
+
+    pub(crate) fn cancel_rooted_car_tracking(&self, root_cid: Cid) {
+        if let Some(tracker) = &self.rooted_car_completions {
+            tracker.cancel(root_cid);
+        }
     }
 
     pub(crate) fn fill_missing_from_block(&mut self, block_data: &[u8]) {

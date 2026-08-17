@@ -235,7 +235,10 @@ where
     );
     let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
 
-    let doc_pusher_impl = Arc::new(DbDocPusher::new(database.clone()));
+    let doc_pusher_impl = Arc::new(DbDocPusher::new(
+        database.clone(),
+        coordinator.head_hint_car_authority(),
+    ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
     let doc_pusher: Arc<dyn DocPusher> = doc_pusher_impl;
     let version_syncer = Some(DbVersionSyncer::new_arc(
@@ -524,6 +527,7 @@ where
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
         transport.clone(),
+        coordinator.head_hint_car_authority(),
     ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
     let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_impl;

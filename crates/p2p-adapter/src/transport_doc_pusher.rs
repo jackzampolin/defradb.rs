@@ -9,6 +9,10 @@ use p2p::P2PTransport;
 /// Type-erased interface for transport-generic push operations.
 #[async_trait]
 pub trait TransportDocPusher: Send + Sync {
+    async fn push_retry_marker_stats(&self) -> P2PResult<storage::stores::PushRetryMarkerStats> {
+        Ok(storage::stores::PushRetryMarkerStats::default())
+    }
+
     async fn push_existing_docs(
         &self,
         peer_id: &PeerId,
@@ -20,16 +24,12 @@ pub trait TransportDocPusher: Send + Sync {
     async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
         -> P2PResult<()>;
 
-    /// Replay a failed COLLECTION-COMMIT push by CID (defradb#1113).
+    /// Replay a failed collection scope by rederiving current collection heads.
     ///
     /// Collection commits are doc-less, so they cannot be replayed through
     /// `retry_doc`, which resolves work from a document's composite heads.
-    async fn retry_collection_commit(
-        &self,
-        peer_id: &PeerId,
-        collection_id: &str,
-        cid: &Cid,
-    ) -> P2PResult<()>;
+    async fn retry_collection_commit(&self, peer_id: &PeerId, collection_id: &str)
+        -> P2PResult<()>;
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
 
@@ -77,20 +77,30 @@ pub trait TransportDocPusher: Send + Sync {
 pub struct DbTransportDocPusher<S: storage::corekv::Store, T: P2PTransport> {
     db: Arc<db::DB<S>>,
     transport: T,
+    car_authority: p2p::sync::HeadHintCarAuthority,
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<S, T> {
-    pub fn new(db: Arc<db::DB<S>>, transport: T) -> Self {
+    pub fn new(
+        db: Arc<db::DB<S>>,
+        transport: T,
+        car_authority: p2p::sync::HeadHintCarAuthority,
+    ) -> Self {
         Self {
             db,
             transport,
+            car_authority,
             document_acp: std::sync::OnceLock::new(),
         }
     }
 
-    pub fn new_arc(db: Arc<db::DB<S>>, transport: T) -> Arc<dyn TransportDocPusher> {
-        Arc::new(Self::new(db, transport))
+    pub fn new_arc(
+        db: Arc<db::DB<S>>,
+        transport: T,
+        car_authority: p2p::sync::HeadHintCarAuthority,
+    ) -> Arc<dyn TransportDocPusher> {
+        Arc::new(Self::new(db, transport, car_authority))
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
@@ -102,6 +112,13 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<
 impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     for DbTransportDocPusher<S, T>
 {
+    async fn push_retry_marker_stats(&self) -> P2PResult<storage::stores::PushRetryMarkerStats> {
+        storage::stores::Peerstore::new(self.db.store().clone())
+            .push_retry_marker_stats()
+            .await
+            .map_err(|error| P2PError::internal(error.to_string()))
+    }
+
     async fn push_existing_docs(
         &self,
         peer_id: &PeerId,
@@ -118,6 +135,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             filters,
             se_key,
             &replication_filter::QueryReplicationFilterMatcher::new(),
+            &self.car_authority,
         )
         .await
         .map_err(P2PError::from)
@@ -146,6 +164,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             collection_id,
             &filters,
             &replication_filter::QueryReplicationFilterMatcher::new(),
+            &self.car_authority,
         )
         .await
         .map_err(P2PError::from)
@@ -155,14 +174,13 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         &self,
         peer_id: &PeerId,
         collection_id: &str,
-        cid: &Cid,
     ) -> P2PResult<()> {
         db_merge::retry_collection_commit_via_transport(
             &self.transport,
             &self.db,
             peer_id,
             collection_id,
-            cid,
+            &self.car_authority,
         )
         .await
         .map_err(P2PError::from)

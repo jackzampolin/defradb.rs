@@ -712,6 +712,25 @@ mod pending_persistence {
         (comp_cid, comp_bytes, field_cid, field_bytes)
     }
 
+    fn composite_with_priority_and_missing_field(
+        priority: u64,
+        field_name: &str,
+    ) -> (Cid, Vec<u8>) {
+        let (field_cid, _) = create_lww_block(field_name);
+        let block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "schema1".to_string(),
+                priority,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new(field_name, field_cid)],
+        );
+        let bytes = block.to_dag_cbor().expect("encode composite block");
+        let cid = block.generate_cid().expect("generate composite cid");
+        (cid, bytes)
+    }
+
     fn pushlog_for(cid: &Cid, bytes: &[u8]) -> PushLogBroadcast {
         PushLogBroadcast::new(
             "doc123".to_string(),
@@ -720,6 +739,207 @@ mod pending_persistence {
             "creator1".to_string(),
             Bytes::from(bytes.to_vec()),
         )
+    }
+
+    #[tokio::test]
+    async fn current_sender_scope_head_atomically_supersedes_older_durable_root() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut events, pending_store) = manager_with_store(store).await;
+        let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old");
+        let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new");
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&old_root, &old_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("register old head");
+        manager
+            .process_pushlog(
+                &pushlog_for(&new_root, &new_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("register newer head");
+
+        let records = pending_store.load_all().await.expect("load pending roots");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, new_root);
+        assert_eq!(manager.pending_dag_cids(), vec![new_root]);
+        assert_eq!(manager.persisted_pending_count(), 1);
+
+        // A delayed old hint is honestly covered by the already-durable newer
+        // head and must not recreate the retired CID-valued obligation.
+        manager
+            .process_pushlog(
+                &pushlog_for(&old_root, &old_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("stale head is covered");
+        assert_eq!(pending_store.load_all().await.expect("load").len(), 1);
+        assert_eq!(manager.pending_dag_cids(), vec![new_root]);
+
+        // The same logical scope from another sender is an independent
+        // branch obligation and cannot be retired by peer-1's head.
+        manager
+            .process_pushlog(
+                &pushlog_for(&old_root, &old_bytes),
+                Some("peer-2"),
+                true,
+                None,
+            )
+            .await
+            .expect("other sender remains independent");
+        assert_eq!(pending_store.load_all().await.expect("load").len(), 2);
+        assert_eq!(manager.pending_dag_count(), 2);
+
+        while events.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn durable_scope_head_survives_pending_eviction_and_restart() {
+        let store = Arc::new(MemoryStore::new());
+        let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old");
+        let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new");
+
+        {
+            let (manager, _events, pending_store) = manager_with_store(store.clone()).await;
+            manager
+                .process_pushlog(
+                    &pushlog_for(&old_root, &old_bytes),
+                    Some("peer-1"),
+                    true,
+                    None,
+                )
+                .await
+                .expect("register old head");
+
+            // Model TTL eviction: only the in-memory fetch entry disappears;
+            // the success-acked durable receiver obligation remains.
+            assert!(manager.clear_pending_dag(&old_root));
+            manager
+                .process_pushlog(
+                    &pushlog_for(&new_root, &new_bytes),
+                    Some("peer-1"),
+                    true,
+                    None,
+                )
+                .await
+                .expect("new head supersedes evicted durable head");
+            let records = pending_store.load_all().await.expect("load after eviction");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].0, new_root);
+        }
+
+        // Installation must hydrate the scope index synchronously. A stale
+        // hint arriving before the resync sweep is covered by the durable new
+        // head and cannot resurrect the retired per-root obligation.
+        let (restarted, _events, pending_store) = manager_with_store(store).await;
+        restarted
+            .process_pushlog(
+                &pushlog_for(&old_root, &old_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("stale post-restart hint is durably covered");
+        let records = pending_store.load_all().await.expect("load after restart");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, new_root);
+        assert_eq!(records[0].1.head_priority, Some(2));
+    }
+
+    #[tokio::test]
+    async fn current_scope_replacement_is_admitted_at_pending_capacity() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let (manager, _events) = SyncManager::new(
+            blockstore,
+            test_peer_state(),
+            SyncConfig {
+                max_pending_dags: 1,
+                ..SyncConfig::default()
+            },
+        );
+        let pending_store = Arc::new(PendingDagStore::new(store));
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old");
+        let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new");
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&old_root, &old_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("fill the only pending slot");
+        manager
+            .process_pushlog(
+                &pushlog_for(&new_root, &new_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("new current head replaces the full slot");
+
+        assert_eq!(manager.pending_dag_cids(), vec![new_root]);
+        let records = pending_store.load_all().await.expect("load current root");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, new_root);
+    }
+
+    #[tokio::test]
+    async fn collection_scope_heads_use_the_same_current_obligation_rule() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, _events, pending_store) = manager_with_store(store).await;
+        let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old-col");
+        let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new-col");
+        let collection_pushlog = |cid: &Cid, bytes: &[u8]| {
+            let mut message = pushlog_for(cid, bytes);
+            message.doc_id.clear();
+            message
+        };
+
+        manager
+            .process_pushlog(
+                &collection_pushlog(&old_root, &old_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("register old collection head");
+        manager
+            .process_pushlog(
+                &collection_pushlog(&new_root, &new_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("register new collection head");
+
+        let records = pending_store
+            .load_all()
+            .await
+            .expect("load collection heads");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, new_root);
+        assert_eq!(manager.pending_dag_cids(), vec![new_root]);
     }
 
     #[tokio::test]
@@ -1008,13 +1228,10 @@ mod pending_persistence {
         for index in 0..4 {
             let (comp_cid, comp_bytes) =
                 composite_with_missing_named_field(&format!("field_{index}"));
+            let mut message = pushlog_for(&comp_cid, &comp_bytes);
+            message.doc_id = format!("doc-{index}");
             manager
-                .process_pushlog(
-                    &pushlog_for(&comp_cid, &comp_bytes),
-                    Some("peer-1"),
-                    true,
-                    None,
-                )
+                .process_pushlog(&message, Some("peer-1"), true, None)
                 .await
                 .expect("registration under the durable cap");
             manager.clear_pending_dag(&comp_cid);
@@ -1022,13 +1239,10 @@ mod pending_persistence {
         assert_eq!(pending_store.load_all().await.expect("load").len(), 4);
 
         let (comp_cid, comp_bytes) = composite_with_missing_named_field("field_overflow");
+        let mut message = pushlog_for(&comp_cid, &comp_bytes);
+        message.doc_id = "doc-overflow".to_string();
         let result = manager
-            .process_pushlog(
-                &pushlog_for(&comp_cid, &comp_bytes),
-                Some("peer-1"),
-                true,
-                None,
-            )
+            .process_pushlog(&message, Some("peer-1"), true, None)
             .await;
         assert!(
             matches!(result, Err(Error::PendingDagCapacity { max: 4 })),
@@ -1070,7 +1284,7 @@ mod pending_persistence {
         manager.clear_pending_dag(&comp_a);
         let (comp_b, bytes_b) = composite_with_missing_named_field("field_b");
         manager
-            .process_pushlog(&pushlog_for(&comp_b, &bytes_b), Some("peer-1"), true, None)
+            .process_pushlog(&pushlog_for(&comp_b, &bytes_b), Some("peer-2"), true, None)
             .await
             .expect("register B");
         while tokio::time::timeout(Duration::from_millis(50), events.recv())
@@ -1123,6 +1337,7 @@ mod pending_persistence {
                 &PersistedPendingDag {
                     doc_id: "doc123".to_string(),
                     collection_id: "collection1".to_string(),
+                    head_priority: None,
                     creator: "creator1".to_string(),
                     source_peer: Some("peer-1".to_string()),
                     is_explicit_replicator: true,
@@ -1213,6 +1428,14 @@ mod pending_persistence {
     impl PendingDagStorage for FailingStore {
         async fn put(
             &self,
+            _root_cid: &Cid,
+            _record: &PersistedPendingDag,
+        ) -> p2p::error::Result<()> {
+            Err(Error::Storage("disk full".to_string()))
+        }
+        async fn replace_scope_head(
+            &self,
+            _superseded_root: Option<&Cid>,
             _root_cid: &Cid,
             _record: &PersistedPendingDag,
         ) -> p2p::error::Result<()> {

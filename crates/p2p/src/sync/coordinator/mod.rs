@@ -60,9 +60,10 @@ mod selective_car_access;
 mod subscriptions;
 
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
+pub use selective_car_access::{HeadHintCarAuthority, HeadHintCarGrant};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -92,18 +93,95 @@ pub(crate) use super::manager::{
 
 /// A durable retry update emitted by outbound PushLog admission/workers.
 ///
-/// The runtime consumes failures to create retry records and newer-head
-/// observations to retire an existing persisted predecessor.
-#[derive(Debug, Clone)]
+/// The runtime consumes observations to register scope markers before send,
+/// failures to retain/reschedule them, and current acknowledgements to clear them.
+#[derive(Debug)]
 pub struct PushFailure {
     pub peer_id: String,
     pub doc_id: String,
     pub collection_id: String,
     pub cid: String,
     pub head_priority: u64,
-    /// False for a newer-head observation that must only retire an existing
-    /// persisted predecessor, never create a new retry obligation.
+    /// False for a pre-send observation; true for a terminal failure that keeps
+    /// the already-registered scope marker on its durable ladder.
     pub create_retry: bool,
+    /// Successful acknowledgement for this exact scope/head.
+    pub acknowledged: bool,
+    /// Register-before-send handshake with the durable recorder.
+    pub durable_tx: Option<tokio::sync::oneshot::Sender<bool>>,
+}
+
+/// Volatile fence for acknowledgements of presence-only durable markers.
+///
+/// The durable marker intentionally stores no CID. This fence covers the only
+/// acknowledgements that can survive long enough to race a newer live head in
+/// the same process. Across restart there are no surviving in-flight sends, so
+/// the presence marker alone is the conservative source of truth.
+#[derive(Default)]
+pub struct HeadAckFence {
+    current: std::collections::HashMap<(String, String, String), (u64, String)>,
+}
+
+impl HeadAckFence {
+    fn scope_key(event: &PushFailure) -> (String, String, String) {
+        (
+            event.peer_id.clone(),
+            event.doc_id.clone(),
+            event.collection_id.clone(),
+        )
+    }
+
+    fn head_token(event: &PushFailure) -> (u64, String) {
+        (event.head_priority, event.cid.clone())
+    }
+
+    pub fn observe_durable(&mut self, event: &PushFailure) {
+        self.current
+            .insert(Self::scope_key(event), Self::head_token(event));
+    }
+
+    pub fn ack_is_current(&self, event: &PushFailure) -> bool {
+        self.current.get(&Self::scope_key(event)) == Some(&Self::head_token(event))
+    }
+
+    pub fn clear_current_ack(&mut self, event: &PushFailure) {
+        if self.ack_is_current(event) {
+            self.current.remove(&Self::scope_key(event));
+        }
+    }
+}
+
+#[cfg(test)]
+mod head_ack_fence_tests {
+    use super::*;
+
+    fn event(cid: &str, priority: u64) -> PushFailure {
+        PushFailure {
+            peer_id: "peer".to_string(),
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            cid: cid.to_string(),
+            head_priority: priority,
+            create_retry: false,
+            acknowledged: false,
+            durable_tx: None,
+        }
+    }
+
+    #[test]
+    fn stale_ack_cannot_clear_a_newer_scope_head() {
+        let mut fence = HeadAckFence::default();
+        let old = event("old", 1);
+        let new = event("new", 2);
+        fence.observe_durable(&old);
+        fence.observe_durable(&new);
+
+        assert!(!fence.ack_is_current(&old));
+        fence.clear_current_ack(&old);
+        assert!(fence.ack_is_current(&new));
+        fence.clear_current_ack(&new);
+        assert!(!fence.ack_is_current(&new));
+    }
 }
 
 /// Stable diagnostic snapshot of P2P-owned sync resources (#1099).
@@ -116,10 +194,6 @@ pub struct PushFailure {
 pub struct SyncStatus {
     /// Live queue occupancy and retry/retirement counters.
     pub push_backlog: crate::sync::push_backlog::PushBacklogSnapshot,
-    /// CID cache acquisitions that reused an existing fan-out payload.
-    pub encode_cache_hits_total: u64,
-    /// Entries still owned by at least one queued or active peer job.
-    pub encode_cache_entries: usize,
     /// Gossip updates folded into a newer update during the short window.
     pub broadcast_coalesced_total: u64,
     /// Replicator fan-outs folded before enumerating peers.
@@ -129,14 +203,29 @@ pub struct SyncStatus {
     pub gossip_direction_filtered_total: u64,
     pub pending_dags: usize,
     pub pending_dag_capacity: usize,
+    pub pending_dag_high_water: u64,
     /// Durable pending-DAG registrations (may exceed `pending_dags`: records
     /// outlive TTL-evicted in-memory entries until their roots merge).
     pub persisted_pending_dags: usize,
     pub persisted_pending_dag_capacity: usize,
+    pub persisted_pending_dag_high_water: u64,
     pub pending_resync_in_flight: bool,
     pub retained_background_tasks: usize,
+    /// Current/high-water occupancy of bounded non-authoritative mutation
+    /// gossip/artifact work. Durable head markers are installed before this
+    /// pool is entered, so shedding here cannot lose a sync obligation.
+    pub non_authoritative_broadcast_tasks: usize,
+    pub non_authoritative_broadcast_high_water: usize,
+    pub non_authoritative_broadcast_rejected_total: u64,
     pub missing_link_retries: u64,
+    pub car_requested_cids: u64,
+    pub car_present_cids: u64,
+    pub car_served_cids: u64,
+    pub car_filtered_cids: u64,
+    pub provider_rotations: u64,
     pub pending_dag_resolved: u64,
+    /// Push-originated missing DAGs durably registered before a success ack.
+    pub pending_dag_registered: u64,
     pub pending_dag_expired: u64,
     pub single_flight_suppressed: u64,
     pub already_merged_fast_path: u64,
@@ -145,6 +234,10 @@ pub struct SyncStatus {
     pub pending_dag_retry_dispatched: u64,
     /// Retry-clock/claim attempts that found no due entry (#1116 stage 2).
     pub pending_dag_retry_suppressed: u64,
+    /// Roots whose bounded fetch exhausted all attempts/providers.
+    pub pending_dag_fetch_exhausted: u64,
+    /// Durable pending-DAG obligations discharged by terminal merge/mark.
+    pub pending_dag_terminal_merged: u64,
     /// Milliseconds until the earliest due incomplete pending-DAG retry;
     /// `None` when no incomplete entry is registered.
     pub next_pending_retry_in_ms: Option<u64>,
@@ -164,6 +257,9 @@ struct SyncShutdownState {
     /// is read on hot paths.
     shutdown_notify: Notify,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
+    non_authoritative_broadcast_slots: Arc<Semaphore>,
+    non_authoritative_broadcast_high_water: AtomicUsize,
+    non_authoritative_broadcast_rejected: AtomicU64,
     /// Long-lived poll fetches keyed by pending-DAG root. The retry clock may
     /// re-emit a root before its previous bounded fetch has exhausted all
     /// providers, so these need root-level single-flight in addition to the
@@ -172,6 +268,7 @@ struct SyncShutdownState {
 }
 
 const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+const NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT: usize = 32;
 
 /// Shared limiter for poll-based DAG fetches.
 ///
@@ -244,6 +341,11 @@ impl SyncShutdownHandle {
                 is_shutting_down: AtomicBool::new(false),
                 shutdown_notify: Notify::new(),
                 background_tasks: Mutex::new(Vec::new()),
+                non_authoritative_broadcast_slots: Arc::new(Semaphore::new(
+                    NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
+                )),
+                non_authoritative_broadcast_high_water: AtomicUsize::new(0),
+                non_authoritative_broadcast_rejected: AtomicU64::new(0),
                 pending_dag_fetch_tasks: Mutex::new(HashMap::new()),
             }),
         }
@@ -305,6 +407,44 @@ impl SyncShutdownHandle {
         } else {
             tasks.push(handle);
         }
+    }
+
+    fn try_acquire_non_authoritative_broadcast_slot(&self) -> Option<OwnedSemaphorePermit> {
+        let permit =
+            match Arc::clone(&self.inner.non_authoritative_broadcast_slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.inner
+                        .non_authoritative_broadcast_rejected
+                        .fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+            };
+        let current = NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT.saturating_sub(
+            self.inner
+                .non_authoritative_broadcast_slots
+                .available_permits(),
+        );
+        self.inner
+            .non_authoritative_broadcast_high_water
+            .fetch_max(current, Ordering::Relaxed);
+        Some(permit)
+    }
+
+    fn non_authoritative_broadcast_stats(&self) -> (usize, usize, u64) {
+        (
+            NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT.saturating_sub(
+                self.inner
+                    .non_authoritative_broadcast_slots
+                    .available_permits(),
+            ),
+            self.inner
+                .non_authoritative_broadcast_high_water
+                .load(Ordering::Relaxed),
+            self.inner
+                .non_authoritative_broadcast_rejected
+                .load(Ordering::Relaxed),
+        )
     }
 
     fn spawn_pending_dag_fetch<F>(&self, root_cid: Cid, future: F) -> bool
@@ -392,10 +532,6 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Bounded admission queue for outbound replicator pushes, drained by the
     /// fixed worker pool spawned at construction (#1099).
     pub(super) push_backlog: Arc<super::push_backlog::PushBacklog>,
-
-    /// CID-keyed weak cache shared by every peer in one fan-out. Strong
-    /// lifetime is owned by queued/active jobs.
-    pub(super) push_encode_cache: Arc<super::push_encode_cache::PushEncodeCache>,
 
     pub(super) broadcast_coalescer: Arc<super::broadcast_coalescer::BroadcastCoalescer>,
 
@@ -508,10 +644,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Point-in-time snapshot of sync resource state for diagnostics (#1099).
     pub fn sync_status(&self) -> SyncStatus {
         let diagnostics = self.manager.diagnostics().snapshot();
+        let (
+            non_authoritative_broadcast_tasks,
+            non_authoritative_broadcast_high_water,
+            non_authoritative_broadcast_rejected_total,
+        ) = self.runtime.shutdown.non_authoritative_broadcast_stats();
         SyncStatus {
             push_backlog: self.runtime.push_backlog.snapshot(),
-            encode_cache_hits_total: self.runtime.push_encode_cache.hits(),
-            encode_cache_entries: self.runtime.push_encode_cache.live_entries(),
             broadcast_coalesced_total: self.runtime.broadcast_coalescer.coalesced(),
             push_updates_coalesced_total: self.runtime.push_fanout_coalescer.coalesced(),
             gossip_direction_filtered_total: self
@@ -520,18 +659,31 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .load(Ordering::Relaxed),
             pending_dags: self.manager.pending_dag_count(),
             pending_dag_capacity: self.manager.max_pending_dags(),
+            pending_dag_high_water: diagnostics.pending_dag_high_water,
             persisted_pending_dags: self.manager.persisted_pending_count(),
             persisted_pending_dag_capacity: self.manager.persisted_pending_capacity(),
+            persisted_pending_dag_high_water: diagnostics.persisted_pending_dag_high_water,
             pending_resync_in_flight: self.manager.pending_resync_in_flight(),
             retained_background_tasks: self.runtime.shutdown.retained_task_count(),
+            non_authoritative_broadcast_tasks,
+            non_authoritative_broadcast_high_water,
+            non_authoritative_broadcast_rejected_total,
             missing_link_retries: diagnostics.missing_link_retries,
+            car_requested_cids: diagnostics.car_requested_cids,
+            car_present_cids: diagnostics.car_present_cids,
+            car_served_cids: diagnostics.car_served_cids,
+            car_filtered_cids: diagnostics.car_filtered_cids,
+            provider_rotations: diagnostics.provider_rotations,
             pending_dag_resolved: diagnostics.pending_dag_resolved,
+            pending_dag_registered: diagnostics.pending_dag_registered,
             pending_dag_expired: diagnostics.pending_dag_expired,
             single_flight_suppressed: diagnostics.single_flight_suppressed,
             already_merged_fast_path: diagnostics.already_merged_fast_path,
             pending_dag_capacity_shed: diagnostics.pending_dag_capacity_shed,
             pending_dag_retry_dispatched: diagnostics.pending_dag_retry_dispatched,
             pending_dag_retry_suppressed: diagnostics.pending_dag_retry_suppressed,
+            pending_dag_fetch_exhausted: diagnostics.pending_dag_fetch_exhausted,
+            pending_dag_terminal_merged: diagnostics.pending_dag_terminal_merged,
             next_pending_retry_in_ms: self.manager.next_pending_retry_in_ms(),
             pending_dag_terminal_quarantined: diagnostics.pending_dag_terminal_quarantined,
             quarantined_pending_dags: self.manager.quarantined_pending_count(),
@@ -686,6 +838,40 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.runtime.shutdown.register_task(handle);
     }
 
+    /// Spawn mutation-adjacent gossip/artifact work in a distinct bounded
+    /// pool. Callers must install durable document/collection head markers
+    /// before using this method; overflow therefore sheds only redundant,
+    /// non-authoritative dissemination work.
+    pub fn spawn_non_authoritative_broadcast_task<F>(&self, task_name: &'static str, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if self.runtime.shutdown.is_shutting_down() {
+            tracing::debug!(
+                task = task_name,
+                "Skipping background broadcast during shutdown"
+            );
+            return;
+        }
+        let Some(permit) = self
+            .runtime
+            .shutdown
+            .try_acquire_non_authoritative_broadcast_slot()
+        else {
+            tracing::warn!(
+                task = task_name,
+                limit = NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
+                "Non-authoritative background broadcast pool full; durable head marker retains delivery ownership"
+            );
+            return;
+        };
+        let handle = tokio::spawn(async move {
+            future.await;
+            drop(permit);
+        });
+        self.runtime.shutdown.register_task(handle);
+    }
+
     pub(crate) fn spawn_pending_dag_fetch_task<F>(
         &self,
         root_cid: Cid,
@@ -769,7 +955,7 @@ mod dag_fetch_limiter_tests {
 
 #[cfg(test)]
 mod shutdown_tests {
-    use super::SyncShutdownHandle;
+    use super::{SyncShutdownHandle, NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT};
     use cid::Cid;
     use multihash_codetable::{Code, MultihashDigest};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -793,6 +979,35 @@ mod shutdown_tests {
             completed.load(Ordering::SeqCst),
             "shutdown should allow in-flight background tasks to finish"
         );
+    }
+
+    #[test]
+    fn non_authoritative_broadcast_slots_are_bounded_and_observable() {
+        let shutdown = SyncShutdownHandle::new();
+        let mut permits = Vec::new();
+        for _ in 0..NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT {
+            permits.push(
+                shutdown
+                    .try_acquire_non_authoritative_broadcast_slot()
+                    .expect("slot within limit"),
+            );
+        }
+        assert!(
+            shutdown
+                .try_acquire_non_authoritative_broadcast_slot()
+                .is_none(),
+            "overflow must be actionable instead of allocating another task"
+        );
+        assert_eq!(
+            shutdown.non_authoritative_broadcast_stats(),
+            (
+                NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
+                NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
+                1,
+            )
+        );
+        drop(permits);
+        assert_eq!(shutdown.non_authoritative_broadcast_stats().0, 0);
     }
 
     /// #1099: completed handles must not accumulate for the process lifetime.

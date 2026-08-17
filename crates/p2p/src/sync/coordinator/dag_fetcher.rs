@@ -20,11 +20,17 @@ use super::dag_context::DagFetchContext;
 use super::dag_retry::{retry_backoff, ProviderRotation, MAX_FETCH_ATTEMPTS};
 use super::DagFetchLimiter;
 use crate::sync::manager::links::find_all_missing_links;
+use crate::sync::manager::SyncDiagnostics;
 use crate::sync::manager::SyncEvent;
 use crate::transport::{P2PTransport, PeerId};
 
 const SELECTIVE_FETCH_BATCH_SIZE: usize = 2048;
-
+/// Outer owner watchdog for a transport block-sync response.
+///
+/// Iroh bounds its request/response read at 30 seconds. The receiver owner must
+/// outlive that bound so the transport completion event, rather than a racing
+/// shorter poll window, decides when a productive CAR stream is reaped.
+const BLOCK_SYNC_COMPLETION_WATCHDOG: Duration = Duration::from_secs(35);
 /// Defensive ceiling on selective-fetch DAG-walk iterations.
 ///
 /// Each iteration reveals and fetches the next frontier of missing blocks
@@ -81,6 +87,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     root_cid: Cid,
     context: DagFetchContext,
     limiter: DagFetchLimiter,
+    diagnostics: Arc<SyncDiagnostics>,
 ) {
     let mut providers = ProviderRotation::new(context.providers());
     debug!(
@@ -95,6 +102,15 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
     let mut remaining_count = 0usize;
     for attempt in 1..=MAX_FETCH_ATTEMPTS {
+        if !context.is_current() {
+            debug!(
+                root_cid = %root_cid,
+                doc_id = %context.doc_id,
+                collection_id = %context.collection_id,
+                "Stopping fetch for superseded sender/scope head"
+            );
+            return;
+        }
         if attempt > 1 {
             let backoff = retry_backoff(attempt);
             warn!(
@@ -117,6 +133,9 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             );
             return;
         };
+        if !context.is_current() {
+            return;
+        }
 
         match fetch_dag_attempt(
             &transport,
@@ -125,6 +144,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             root_cid,
             &context,
             &mut providers,
+            diagnostics.as_ref(),
         )
         .await
         {
@@ -133,6 +153,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
         }
     }
 
+    diagnostics.record_pending_dag_fetch_exhausted();
     error!(
         root_cid = %root_cid,
         doc_id = %context.doc_id,
@@ -175,6 +196,7 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
     root_cid: Cid,
     context: &DagFetchContext,
     providers: &mut ProviderRotation,
+    diagnostics: &SyncDiagnostics,
 ) -> FetchAttemptOutcome {
     // One full rotation's worth of stalled 30s windows per attempt. Productive
     // windows (any block arrived) never consume it, so a large DAG that is
@@ -191,22 +213,52 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
         _ => None,
     };
 
-    // Try CAR fetch first
-    if try_car_fetch(
-        transport,
-        blockstore,
-        &root_cid,
-        providers.current(),
-        car_missing_watch.as_deref(),
-    )
-    .await
-    {
+    // Sender demotion removes per-CID provider advertisements. Exercise the
+    // rooted authority at the announcing publisher first (with a cancellable,
+    // bounded query), then request only the still-missing exact frontier.
+    // This lets a directly connected hub cache a leaf's DAG for the rest of a
+    // star without returning to unbounded recursive-first ownership.
+    let rooted_outcome = if let Some(rooted_watch) = car_missing_watch.as_deref() {
+        if context.needs_rooted_provider_discovery() {
+            if transport.supports_cancellable_rooted_sync() {
+                poll_fetch_rooted_provider(
+                    &root_cid,
+                    rooted_watch,
+                    transport,
+                    blockstore,
+                    providers.current(),
+                    context,
+                )
+                .await
+            } else {
+                poll_fetch_rooted_car(
+                    &root_cid,
+                    rooted_watch,
+                    transport,
+                    blockstore,
+                    providers.current(),
+                    context,
+                )
+                .await
+            }
+        } else {
+            ProviderWindowOutcome::SendFailed
+        }
+    } else if try_car_fetch(transport, blockstore, &root_cid, providers.current()).await {
+        ProviderWindowOutcome::Partial
+    } else {
+        ProviderWindowOutcome::SendFailed
+    };
+    if matches!(
+        rooted_outcome,
+        ProviderWindowOutcome::Complete | ProviderWindowOutcome::Partial
+    ) {
         if let Ok(Some(root_data)) = blockstore.get(&root_cid).await {
             let missing = find_all_missing_links(blockstore.as_ref(), &root_data)
                 .await
                 .unwrap_or_default();
             if missing.is_empty() {
-                info!(root_cid = %root_cid, doc_id = %context.doc_id, "DAG fetch complete via CAR");
+                info!(root_cid = %root_cid, doc_id = %context.doc_id, "DAG fetch complete via rooted CAR");
                 emit_dag_ready(event_tx, root_cid, context, &root_data).await;
                 return FetchAttemptOutcome::Complete;
             }
@@ -225,8 +277,12 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
             std::slice::from_ref(&root_cid),
             transport,
             blockstore,
-            providers,
-            &mut stall_budget,
+            &mut ProviderFetchState {
+                providers,
+                stall_budget: &mut stall_budget,
+                diagnostics,
+            },
+            context,
         )
         .await,
         FetchBatchOutcome::Complete
@@ -273,8 +329,12 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
                 batch,
                 transport,
                 blockstore,
-                providers,
-                &mut stall_budget,
+                &mut ProviderFetchState {
+                    providers,
+                    stall_budget: &mut stall_budget,
+                    diagnostics,
+                },
+                context,
             )
             .await
             {
@@ -344,68 +404,228 @@ async fn emit_dag_ready(
     }
 }
 
-/// Ceiling on the CAR request round-trip itself.
-///
-/// On iroh, `send_car_request` resolves only after the full connect /
-/// stream-open / response-read cycle (up to ~50s against a half-open peer),
-/// which would silently extend the attempt's CAR phase well past its intended
-/// 10s budget while the limiter permit is held. CAR requests have no
-/// cancellation handle, so on timeout the transport-side task is left to
-/// self-terminate within its own bounded internal timeouts (at most one per
-/// attempt); any late response still lands in the blockstore, where the
-/// selective phase or a later attempt picks it up.
-const CAR_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Try to fetch an entire DAG via a single CAR request.
+/// Root-absent DocSync/BranchableSync discovery retains the established CAR
+/// request seam. PushLog recovery already has the root and uses the cancellable
+/// rooted-provider probe below instead.
 async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
     transport: &T,
     blockstore: &Arc<B>,
     root_cid: &Cid,
     source_peer: &PeerId,
-    watch_missing: Option<&[Cid]>,
 ) -> bool {
     match tokio::time::timeout(
-        CAR_REQUEST_TIMEOUT,
+        Duration::from_secs(10),
         transport.send_car_request(source_peer, *root_cid),
     )
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            debug!(root_cid = %root_cid, error = %e, "CAR request failed, will use selective block fetch");
+        Ok(Err(error)) => {
+            debug!(root_cid = %root_cid, error = %error, "CAR discovery request failed");
             return false;
         }
-        Err(_) => {
-            debug!(
-                root_cid = %root_cid,
-                timeout_secs = CAR_REQUEST_TIMEOUT.as_secs(),
-                "CAR request did not resolve within budget, falling back to selective block fetch"
-            );
-            return false;
-        }
+        Err(_) => return false,
     }
 
-    let timeout = Duration::from_secs(10);
     let start = Instant::now();
-    while start.elapsed() < timeout {
-        if let Some(missing) = watch_missing {
-            let mut remaining = 0usize;
-            for cid in missing {
-                if !matches!(blockstore.has(cid).await, Ok(true)) {
-                    remaining += 1;
-                }
-            }
-            if remaining < missing.len() {
-                return true;
-            }
-        } else if let Ok(true) = blockstore.has(root_cid).await {
+    while start.elapsed() < Duration::from_secs(10) {
+        if matches!(blockstore.has(root_cid).await, Ok(true)) {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-
-    debug!(root_cid = %root_cid, "CAR fetch timed out (10s), falling back to selective block fetch");
     false
+}
+
+/// Exercise the established libp2p CAR request protocol when the transport's
+/// block-sync primitive cannot express a recursive root request.  Sending the
+/// request and receiving its CAR response are separate streams on libp2p, so
+/// completion is established from the bounded rooted frontier in blockstore.
+async fn poll_fetch_rooted_car<B: Blockstore, T: P2PTransport>(
+    root_cid: &Cid,
+    watch_cids: &[Cid],
+    transport: &T,
+    blockstore: &Arc<B>,
+    source_peer: &PeerId,
+    context: &DagFetchContext,
+) -> ProviderWindowOutcome {
+    let mut initially_missing = 0usize;
+    for cid in watch_cids {
+        if !matches!(blockstore.has(cid).await, Ok(true)) {
+            initially_missing += 1;
+        }
+    }
+    if initially_missing == 0 {
+        return ProviderWindowOutcome::Complete;
+    }
+
+    let mut completion = context.track_rooted_car(*root_cid);
+
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        transport.send_car_request(source_peer, *root_cid),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            context.cancel_rooted_car_tracking(*root_cid);
+            debug!(root_cid = %root_cid, source_peer = %source_peer, error = %error, "Rooted CAR request failed before dispatch");
+            return ProviderWindowOutcome::SendFailed;
+        }
+        Err(_) => {
+            context.cancel_rooted_car_tracking(*root_cid);
+            return ProviderWindowOutcome::Stalled;
+        }
+    }
+
+    let observe = |remaining: usize| {
+        if remaining == 0 {
+            ProviderWindowOutcome::Complete
+        } else if remaining < initially_missing {
+            ProviderWindowOutcome::Partial
+        } else {
+            ProviderWindowOutcome::Stalled
+        }
+    };
+    let remaining_now = count_missing(blockstore, watch_cids).await;
+    if remaining_now < initially_missing {
+        context.cancel_rooted_car_tracking(*root_cid);
+        return observe(remaining_now);
+    }
+
+    if let Some(receiver) = completion.as_mut() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if !context.is_current() {
+                context.cancel_rooted_car_tracking(*root_cid);
+                return ProviderWindowOutcome::Stalled;
+            }
+            tokio::select! {
+                _ = &mut *receiver => break,
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+    } else {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) && context.is_current() {
+            let remaining = count_missing(blockstore, watch_cids).await;
+            if remaining < initially_missing {
+                return observe(remaining);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    context.cancel_rooted_car_tracking(*root_cid);
+    observe(count_missing(blockstore, watch_cids).await)
+}
+
+async fn count_missing<B: Blockstore>(blockstore: &Arc<B>, cids: &[Cid]) -> usize {
+    let mut remaining = 0usize;
+    for cid in cids {
+        if !matches!(blockstore.has(cid).await, Ok(true)) {
+            remaining += 1;
+        }
+    }
+    remaining
+}
+
+/// Exercise one authenticated provider's rooted CAR authority before exact-CID
+/// recovery. The query is cancellable and bounded, so an unavailable provider
+/// cannot retain a transport task or monopolize the receiver fetch owner.
+async fn poll_fetch_rooted_provider<B: Blockstore, T: P2PTransport>(
+    root_cid: &Cid,
+    watch_cids: &[Cid],
+    transport: &T,
+    blockstore: &Arc<B>,
+    source_peer: &PeerId,
+    context: &DagFetchContext,
+) -> ProviderWindowOutcome {
+    let mut initially_missing = 0usize;
+    for cid in watch_cids {
+        if !matches!(blockstore.has(cid).await, Ok(true)) {
+            initially_missing += 1;
+        }
+    }
+    if initially_missing == 0 {
+        return ProviderWindowOutcome::Complete;
+    }
+    let query_id = match transport
+        .sync_blocks(*root_cid, vec![source_peer.clone()], Vec::new())
+        .await
+    {
+        Ok(query_id) => query_id,
+        Err(error) => {
+            debug!(root_cid = %root_cid, source_peer = %source_peer, error = %error, "Rooted CAR request failed before dispatch");
+            return ProviderWindowOutcome::SendFailed;
+        }
+    };
+    let mut completion = context.track_block_sync(query_id);
+    let completion_is_observable = completion.is_some();
+    let start = Instant::now();
+    let timeout = BLOCK_SYNC_COMPLETION_WATCHDOG;
+    let mut outcome = ProviderWindowOutcome::Stalled;
+    let mut transport_complete = false;
+    while start.elapsed() < timeout && context.is_current() {
+        let mut remaining = 0usize;
+        for cid in watch_cids {
+            if !matches!(blockstore.has(cid).await, Ok(true)) {
+                remaining += 1;
+            }
+        }
+        if remaining == 0 {
+            outcome = ProviderWindowOutcome::Complete;
+            // Even a locally complete DAG does not imply that the peer has
+            // finished the response framing.  When completion is observable,
+            // drain it; otherwise a direct unit transport can only use its
+            // blockstore state.  If the DAG is not yet complete, this is only
+            // the frontier known before the rooted request and descendants can
+            // still be streaming.
+            if !completion_is_observable {
+                break;
+            }
+        }
+        if remaining < initially_missing {
+            outcome = ProviderWindowOutcome::Partial;
+            // A CAR response is a stream.  Seeing its first useful block is
+            // progress, not completion: cancelling here truncates the rooted
+            // response and leaves the newly discovered frontier unavailable
+            // from the only authoritative publisher.  Production contexts
+            // carry the transport completion tracker, so let that response
+            // drain.  Direct unit transports without completion events retain
+            // the blockstore-only fallback.
+            if !completion_is_observable {
+                break;
+            }
+        }
+        if transport_complete {
+            break;
+        }
+        if let Some(receiver) = completion.as_mut() {
+            tokio::select! {
+                result = receiver => {
+                    let success = result.unwrap_or(false);
+                    completion = None;
+                    transport_complete = true;
+                    if !success {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    context.cancel_block_sync_tracking(query_id);
+    if let Err(error) = transport.cancel_sync(query_id).await {
+        debug!(root_cid = %root_cid, query_id = query_id.0, error = %error, "Failed to cancel rooted CAR query");
+    }
+    outcome
 }
 
 /// Fetch one batch of exact blocks, rotating to the next provider whenever
@@ -414,16 +634,22 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
 /// `stall_budget` caps the stalled (timed-out) provider windows one attempt
 /// may burn across all of its batches; once it reaches zero, stalled batches
 /// fail fast without issuing further transport queries.
+struct ProviderFetchState<'a> {
+    providers: &'a mut ProviderRotation,
+    stall_budget: &'a mut usize,
+    diagnostics: &'a SyncDiagnostics,
+}
+
 async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
     root_cid: &Cid,
     cids: &[Cid],
     transport: &T,
     blockstore: &Arc<B>,
-    providers: &mut ProviderRotation,
-    stall_budget: &mut usize,
+    state: &mut ProviderFetchState<'_>,
+    context: &DagFetchContext,
 ) -> FetchBatchOutcome {
-    for _ in 0..providers.len() {
-        if *stall_budget == 0 {
+    for _ in 0..state.providers.len() {
+        if *state.stall_budget == 0 {
             debug!(
                 root_cid = %root_cid,
                 requested_count = cids.len(),
@@ -431,14 +657,15 @@ async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
             );
             return FetchBatchOutcome::NoProgress;
         }
-        let provider = providers.current().clone();
-        match poll_fetch_blocks(root_cid, cids, transport, blockstore, &provider).await {
+        let provider = state.providers.current().clone();
+        match poll_fetch_blocks(root_cid, cids, transport, blockstore, &provider, context).await {
             ProviderWindowOutcome::Complete => return FetchBatchOutcome::Complete,
             ProviderWindowOutcome::Partial => return FetchBatchOutcome::Partial,
             ProviderWindowOutcome::Stalled => {
-                *stall_budget -= 1;
-                providers.advance();
-                if providers.len() > 1 {
+                *state.stall_budget -= 1;
+                state.providers.advance();
+                state.diagnostics.record_provider_rotation();
+                if state.providers.len() > 1 {
                     warn!(
                         root_cid = %root_cid,
                         provider = %provider,
@@ -447,7 +674,10 @@ async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
                     );
                 }
             }
-            ProviderWindowOutcome::SendFailed => providers.advance(),
+            ProviderWindowOutcome::SendFailed => {
+                state.providers.advance();
+                state.diagnostics.record_provider_rotation();
+            }
         }
     }
     FetchBatchOutcome::NoProgress
@@ -466,6 +696,7 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     transport: &T,
     blockstore: &Arc<B>,
     source_peer: &PeerId,
+    context: &DagFetchContext,
 ) -> ProviderWindowOutcome {
     let mut missing = Vec::new();
     for cid in cids {
@@ -494,11 +725,17 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
             return ProviderWindowOutcome::SendFailed;
         }
     };
+    let mut completion = context.track_block_sync(query_id);
+    let completion_is_observable = completion.is_some();
+    let mut transport_complete = false;
 
-    let timeout = Duration::from_secs(30);
+    let timeout = BLOCK_SYNC_COMPLETION_WATCHDOG;
     let start = Instant::now();
     let mut outcome = ProviderWindowOutcome::Stalled;
     while start.elapsed() < timeout {
+        if !context.is_current() {
+            break;
+        }
         let mut remaining = 0usize;
         for cid in &missing {
             if !matches!(blockstore.has(cid).await, Ok(true)) {
@@ -507,15 +744,39 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
         }
         if remaining == 0 {
             outcome = ProviderWindowOutcome::Complete;
-            break;
+            if !completion_is_observable {
+                break;
+            }
         }
         if remaining < missing.len() {
             outcome = ProviderWindowOutcome::Partial;
+            // Do not abort a productive selective CAR stream after its first
+            // block.  Its remaining requested blocks are still in flight.
+            if !completion_is_observable {
+                break;
+            }
+        }
+        if transport_complete {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(receiver) = completion.as_mut() {
+            tokio::select! {
+                result = receiver => {
+                    let success = result.unwrap_or(false);
+                    completion = None;
+                    transport_complete = true;
+                    if !success {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
+    context.cancel_block_sync_tracking(query_id);
     if let Err(e) = transport.cancel_sync(query_id).await {
         debug!(
             root_cid = %root_cid,

@@ -85,7 +85,7 @@ defra-http = { path = "../http", optional = true }
 # Optional — P2P replication (IROH transport)
 p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
 blockstore = { path = "../blockstore", optional = true }
-# Collection-commit retry records replay by CID (defradb#1113).
+# Collection retry markers rederive current heads (defradb#1113).
 cid = { workspace = true, optional = true }
 defra-p2p-adapter = { workspace = true, optional = true, default-features = false, features = ["iroh"] }
 

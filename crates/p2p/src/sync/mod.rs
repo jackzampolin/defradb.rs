@@ -21,7 +21,6 @@ mod merge;
 mod peer_state;
 pub mod pending_store;
 mod push_backlog;
-pub(crate) mod push_encode_cache;
 pub(crate) mod push_fanout_coalescer;
 mod queue;
 pub(crate) mod rate_limiter;
@@ -34,8 +33,8 @@ pub use coordinator::IrohSyncCoordinator;
 #[cfg(feature = "libp2p-transport")]
 pub use coordinator::Libp2pSyncCoordinator;
 pub use coordinator::{
-    CreateReplicatorResult, LoadReplicatorsResult, PushFailure, SyncCoordinator,
-    SyncShutdownHandle, SyncStatus,
+    CreateReplicatorResult, HeadAckFence, HeadHintCarAuthority, HeadHintCarGrant,
+    LoadReplicatorsResult, PushFailure, SyncCoordinator, SyncShutdownHandle, SyncStatus,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};
@@ -57,8 +56,7 @@ pub use pending_store::{
     PersistedReplayAuthorization,
 };
 pub use push_backlog::{
-    CidRetrySnapshot, EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot,
-    PushJobSpec, DEFAULT_PUSH_FAILURE_COOLDOWN_BASE,
+    EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot, PushJobSpec,
 };
 pub use queue::ProcessQueue;
 pub use replication::{recover_unmerged, ReplicationConfig, ReplicationLoop, ReplicationResult};
@@ -73,7 +71,9 @@ pub fn reschedule_persisted_push_retry(
     retry_key: &str,
     error_message: &str,
 ) {
-    if error_message.contains(crate::error::AT_CAPACITY_MESSAGE) {
+    if error_message.contains(crate::error::AT_CAPACITY_MESSAGE)
+        || error_message.contains(crate::error::RATE_LIMITED_MESSAGE)
+    {
         retry_info.defer_for(PERSISTED_RETRY_SWEEP_INTERVAL);
     } else {
         retry_info.bump_for(retry_key);
@@ -97,6 +97,19 @@ mod tests {
             &format!(
                 "peer rejected replay: {}",
                 crate::error::AT_CAPACITY_MESSAGE
+            ),
+        );
+
+        assert_eq!(retry_info.num_retries, 4);
+        assert!(!retry_info.is_due());
+
+        retry_info.next_retry_unix = 0;
+        reschedule_persisted_push_retry(
+            &mut retry_info,
+            "peer:cid",
+            &format!(
+                "peer rejected replay: {}",
+                crate::error::RATE_LIMITED_MESSAGE
             ),
         );
 

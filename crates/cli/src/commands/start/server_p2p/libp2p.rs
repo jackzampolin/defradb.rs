@@ -150,8 +150,8 @@ impl Node {
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
-            info!("Starting parallel replication loop for P2P sync");
-            p2p::sync::ReplicationLoop::run_parallel(
+            info!("Starting replication loop for P2P sync");
+            p2p::sync::ReplicationLoop::run(
                 coordinator_for_replication,
                 sync_events,
                 merge_handler_for_loop,
@@ -159,59 +159,8 @@ impl Node {
                     continue_on_error: true,
                     rebroadcast_on_merge: false,
                     batch_size: 50,
-                    max_workers: 32,
                 },
-                |result| match &result {
-                    p2p::sync::ReplicationResult::Merged {
-                        cid,
-                        doc_id,
-                        collection_id,
-                    } => {
-                        info!(
-                            cid = %cid,
-                            doc_id = %doc_id,
-                            collection_id = %collection_id,
-                            "Block merged successfully"
-                        );
-                    }
-                    p2p::sync::ReplicationResult::MergedButBroadcastFailed {
-                        cid,
-                        doc_id,
-                        broadcast_error,
-                        ..
-                    } => {
-                        error!(
-                            cid = %cid,
-                            doc_id = %doc_id,
-                            error = %broadcast_error,
-                            "Block merged but re-broadcast failed"
-                        );
-                    }
-                    p2p::sync::ReplicationResult::Failed { cid, error } => {
-                        error!(cid = %cid, error = %error, "Block merge failed");
-                    }
-                    p2p::sync::ReplicationResult::Skipped { cid, reason, .. } => {
-                        tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
-                    }
-                    p2p::sync::ReplicationResult::MergedButNotMarked { cid, error } => {
-                        error!(cid = %cid, error = %error, "Block merged but failed to mark");
-                    }
-                    p2p::sync::ReplicationResult::Quarantined {
-                        cid,
-                        doc_id,
-                        collection_id,
-                        reason,
-                    } => {
-                        tracing::warn!(
-                            cid = %cid,
-                            doc_id = %doc_id,
-                            collection_id = %collection_id,
-                            reason = %reason,
-                            "Block quarantined: merge deterministically rejected, will not be re-driven locally"
-                        );
-                    }
-                    _ => {}
-                },
+                |_| {},
             )
             .await;
             info!("Replication loop stopped");
@@ -251,6 +200,19 @@ impl Node {
                 match &event {
                     p2p::HostEvent::PeerConnected(peer) => {
                         info!("Peer connected: {}", peer);
+                        let peerstore = storage::stores::Peerstore::new(se_store.clone());
+                        match peerstore.activate_retry_peer(&peer.to_string()).await {
+                            Ok(true) => tracing::debug!(
+                                peer_id = %peer,
+                                "Activated durable push markers after peer reconnect"
+                            ),
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                peer_id = %peer,
+                                %error,
+                                "Failed to activate durable push markers after peer reconnect"
+                            ),
+                        }
                     }
                     p2p::HostEvent::PeerDisconnected(peer) => {
                         info!("Peer disconnected: {}", peer);
@@ -395,31 +357,68 @@ impl Node {
                 database.clone(),
             );
 
-        let doc_pusher_impl = Arc::new(crate::p2p_adapter::DbDocPusher::new(database.clone()));
+        let doc_pusher_impl = Arc::new(crate::p2p_adapter::DbDocPusher::new(
+            database.clone(),
+            coordinator.head_hint_car_authority(),
+        ));
         let doc_pusher_for_acp = doc_pusher_impl.clone();
         let doc_pusher: Arc<dyn crate::p2p_adapter::DocPusher> = doc_pusher_impl;
 
         let recorder_store = store.clone();
         let failure_recorder_task = tokio::spawn(async move {
             let mut rx = failure_rx;
-            while let Some(failure) = rx.recv().await {
+            let mut ack_fence = p2p::sync::HeadAckFence::default();
+            while let Some(mut failure) = rx.recv().await {
+                let durable_tx = failure.durable_tx.take();
+                if failure.acknowledged && !ack_fence.ack_is_current(&failure) {
+                    tracing::debug!(
+                        peer_id = %failure.peer_id,
+                        doc_id = %failure.doc_id,
+                        collection_id = %failure.collection_id,
+                        "Ignoring stale head acknowledgement"
+                    );
+                    let _ = durable_tx.map(|tx| tx.send(false));
+                    continue;
+                }
                 let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
                 let _retry_guard = match peerstore
                     .acquire_replicator_retry_guard(&failure.peer_id)
                     .await
                 {
                     Ok(Some(guard)) => guard,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        let _ = durable_tx.map(|tx| tx.send(false));
+                        continue;
+                    }
                     Err(error) => {
                         warn!(error = %error, "Failed to coordinate push failure recording");
+                        let _ = durable_tx.map(|tx| tx.send(false));
                         continue;
                     }
                 };
-                let result = if failure.create_retry {
+                let result = if failure.acknowledged {
+                    let retry = storage::stores::PersistedPushRetry {
+                        doc_id: failure.doc_id.clone(),
+                        collection_id: failure.collection_id.clone(),
+                        cid: String::new(),
+                        priority: 0,
+                        pending: true,
+                        scope: if failure.doc_id.is_empty() {
+                            storage::stores::RetryScope::CollectionCommit
+                        } else {
+                            storage::stores::RetryScope::Document
+                        },
+                        retry_info: storage::stores::RetryInfo::new_initial(),
+                    };
+                    peerstore
+                        .complete_retry_document(&failure.peer_id, &retry)
+                        .await
+                } else if failure.create_retry {
                     let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
                         Ok(bytes) => bytes,
                         Err(error) => {
                             warn!(error = %error, "Failed to serialize RetryInfo");
+                            let _ = durable_tx.map(|tx| tx.send(false));
                             continue;
                         }
                     };
@@ -446,6 +445,16 @@ impl Node {
                 };
                 if let Err(e) = result {
                     warn!(error = %e, "Failed to record push failure");
+                    let _ = durable_tx.map(|tx| tx.send(false));
+                    continue;
+                }
+                if !failure.create_retry && !failure.acknowledged {
+                    ack_fence.observe_durable(&failure);
+                }
+                let _ = durable_tx.map(|tx| tx.send(true));
+                if failure.acknowledged {
+                    ack_fence.clear_current_ack(&failure);
+                    let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
                     continue;
                 }
                 if !failure.create_retry {
@@ -468,8 +477,8 @@ impl Node {
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
             let peerstore = storage::stores::Peerstore::new(retry_store.clone());
-            if let Err(error) = peerstore.activate_dormant_push_retries().await {
-                warn!(error = %error, "Failed to reactivate push retries after restart");
+            if let Err(error) = peerstore.migrate_legacy_push_retries().await {
+                warn!(error = %error, "Failed to migrate legacy push retries after restart");
             }
             loop {
                 tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
@@ -479,7 +488,7 @@ impl Node {
                     Err(_) => continue,
                 };
                 for (peer_id_str, info_bytes) in peers {
-                    let _retry_guard =
+                    let retry_guard =
                         match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
                             Ok(Some(guard)) => guard,
                             Ok(None) | Err(_) => continue,
@@ -489,6 +498,10 @@ impl Node {
                             Ok(i) => i,
                             Err(_) => continue,
                         };
+                    // Snapshot under the per-peer writer, then release it for
+                    // the bounded network attempt. Live commits must be able
+                    // to mark this peer dirty while it is unavailable.
+                    drop(retry_guard);
                     let peer_id = match peer_id_str.parse::<libp2p::PeerId>() {
                         Ok(p) => p,
                         Err(_) => continue,
@@ -523,28 +536,17 @@ impl Node {
                         // fast rejection only consumes a bounded budget so
                         // one permanently rejected doc at the head of the
                         // key order cannot starve the rest forever.
-                        // Collection commits are doc-less and replay by CID
+                        // Collection markers rederive current collection heads
                         // (defradb#1113).
                         let replay = async {
                             if retry.is_collection_commit() {
-                                match retry.cid.parse::<cid::Cid>() {
-                                    Ok(cid) => {
-                                        retry_pusher
-                                            .retry_collection_commit(
-                                                &retry_handle,
-                                                peer_id,
-                                                &retry.collection_id,
-                                                &cid,
-                                            )
-                                            .await
-                                    }
-                                    Err(error) => {
-                                        Err(defra_http::router::P2PError::InvalidInput(format!(
-                                            "unparseable collection-commit CID {}: {error}",
-                                            retry.cid
-                                        )))
-                                    }
-                                }
+                                retry_pusher
+                                    .retry_collection_commit(
+                                        &retry_handle,
+                                        peer_id,
+                                        &retry.collection_id,
+                                    )
+                                    .await
                             } else {
                                 retry_pusher
                                     .retry_doc(
@@ -556,8 +558,14 @@ impl Node {
                                     .await
                             }
                         };
-                        match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await
-                        {
+                        let replay_result =
+                            tokio::time::timeout(std::time::Duration::from_secs(15), replay).await;
+                        let _transition_guard =
+                            match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+                                Ok(Some(guard)) => guard,
+                                Ok(None) | Err(_) => break,
+                            };
+                        match replay_result {
                             Ok(Ok(())) => {
                                 let _ =
                                     peerstore.complete_retry_document(&peer_id_str, retry).await;

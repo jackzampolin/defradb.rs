@@ -102,6 +102,14 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        family: "Sync ownership transfer (head hint / receiver pull)",
+        name: "INV_ObligationConservation / INV_PendingServiceable / INV_PendingHasAuthenticatedProvider / INV_SingleFlight / INV_SingleMergeWriter / INV_SenderMarkersOnly / LIVE_EventualCurrency",
+        axis: Tla,
+        anchor: "crates/p2p/src/sync coordinator + pending DAG clock; crates/db-merge push replay; crates/storage peerstore retry markers",
+        model_ref: "MC_SyncOwnership_Green.cfg",
+        tiers: &[Behavioral],
+    },
+    Property {
         family: "Multi-instance claim",
         name: "INV_EventualUnique — claim CAS converges to a single winner",
         axis: Tla,

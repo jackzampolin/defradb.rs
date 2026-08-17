@@ -2,13 +2,12 @@ use std::sync::Arc;
 
 use acp::DocumentACP;
 use bytes::Bytes;
-use cid::Cid;
 use p2p::message::PushLogRequest;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_common::load_latest_composite_head_cids;
 use crate::push_docs_creator::resolve_push_creator;
 use crate::push_docs_replay::{
     persist_replay_failures, ReplayDocumentFailure, ReplayPushConfig, ReplayPushGate,
@@ -59,6 +58,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
     filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
     push_existing_docs_via_transport_with_config(
         transport,
@@ -70,6 +70,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         se_encryption_key,
         ReplayPushConfig::default(),
         matcher,
+        car_authority,
     )
     .await
 }
@@ -86,6 +87,7 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
     se_encryption_key: Option<&[u8]>,
     replay_config: ReplayPushConfig,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
@@ -115,6 +117,18 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
     }
 
     let local_peer_id = transport.local_peer_id().to_string();
+    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let Some(retry_guard) = peerstore
+        .acquire_replicator_retry_guard(peer_id.as_str())
+        .await
+        .map_err(|error| format!("failed to coordinate existing-document replay: {error}"))?
+    else {
+        tracing::debug!(peer_id = %peer_id, "Replicator removed before existing-document replay");
+        return Ok(());
+    };
+    // Serialize storage transitions, not the bounded network wait. A live
+    // update must be able to dirty the marker while initial replay is stalled.
+    drop(retry_guard);
 
     let txn = db
         .new_txn(true)
@@ -127,9 +141,6 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
     let blockstore_view = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
-    let encstore_view = txn
-        .encstore()
-        .map_err(|e| format!("failed to get encstore: {}", e))?;
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -232,35 +243,18 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                     _ => continue,
                 };
 
-                doc_blocks.extend(
-                    load_push_dag_blocks(&blockstore_view, &encstore_view, head_cid, block_data)
-                        .await,
-                );
+                doc_blocks.push((head_cid, block_data));
             }
 
+            let mut replay_head_cids: Vec<_> = doc_blocks.iter().map(|(cid, _)| *cid).collect();
+            replay_head_cids.sort_unstable();
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
-                // #1043: do not push COUNTER field blocks as PushLog heads. A
-                // counter block pushed as its own head is merged as a standalone
-                // head by the receiver, whose merge then walks and re-applies the
-                // entire counter chain (double-apply against cross-impl peers).
-                // Counter field blocks are fetched by the receiver via DAG sync
-                // from the composite links instead, matching Go's SendUpdate.
-                //
-                // All other blocks (composite + non-counter field blocks, e.g.
-                // encrypted LWW) are still pushed as heads: an encrypted LWW field
-                // block must reach the receiver as a head so its merge triggers a
-                // KMS DEK request, which is how an unauthorized peer's denial fires
-                // (proofs/tests/behavioral/kms.rs). LWW is idempotent on re-walk,
-                // so it carries no double-apply hazard.
-                match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                    Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                        continue;
-                    }
-                }
+                let grant = car_authority
+                    .register(peer_id.clone(), block_cid)
+                    .ok_or_else(|| {
+                        format!("selective CAR authority full for replay head {block_cid}")
+                    })?;
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -272,10 +266,21 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
                     continue;
                 }
-                requests.push(request);
+                requests.push((grant, request));
             }
 
             if !requests.is_empty() {
+                let Some(_marker_guard) = peerstore
+                    .acquire_replicator_retry_guard(peer_id.as_str())
+                    .await
+                    .map_err(|error| format!("failed to coordinate replay marker: {error}"))?
+                else {
+                    return Ok(());
+                };
+                peerstore
+                    .observe_push_head(peer_id.as_str(), doc_id, collection.collection_id(), "", 0)
+                    .await
+                    .map_err(|error| format!("failed to register replay marker: {error}"))?;
                 let t = transport.clone();
                 let pid = peer_id.clone();
                 let gate = replay_gate.clone();
@@ -290,15 +295,15 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                 push_handles.push((
                     replay_doc_id,
                     replay_collection_id,
+                    *doc_short_id,
+                    replay_head_cids,
                     tokio::spawn(async move {
                         let _permit = permit;
                         let mut completed_blocks = 0usize;
-                        for req in requests {
+                        for (_car_grant, req) in requests {
                             let cid = req.cid.clone();
                             match gate
-                                .send_pushlog_with_rate_limit_retry(&peer_key, || {
-                                    t.send_two_stream_request(&pid, req.clone())
-                                })
+                                .send_pushlog(&peer_key, t.send_two_stream_request(&pid, req))
                                 .await
                             {
                                 Ok(reply) if reply.err_message.is_some() => {
@@ -348,9 +353,48 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
 
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     let mut replay_failures = Vec::new();
-    for (doc_id, collection_id, jh) in push_handles {
+    for (doc_id, collection_id, doc_short_id, attempted_heads, jh) in push_handles {
         match jh.await {
-            Ok(true) => {}
+            Ok(true) => {
+                let Some(_completion_guard) = peerstore
+                    .acquire_replicator_retry_guard(peer_id.as_str())
+                    .await
+                    .map_err(|error| format!("failed to coordinate replay completion: {error}"))?
+                else {
+                    continue;
+                };
+                let verify_txn = db
+                    .new_txn(true)
+                    .await
+                    .map_err(|error| format!("replay head verification transaction: {error}"))?;
+                let verify_heads = verify_txn.headstore().map_err(|error| error.to_string())?;
+                let verify_blocks = verify_txn.blockstore().map_err(|error| error.to_string())?;
+                let mut current_heads =
+                    load_latest_composite_head_cids(&verify_heads, &verify_blocks, doc_short_id)
+                        .await;
+                current_heads.sort_unstable();
+                if current_heads != attempted_heads {
+                    tracing::debug!(%doc_id, "Document changed during replay; retaining dirty marker");
+                    replay_failures.push(ReplayDocumentFailure {
+                        doc_id,
+                        collection_id,
+                    });
+                    continue;
+                }
+                let retry = storage::stores::PersistedPushRetry {
+                    doc_id: doc_id.clone(),
+                    collection_id: collection_id.clone(),
+                    cid: String::new(),
+                    priority: 0,
+                    pending: true,
+                    scope: storage::stores::RetryScope::Document,
+                    retry_info: storage::stores::RetryInfo::new_initial(),
+                };
+                peerstore
+                    .complete_retry_document(peer_id.as_str(), &retry)
+                    .await
+                    .map_err(|error| format!("failed to clear replay marker: {error}"))?;
+            }
             Ok(false) => replay_failures.push(ReplayDocumentFailure {
                 doc_id,
                 collection_id,
@@ -520,8 +564,18 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
     collection_id: &str,
     filters: &p2p::ReplicationFilters,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
     let local_peer_id = transport.local_peer_id().to_string();
+    let resolved_collection;
+    let collection_id = if collection_id.is_empty() {
+        resolved_collection = crate::push_docs_common::resolve_collection_id_for_doc(db, doc_id)
+            .await?
+            .ok_or_else(|| format!("collection for document '{doc_id}' not found"))?;
+        resolved_collection.as_str()
+    } else {
+        collection_id
+    };
     let collection = db
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
@@ -571,40 +625,21 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .new_txn(true)
         .await
         .map_err(|e| format!("blockstore txn: {}", e))?;
-    let encstore_view = storage::stores::Blockstore::new_with_namespace(
-        db.store().clone(),
-        true,
-        storage::namespace::Namespace::Encstore,
-    );
-    let enc_txn = encstore_view
-        .new_txn(true)
-        .await
-        .map_err(|e| format!("encstore txn: {}", e))?;
-
+    let mut attempted_heads =
+        load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await;
+    attempted_heads.sort_unstable();
     let mut successful_blocks = 0usize;
-    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await {
+    for head_cid in attempted_heads.iter().copied() {
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
             _ => continue,
         };
 
-        for (block_cid, block_data) in
-            load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
         {
-            // #1043: do not push COUNTER field blocks as PushLog heads (see
-            // backfill above). Counter blocks pushed as heads cause double-apply
-            // on cross-impl peers; the receiver fetches them via DAG sync. Other
-            // blocks (composite + non-counter field blocks, e.g. encrypted LWW)
-            // are still pushed as heads so an encrypted LWW field reaches the
-            // receiver and its merge triggers the KMS DEK request.
-            match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                    continue;
-                }
-            }
+            let block_cid = head_cid;
+            let _car_grant = car_authority
+                .register(peer_id.clone(), head_cid)
+                .ok_or_else(|| format!("selective CAR authority full for retry head {head_cid}"))?;
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
                 Bytes::from(block_cid.to_bytes()),
@@ -645,107 +680,99 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             }
         }
     }
+    drop(block_txn);
+    drop(head_txn);
+    let verify_txn = db
+        .new_txn(true)
+        .await
+        .map_err(|error| format!("head verification transaction: {error}"))?;
+    let verify_heads = verify_txn.headstore().map_err(|error| error.to_string())?;
+    let verify_blocks = verify_txn.blockstore().map_err(|error| error.to_string())?;
+    let mut current_heads =
+        load_latest_composite_head_cids(&verify_heads, &verify_blocks, doc_short_id).await;
+    current_heads.sort_unstable();
+    if current_heads != attempted_heads {
+        return Err("document heads changed during retry; retaining dirty marker".to_string());
+    }
     Ok(())
 }
 
-/// Replay a failed COLLECTION-COMMIT push (defradb#1113).
-///
-/// Collection commits are doc-less: their obligation is the CID itself, so they
-/// cannot be replayed by `retry_doc_via_transport`, which resolves work from a
-/// document's composite heads. Before this existed, a failed collection-commit
-/// push had no replay path at all and failed permanently — receivers held heads
-/// whose parents never arrived, so their pending-DAG registrations could never
-/// complete (source-inc/gents#696).
-///
-/// Unlike the document replay, a missing block is an ERROR, not a silent
-/// success: acking an obligation we did not actually push would delete the
-/// ledger record and lose the block forever.
+/// Rederive and announce every current collection head for a dirty collection
+/// scope. No CID is retained in durable sender state.
 pub async fn retry_collection_commit_via_transport<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,
     peer_id: &PeerId,
     collection_id: &str,
-    cid: &Cid,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
     let creator = transport.local_peer_id().to_string();
-
-    let blockstore_view = storage::stores::Blockstore::new(db.store().clone(), true);
-    let block_txn = blockstore_view
+    let txn = db
         .new_txn(true)
         .await
-        .map_err(|e| format!("blockstore txn: {}", e))?;
-    let encstore_view = storage::stores::Blockstore::new_with_namespace(
-        db.store().clone(),
-        true,
-        storage::namespace::Namespace::Encstore,
-    );
-    let enc_txn = encstore_view
-        .new_txn(true)
-        .await
-        .map_err(|e| format!("encstore txn: {}", e))?;
-
-    let root_block = match block_txn.get(&cid.to_bytes()).await {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-            return Err(format!(
-                "collection-commit block {cid} is not in the local blockstore"
-            ))
-        }
-        Err(error) => return Err(format!("failed to load collection-commit block: {error}")),
-    };
-
-    let mut successful_blocks = 0usize;
-    for (block_cid, block_data) in
-        load_push_dag_blocks(&*block_txn, &*enc_txn, *cid, root_block).await
-    {
+        .map_err(|error| format!("collection retry txn: {error}"))?;
+    let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
+    let headstore = txn.headstore().map_err(|error| error.to_string())?;
+    let block_txn = txn.blockstore().map_err(|error| error.to_string())?;
+    let short_id =
+        db::collection::require_persisted_collection_short_id(&systemstore, collection_id)
+            .await
+            .map_err(|error| format!("collection retry short id: {error}"))?;
+    let mut heads =
+        crate::push_docs_common::load_collection_head_cids(&headstore, short_id).await?;
+    heads.sort_unstable();
+    for cid in heads.iter().copied() {
+        let block_data = block_txn
+            .get(&cid.to_bytes())
+            .await
+            .map_err(|error| format!("collection head read: {error}"))?
+            .ok_or_else(|| format!("current collection head {cid} is missing"))?;
+        let _car_grant = car_authority
+            .register(peer_id.clone(), cid)
+            .ok_or_else(|| format!("selective CAR authority full for collection head {cid}"))?;
         let mut request = PushLogRequest::new(
-            // Doc-less: the empty document id is what marks this a collection
-            // commit on the wire, exactly as the live push does.
             String::new(),
-            Bytes::from(block_cid.to_bytes()),
+            Bytes::from(cid.to_bytes()),
             collection_id.to_string(),
             creator.clone(),
             Bytes::from(block_data),
         );
-
         if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
-            return Err(format!(
-                "failed to sign collection-commit replay block after {successful_blocks} \
-                 successful block(s)"
-            ));
+            return Err(format!("failed to sign current collection head {cid}"));
         }
-
         match transport.send_two_stream_request(peer_id, request).await {
             Ok(reply) if reply.err_message.is_some() => {
                 return Err(format!(
-                    "peer rejected collection-commit replay after {successful_blocks} successful \
-                     block(s): {}",
+                    "peer rejected current collection head {cid}: {}",
                     reply
                         .err_message
                         .as_deref()
                         .unwrap_or("unknown pushlog error")
                 ));
             }
-            Ok(_) => {
-                successful_blocks += 1;
-            }
-            Err(error) => {
-                let prefix = if error.is_connection_like() {
-                    "transport became unavailable"
-                } else {
-                    "collection-commit replay push failed"
-                };
-                return Err(format!(
-                    "{prefix} after {successful_blocks} successful block(s): {error}"
-                ));
-            }
+            Ok(_) => {}
+            Err(error) => return Err(format!("collection head {cid} push failed: {error}")),
         }
     }
-
-    if successful_blocks == 0 {
-        return Err(format!(
-            "collection-commit replay for {cid} pushed no blocks"
-        ));
+    drop(txn);
+    let verify_txn = db
+        .new_txn(true)
+        .await
+        .map_err(|error| format!("collection head verification transaction: {error}"))?;
+    let verify_systemstore = verify_txn
+        .systemstore()
+        .map_err(|error| error.to_string())?;
+    let verify_headstore = verify_txn.headstore().map_err(|error| error.to_string())?;
+    let verify_short_id =
+        db::collection::require_persisted_collection_short_id(&verify_systemstore, collection_id)
+            .await
+            .map_err(|error| format!("collection retry verification short id: {error}"))?;
+    let mut current_heads =
+        crate::push_docs_common::load_collection_head_cids(&verify_headstore, verify_short_id)
+            .await?;
+    current_heads.sort_unstable();
+    if current_heads != heads {
+        return Err("collection heads changed during retry; retaining dirty marker".to_string());
     }
     Ok(())
 }

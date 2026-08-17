@@ -18,6 +18,16 @@ use super::SyncManager;
 
 const MAX_RETRIABLE_PUSHLOG_ATTEMPTS: usize = 4;
 
+fn announced_head_priority(bytes: &[u8]) -> Option<u64> {
+    let block = defra_core::Block::from_dag_cbor(bytes).ok()?;
+    match &block.delta {
+        defra_core::CrdtDelta::Composite(_) | defra_core::CrdtDelta::Collection(_) => {
+            Some(block.delta.priority())
+        }
+        _ => None,
+    }
+}
+
 fn retriable_pushlog_delay(attempt: usize) -> Duration {
     match attempt {
         1 => Duration::from_millis(10),
@@ -200,7 +210,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
 
-        if !self.can_process_pushlog(cid) {
+        let head_priority = announced_head_priority(&msg.block);
+        if !self.can_process_pushlog(cid)
+            && !self.scope_head_is_refresh_or_newer(
+                *cid,
+                sender_peer,
+                &msg.collection_id,
+                &msg.doc_id,
+                head_priority,
+            )
+        {
             self.diagnostics.record_pending_dag_capacity_shed();
             tracing::warn!(
                 cid = %cid,
@@ -340,15 +359,43 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 "DAG has missing links, requesting Bitswap fetch"
             );
 
-            // Track this DAG as pending (enforces TTL eviction and capacity limit).
+            // Different CIDs for one sender/scope must make one serialized
+            // durable replacement decision. Otherwise concurrent heartbeats
+            // can both observe the old head and recreate a per-root ledger.
+            let _registration_writer = self.pending_registration_writer.lock().await;
+            let durable_superseded_root = match self.persisted_scope_decision(
+                *cid,
+                sender_peer,
+                &msg.collection_id,
+                &msg.doc_id,
+                head_priority,
+            ) {
+                super::PersistedScopeDecision::CoveredByCurrent => {
+                    tracing::debug!(
+                        cid = %cid,
+                        doc_id = %msg.doc_id,
+                        collection_id = %msg.collection_id,
+                        source_peer = ?sender_peer,
+                        "Incoming head is covered by a newer durable sender/scope obligation"
+                    );
+                    return Ok(());
+                }
+                super::PersistedScopeDecision::Supersedes(root) => Some(root),
+                super::PersistedScopeDecision::Independent
+                | super::PersistedScopeDecision::Current => None,
+            };
+
+            // Track this DAG as pending (enforces TTL eviction, capacity, and
+            // current-head retirement for one sender/document-or-collection scope).
             let inserted_at = Instant::now();
-            {
+            let superseded = {
                 use super::pending_dag::PendingDagAdmission;
                 let admission = self.try_insert_pending_dag(
                     *cid,
                     PendingDag {
                         doc_id: msg.doc_id.clone(),
                         collection_id: msg.collection_id.clone(),
+                        head_priority,
                         creator: msg.creator.clone(),
                         missing: missing.iter().cloned().collect(),
                         source_peer: sender_peer.map(str::to_owned),
@@ -365,10 +412,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
                 // Report the limit that actually tripped so the nack and its
                 // WARN log agree (the global cap vs the smaller per-peer quota).
-                let rejected_max = match admission {
-                    PendingDagAdmission::Admitted => None,
+                let rejected_max = match &admission {
+                    PendingDagAdmission::Admitted { .. }
+                    | PendingDagAdmission::CoveredByCurrent => None,
                     PendingDagAdmission::GlobalCapacity => Some(self.max_pending_dags),
-                    PendingDagAdmission::PeerQuota { max_per_peer } => Some(max_per_peer),
+                    PendingDagAdmission::PeerQuota { max_per_peer } => Some(*max_per_peer),
                 };
                 if let Some(max) = rejected_max {
                     self.diagnostics.record_pending_dag_capacity_shed();
@@ -389,13 +437,25 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     );
                     return Err(Error::PendingDagCapacity { max });
                 }
-            }
-
-            // A fresh registration is immediately due (`insert_pending_dag`
-            // leaves `next_retry_at = now`); claim it here so the retry
-            // clock's next tick does not also dispatch it. The `bool` is
-            // unused — the DagNeedsFetch emission below is the dispatch.
-            let _claimed = self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now());
+                match admission {
+                    PendingDagAdmission::Admitted { superseded } => *superseded,
+                    PendingDagAdmission::CoveredByCurrent => {
+                        tracing::debug!(
+                            cid = %cid,
+                            doc_id = %msg.doc_id,
+                            collection_id = %msg.collection_id,
+                            source_peer = ?sender_peer,
+                            "Incoming head is covered by the current durable sender/scope obligation"
+                        );
+                        return Ok(());
+                    }
+                    PendingDagAdmission::GlobalCapacity | PendingDagAdmission::PeerQuota { .. } => {
+                        unreachable!("handled above")
+                    }
+                }
+            };
+            let superseded_root =
+                durable_superseded_root.or_else(|| superseded.as_ref().map(|(root, _)| *root));
 
             // Persist the registration before the caller acks success: the
             // ack destroys the pusher's retry record, so an unpersisted
@@ -421,16 +481,24 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     let mut roots = self.persisted_roots.write();
                     if roots.contains(cid) {
                         DurableAdmission::AlreadyPresent
-                    } else if roots.len() >= durable_cap {
+                    } else if roots.len() >= durable_cap
+                        && superseded_root.is_none_or(|old| !roots.contains(&old))
+                    {
                         DurableAdmission::AtCapacity
                     } else {
                         roots.insert(*cid);
+                        if let Some(old) = superseded_root {
+                            roots.remove(&old);
+                        }
                         DurableAdmission::Reserved
                     }
                 };
                 if matches!(admission, DurableAdmission::AtCapacity) {
                     self.diagnostics.record_pending_dag_capacity_shed();
                     self.pending_dags.write().remove(cid);
+                    if let Some((old_root, old_dag)) = superseded.clone() {
+                        self.pending_dags.write().insert(old_root, old_dag);
+                    }
                     tracing::warn!(
                         cid = %cid,
                         doc_id = %msg.doc_id,
@@ -443,6 +511,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 let record = crate::sync::pending_store::PersistedPendingDag {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
+                    head_priority,
                     creator: msg.creator.clone(),
                     source_peer: sender_peer.map(str::to_owned),
                     is_explicit_replicator,
@@ -450,11 +519,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         .as_ref()
                         .map(Into::into),
                 };
-                if let Err(error) = store.put(cid, &record).await {
+                if let Err(error) = store
+                    .replace_scope_head(superseded_root.as_ref(), cid, &record)
+                    .await
+                {
                     if newly_reserved {
                         self.persisted_roots.write().remove(cid);
+                        if let Some(old) = superseded_root {
+                            self.persisted_roots.write().insert(old);
+                        }
                     }
                     self.pending_dags.write().remove(cid);
+                    if let Some((old_root, old_dag)) = superseded.clone() {
+                        self.pending_dags.write().insert(old_root, old_dag);
+                    }
                     tracing::warn!(
                         cid = %cid,
                         doc_id = %msg.doc_id,
@@ -465,7 +543,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         "failed to persist pending DAG registration: {error}"
                     )));
                 }
+                self.diagnostics
+                    .observe_persisted_pending_dag_depth(self.persisted_roots.read().len());
+                self.remember_persisted_scope_head(
+                    *cid,
+                    sender_peer,
+                    &msg.collection_id,
+                    &msg.doc_id,
+                    head_priority,
+                );
+                self.diagnostics.record_pending_dag_registered();
                 self.mark_pending_dag_recovery_registered(cid, inserted_at);
+                if let Some(old) = superseded_root {
+                    tracing::debug!(
+                        old_root_cid = %old,
+                        root_cid = %cid,
+                        doc_id = %msg.doc_id,
+                        collection_id = %msg.collection_id,
+                        source_peer = ?sender_peer,
+                        "Durably superseded older pending head for sender/scope"
+                    );
+                }
                 tracing::debug!(
                     target: "p2p::sync::restart_recovery",
                     cid = %cid,
@@ -476,6 +574,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             } else {
                 false
             };
+
+            // A fresh registration is immediately due (`insert_pending_dag`
+            // leaves `next_retry_at = now`); claim it only after durable
+            // replacement succeeds so the fetch owner cannot race rollback.
+            let _claimed = self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now());
 
             // Get providers for the missing blocks
             let providers = self.get_providers_for_cids(&missing);

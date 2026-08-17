@@ -15,7 +15,7 @@ pub enum RetryLayer {
     HttpAutoCommit,
     EmbeddedExecute,
     Merge,
-    PushLedger,
+    PushMarker,
 }
 
 impl RetryLayer {
@@ -27,7 +27,7 @@ impl RetryLayer {
             Self::HttpAutoCommit => "http_auto_commit",
             Self::EmbeddedExecute => "embedded_execute",
             Self::Merge => "merge",
-            Self::PushLedger => "push_ledger",
+            Self::PushMarker => "push_marker",
         }
     }
 }
@@ -49,7 +49,7 @@ pub struct ConflictMetricsSnapshot {
     pub http_auto_commit: RetryLayerSnapshot,
     pub embedded_execute: RetryLayerSnapshot,
     pub merge: RetryLayerSnapshot,
-    pub push_ledger: RetryLayerSnapshot,
+    pub push_marker: RetryLayerSnapshot,
     /// Typed transaction conflicts returned through a client API.
     pub escaped_to_clients: u64,
 }
@@ -89,7 +89,7 @@ pub fn conflict_metrics_snapshot() -> ConflictMetricsSnapshot {
         http_auto_commit: RETRIES.layer(RetryLayer::HttpAutoCommit),
         embedded_execute: RETRIES.layer(RetryLayer::EmbeddedExecute),
         merge: RETRIES.layer(RetryLayer::Merge),
-        push_ledger: RETRIES.layer(RetryLayer::PushLedger),
+        push_marker: RETRIES.layer(RetryLayer::PushMarker),
         escaped_to_clients: RETRIES.escaped_to_clients.load(Ordering::Relaxed),
     }
 }

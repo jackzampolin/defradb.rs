@@ -176,7 +176,17 @@ impl<S: Store> P2PHost<S> {
                 }
 
                 match PushLogBroadcast::decode_gossip_payload(&message.data) {
-                    Ok((broadcast, encoding)) => {
+                    Ok((mut broadcast, encoding)) => {
+                        // libp2p signs the original author into Message::source.
+                        // Preserve it independently from the authenticated
+                        // propagation hop so recovery can prefer the author
+                        // only when a live route to it exists.
+                        if let Some(source) = message.source {
+                            let source = source.to_string();
+                            broadcast.source_peer_id = Some(source.clone());
+                            broadcast.authenticate_origin_peer(source);
+                            broadcast.authenticate_source_peer(propagation_source.to_string());
+                        }
                         if encoding != crate::message::PushLogGossipPayloadEncoding::CborBroadcast
                             && encoding != crate::message::PushLogGossipPayloadEncoding::CborRequest
                         {

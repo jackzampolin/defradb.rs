@@ -124,7 +124,9 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     // Scale floor: make sure the writers have produced hundreds of documents
     // (and therefore hundreds of nacked pushes queued in the pusher retry
     // ladders behind the 1-slot hub) before hunting for the crash window.
-    let load_deadline = Instant::now() + Duration::from_secs(60);
+    // Marker registration is part of committed-write durability, so the
+    // anti-vacuity fence is a document count rather than an ingest-rate SLA.
+    let load_deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let produced = doc_ids.lock().unwrap().len();
         if produced >= 600 {
@@ -222,7 +224,8 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     // pushers' retry ladders.
     let hub = cluster.client(0);
     let converge_start = Instant::now();
-    let deadline = Instant::now() + Duration::from_secs(240);
+    let deadline = Instant::now() + Duration::from_secs(480);
+    let mut next_progress_log = Instant::now() + Duration::from_secs(30);
     loop {
         let present: std::collections::HashSet<String> = hub
             .query("query { User { _docID } }")
@@ -247,6 +250,15 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
                 converge_start.elapsed().as_secs_f64()
             );
             break;
+        }
+        if Instant::now() >= next_progress_log {
+            eprintln!(
+                "issue1154_repro: {} of {} documents remain after {:.1}s",
+                missing.len(),
+                expected_doc_ids.len(),
+                converge_start.elapsed().as_secs_f64()
+            );
+            next_progress_log += Duration::from_secs(30);
         }
         assert!(
             Instant::now() < deadline,

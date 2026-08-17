@@ -11,6 +11,8 @@ use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, enc
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
+use super::super::authorizer::AccessAuthorizer;
+
 fn sample_cids(cids: &[Cid]) -> Vec<String> {
     cids.iter().take(4).map(ToString::to_string).collect()
 }
@@ -69,6 +71,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let kept_count = blocks.len();
         let filtered_count = collected_count.saturating_sub(kept_count);
         let blockstore_miss_count = request.wanted_cids.len().saturating_sub(collected_count);
+        self.manager.diagnostics.record_car_serve_counts(
+            request.wanted_cids.len(),
+            collected_count,
+            kept_count,
+            filtered_count,
+        );
 
         if blocks.is_empty() {
             self.manager.diagnostics.record_car_no_blocks_served();
@@ -175,12 +183,30 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let serve = self.serve_acp.get();
         let mut identity: Option<acp::Identity> = None;
         let mut kept = Vec::with_capacity(blocks.len());
+        let rooted_grant = self
+            .runtime
+            .selective_car_access
+            .allows_root(peer_id, root_cid)
+            || self
+                .has_restart_safe_root_authority(peer_id, root_cid)
+                .await;
+        let granted_cids = if rooted_grant {
+            crate::sync::car::collect_dag_cids(
+                self.manager.blockstore().as_ref(),
+                root_cid,
+                crate::sync::car::CAR_MAX_BLOCKS,
+            )
+            .await
+            .ok()
+            .map(|cids| cids.into_iter().collect::<std::collections::HashSet<_>>())
+        } else {
+            None
+        };
 
         for (cid, data) in blocks {
-            if self
-                .runtime
-                .selective_car_access
-                .allows(peer_id, root_cid, &cid)
+            if granted_cids
+                .as_ref()
+                .is_some_and(|cids| cids.contains(&cid))
             {
                 kept.push((cid, data));
                 continue;
@@ -235,8 +261,82 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         kept
     }
 
+    /// Re-derive the authority installed before a head hint after the sender
+    /// has restarted or its in-memory grant cache has expired.
+    ///
+    /// The DB-backed classifier binds the requested root to its collection and
+    /// document IDs. Replicator configuration is durable and binds the peer to
+    /// that collection. Filter predicates select which roots are announced;
+    /// they are not a block-read security boundary (ACP/encryption remains the
+    /// security boundary). Consequently the exact requested root reconstructs
+    /// the rooted CAR capability without CID-valued sender delivery state.
+    async fn has_restart_safe_root_authority(&self, peer_id: &PeerId, root_cid: &Cid) -> bool {
+        let Ok(Some(root_data)) = self.manager.blockstore().get(root_cid).await else {
+            return false;
+        };
+        let BlockClass::Data(meta) = self.classifier.classify(root_cid, &root_data).await else {
+            return false;
+        };
+        // Document composite roots resolve to one or more document IDs, while
+        // collection-commit roots deliberately resolve to an empty set. Both
+        // are valid head-hint scopes. The exact root and the reachability walk
+        // below constrain the capability; requiring a document ID here would
+        // strand every durably registered collection obligation after restart.
+        let configured_replicator = self
+            .authorizer
+            .peer_authorized_for_collection(peer_id.as_str(), &meta.collection_id)
+            .await;
+        // Gossip ingress accepts a locally subscribed collection even when
+        // the source has no outbound replicator record for that receiver.
+        // After a sender restart the receiver advertises that configured
+        // subscription again. Treat the observed, exact collection topic as
+        // the second restart-reconstructible serving policy; otherwise a
+        // success-acked gossip root becomes permanently unserviceable as soon
+        // as its process-local SelectiveCarAccess grant expires.
+        let configured_subscriber = self
+            .access
+            .peer_state
+            .peer_subscribed_to_collection(peer_id.as_str(), &meta.collection_id);
+        let authorized = configured_replicator || configured_subscriber;
+        if authorized {
+            tracing::debug!(
+                peer_id = %peer_id,
+                root_cid = %root_cid,
+                collection_id = %meta.collection_id,
+                configured_replicator,
+                configured_subscriber,
+                "Re-derived rooted CAR authority from replication scope"
+            );
+        } else {
+            tracing::debug!(
+                peer_id = %peer_id,
+                root_cid = %root_cid,
+                collection_id = %meta.collection_id,
+                configured_replicator,
+                configured_subscriber,
+                "Could not re-derive rooted CAR authority from replication scope"
+            );
+        }
+        authorized
+    }
+
     /// Handle an inbound CAR fetch response: decode and store blocks.
     pub(crate) async fn handle_car_fetch_response(
+        &self,
+        peer_id: PeerId,
+        root_cid: Cid,
+        car_data: Vec<u8>,
+    ) -> Result<()> {
+        let result = self
+            .handle_car_fetch_response_inner(peer_id, root_cid, car_data)
+            .await;
+        self.manager
+            .rooted_car_completion_tracker()
+            .complete(root_cid, result.is_ok());
+        result
+    }
+
+    async fn handle_car_fetch_response_inner(
         &self,
         peer_id: PeerId,
         root_cid: Cid,
@@ -286,6 +386,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
+        // Share the same CID ownership boundary as PushLog processing and
+        // merge. Go holds its root sync owner across CAR ingest and merge;
+        // Rust additionally owns every contained CID because overlapping DAGs
+        // can share a mutable `ToMergeIndexKey` and SSI correctly treats two
+        // unsynchronised writers as a conflict.
+        let _storage_owners = self
+            .manager
+            .acquire_car_storage_owners(root_cid, blocks.iter().map(|(cid, _)| *cid).collect())
+            .await;
         let block_refs: Vec<(&Cid, &[u8])> = blocks.iter().map(|(c, d)| (c, d.as_ref())).collect();
         self.manager
             .blockstore()

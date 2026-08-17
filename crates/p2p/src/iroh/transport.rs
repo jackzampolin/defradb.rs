@@ -427,6 +427,10 @@ impl P2PTransport for IrohTransport {
         .await
     }
 
+    fn supports_cancellable_rooted_sync(&self) -> bool {
+        true
+    }
+
     async fn cancel_sync(&self, query_id: QueryId) -> Result<bool> {
         self.send_command(|reply| IrohCommand::CancelSync { query_id, reply })
             .await

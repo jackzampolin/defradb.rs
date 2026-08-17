@@ -9,6 +9,10 @@ use p2p::P2PHostHandle;
 /// Type-erased interface for libp2p-backed document push operations.
 #[async_trait]
 pub trait DocPusher: Send + Sync {
+    async fn push_retry_marker_stats(&self) -> P2PResult<storage::stores::PushRetryMarkerStats> {
+        Ok(storage::stores::PushRetryMarkerStats::default())
+    }
+
     async fn push_existing_docs(
         &self,
         handle: &P2PHostHandle,
@@ -60,17 +64,16 @@ pub trait DocPusher: Send + Sync {
         collection_id: &str,
     ) -> P2PResult<()>;
 
-    /// Replay a failed COLLECTION-COMMIT push by CID (defradb#1113).
+    /// Replay a failed collection scope by rederiving current collection heads.
     ///
     /// Doc-less commits cannot go through `retry_doc`: it resolves work from a
     /// document's composite heads, would find none, and return `Ok(())` — so the
-    /// ledger would delete the obligation and lose the block.
+    /// marker would otherwise be cleared without announcing the collection.
     async fn retry_collection_commit(
         &self,
         handle: &P2PHostHandle,
         peer_id: libp2p::PeerId,
         collection_id: &str,
-        cid: &Cid,
     ) -> P2PResult<()>;
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
@@ -85,19 +88,24 @@ pub trait DocPusher: Send + Sync {
 /// Database-backed `DocPusher` implementation.
 pub struct DbDocPusher<S: storage::corekv::Store> {
     db: Arc<db::DB<S>>,
+    car_authority: p2p::sync::HeadHintCarAuthority,
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
-    pub fn new(db: Arc<db::DB<S>>) -> Self {
+    pub fn new(db: Arc<db::DB<S>>, car_authority: p2p::sync::HeadHintCarAuthority) -> Self {
         Self {
             db,
+            car_authority,
             document_acp: std::sync::OnceLock::new(),
         }
     }
 
-    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn DocPusher> {
-        Arc::new(Self::new(db))
+    pub fn new_arc(
+        db: Arc<db::DB<S>>,
+        car_authority: p2p::sync::HeadHintCarAuthority,
+    ) -> Arc<dyn DocPusher> {
+        Arc::new(Self::new(db, car_authority))
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
@@ -107,6 +115,13 @@ impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
 
 #[async_trait]
 impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
+    async fn push_retry_marker_stats(&self) -> P2PResult<storage::stores::PushRetryMarkerStats> {
+        storage::stores::Peerstore::new(self.db.store().clone())
+            .push_retry_marker_stats()
+            .await
+            .map_err(|error| P2PError::internal(error.to_string()))
+    }
+
     async fn push_existing_docs(
         &self,
         handle: &P2PHostHandle,
@@ -126,6 +141,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             se_key,
             se_identity_pubkey,
             &replication_filter::QueryReplicationFilterMatcher::new(),
+            &self.car_authority,
         )
         .await
         .map_err(P2PError::from)
@@ -322,6 +338,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             collection_id,
             &filters,
             &replication_filter::QueryReplicationFilterMatcher::new(),
+            &self.car_authority,
         )
         .await
         .map_err(P2PError::from)
@@ -332,11 +349,16 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         handle: &P2PHostHandle,
         peer_id: libp2p::PeerId,
         collection_id: &str,
-        cid: &Cid,
     ) -> P2PResult<()> {
-        db_merge::retry_collection_commit(handle, &self.db, peer_id, collection_id, cid)
-            .await
-            .map_err(P2PError::from)
+        db_merge::retry_collection_commit(
+            handle,
+            &self.db,
+            peer_id,
+            collection_id,
+            &self.car_authority,
+        )
+        .await
+        .map_err(P2PError::from)
     }
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {

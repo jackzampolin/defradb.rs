@@ -16,6 +16,9 @@ mod bitswap;
 mod pending_dag;
 mod pushlog;
 
+pub(crate) use bitswap::{BlockSyncCompletionTracker, RootedCarCompletionTracker};
+pub(crate) use pending_dag::PendingDagLease;
+
 use crate::QueryId;
 use cid::Cid;
 use parking_lot::RwLock;
@@ -32,6 +35,27 @@ use super::config::SyncConfig;
 use super::diagnostics::SyncDiagnostics;
 use super::events::SyncEvent;
 use super::pending::PendingDagRegistry;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct PersistedScopeKey {
+    source_peer: String,
+    collection_id: String,
+    doc_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct PersistedHeadVersion {
+    priority: u64,
+    cid: Cid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PersistedScopeDecision {
+    Independent,
+    Current,
+    CoveredByCurrent,
+    Supersedes(Cid),
+}
 
 /// Manager for P2P block synchronization.
 ///
@@ -82,6 +106,12 @@ pub struct SyncManager<B: Blockstore> {
     /// Maps Bitswap QueryId → root CID for tracking completions.
     pub(super) query_to_root: Arc<RwLock<HashMap<QueryId, Cid>>>,
 
+    /// Completion waiters for poll-owned exact-CID queries.
+    pub(super) block_sync_completions: BlockSyncCompletionTracker,
+
+    /// Completion waiters for libp2p's separately streamed rooted CAR replies.
+    pub(super) rooted_car_completions: RootedCarCompletionTracker,
+
     /// Observability counters (see `SyncDiagnostics`).
     pub(crate) diagnostics: Arc<SyncDiagnostics>,
 
@@ -94,10 +124,19 @@ pub struct SyncManager<B: Blockstore> {
     pub(super) pending_store:
         std::sync::OnceLock<Arc<dyn crate::sync::pending_store::PendingDagStorage>>,
 
+    /// Serializes same-scope durable replacement decisions across distinct
+    /// root CIDs. The storage transaction remains bounded and atomic.
+    pub(super) pending_registration_writer: tokio::sync::Mutex<()>,
+
     /// Roots with a durable registration. Superset guard so the merge path
     /// only pays a delete transaction for roots that actually have records,
     /// and admission can bound durable growth without hitting storage.
     pub(super) persisted_roots: Arc<RwLock<std::collections::HashSet<Cid>>>,
+
+    /// Current durable root for each sender/document-or-collection scope.
+    /// This survives pending TTL eviction and is hydrated before the first
+    /// post-restart PushLog.
+    pub(super) persisted_scope_heads: Arc<RwLock<HashMap<PersistedScopeKey, PersistedHeadVersion>>>,
 
     /// Single-flight guard for the durable resync sweep.
     pub(super) pending_resync_in_flight: std::sync::atomic::AtomicBool,
@@ -126,6 +165,106 @@ pub(super) const PENDING_RESYNC_FORCED_TICK: usize = 10;
 pub(super) const PERSISTED_PENDING_CAP_FACTOR: usize = 4;
 
 impl<B: Blockstore + 'static> SyncManager<B> {
+    pub(super) fn persisted_scope_key(
+        source_peer: Option<&str>,
+        collection_id: &str,
+        doc_id: &str,
+        head_priority: Option<u64>,
+    ) -> Option<(PersistedScopeKey, u64)> {
+        Some((
+            PersistedScopeKey {
+                source_peer: source_peer?.to_owned(),
+                collection_id: collection_id.to_owned(),
+                doc_id: doc_id.to_owned(),
+            },
+            head_priority?,
+        ))
+    }
+
+    pub(super) fn persisted_scope_decision(
+        &self,
+        root_cid: Cid,
+        source_peer: Option<&str>,
+        collection_id: &str,
+        doc_id: &str,
+        head_priority: Option<u64>,
+    ) -> PersistedScopeDecision {
+        let Some((key, priority)) =
+            Self::persisted_scope_key(source_peer, collection_id, doc_id, head_priority)
+        else {
+            return PersistedScopeDecision::Independent;
+        };
+        let version = PersistedHeadVersion {
+            priority,
+            cid: root_cid,
+        };
+        match self.persisted_scope_heads.read().get(&key) {
+            None => PersistedScopeDecision::Current,
+            Some(current) if current.cid == root_cid => PersistedScopeDecision::Current,
+            Some(current) if version <= *current => PersistedScopeDecision::CoveredByCurrent,
+            Some(current) => PersistedScopeDecision::Supersedes(current.cid),
+        }
+    }
+
+    pub(super) fn scope_head_is_refresh_or_newer(
+        &self,
+        root_cid: Cid,
+        source_peer: Option<&str>,
+        collection_id: &str,
+        doc_id: &str,
+        head_priority: Option<u64>,
+    ) -> bool {
+        let Some((key, priority)) =
+            Self::persisted_scope_key(source_peer, collection_id, doc_id, head_priority)
+        else {
+            return false;
+        };
+        let version = PersistedHeadVersion {
+            priority,
+            cid: root_cid,
+        };
+        self.persisted_scope_heads
+            .read()
+            .get(&key)
+            .is_some_and(|current| current.cid == root_cid || version > *current)
+            || self.pending_dags.read().scope_head_is_refresh_or_newer(
+                root_cid,
+                source_peer,
+                collection_id,
+                doc_id,
+                head_priority,
+            )
+    }
+
+    pub(super) fn remember_persisted_scope_head(
+        &self,
+        root_cid: Cid,
+        source_peer: Option<&str>,
+        collection_id: &str,
+        doc_id: &str,
+        head_priority: Option<u64>,
+    ) {
+        let Some((key, priority)) =
+            Self::persisted_scope_key(source_peer, collection_id, doc_id, head_priority)
+        else {
+            return;
+        };
+        let version = PersistedHeadVersion {
+            priority,
+            cid: root_cid,
+        };
+        let mut heads = self.persisted_scope_heads.write();
+        if heads.get(&key).is_none_or(|current| version >= *current) {
+            heads.insert(key, version);
+        }
+    }
+
+    pub(super) fn forget_persisted_scope_root(&self, root_cid: &Cid) {
+        self.persisted_scope_heads
+            .write()
+            .retain(|_, version| version.cid != *root_cid);
+    }
+
     /// Create a new SyncManager.
     ///
     /// # Arguments
@@ -149,12 +288,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             peer_state,
             pending_dags: Arc::new(RwLock::new(PendingDagRegistry::default())),
             query_to_root: Arc::new(RwLock::new(HashMap::new())),
+            block_sync_completions: BlockSyncCompletionTracker::default(),
+            rooted_car_completions: RootedCarCompletionTracker::default(),
             diagnostics: Arc::new(SyncDiagnostics::default()),
             // A zero cap would reject every missing-link push forever
             // (permanent admission outage); normalize to a 1-slot map.
             max_pending_dags: config.max_pending_dags.max(1),
             pending_store: std::sync::OnceLock::new(),
+            pending_registration_writer: tokio::sync::Mutex::new(()),
             persisted_roots: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            persisted_scope_heads: Arc::new(RwLock::new(HashMap::new())),
             pending_resync_in_flight: std::sync::atomic::AtomicBool::new(false),
             pending_resync_tick: std::sync::atomic::AtomicUsize::new(0),
             quarantined_pending_count: std::sync::atomic::AtomicUsize::new(0),
@@ -186,6 +329,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
         if self.persisted_roots.read().contains(cid) {
             self.remove_persisted_pending(cid).await;
+            if !self.persisted_roots.read().contains(cid) {
+                self.diagnostics.record_pending_dag_terminal_merged();
+            }
         }
         Ok(())
     }
@@ -205,6 +351,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         };
         for cid in &persisted {
             self.remove_persisted_pending(cid).await;
+            if !self.persisted_roots.read().contains(cid) {
+                self.diagnostics.record_pending_dag_terminal_merged();
+            }
         }
         Ok(())
     }
@@ -212,6 +361,24 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get the process queue used to serialize work for the same CID.
     pub(crate) fn process_queue(&self) -> ProcessQueue {
         self.process_queue.clone()
+    }
+
+    /// Acquire the shared ingest/merge owners for a rooted block batch.
+    ///
+    /// The root is included even when an exact selective-CAR response only
+    /// carries descendants. This keeps response storage ordered with the
+    /// root's PushLog registration and eventual merge, matching Go's
+    /// root-owned ingest path. Each contained CID is included as well because
+    /// Rust's SSI store conflict-checks the mutable `ToMergeIndexKey`; shared
+    /// child blocks from different roots must therefore also have one writer.
+    pub(crate) async fn acquire_car_storage_owners(
+        &self,
+        root_cid: Cid,
+        block_cids: Vec<Cid>,
+    ) -> Vec<crate::sync::queue::ProcessGuard> {
+        self.process_queue
+            .acquire_all(std::iter::once(root_cid).chain(block_cids))
+            .await
     }
 
     /// Get all unmerged block CIDs.
@@ -278,6 +445,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 self.persisted_roots
                     .write()
                     .extend(records.iter().map(|(cid, _)| *cid));
+                for (cid, record) in &records {
+                    self.remember_persisted_scope_head(
+                        *cid,
+                        record.source_peer.as_deref(),
+                        &record.collection_id,
+                        &record.doc_id,
+                        record.head_priority,
+                    );
+                }
+                self.diagnostics
+                    .observe_persisted_pending_dag_depth(self.persisted_roots.read().len());
             }
             Err(error) => {
                 tracing::warn!(
@@ -317,6 +495,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             match store.remove(root_cid).await {
                 Ok(()) => {
                     self.persisted_roots.write().remove(root_cid);
+                    self.forget_persisted_scope_root(root_cid);
                 }
                 Err(error) => {
                     tracing::warn!(

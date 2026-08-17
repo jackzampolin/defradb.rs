@@ -11,7 +11,7 @@ use integration_test::TestCluster;
 
 const SCHEMA: &str = "type User { name: String  age: Int }";
 const PERSISTED_REGISTRATION: &str = "Persisted pending DAG registration";
-const ACCEPTED_PUSH: &str = "PushLog accepted by replicator";
+const ACCEPTED_PUSH: &str = "PushLog head hint accepted by replicator";
 
 async fn pending_dags(hub_api: &str) -> u64 {
     let Ok(response) = reqwest::get(format!("{hub_api}/api/v0/p2p/sync/status")).await else {

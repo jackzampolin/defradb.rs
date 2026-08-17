@@ -111,7 +111,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// ladder; request events are nacked with `RATE_LIMITED_MESSAGE` (via the
     /// `reject_rate_limited_*` helpers) and use the paced limiter, whose
     /// retry horizon is ~one token refill — a long lockout here wedges any
-    /// full-DAG push deeper than the burst (see `p2p_deep_catchup`).
+    /// receiver-owned recovery deeper than the burst (see `p2p_deep_catchup`).
     /// Nack-on-overload is the Go-aligned behavior: Go's direct replicator
     /// channel drives its retry ladder off error replies; overload replies
     /// are orthogonal to its trust/ACP bypasses.
@@ -751,6 +751,140 @@ mod tests {
             "creator1".to_string(),
             Bytes::from(block),
         )
+    }
+
+    #[tokio::test]
+    async fn gossip_authenticated_hop_is_the_durable_recovery_provider() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("origin-peer".to_string());
+        message.authenticate_origin_peer("origin-peer".to_string());
+        message.authenticate_source_peer("relay-peer".to_string());
+
+        coordinator
+            .handle_gossip_message(
+                PeerId::new("relay-peer".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await
+            .expect("head hint should register receiver ownership");
+
+        match events.try_recv().expect("DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                sender_peer,
+                ..
+            } => {
+                assert_eq!(event_root, root_cid);
+                assert_eq!(sender_peer.as_deref(), Some("relay-peer"));
+            }
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+
+        let records = pending_store.load_all().await.expect("load pending roots");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, root_cid);
+        assert_eq!(records[0].1.source_peer.as_deref(), Some("relay-peer"));
+    }
+
+    #[tokio::test]
+    async fn gossip_routable_authenticated_origin_is_the_durable_recovery_provider() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        coordinator.access.peer_state.peer_connected("origin-peer");
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("origin-peer".to_string());
+        message.authenticate_origin_peer("origin-peer".to_string());
+        message.authenticate_source_peer("relay-peer".to_string());
+
+        coordinator
+            .handle_gossip_message(
+                PeerId::new("relay-peer".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await
+            .expect("head hint should register receiver ownership");
+
+        match events.try_recv().expect("DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                sender_peer,
+                ..
+            } => {
+                assert_eq!(event_root, root_cid);
+                assert_eq!(sender_peer.as_deref(), Some("origin-peer"));
+            }
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+
+        let records = pending_store.load_all().await.expect("load pending roots");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, root_cid);
+        assert_eq!(records[0].1.source_peer.as_deref(), Some("origin-peer"));
+    }
+
+    #[tokio::test]
+    async fn unsigned_gossip_origin_cannot_become_a_durable_recovery_provider() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("forged-origin".to_string());
+
+        let result = coordinator
+            .handle_gossip_message(
+                PeerId::new("authenticated-relay".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await;
+        assert!(matches!(result, Err(crate::error::Error::Unauthorized(_))));
+        assert!(events.try_recv().is_err());
+        assert!(pending_store.load_all().await.unwrap().is_empty());
     }
 
     /// #1116 stage 2: a peer connect must not dispatch `DagNeedsFetch`

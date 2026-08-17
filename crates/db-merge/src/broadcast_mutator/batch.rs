@@ -17,12 +17,6 @@ use db::auto_commit_mutator::BatchMutator;
 use db::database::DB;
 use db_blocks::BlockResult;
 
-#[derive(Clone, Copy)]
-enum BroadcastKind {
-    DagPush,
-    SingleBlockPush,
-}
-
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(
         doc.to_map().ok()?.into_iter().collect(),
@@ -30,7 +24,6 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 }
 
 struct PendingBroadcast {
-    kind: BroadcastKind,
     cid: Cid,
     block: Vec<u8>,
     doc_id: String,
@@ -43,7 +36,6 @@ struct PendingBroadcast {
 }
 
 struct BroadcastCapture<'a> {
-    kind: BroadcastKind,
     collection_name: &'a str,
     doc_id: &'a str,
     commit_cid: Option<Cid>,
@@ -88,7 +80,6 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
 
     async fn capture_broadcast(&self, capture: BroadcastCapture<'_>) -> query::error::Result<()> {
         let BroadcastCapture {
-            kind,
             collection_name,
             doc_id,
             commit_cid,
@@ -112,7 +103,6 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
 
         let collection_id = self.get_collection_id(collection_name)?;
         self.pending_broadcasts.lock().await.push(PendingBroadcast {
-            kind,
             cid,
             block,
             doc_id: doc_id.to_string(),
@@ -127,45 +117,58 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
         Ok(())
     }
 
+    async fn register_pending_static(sync: &SyncCoordinator<B, T>, pending: &PendingBroadcast) {
+        let creator_ref = pending.creator_did.as_deref();
+        if let Some(document_json) = pending.document_json.as_ref() {
+            sync.push_document_to_replicators_with_creator(
+                &pending.cid,
+                &pending.block,
+                &pending.doc_id,
+                &pending.collection_id,
+                document_json,
+                creator_ref,
+            )
+            .await;
+        } else {
+            sync.push_to_replicators_with_creator(
+                &pending.cid,
+                &pending.block,
+                &pending.doc_id,
+                &pending.collection_id,
+                creator_ref,
+            )
+            .await;
+        }
+
+        if let (Some(col_cid), Some(col_block)) = (
+            pending.broadcast_cid.as_ref(),
+            pending.broadcast_block.as_ref(),
+        ) {
+            sync.push_to_replicators_with_creator(
+                col_cid,
+                col_block,
+                "",
+                &pending.collection_id,
+                creator_ref,
+            )
+            .await;
+        }
+    }
+
     async fn broadcast_pending_static(sync: &SyncCoordinator<B, T>, pending: PendingBroadcast) {
         let PendingBroadcast {
-            kind,
             cid,
             block,
             doc_id,
             collection_id,
             collection_name,
-            document_json,
+            document_json: _,
             creator_did,
             broadcast_cid,
             broadcast_block,
         } = pending;
 
         let creator_ref = creator_did.as_deref();
-
-        match (kind, document_json.as_ref()) {
-            (_, Some(document_json)) => {
-                sync.push_document_to_replicators_with_creator(
-                    &cid,
-                    &block,
-                    &doc_id,
-                    &collection_id,
-                    document_json,
-                    creator_ref,
-                )
-                .await;
-            }
-            (BroadcastKind::DagPush | BroadcastKind::SingleBlockPush, None) => {
-                sync.push_to_replicators_with_creator(
-                    &cid,
-                    &block,
-                    &doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await;
-            }
-        }
 
         let block_result = BlockResult {
             cid,
@@ -200,15 +203,6 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
                 field_cids: vec![],
                 encryption_cids: vec![],
             };
-            sync.push_to_replicators_with_creator(
-                &col_block_result.cid,
-                &col_block_result.block,
-                &col_block_result.doc_id,
-                &collection_id,
-                creator_ref,
-            )
-            .await;
-
             let collection_broadcast_status = super::broadcast::broadcast_with_retry_with_creator(
                 sync,
                 &col_block_result,
@@ -244,7 +238,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let doc_id = result.doc_id.to_string();
         let document_json = document_json_value(&result.document);
         self.capture_broadcast(BroadcastCapture {
-            kind: BroadcastKind::DagPush,
             collection_name,
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
@@ -272,7 +265,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             let doc_id = doc_id.to_string();
             let document_json = document_json_value(&result.document);
             self.capture_broadcast(BroadcastCapture {
-                kind: BroadcastKind::DagPush,
                 collection_name,
                 doc_id: &doc_id,
                 commit_cid: result.commit_cid,
@@ -308,7 +300,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // alongside the composite delete (matches the non-batch BroadcastMutator
         // path and Go's two-update emit for branchable mutations).
         self.capture_broadcast(BroadcastCapture {
-            kind: BroadcastKind::SingleBlockPush,
             collection_name,
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
@@ -347,13 +338,18 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
 
         let pending_broadcasts = std::mem::take(&mut *self.pending_broadcasts.lock().await);
         if !pending_broadcasts.is_empty() {
+            for pending in &pending_broadcasts {
+                Self::register_pending_static(&self.sync, pending).await;
+            }
             let sync = self.sync.clone();
-            self.sync
-                .spawn_background_task("broadcast_mutation_batch", async move {
+            self.sync.spawn_non_authoritative_broadcast_task(
+                "broadcast_mutation_batch",
+                async move {
                     for pending in pending_broadcasts {
                         Self::broadcast_pending_static(&sync, pending).await;
                     }
-                });
+                },
+            );
         }
 
         Ok(())

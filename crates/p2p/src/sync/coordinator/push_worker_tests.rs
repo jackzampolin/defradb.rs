@@ -11,22 +11,17 @@ use super::*;
 use crate::sync::push_backlog::EnqueueOutcome;
 use crate::transport::PeerId;
 
-type TestBlockstore = blockstore::DefraBlockstore<storage::backends::MemoryStore>;
-
 fn test_context(
     transport: TestTransport,
     backlog: Arc<PushBacklog>,
     send_timeout: Duration,
 ) -> (
-    Arc<PushWorkerContext<TestBlockstore, TestTransport>>,
+    Arc<PushWorkerContext<TestTransport>>,
     tokio::sync::mpsc::Receiver<PushFailure>,
 ) {
-    let store = Arc::new(storage::backends::MemoryStore::new());
-    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, true));
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let context = Arc::new(PushWorkerContext {
         transport,
-        blockstore,
         backlog,
         selective_car_access: Arc::new(
             super::super::selective_car_access::SelectiveCarAccess::default(),
@@ -45,7 +40,6 @@ fn job(peer: &str, cid_seed: &[u8]) -> PushJobSpec {
         "creator".to_string(),
         Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
         Bytes::from_static(b"head-block"),
-        false,
     )
 }
 
@@ -72,7 +66,6 @@ fn versioned_job(peer: &str, priority: u64) -> PushJobSpec {
         "creator".to_string(),
         defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
         head_block,
-        false,
     )
 }
 
@@ -100,7 +93,7 @@ async fn slow_peer_does_not_starve_healthy_peers() {
         let healthy_sent = transport
             .sent()
             .iter()
-            .filter(|(peer, _)| peer == "healthy")
+            .filter(|push| push.peer_id == "healthy")
             .count();
         if healthy_sent == 5 {
             break;
@@ -196,102 +189,7 @@ async fn capacity_nack_demotes_queued_peer_work_to_persisted_retry() {
 }
 
 #[tokio::test]
-async fn fanout_signs_one_payload_once_for_all_peers() {
-    let backlog = PushBacklog::new(1024, usize::MAX, 1, 2);
-    let transport = TestTransport::new(Vec::new());
-    let (context, _failure_rx) = test_context(
-        transport.clone(),
-        Arc::clone(&backlog),
-        Duration::from_secs(1),
-    );
-    let cache = crate::sync::push_encode_cache::PushEncodeCache::default();
-    let base = job("a", b"shared");
-    let mut first = PushJobSpec::new(
-        base.peer_id,
-        "doc-shared".to_string(),
-        base.collection_id,
-        base.creator,
-        base.root_cid,
-        base.head_block,
-        base.expand_dag,
-    );
-    first.encoded_payload = Some(cache.acquire(&first));
-    let mut second = PushJobSpec::new(
-        PeerId::new("b".to_string()),
-        first.doc_id.clone(),
-        first.collection_id.clone(),
-        first.creator.clone(),
-        first.root_cid,
-        first.head_block.clone(),
-        first.expand_dag,
-    );
-    second.encoded_payload = Some(cache.acquire(&second));
-
-    let shutdown = SyncShutdownHandle::new();
-    spawn_push_workers(context, &shutdown);
-    backlog.try_enqueue(first);
-    backlog.try_enqueue(second);
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while backlog.snapshot().completed_total < 2 {
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert_eq!(transport.sign_count(), 1);
-    assert_eq!(cache.hits(), 1);
-    backlog.close();
-}
-
-#[tokio::test]
-async fn transient_root_sign_failure_is_not_cached_across_fanout() {
-    let backlog = PushBacklog::new(1024, usize::MAX, 1, 2);
-    let transport = TestTransport::new(Vec::new()).with_sign_failures(1);
-    let (context, mut failure_rx) = test_context(
-        transport.clone(),
-        Arc::clone(&backlog),
-        Duration::from_secs(1),
-    );
-    let cache = crate::sync::push_encode_cache::PushEncodeCache::default();
-    let base = job("a", b"shared-sign-retry");
-    let mut first = PushJobSpec::new(
-        base.peer_id,
-        "doc-shared".to_string(),
-        base.collection_id,
-        base.creator,
-        base.root_cid,
-        base.head_block,
-        base.expand_dag,
-    );
-    first.encoded_payload = Some(cache.acquire(&first));
-    let mut second = PushJobSpec::new(
-        PeerId::new("b".to_string()),
-        first.doc_id.clone(),
-        first.collection_id.clone(),
-        first.creator.clone(),
-        first.root_cid,
-        first.head_block.clone(),
-        first.expand_dag,
-    );
-    second.encoded_payload = Some(cache.acquire(&second));
-
-    let shutdown = SyncShutdownHandle::new();
-    spawn_push_workers(context, &shutdown);
-    backlog.try_enqueue(first);
-    backlog.try_enqueue(second);
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while backlog.snapshot().completed_total + backlog.snapshot().failed_total < 2 {
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert_eq!(transport.sign_count(), 2);
-    assert_eq!(transport.sent().len(), 1);
-    assert!(failure_rx.try_recv().is_ok());
-    backlog.close();
-}
-
-#[tokio::test]
-async fn missing_root_request_fails_even_when_dependency_send_succeeds() {
+async fn head_hint_signing_failure_sends_no_dependency_pushlogs() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
 
     let backlog = PushBacklog::new(1024, usize::MAX, 1, 1);
@@ -303,11 +201,6 @@ async fn missing_root_request_fails_even_when_dependency_send_succeeds() {
     );
     let dependency = Bytes::from_static(b"dependency");
     let dependency_cid = defra_core::block::generate_cid_from_bytes(&dependency).unwrap();
-    context
-        .blockstore
-        .put(&dependency_cid, &dependency)
-        .await
-        .unwrap();
     let root = Block::new_with_options(
         CrdtDelta::Composite(CompositeDeltaPayload {
             schema_version_id: "schema".to_string(),
@@ -328,7 +221,6 @@ async fn missing_root_request_fails_even_when_dependency_send_succeeds() {
         "creator".to_string(),
         root_cid,
         root,
-        true,
     );
     assert_eq!(backlog.try_enqueue(job), EnqueueOutcome::Enqueued);
     let active = backlog.next_job().await.unwrap();
@@ -336,20 +228,17 @@ async fn missing_root_request_fails_even_when_dependency_send_succeeds() {
     let completion = run_push_job(&context, &active).await;
 
     assert_eq!(completion, JobCompletion::Failed);
-    assert_eq!(transport.sign_count(), 2);
-    assert_eq!(transport.sent().len(), 1);
+    assert_eq!(transport.sign_count(), 1);
+    assert!(transport.sent().is_empty());
     assert_eq!(failure_rx.recv().await.unwrap().cid, root_cid.to_string());
     backlog.job_done(&active, completion);
     backlog.close();
 }
 
-/// A root-only push (`expand_dag = false`) sends just the root block, but
-/// the selective-CAR grant must still cover the full local DAG so the
-/// receiver's post-ack recovery pull can fetch missing dependents (#1116
-/// stage 2): the grant is authorized from the blockstore's DAG shape, not
-/// from the pushed payload set.
+/// A root-only push installs its bounded root capability before sending. The
+/// CAR handler validates requested linked CIDs against that root on demand.
 #[tokio::test]
-async fn root_only_push_still_grants_full_dag_for_recovery() {
+async fn root_only_push_installs_receiver_pull_authority() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink};
 
     let backlog = PushBacklog::new(1024, usize::MAX, 1, 1);
@@ -362,11 +251,6 @@ async fn root_only_push_still_grants_full_dag_for_recovery() {
 
     let child_data = Bytes::from_static(b"child-block");
     let child_cid = defra_core::block::generate_cid_from_bytes(&child_data).unwrap();
-    context
-        .blockstore
-        .put(&child_cid, &child_data)
-        .await
-        .unwrap();
 
     let root = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
@@ -379,11 +263,6 @@ async fn root_only_push_still_grants_full_dag_for_recovery() {
     );
     let root_bytes = Bytes::from(root.to_dag_cbor().unwrap());
     let root_cid = defra_core::block::generate_cid_from_bytes(&root_bytes).unwrap();
-    context
-        .blockstore
-        .put(&root_cid, &root_bytes)
-        .await
-        .unwrap();
 
     let peer = PeerId::new("peer".to_string());
     let job = PushJobSpec::new(
@@ -393,7 +272,6 @@ async fn root_only_push_still_grants_full_dag_for_recovery() {
         "creator".to_string(),
         root_cid,
         root_bytes,
-        false,
     );
     assert_eq!(backlog.try_enqueue(job), EnqueueOutcome::Enqueued);
     let active = backlog.next_job().await.unwrap();
@@ -402,13 +280,128 @@ async fn root_only_push_still_grants_full_dag_for_recovery() {
 
     assert_eq!(completion, JobCompletion::Succeeded);
     assert!(
-        context
-            .selective_car_access
-            .allows(&peer, &root_cid, &child_cid),
+        context.selective_car_access.allows_root(&peer, &root_cid),
         "root-only push must still grant the child block for receiver recovery"
     );
     backlog.job_done(&active, completion);
     backlog.close();
+}
+
+#[derive(Debug)]
+struct OwnershipArm {
+    scheduled: u64,
+    transmitted: usize,
+    announced_bytes: usize,
+    terminal_success: u64,
+    child_announced_as_head: bool,
+    child_car_authorized: bool,
+}
+
+async fn run_ownership_arm(expand_dag: bool) -> OwnershipArm {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let backlog = PushBacklog::new(8, usize::MAX, 1, 1);
+    let transport = TestTransport::new(Vec::new());
+    let (context, _failure_rx) = test_context(
+        transport.clone(),
+        Arc::clone(&backlog),
+        Duration::from_secs(1),
+    );
+
+    let child = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "value".to_string(),
+            priority: 1,
+            schema_version_id: "schema".to_string(),
+            data: b"current".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let child_bytes = Bytes::from(child.to_dag_cbor().unwrap());
+    let child_cid = defra_core::block::generate_cid_from_bytes(&child_bytes).unwrap();
+
+    let root = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "schema".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("value", child_cid)],
+    );
+    let root_bytes = Bytes::from(root.to_dag_cbor().unwrap());
+    let root_cid = defra_core::block::generate_cid_from_bytes(&root_bytes).unwrap();
+
+    let peer = PeerId::new("receiver".to_string());
+    if expand_dag {
+        // Frozen reference arm for the superseded sender: dependencies were
+        // signed and presented as standalone PushLog heads before the root.
+        // Keeping this only in the A/B harness ensures the regression test
+        // remains capable of distinguishing the two ownership models after
+        // production expansion is removed.
+        let mut child_request = crate::message::PushLogRequest::new(
+            "doc".to_string(),
+            Bytes::from(child_cid.to_bytes()),
+            "collection".to_string(),
+            "creator".to_string(),
+            child_bytes,
+        );
+        crate::signing::sign_with_transport(&transport, &mut child_request).unwrap();
+        transport
+            .send_two_stream_request(&peer, child_request)
+            .await
+            .unwrap();
+    }
+    let job = PushJobSpec::new(
+        peer.clone(),
+        "doc".to_string(),
+        "collection".to_string(),
+        "creator".to_string(),
+        root_cid,
+        root_bytes,
+    );
+    assert_eq!(backlog.try_enqueue(job), EnqueueOutcome::Enqueued);
+    let active = backlog.next_job().await.unwrap();
+    let completion = run_push_job(&context, &active).await;
+    assert_eq!(completion, JobCompletion::Succeeded);
+    backlog.job_done(&active, completion);
+
+    let sent = transport.sent();
+    let snapshot = backlog.snapshot();
+    let result = OwnershipArm {
+        scheduled: snapshot.enqueued_total,
+        transmitted: sent.len(),
+        announced_bytes: sent.iter().map(|push| push.block_bytes).sum(),
+        terminal_success: snapshot.completed_total,
+        child_announced_as_head: sent.iter().any(|push| push.cid == child_cid.to_bytes()),
+        child_car_authorized: context.selective_car_access.allows_root(&peer, &root_cid),
+    };
+    backlog.close();
+    result
+}
+
+/// Delivery-shape fence for #1116: the frozen full-DAG arm announces a field
+/// block as a standalone PushLog, while the production arm announces one
+/// composite head and preserves rooted CAR authority. Receiver convergence is
+/// covered separately by
+/// `ownership_ab_full_dag_amplifies_admission_and_requires_sender_retry`.
+#[tokio::test]
+async fn delivery_shape_full_dag_vs_head_hint_only() {
+    let full_dag = run_ownership_arm(true).await;
+    let head_hint = run_ownership_arm(false).await;
+
+    assert_eq!(full_dag.scheduled, 1);
+    assert_eq!(head_hint.scheduled, 1);
+    assert_eq!(full_dag.terminal_success, 1);
+    assert_eq!(head_hint.terminal_success, 1);
+    assert!(full_dag.child_announced_as_head);
+    assert!(!head_hint.child_announced_as_head);
+    assert_eq!(full_dag.transmitted, 2);
+    assert_eq!(head_hint.transmitted, 1);
+    assert!(full_dag.announced_bytes > head_hint.announced_bytes);
+    assert!(full_dag.child_car_authorized);
+    assert!(head_hint.child_car_authorized);
 }
 
 #[tokio::test]
@@ -440,7 +433,9 @@ async fn superseded_active_failure_never_enters_persisted_retry() {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert!(failure_rx.try_recv().is_err());
+    let events: Vec<_> = std::iter::from_fn(|| failure_rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|event| !event.create_retry));
+    assert!(events.iter().all(|event| !event.create_retry));
     assert_eq!(backlog.snapshot().stale_head_retirements_total, 1);
     backlog.close();
 }
@@ -457,6 +452,8 @@ async fn report_push_failure_backpressures_instead_of_dropping() {
         cid: Cid::new_v1(0x55, Code::Sha2_256.digest(b"occupant")).to_string(),
         head_priority: 0,
         create_retry: true,
+        acknowledged: false,
+        durable_tx: None,
     })
     .await
     .unwrap();

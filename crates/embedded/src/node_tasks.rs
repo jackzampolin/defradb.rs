@@ -62,6 +62,12 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
         while let Some(event) = events.recv().await {
             match &event {
+                p2p::HostEvent::PeerConnected(peer_id) => {
+                    let peerstore = storage::stores::Peerstore::new(store.clone());
+                    if let Err(error) = peerstore.activate_retry_peer(&peer_id.to_string()).await {
+                        tracing::warn!(%peer_id, %error, "failed to activate durable push markers after peer reconnect");
+                    }
+                }
                 p2p::HostEvent::PeerSubscribed { peer_id, topic } => {
                     event_bus.publish(events::Message::topic_peer_event(
                         events::TopicPeerEventData {
@@ -199,6 +205,12 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
         while let Some(event) = events.recv().await {
             match &event {
+                p2p::TransportEvent::PeerConnected(peer_id) => {
+                    let peerstore = storage::stores::Peerstore::new(store.clone());
+                    if let Err(error) = peerstore.activate_retry_peer(peer_id.as_str()).await {
+                        tracing::warn!(%peer_id, %error, "failed to activate durable push markers after peer reconnect");
+                    }
+                }
                 p2p::TransportEvent::PeerSubscribed { peer_id, topic } => {
                     event_bus.publish(events::Message::topic_peer_event(
                         events::TopicPeerEventData {
@@ -365,16 +377,12 @@ where
 {
     tokio::spawn(async move {
         let local_peer = coordinator.local_peer_id().to_string();
-        let config = ReplicationConfig {
-            max_workers: 1,
-            ..ReplicationConfig::default()
-        };
-        ReplicationLoop::run_parallel(
+        ReplicationLoop::run(
             coordinator,
             sync_events_rx,
             merge_handler,
-            config,
-            move |result| match &result {
+            ReplicationConfig::default(),
+            move |result| match result {
                 ReplicationResult::Merged {
                     cid,
                     doc_id,
@@ -465,24 +473,58 @@ pub(crate) fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     mut failure_rx: tokio::sync::mpsc::Receiver<PushFailure>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(failure) = failure_rx.recv().await {
+        let mut ack_fence = p2p::sync::HeadAckFence::default();
+        while let Some(mut failure) = failure_rx.recv().await {
+            let durable_tx = failure.durable_tx.take();
+            if failure.acknowledged && !ack_fence.ack_is_current(&failure) {
+                tracing::debug!(
+                    peer_id = %failure.peer_id,
+                    doc_id = %failure.doc_id,
+                    collection_id = %failure.collection_id,
+                    "Ignoring stale head acknowledgement"
+                );
+                let _ = durable_tx.map(|tx| tx.send(false));
+                continue;
+            }
             let peerstore = storage::stores::Peerstore::new(store.clone());
             let _retry_guard = match peerstore
                 .acquire_replicator_retry_guard(&failure.peer_id)
                 .await
             {
                 Ok(Some(guard)) => guard,
-                Ok(None) => continue,
+                Ok(None) => {
+                    let _ = durable_tx.map(|tx| tx.send(false));
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!(error = %error, "failed to coordinate push failure recording");
+                    let _ = durable_tx.map(|tx| tx.send(false));
                     continue;
                 }
             };
-            let result = if failure.create_retry {
+            let result = if failure.acknowledged {
+                let retry = storage::stores::PersistedPushRetry {
+                    doc_id: failure.doc_id.clone(),
+                    collection_id: failure.collection_id.clone(),
+                    cid: String::new(),
+                    priority: 0,
+                    pending: true,
+                    scope: if failure.doc_id.is_empty() {
+                        storage::stores::RetryScope::CollectionCommit
+                    } else {
+                        storage::stores::RetryScope::Document
+                    },
+                    retry_info: storage::stores::RetryInfo::new_initial(),
+                };
+                peerstore
+                    .complete_retry_document(&failure.peer_id, &retry)
+                    .await
+            } else if failure.create_retry {
                 let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         tracing::warn!(error = %error, "failed to serialize retry info");
+                        let _ = durable_tx.map(|tx| tx.send(false));
                         continue;
                     }
                 };
@@ -509,6 +551,16 @@ pub(crate) fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
             };
             if let Err(error) = result {
                 tracing::warn!(error = %error, "failed to record push failure");
+                let _ = durable_tx.map(|tx| tx.send(false));
+                continue;
+            }
+            if !failure.create_retry && !failure.acknowledged {
+                ack_fence.observe_durable(&failure);
+            }
+            let _ = durable_tx.map(|tx| tx.send(true));
+            if failure.acknowledged {
+                ack_fence.clear_current_ack(&failure);
+                let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
                 continue;
             }
             if !failure.create_retry {
@@ -572,10 +624,11 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
     };
 
     for (peer_id_str, info_bytes) in peers {
-        let _retry_guard = match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+        let retry_guard = match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
             Ok(Some(guard)) => guard,
             Ok(None) | Err(_) => continue,
         };
+        drop(retry_guard);
         let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
             Ok(info) => info,
             Err(error) => {
@@ -627,32 +680,26 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             // peer is unreachable); a fast rejection only consumes a bounded
             // budget so one permanently rejected doc at the head of the key
             // order cannot starve the rest forever.
-            // Collection commits are doc-less and replay by CID (defradb#1113).
+            // Collection markers rederive current collection heads (defradb#1113).
             let replay = async {
                 if retry.is_collection_commit() {
-                    match retry.cid.parse::<cid::Cid>() {
-                        Ok(cid) => {
-                            doc_pusher
-                                .retry_collection_commit(
-                                    handle,
-                                    peer_id,
-                                    &retry.collection_id,
-                                    &cid,
-                                )
-                                .await
-                        }
-                        Err(error) => Err(defra_p2p_adapter::P2PError::Internal(format!(
-                            "unparseable collection-commit CID {}: {error}",
-                            retry.cid
-                        ))),
-                    }
+                    doc_pusher
+                        .retry_collection_commit(handle, peer_id, &retry.collection_id)
+                        .await
                 } else {
                     doc_pusher
                         .retry_doc(handle, peer_id, &retry.doc_id, &retry.collection_id)
                         .await
                 }
             };
-            match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await {
+            let replay_result =
+                tokio::time::timeout(std::time::Duration::from_secs(15), replay).await;
+            let _transition_guard =
+                match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+                    Ok(Some(guard)) => guard,
+                    Ok(None) | Err(_) => break,
+                };
+            match replay_result {
                 Ok(Ok(())) => {
                     // Doc block re-push succeeded; regenerate and re-push
                     // SE artifacts for this doc too. Go re-pushes the
@@ -718,8 +765,8 @@ pub(crate) fn spawn_libp2p_retry_loop<S: storage::corekv::Store + 'static>(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let peerstore = storage::stores::Peerstore::new(store.clone());
-        if let Err(error) = peerstore.activate_dormant_push_retries().await {
-            tracing::warn!(error = %error, "failed to reactivate push retries after restart");
+        if let Err(error) = peerstore.migrate_legacy_push_retries().await {
+            tracing::warn!(error = %error, "failed to migrate legacy push retries after restart");
         }
         loop {
             tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
@@ -743,10 +790,11 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
     };
 
     for (peer_id_str, info_bytes) in peers {
-        let _retry_guard = match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+        let retry_guard = match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
             Ok(Some(guard)) => guard,
             Ok(None) | Err(_) => continue,
         };
+        drop(retry_guard);
         let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
             Ok(info) => info,
             Err(error) => {
@@ -784,27 +832,26 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             // peer is unreachable); a fast rejection only consumes a bounded
             // budget so one permanently rejected doc at the head of the key
             // order cannot starve the rest forever.
-            // Collection commits are doc-less and replay by CID (defradb#1113).
+            // Collection markers rederive current collection heads (defradb#1113).
             let replay = async {
                 if retry.is_collection_commit() {
-                    match retry.cid.parse::<cid::Cid>() {
-                        Ok(cid) => {
-                            doc_pusher
-                                .retry_collection_commit(&peer_id, &retry.collection_id, &cid)
-                                .await
-                        }
-                        Err(error) => Err(defra_p2p_adapter::P2PError::Internal(format!(
-                            "unparseable collection-commit CID {}: {error}",
-                            retry.cid
-                        ))),
-                    }
+                    doc_pusher
+                        .retry_collection_commit(&peer_id, &retry.collection_id)
+                        .await
                 } else {
                     doc_pusher
                         .retry_doc(&peer_id, &retry.doc_id, &retry.collection_id)
                         .await
                 }
             };
-            match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await {
+            let replay_result =
+                tokio::time::timeout(std::time::Duration::from_secs(15), replay).await;
+            let _transition_guard =
+                match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+                    Ok(Some(guard)) => guard,
+                    Ok(None) | Err(_) => break,
+                };
+            match replay_result {
                 Ok(Ok(())) => {
                     se_repusher
                         .regenerate_and_push_se_artifacts(&retry.collection_id, &retry.doc_id)
@@ -866,8 +913,8 @@ pub(crate) fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let peerstore = storage::stores::Peerstore::new(store.clone());
-        if let Err(error) = peerstore.activate_dormant_push_retries().await {
-            tracing::warn!(error = %error, "failed to reactivate push retries after restart");
+        if let Err(error) = peerstore.migrate_legacy_push_retries().await {
+            tracing::warn!(error = %error, "failed to migrate legacy push retries after restart");
         }
         loop {
             tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;

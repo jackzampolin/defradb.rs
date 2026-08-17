@@ -154,20 +154,48 @@ impl Key for ReplicatorRetryDocIDKey {
     }
 }
 
-/// ReplicatorRetryCommitKey: tracks COLLECTION-COMMIT replication failures.
+/// Presence marker for collection-scoped head rederivation.
+/// Structure: `/rep/retry/col/{peer}/{collection}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicatorRetryCollectionKey {
+    pub peer_id: String,
+    pub collection_id: String,
+}
+
+impl ReplicatorRetryCollectionKey {
+    pub fn new(peer_id: impl Into<String>, collection_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            collection_id: collection_id.into(),
+        }
+    }
+
+    pub fn retry_collection_prefix() -> Vec<u8> {
+        b"/rep/retry/col/".to_vec()
+    }
+
+    pub fn peer_prefix(peer_id: impl Into<String>) -> Vec<u8> {
+        format!("/rep/retry/col/{}/", peer_id.into()).into_bytes()
+    }
+}
+
+impl Key for ReplicatorRetryCollectionKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/rep/retry/col/{}/{}", self.peer_id, self.collection_id).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/rep/retry/col/{}/{}", self.peer_id, self.collection_id)
+    }
+}
+
+/// Legacy CID-valued collection retry key, retained only for migration.
 ///
 /// Structure: /rep/retry/commit/[PeerID]/[CollectionID]/[CID]
 ///
-/// Collection commits are doc-less: their DAG obligation is CID-scoped, not
-/// document-scoped, so they cannot be keyed by `ReplicatorRetryDocIDKey` (whose
-/// terminal segment is the document id — an empty doc id would collapse every
-/// commit for a peer into one slot). Before this key existed, a failed
-/// collection-commit push had nowhere to be recorded and failed PERMANENTLY:
-/// receivers kept heads whose parents never arrived, so their pending-DAG
-/// registrations could never complete (defradb#1113, source-inc/gents#696).
-///
-/// One record per (peer, collection, CID): collection-commit DAGs chain, so a
-/// newer commit does NOT make an older undelivered one redundant.
+/// New writes use `ReplicatorRetryCollectionKey`, whose marker causes the retry
+/// sweep to rederive current collection heads. Existing records are converted
+/// one-way and then deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicatorRetryCommitKey {
     /// Peer network identifier

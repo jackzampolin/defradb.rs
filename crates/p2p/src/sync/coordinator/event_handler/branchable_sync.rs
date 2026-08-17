@@ -281,6 +281,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
             let limiter = self.runtime.dag_fetch_limiter.clone();
+            let diagnostics = self.manager.diagnostics();
 
             for root_cid in cids_to_fetch {
                 let transport = transport.clone();
@@ -288,6 +289,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let event_tx = event_tx.clone();
                 let collection_id = reply.collection_id.clone();
                 let limiter = limiter.clone();
+                let diagnostics = diagnostics.clone();
                 let source_peer = peer_id.clone();
                 let is_explicit_replicator =
                     self.is_registered_replicator(peer_id.as_str(), &collection_id);
@@ -312,6 +314,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         .with_alternate_providers(alternate_providers)
                         .with_explicit_replicator(is_explicit_replicator),
                         limiter,
+                        diagnostics,
                     )
                     .await;
                 });

@@ -29,6 +29,10 @@ fn encode_ipld(ipld: Ipld) -> Vec<u8> {
     DagCborCodec::encode_to_vec(&ipld).unwrap()
 }
 
+fn diagnostics() -> Arc<SyncDiagnostics> {
+    Arc::new(SyncDiagnostics::default())
+}
+
 #[derive(Clone)]
 struct TestTransport {
     peer_id: PeerId,
@@ -46,6 +50,11 @@ struct TestTransport {
     fail_connected_peers: Arc<AtomicBool>,
     cancelled_queries: Arc<Mutex<Vec<u64>>>,
     hang_car_requests: Arc<AtomicBool>,
+    streamed_rooted_blocks: Arc<Mutex<Option<Vec<(Cid, Vec<u8>)>>>>,
+    stream_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
+    stream_block_delay: Arc<Mutex<Duration>>,
+    stream_completed: Arc<AtomicBool>,
+    cancelled_before_stream_complete: Arc<AtomicBool>,
 }
 
 impl TestTransport {
@@ -72,6 +81,11 @@ impl TestTransport {
             fail_connected_peers: Arc::new(AtomicBool::new(false)),
             cancelled_queries: Arc::new(Mutex::new(Vec::new())),
             hang_car_requests: Arc::new(AtomicBool::new(false)),
+            streamed_rooted_blocks: Arc::new(Mutex::new(None)),
+            stream_completion: Arc::new(Mutex::new(None)),
+            stream_block_delay: Arc::new(Mutex::new(Duration::from_millis(10))),
+            stream_completed: Arc::new(AtomicBool::new(false)),
+            cancelled_before_stream_complete: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -106,6 +120,23 @@ impl TestTransport {
     fn set_hang_car_requests(&self) {
         self.hang_car_requests.store(true, Ordering::SeqCst);
     }
+
+    fn set_streamed_rooted_blocks(
+        &self,
+        blocks: Vec<(Cid, Vec<u8>)>,
+        completion: crate::sync::manager::BlockSyncCompletionTracker,
+    ) {
+        *self.streamed_rooted_blocks.lock().unwrap() = Some(blocks);
+        *self.stream_completion.lock().unwrap() = Some(completion);
+    }
+
+    fn cancelled_before_stream_complete(&self) -> bool {
+        self.cancelled_before_stream_complete.load(Ordering::SeqCst)
+    }
+
+    fn set_stream_block_delay(&self, delay: Duration) {
+        *self.stream_block_delay.lock().unwrap() = delay;
+    }
 }
 
 #[async_trait]
@@ -114,6 +145,10 @@ impl P2PTransport for TestTransport {
 
     fn local_peer_id(&self) -> &PeerId {
         &self.peer_id
+    }
+
+    fn supports_cancellable_rooted_sync(&self) -> bool {
+        self.streamed_rooted_blocks.lock().unwrap().is_some()
     }
 
     fn local_public_key_proto(&self) -> &[u8] {
@@ -301,6 +336,28 @@ impl P2PTransport for TestTransport {
             .unwrap()
             .extend(providers.iter().map(|peer| peer.to_string()));
         let query_id = QueryId(call_index as u64 + 1);
+        let streamed_blocks = if missing.is_empty() {
+            self.streamed_rooted_blocks.lock().unwrap().clone()
+        } else {
+            None
+        };
+        if let Some(streamed_blocks) = streamed_blocks {
+            let blockstore = Arc::clone(&self.blockstore);
+            let completion = self.stream_completion.lock().unwrap().clone();
+            let stream_block_delay = *self.stream_block_delay.lock().unwrap();
+            let stream_completed = Arc::clone(&self.stream_completed);
+            tokio::spawn(async move {
+                for (cid, data) in streamed_blocks {
+                    tokio::time::sleep(stream_block_delay).await;
+                    blockstore.put(&cid, &data).await.unwrap();
+                }
+                stream_completed.store(true, Ordering::SeqCst);
+                if let Some(completion) = completion {
+                    completion.complete(query_id, true);
+                }
+            });
+            return Ok(query_id);
+        }
         if call_index < self.skip_serving_syncs.load(Ordering::SeqCst) {
             return Ok(query_id);
         }
@@ -323,6 +380,12 @@ impl P2PTransport for TestTransport {
     }
 
     async fn cancel_sync(&self, query_id: QueryId) -> P2PResult<bool> {
+        if self.streamed_rooted_blocks.lock().unwrap().is_some()
+            && !self.stream_completed.load(Ordering::SeqCst)
+        {
+            self.cancelled_before_stream_complete
+                .store(true, Ordering::SeqCst);
+        }
         self.cancelled_queries.lock().unwrap().push(query_id.0);
         Ok(true)
     }
@@ -400,6 +463,7 @@ async fn poll_fetch_dag_recovers_partial_car_with_batched_selective_fetch() {
         )
         .with_explicit_replicator(true),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -435,7 +499,7 @@ async fn poll_fetch_dag_recovers_partial_car_with_batched_selective_fetch() {
 }
 
 #[tokio::test]
-async fn poll_fetch_dag_does_not_treat_preexisting_root_as_car_success() {
+async fn poll_fetch_dag_uses_known_missing_frontier_without_recursive_car() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
@@ -450,8 +514,8 @@ async fn poll_fetch_dag_does_not_treat_preexisting_root_as_car_success() {
         blockstore.clone(),
         root_cid,
         root_data,
-        HashMap::from([(child_cid, child_data.clone())]),
         HashMap::new(),
+        HashMap::from([(child_cid, child_data.clone())]),
     );
 
     let (event_tx, mut event_rx) = mpsc::channel(1);
@@ -469,6 +533,7 @@ async fn poll_fetch_dag_does_not_treat_preexisting_root_as_car_success() {
             source_peer,
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -477,8 +542,69 @@ async fn poll_fetch_dag_does_not_treat_preexisting_root_as_car_success() {
         Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
     ));
     assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
-    assert_eq!(transport.car_request_count(), 1);
-    assert!(transport.sync_batches().is_empty());
+    assert_eq!(transport.car_request_count(), 0);
+    assert_eq!(transport.sync_batches(), vec![vec![child_cid]]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rooted_provider_response_drains_before_query_is_reaped() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let leaf_data = encode_ipld(ipld!({ "value": 1 }));
+    let leaf_cid = make_cid(&leaf_data);
+    let child_data = encode_ipld(ipld!({ "child": leaf_cid }));
+    let child_cid = make_cid(&child_data);
+    let root_data = encode_ipld(ipld!({ "child": child_cid }));
+    let root_cid = make_cid(&root_data);
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    let transport = TestTransport::new(
+        blockstore.clone(),
+        root_cid,
+        root_data,
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let completion = crate::sync::manager::BlockSyncCompletionTracker::default();
+    transport.set_streamed_rooted_blocks(
+        vec![(child_cid, child_data), (leaf_cid, leaf_data)],
+        completion.clone(),
+    );
+    // The old 10-second coordinator poll window cancelled this otherwise
+    // healthy response before Iroh's 30-second transport bound could report
+    // completion. Paused time keeps the regression deterministic and fast.
+    transport.set_stream_block_delay(Duration::from_secs(11));
+
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    poll_fetch_dag(
+        transport.clone(),
+        blockstore.clone(),
+        event_tx,
+        root_cid,
+        DagFetchContext::new(
+            "doc-id".to_string(),
+            "collection-id".to_string(),
+            "creator-id".to_string(),
+            PeerId::new("remote-peer".to_string()),
+        )
+        .with_block_sync_completions(completion)
+        .with_rooted_provider_discovery(),
+        DagFetchLimiter::new(2),
+        diagnostics(),
+    )
+    .await;
+
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+    ));
+    assert!(matches!(blockstore.has(&leaf_cid).await, Ok(true)));
+    assert!(
+        !transport.cancelled_before_stream_complete(),
+        "a productive rooted CAR must not be cancelled after only its first block"
+    );
+    assert_eq!(transport.sync_batches(), vec![Vec::<Cid>::new()]);
 }
 
 #[tokio::test]
@@ -528,6 +654,7 @@ async fn poll_fetch_dag_continues_after_partial_selective_batch_progress() {
             source_peer,
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -603,6 +730,7 @@ async fn poll_fetch_dag_completes_dag_deeper_than_legacy_iteration_cap() {
             source_peer,
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -659,6 +787,7 @@ async fn poll_fetch_dag_rotates_to_alternate_provider_on_no_progress() {
         )
         .with_alternate_providers(vec![PeerId::new("alt-peer".to_string())]),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -704,6 +833,7 @@ async fn poll_fetch_dag_retries_incomplete_fetch_and_succeeds() {
             PeerId::new("remote-peer".to_string()),
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -712,8 +842,9 @@ async fn poll_fetch_dag_retries_incomplete_fetch_and_succeeds() {
         Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
     ));
     assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
-    // One CAR try and one selective batch per attempt; success on attempt 2.
-    assert_eq!(transport.car_request_count(), 2);
+    // Only the root-absent first attempt needs recursive CAR discovery. Once
+    // the root is local, retry uses the exact missing-CID frontier.
+    assert_eq!(transport.car_request_count(), 1);
     assert_eq!(transport.sync_batches().len(), 2);
 }
 
@@ -747,6 +878,7 @@ async fn poll_fetch_dag_exhausted_retries_do_not_emit_dag_ready() {
             PeerId::new("dead-peer".to_string()),
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -755,8 +887,9 @@ async fn poll_fetch_dag_exhausted_retries_do_not_emit_dag_ready() {
         "terminal failure must not emit DagReady"
     );
     assert!(matches!(blockstore.has(&child_cid).await, Ok(false)));
-    // One CAR try and one selective batch per attempt, all exhausted.
-    assert_eq!(transport.car_request_count(), MAX_FETCH_ATTEMPTS as usize);
+    // Only the root-absent first attempt needs recursive CAR discovery. The
+    // remaining attempts retry the exact missing-CID frontier.
+    assert_eq!(transport.car_request_count(), 1);
     assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
 }
 
@@ -791,6 +924,7 @@ async fn poll_fetch_dag_cancels_every_issued_query() {
             PeerId::new("dead-peer".to_string()),
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -846,6 +980,7 @@ async fn poll_fetch_dag_stall_budget_caps_stalled_batches_per_attempt() {
             PeerId::new("dead-peer".to_string()),
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -897,6 +1032,7 @@ async fn poll_fetch_dag_bounds_hung_car_request() {
             PeerId::new("remote-peer".to_string()),
         ),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -952,6 +1088,7 @@ async fn poll_fetch_dag_completes_from_source_when_peer_listing_fails() {
         )
         .with_alternate_providers(alternate_providers),
         DagFetchLimiter::new(2),
+        diagnostics(),
     )
     .await;
 
@@ -995,6 +1132,7 @@ async fn poll_fetch_dag_releases_limiter_permit_during_backoff() {
             PeerId::new("dead-peer".to_string()),
         ),
         limiter.clone(),
+        diagnostics(),
     ));
 
     // Let attempt 1 start (and therefore hold the only permit) before

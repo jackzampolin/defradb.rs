@@ -48,34 +48,50 @@ where
             creator_did,
         } = event;
 
+        let creator_ref = creator_did.as_deref();
+        if let Some(document_json) = document_json.as_ref() {
+            self.sync
+                .push_document_to_replicators_with_creator(
+                    &doc_cid,
+                    &doc_block,
+                    &doc_id,
+                    &collection_id,
+                    document_json,
+                    creator_ref,
+                )
+                .await;
+        } else {
+            self.sync
+                .push_to_replicators_with_creator(
+                    &doc_cid,
+                    &doc_block,
+                    &doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+        }
+        if let Some((col_cid, col_block)) = collection_block.as_ref() {
+            self.sync
+                .push_to_replicators_with_creator(
+                    col_cid,
+                    col_block,
+                    "",
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+        }
+
         let sync = self.sync.clone();
 
-        // Return from the tx-success callback promptly while keeping the
-        // broadcast owned by the node lifecycle.
-        self.sync
-            .spawn_background_task("broadcast_transaction_update", async move {
+        // The transaction callback returns only after its scope markers are
+        // durable. Gossip still runs under the node lifecycle without holding
+        // transaction completion open.
+        self.sync.spawn_non_authoritative_broadcast_task(
+            "broadcast_transaction_update",
+            async move {
                 let creator_ref = creator_did.as_deref();
-
-                if let Some(document_json) = document_json.as_ref() {
-                    sync.push_document_to_replicators_with_creator(
-                        &doc_cid,
-                        &doc_block,
-                        &doc_id,
-                        &collection_id,
-                        document_json,
-                        creator_ref,
-                    )
-                    .await;
-                } else {
-                    sync.push_to_replicators_with_creator(
-                        &doc_cid,
-                        &doc_block,
-                        &doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
-                }
 
                 let doc_block_result = BlockResult {
                     cid: doc_cid,
@@ -96,18 +112,6 @@ where
                 );
 
                 if let Some((col_cid, col_block)) = collection_block {
-                    // Collection commits are independent DAG obligations. An
-                    // empty document ID gives them a CID-scoped backlog key so
-                    // they cannot retire, or be retired by, the document head.
-                    sync.push_to_replicators_with_creator(
-                        &col_cid,
-                        &col_block,
-                        "",
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
-
                     let col_block_result = BlockResult {
                         cid: col_cid,
                         block: col_block,
@@ -126,6 +130,7 @@ where
                         .await,
                     );
                 }
-            });
+            },
+        );
     }
 }

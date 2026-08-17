@@ -67,7 +67,6 @@ impl TransportDocPusher for StubPusher {
         &self,
         _peer_id: &PeerId,
         _collection_id: &str,
-        _cid: &Cid,
     ) -> P2PResult<()> {
         unimplemented!("not reached by doc-sync tests")
     }
@@ -187,7 +186,6 @@ impl DocPusher for StubPusher {
         _handle: &P2PHostHandle,
         _peer_id: libp2p::PeerId,
         _collection_id: &str,
-        _cid: &Cid,
     ) -> P2PResult<()> {
         unimplemented!("not reached by doc-sync tests")
     }

@@ -10,7 +10,74 @@ use crate::QueryId;
 
 use super::SyncManager;
 
+/// Completion signal for poll-owned exact-CID queries. Transport completion
+/// already exists; this tracker lets the same fetch owner stop its blockstore
+/// poll immediately when a provider failed instead of burning the full window.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BlockSyncCompletionTracker {
+    waiters: std::sync::Arc<
+        parking_lot::Mutex<std::collections::HashMap<QueryId, tokio::sync::oneshot::Sender<bool>>>,
+    >,
+}
+
+/// Completion signal for libp2p's two-stream rooted CAR protocol.  Request
+/// dispatch and response arrival are separate streams, so blockstore polling
+/// alone adds avoidable ownership latency at small admission capacities.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RootedCarCompletionTracker {
+    waiters: std::sync::Arc<
+        parking_lot::Mutex<std::collections::HashMap<Cid, tokio::sync::oneshot::Sender<bool>>>,
+    >,
+}
+
+impl RootedCarCompletionTracker {
+    pub(crate) fn register(&self, root_cid: Cid) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiters.lock().insert(root_cid, tx);
+        rx
+    }
+
+    pub(crate) fn complete(&self, root_cid: Cid, success: bool) -> bool {
+        let Some(waiter) = self.waiters.lock().remove(&root_cid) else {
+            return false;
+        };
+        let _ = waiter.send(success);
+        true
+    }
+
+    pub(crate) fn cancel(&self, root_cid: Cid) {
+        self.waiters.lock().remove(&root_cid);
+    }
+}
+
+impl BlockSyncCompletionTracker {
+    pub(crate) fn register(&self, query_id: QueryId) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiters.lock().insert(query_id, tx);
+        rx
+    }
+
+    pub(crate) fn complete(&self, query_id: QueryId, success: bool) -> bool {
+        let Some(waiter) = self.waiters.lock().remove(&query_id) else {
+            return false;
+        };
+        let _ = waiter.send(success);
+        true
+    }
+
+    pub(crate) fn cancel(&self, query_id: QueryId) {
+        self.waiters.lock().remove(&query_id);
+    }
+}
+
 impl<B: Blockstore + 'static> SyncManager<B> {
+    pub(crate) fn block_sync_completion_tracker(&self) -> BlockSyncCompletionTracker {
+        self.block_sync_completions.clone()
+    }
+
+    pub(crate) fn rooted_car_completion_tracker(&self) -> RootedCarCompletionTracker {
+        self.rooted_car_completions.clone()
+    }
     /// Register a Bitswap query for tracking.
     ///
     /// This maps the QueryId to the root CID so we can identify
@@ -126,6 +193,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// Returns `true` if the block was stored (not a duplicate).
     pub async fn store_bitswap_block(&self, cid: &Cid, data: &[u8]) -> Result<bool> {
+        // PushLog, CAR, Bitswap and merge all mutate the same per-CID merge
+        // marker. Keep one storage owner instead of relying on retries to
+        // resolve competing writers.
+        let _storage_owner = loop {
+            match self.process_queue.try_acquire(cid).await {
+                Ok(guard) => break guard,
+                Err(waiter) => {
+                    let _ = waiter.await;
+                }
+            }
+        };
+
         // Check if we already have the block
         if self
             .blockstore
@@ -176,5 +255,32 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod completion_tracker_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn poll_owner_observes_transport_completion_exactly_once() {
+        let tracker = BlockSyncCompletionTracker::default();
+        let query_id = QueryId(42);
+        let receiver = tracker.register(query_id);
+
+        assert!(tracker.complete(query_id, false));
+        assert!(!receiver.await.expect("completion sender alive"));
+        assert!(!tracker.complete(query_id, true));
+    }
+
+    #[tokio::test]
+    async fn cancelled_poll_owner_does_not_retain_a_completion_waiter() {
+        let tracker = BlockSyncCompletionTracker::default();
+        let query_id = QueryId(43);
+        let receiver = tracker.register(query_id);
+        tracker.cancel(query_id);
+
+        assert!(receiver.await.is_err());
+        assert!(!tracker.complete(query_id, false));
     }
 }

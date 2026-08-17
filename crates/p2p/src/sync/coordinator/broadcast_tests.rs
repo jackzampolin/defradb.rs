@@ -15,10 +15,17 @@ use crate::topics::DefraTopic;
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
 use crate::{QueryId, ReplicatorInfo};
 
-use super::super::push_worker::send_ordered_pushlogs_via_transport;
+use super::super::push_worker::send_head_hint_via_transport;
 use super::*;
 
-type SentLog = Vec<(String, Vec<u8>)>;
+#[derive(Clone)]
+pub(in crate::sync::coordinator) struct SentPush {
+    pub(in crate::sync::coordinator) peer_id: String,
+    pub(in crate::sync::coordinator) cid: Vec<u8>,
+    pub(in crate::sync::coordinator) block_bytes: usize,
+}
+
+type SentLog = Vec<SentPush>;
 
 #[derive(Clone)]
 pub(in crate::sync::coordinator) struct TestTransport {
@@ -68,7 +75,7 @@ impl TestTransport {
             .lock()
             .unwrap()
             .iter()
-            .map(|(_, cid)| cid.clone())
+            .map(|push| push.cid.clone())
             .collect()
     }
 
@@ -172,10 +179,11 @@ impl P2PTransport for TestTransport {
         {
             std::future::pending::<()>().await;
         }
-        self.sent
-            .lock()
-            .unwrap()
-            .push((peer_id.to_string(), req.cid.to_vec()));
+        self.sent.lock().unwrap().push(SentPush {
+            peer_id: peer_id.to_string(),
+            cid: req.cid.to_vec(),
+            block_bytes: req.block.len(),
+        });
         if !self.send_delay.is_zero() {
             tokio::time::sleep(self.send_delay).await;
         }
@@ -314,7 +322,7 @@ impl P2PTransport for TestTransport {
 }
 
 #[tokio::test]
-async fn ordered_pushlogs_retry_rate_limited_request_before_advancing() {
+async fn rate_limited_head_hint_is_nacked_once_for_durable_redrive() {
     let transport = TestTransport::new(vec![
         PushLogReply::error("first", RATE_LIMITED_MESSAGE),
         PushLogReply::success("first"),
@@ -322,43 +330,28 @@ async fn ordered_pushlogs_retry_rate_limited_request_before_advancing() {
     ]);
     let peer_id = PeerId::new("remote-peer".to_string());
     let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
-    let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
-    let requests = vec![
-        (
-            cid1,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid1.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-1"),
-            ),
-        ),
-        (
-            cid2,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid2.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-2"),
-            ),
-        ),
-    ];
-
-    let any_failed =
-        send_ordered_pushlogs_via_transport(&transport, &peer_id, requests, Duration::from_secs(1))
-            .await;
-
-    assert!(!any_failed.failed);
-    assert_eq!(
-        transport.sent_cids(),
-        vec![cid1.to_bytes(), cid1.to_bytes(), cid2.to_bytes()]
+    let request = PushLogRequest::new(
+        "doc-1".to_string(),
+        Bytes::from(cid1.to_bytes()),
+        "collection".to_string(),
+        "creator".to_string(),
+        Bytes::from_static(b"block-1"),
     );
+
+    let outcome = send_head_hint_via_transport(
+        &transport,
+        &peer_id,
+        (cid1, request),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert!(outcome.failed);
+    assert_eq!(transport.sent_cids(), vec![cid1.to_bytes()]);
 }
 
 #[tokio::test]
-async fn ordered_pushlogs_stop_immediately_on_capacity_nack_and_park_the_peer() {
+async fn head_hint_stops_immediately_on_capacity_nack_and_parks_the_peer() {
     // defradb#1112: a saturated receiver is a PEER-WIDE, structural condition —
     // it cannot accept any new root until it drains. Answering it with the
     // rate-limit pacing ladder meant one logical push became 11 resends in
@@ -376,33 +369,21 @@ async fn ordered_pushlogs_stop_immediately_on_capacity_nack_and_park_the_peer() 
     ]);
     let peer_id = PeerId::new("remote-peer".to_string());
     let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
-    let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
-    let requests = vec![
-        (
-            cid1,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid1.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-1"),
-            ),
-        ),
-        (
-            cid2,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid2.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-2"),
-            ),
-        ),
-    ];
+    let request = PushLogRequest::new(
+        "doc-1".to_string(),
+        Bytes::from(cid1.to_bytes()),
+        "collection".to_string(),
+        "creator".to_string(),
+        Bytes::from_static(b"block-1"),
+    );
 
-    let outcome =
-        send_ordered_pushlogs_via_transport(&transport, &peer_id, requests, Duration::from_secs(1))
-            .await;
+    let outcome = send_head_hint_via_transport(
+        &transport,
+        &peer_id,
+        (cid1, request),
+        Duration::from_secs(1),
+    )
+    .await;
 
     assert!(outcome.failed, "a capacity nack is a failed push");
     assert!(
@@ -413,88 +394,28 @@ async fn ordered_pushlogs_stop_immediately_on_capacity_nack_and_park_the_peer() 
         transport.sent_cids(),
         vec![cid1.to_bytes()],
         "the sender must NOT resend the rejected block, and must not push the \
-         next CID at a saturated peer"
+         rejected head"
     );
 }
 
 #[tokio::test]
-async fn ordered_pushlogs_stop_after_bounded_rate_limit_retries() {
-    let transport = TestTransport::new(
-        std::iter::repeat_with(|| PushLogReply::error("first", RATE_LIMITED_MESSAGE))
-            .take(MAX_RATE_LIMITED_PUSH_ATTEMPTS + 2)
-            .collect(),
-    );
-    let peer_id = PeerId::new("remote-peer".to_string());
-    let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
-    let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
-    let requests = vec![
-        (
-            cid1,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid1.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-1"),
-            ),
-        ),
-        (
-            cid2,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid2.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-2"),
-            ),
-        ),
-    ];
-
-    let any_failed =
-        send_ordered_pushlogs_via_transport(&transport, &peer_id, requests, Duration::from_secs(1))
-            .await;
-
-    assert!(any_failed.failed);
-    assert_eq!(
-        transport.sent_cids(),
-        vec![cid1.to_bytes(); MAX_RATE_LIMITED_PUSH_ATTEMPTS + 1]
-    );
-}
-
-#[tokio::test]
-async fn ordered_pushlogs_timeout_stops_peer_push() {
+async fn head_hint_timeout_is_terminal_for_the_live_attempt() {
     let transport = TestTransport::new(vec![PushLogReply::success("first")])
         .with_send_delay(Duration::from_millis(25));
     let peer_id = PeerId::new("remote-peer".to_string());
     let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
-    let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
-    let requests = vec![
-        (
-            cid1,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid1.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-1"),
-            ),
-        ),
-        (
-            cid2,
-            PushLogRequest::new(
-                "doc-1".to_string(),
-                Bytes::from(cid2.to_bytes()),
-                "collection".to_string(),
-                "creator".to_string(),
-                Bytes::from_static(b"block-2"),
-            ),
-        ),
-    ];
+    let request = PushLogRequest::new(
+        "doc-1".to_string(),
+        Bytes::from(cid1.to_bytes()),
+        "collection".to_string(),
+        "creator".to_string(),
+        Bytes::from_static(b"block-1"),
+    );
 
-    let any_failed = send_ordered_pushlogs_via_transport(
+    let any_failed = send_head_hint_via_transport(
         &transport,
         &peer_id,
-        requests,
+        (cid1, request),
         Duration::from_millis(1),
     )
     .await;

@@ -20,13 +20,14 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 20 families (proven)
+### Modeled — 21 families (proven)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
 | DAG convergence (partition / eviction / restart) | TLA+ | p2p, db-merge, blockstore |
 | CRDT merge laws | Lean | crdt, defra-core |
 | Replicator lifecycle (no-loss / resume) | TLA+ | p2p, db-merge, embedded |
+| Sync ownership transfer (head hint / receiver pull) | TLA+ | p2p, db-merge, storage, embedded |
 | Multi-instance claim | TLA+ | gents |
 | Block integrity / signatures | TLA+ | db-merge, defra-core, blockstore |
 | KMS key distribution | TLA+ | kms, db-merge |
@@ -76,6 +77,8 @@ cd proofs/lean && lake build    # all Lean proofs (builds clean, zero `sorry`)
 ```
 
 `proofs/tla/tools/tla2tools.jar` is git-ignored; the wrapper re-downloads it if missing.
+It pins the stable TLC 1.7.4 release by SHA-256. The upstream 1.8.0 asset is a
+rolling pre-release and is intentionally not used for a reproducible gate.
 
 ## Conformance — binding the models to the real binary
 
@@ -96,7 +99,7 @@ substrate) — so a green run never reads as "this was proven against the
 artifact." `matrix::every_modeled_family_is_bound` fails if a model lands without
 a binding.
 
-### Realized status — all 20 families bound
+### Realized status — all 21 families bound
 
 **19 behavioral tests** (driven against fresh `target/debug/defra`, each break-tested
 for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
@@ -113,6 +116,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | B3 filtered replication | Behavioral | `replication.rs` |
 | DAG convergence | Behavioral | `replication.rs` (live-forward) + `partition.rs` (partition heal; concurrent same-doc merge — the bug it found+fixed) |
 | Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss + resume across node restart) |
+| Sync ownership transfer | Behavioral | deterministic full-DAG/head-hint A/B fence; `p2p_admission_restart`; marker migration/storage tests; mixed Go/Rust PushLog fixture |
 | ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |

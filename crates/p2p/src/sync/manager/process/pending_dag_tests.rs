@@ -32,6 +32,7 @@ fn pending_dag_from(doc_id: &str, source_peer: Option<&str>, inserted_at: Instan
     PendingDag {
         doc_id: doc_id.to_string(),
         collection_id: "collection".to_string(),
+        head_priority: None,
         creator: "creator".to_string(),
         missing: HashSet::new(),
         source_peer: source_peer.map(str::to_owned),
@@ -49,6 +50,25 @@ fn pending_dag_from(doc_id: &str, source_peer: Option<&str>, inserted_at: Instan
 
 fn pending_dag(doc_id: &str, inserted_at: Instant) -> PendingDag {
     pending_dag_from(doc_id, Some("peer"), inserted_at)
+}
+
+#[test]
+fn newer_sender_scope_head_invalidates_the_old_fetch_lease() {
+    let manager = test_manager();
+    let old_root = test_cid(40);
+    let new_root = test_cid(41);
+    let mut old = pending_dag("doc", Instant::now());
+    old.head_priority = Some(1);
+    assert!(manager.insert_pending_dag(old_root, old));
+    let old_lease = manager.pending_dag_lease(old_root);
+    assert!(old_lease.is_current());
+
+    let mut new = pending_dag("doc", Instant::now());
+    new.head_priority = Some(2);
+    assert!(manager.insert_pending_dag(new_root, new));
+
+    assert!(!old_lease.is_current());
+    assert_eq!(manager.pending_dag_cids(), vec![new_root]);
 }
 
 #[test]
@@ -414,6 +434,7 @@ async fn quarantine_pending_dag_moves_live_record_and_clears_in_memory_entry() {
             &PersistedPendingDag {
                 doc_id: "doc".to_string(),
                 collection_id: "collection".to_string(),
+                head_priority: None,
                 creator: "creator".to_string(),
                 source_peer: Some("peer".to_string()),
                 is_explicit_replicator: false,
@@ -481,6 +502,7 @@ async fn quarantine_pending_dag_dedupes_gauge_on_repeat_rejection() {
             &PersistedPendingDag {
                 doc_id: "doc".to_string(),
                 collection_id: "collection".to_string(),
+                head_priority: None,
                 creator: "creator".to_string(),
                 source_peer: Some("peer".to_string()),
                 is_explicit_replicator: false,
@@ -582,6 +604,7 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
     let record = PersistedPendingDag {
         doc_id: "doc".to_string(),
         collection_id: "collection".to_string(),
+        head_priority: None,
         creator: "creator".to_string(),
         source_peer: Some("peer".to_string()),
         is_explicit_replicator: false,
@@ -661,6 +684,7 @@ async fn resync_restore_consumes_retry_clock_claim_before_dispatch() {
             &PersistedPendingDag {
                 doc_id: "doc".to_string(),
                 collection_id: "collection".to_string(),
+                head_priority: None,
                 creator: "creator".to_string(),
                 source_peer: Some("peer".to_string()),
                 is_explicit_replicator: false,

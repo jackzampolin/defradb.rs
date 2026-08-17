@@ -13,15 +13,6 @@ use integration_test::TestCluster;
 const SCHEMA: &str = "type User { name: String  age: Int }";
 const HEALTHY_DOCS: usize = 12;
 
-fn signal(pid: u32, signal: &str) {
-    let status = std::process::Command::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .status()
-        .expect("spawn kill");
-    assert!(status.success(), "kill {signal} {pid} failed");
-}
-
 async fn pending_dags(hub_api: &str) -> u64 {
     let Ok(response) = reqwest::get(format!("{hub_api}/api/v0/p2p/sync/status")).await else {
         return 0;
@@ -46,8 +37,9 @@ async fn pending_dags(hub_api: &str) -> u64 {
 #[tokio::test]
 async fn per_peer_quota_prevents_noisy_pusher_starvation() {
     std::env::set_var("DEFRA_P2P_MAX_PENDING_DAGS", "8");
+    std::env::set_var("DEFRA_P2P_RATE_LIMIT_BURST", "500");
 
-    let cluster = TestCluster::builder()
+    let mut cluster = TestCluster::builder()
         .rust_nodes(3) // 0 = hub, 1 = noisy pusher, 2 = healthy pusher
         .with_p2p()
         .build()
@@ -61,6 +53,19 @@ async fn per_peer_quota_prevents_noisy_pusher_starvation() {
             .await
             .unwrap_or_else(|e| panic!("node{node} P2P listener did not start: {e}"));
     }
+
+    // Make only the noisy source unable to serve linked blocks. It can still
+    // accept local writes and send head hints, but the hub's receiver-owned
+    // CAR recovery cannot drain those roots before the two-slot quota is
+    // observed. Restart before schema setup because this test uses the
+    // process-local store.
+    cluster.nodes[1].process.kill();
+    std::env::set_var("DEFRA_P2P_RATE_LIMIT_BURST", "0");
+    cluster
+        .restart_node(1, Duration::from_secs(60))
+        .await
+        .expect("restart noisy source with CAR serving disabled");
+    std::env::set_var("DEFRA_P2P_RATE_LIMIT_BURST", "500");
 
     let hub = cluster.client(0);
     let hub_info = hub.p2p_info().expect("hub p2p info");
@@ -125,11 +130,10 @@ async fn per_peer_quota_prevents_noisy_pusher_starvation() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Freeze the noisy pusher so its quota slots stay occupied (Bitswap can no
-    // longer resolve them), then stop its writer.
-    let noisy_pid = cluster.nodes[1].process.id().expect("noisy pusher pid");
-    signal(noisy_pid, "-STOP");
+    // Stop producing new noisy roots. Its quota slots remain occupied because
+    // that source's inbound request bucket cannot serve the receiver's CAR.
     stop_noisy.store(true, Ordering::Relaxed);
+    noisy_writer.join().expect("noisy writer thread panicked");
 
     // The healthy pusher writes a fixed batch; every document must land despite
     // the noisy peer holding its quota.
@@ -180,7 +184,4 @@ async fn per_peer_quota_prevents_noisy_pusher_starvation() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
-    signal(noisy_pid, "-CONT");
-    noisy_writer.join().expect("noisy writer thread panicked");
 }

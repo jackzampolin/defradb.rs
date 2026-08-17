@@ -237,6 +237,37 @@ pub enum TransportEvent<ResponseToken> {
 }
 
 impl<ResponseToken> TransportEvent<ResponseToken> {
+    /// Stable operation label for transport-event diagnostics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::PeerConnected(_) => "peer_connected",
+            Self::PeerDisconnected(_) => "peer_disconnected",
+            Self::PushLogRequest { .. } => "pushlog_request",
+            Self::GossipMessage { .. } => "gossip_message",
+            Self::GossipRawMessage { .. } => "gossip_raw_message",
+            Self::PeerSubscribed { .. } => "peer_subscribed",
+            Self::PeerUnsubscribed { .. } => "peer_unsubscribed",
+            Self::BitswapProgress { .. } => "bitswap_progress",
+            Self::BitswapComplete { .. } => "bitswap_complete",
+            Self::BitswapBlockReceived { .. } => "bitswap_block_received",
+            Self::TwoStreamRequest { .. } => "two_stream_request",
+            Self::DocSyncRequest { .. } => "doc_sync_request",
+            Self::DocSyncReply { .. } => "doc_sync_reply",
+            Self::BranchableSyncRequest { .. } => "branchable_sync_request",
+            Self::BranchableSyncReply { .. } => "branchable_sync_reply",
+            Self::CarFetchRequest { .. } => "car_fetch_request",
+            Self::CarFetchResponse { .. } => "car_fetch_response",
+            Self::SEArtifactsReceived { .. } => "se_artifacts_received",
+            Self::SEQueryRequest { .. } => "se_query_request",
+            Self::SEQueryReply { .. } => "se_query_reply",
+            Self::ManageRequest { .. } => "manage_request",
+            Self::ManageReply { .. } => "manage_reply",
+            Self::ManageQueryRequest { .. } => "manage_query_request",
+            Self::ManageQueryReply { .. } => "manage_query_reply",
+            Self::Listening(_) => "listening",
+        }
+    }
+
     /// Returns true when this event mutates peer/subscription state that must
     /// be observed before later data-plane events from the same transport.
     pub fn requires_inline_ordering(&self) -> bool {
@@ -467,6 +498,13 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
         missing: Vec<Cid>,
     ) -> Result<QueryId>;
 
+    /// Whether `sync_blocks(root, providers, [])` is a cancellable recursive
+    /// CAR request.  The iroh transport provides that contract; libp2p's
+    /// implementation is exact-CID Bitswap, where an empty set is a no-op.
+    fn supports_cancellable_rooted_sync(&self) -> bool {
+        false
+    }
+
     async fn cancel_sync(&self, query_id: QueryId) -> Result<bool>;
 
     // ---- Replicators ----
@@ -533,6 +571,10 @@ mod tests {
             collection_id: "collection".to_string(),
             creator: "creator".to_string(),
             block: Bytes::from_static(b"block"),
+            source_peer_id: None,
+            origin_signature: None,
+            authenticated_source_peer_id: None,
+            authenticated_origin_peer_id: None,
         };
 
         assert!(!TransportEvent::<()>::GossipMessage {

@@ -154,8 +154,8 @@ impl Node {
                     continue_on_error: true,
                     rebroadcast_on_merge: false,
                     batch_size: 50,
-                    max_workers: 32,
                 },
+                |_| {},
             )
             .await;
             info!("Replication loop stopped (iroh)");
@@ -271,6 +271,19 @@ impl Node {
                 match &event {
                     p2p::TransportEvent::PeerConnected(peer) => {
                         info!("Peer connected (iroh): {}", peer);
+                        let peerstore = storage::stores::Peerstore::new(se_store.clone());
+                        match peerstore.activate_retry_peer(peer.as_str()).await {
+                            Ok(true) => tracing::debug!(
+                                peer_id = %peer,
+                                "Activated durable push markers after peer reconnect"
+                            ),
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                peer_id = %peer,
+                                %error,
+                                "Failed to activate durable push markers after peer reconnect"
+                            ),
+                        }
                     }
                     p2p::TransportEvent::PeerDisconnected(peer) => {
                         info!("Peer disconnected (iroh): {}", peer);
@@ -333,6 +346,7 @@ impl Node {
         let doc_pusher_impl = Arc::new(crate::transport_doc_pusher::DbTransportDocPusher::new(
             database.clone(),
             transport.clone(),
+            coordinator.head_hint_car_authority(),
         ));
         let doc_pusher_for_acp = doc_pusher_impl.clone();
         let doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> = doc_pusher_impl;
@@ -340,24 +354,58 @@ impl Node {
         let recorder_store = store.clone();
         let failure_recorder_task = tokio::spawn(async move {
             let mut rx = failure_rx;
-            while let Some(failure) = rx.recv().await {
+            let mut ack_fence = p2p::sync::HeadAckFence::default();
+            while let Some(mut failure) = rx.recv().await {
+                let durable_tx = failure.durable_tx.take();
+                if failure.acknowledged && !ack_fence.ack_is_current(&failure) {
+                    tracing::debug!(
+                        peer_id = %failure.peer_id,
+                        doc_id = %failure.doc_id,
+                        collection_id = %failure.collection_id,
+                        "Ignoring stale head acknowledgement"
+                    );
+                    let _ = durable_tx.map(|tx| tx.send(false));
+                    continue;
+                }
                 let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
                 let _retry_guard = match peerstore
                     .acquire_replicator_retry_guard(&failure.peer_id)
                     .await
                 {
                     Ok(Some(guard)) => guard,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        let _ = durable_tx.map(|tx| tx.send(false));
+                        continue;
+                    }
                     Err(error) => {
                         warn!(error = %error, "Failed to coordinate push failure recording");
+                        let _ = durable_tx.map(|tx| tx.send(false));
                         continue;
                     }
                 };
-                let result = if failure.create_retry {
+                let result = if failure.acknowledged {
+                    let retry = storage::stores::PersistedPushRetry {
+                        doc_id: failure.doc_id.clone(),
+                        collection_id: failure.collection_id.clone(),
+                        cid: String::new(),
+                        priority: 0,
+                        pending: true,
+                        scope: if failure.doc_id.is_empty() {
+                            storage::stores::RetryScope::CollectionCommit
+                        } else {
+                            storage::stores::RetryScope::Document
+                        },
+                        retry_info: storage::stores::RetryInfo::new_initial(),
+                    };
+                    peerstore
+                        .complete_retry_document(&failure.peer_id, &retry)
+                        .await
+                } else if failure.create_retry {
                     let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
                         Ok(bytes) => bytes,
                         Err(error) => {
                             warn!(error = %error, "Failed to serialize RetryInfo");
+                            let _ = durable_tx.map(|tx| tx.send(false));
                             continue;
                         }
                     };
@@ -384,6 +432,16 @@ impl Node {
                 };
                 if let Err(e) = result {
                     warn!(error = %e, "Failed to record push failure");
+                    let _ = durable_tx.map(|tx| tx.send(false));
+                    continue;
+                }
+                if !failure.create_retry && !failure.acknowledged {
+                    ack_fence.observe_durable(&failure);
+                }
+                let _ = durable_tx.map(|tx| tx.send(true));
+                if failure.acknowledged {
+                    ack_fence.clear_current_ack(&failure);
+                    let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
                     continue;
                 }
                 if !failure.create_retry {
@@ -405,8 +463,8 @@ impl Node {
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
             let peerstore = storage::stores::Peerstore::new(retry_store.clone());
-            if let Err(error) = peerstore.activate_dormant_push_retries().await {
-                warn!(error = %error, "Failed to reactivate push retries after restart");
+            if let Err(error) = peerstore.migrate_legacy_push_retries().await {
+                warn!(error = %error, "Failed to migrate legacy push retries after restart");
             }
             loop {
                 tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
@@ -416,7 +474,7 @@ impl Node {
                     Err(_) => continue,
                 };
                 for (peer_id_str, info_bytes) in peers {
-                    let _retry_guard =
+                    let retry_guard =
                         match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
                             Ok(Some(guard)) => guard,
                             Ok(None) | Err(_) => continue,
@@ -426,6 +484,9 @@ impl Node {
                             Ok(i) => i,
                             Err(_) => continue,
                         };
+                    // Serialize storage snapshots/transitions only; the
+                    // request timeout must not block live marker writers.
+                    drop(retry_guard);
                     let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
                     // Iroh request-response can reconnect on demand, so don't
                     // gate retries on the peer-map snapshot.
@@ -454,36 +515,28 @@ impl Node {
                         // fast rejection only consumes a bounded budget so
                         // one permanently rejected doc at the head of the
                         // key order cannot starve the rest forever.
-                        // Collection commits are doc-less and replay by CID
+                        // Collection markers rederive current collection heads
                         // (defradb#1113); the document executor would ack them
                         // as a no-op and lose the block.
                         let replay = async {
                             if retry.is_collection_commit() {
-                                match retry.cid.parse::<cid::Cid>() {
-                                    Ok(cid) => {
-                                        retry_pusher
-                                            .retry_collection_commit(
-                                                &peer_id,
-                                                &retry.collection_id,
-                                                &cid,
-                                            )
-                                            .await
-                                    }
-                                    Err(error) => {
-                                        Err(defra_http::router::P2PError::InvalidInput(format!(
-                                            "unparseable collection-commit CID {}: {error}",
-                                            retry.cid
-                                        )))
-                                    }
-                                }
+                                retry_pusher
+                                    .retry_collection_commit(&peer_id, &retry.collection_id)
+                                    .await
                             } else {
                                 retry_pusher
                                     .retry_doc(&peer_id, &retry.doc_id, &retry.collection_id)
                                     .await
                             }
                         };
-                        match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await
-                        {
+                        let replay_result =
+                            tokio::time::timeout(std::time::Duration::from_secs(15), replay).await;
+                        let _transition_guard =
+                            match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+                                Ok(Some(guard)) => guard,
+                                Ok(None) | Err(_) => break,
+                            };
+                        match replay_result {
                             Ok(Ok(())) => {
                                 let _ =
                                     peerstore.complete_retry_document(&peer_id_str, retry).await;

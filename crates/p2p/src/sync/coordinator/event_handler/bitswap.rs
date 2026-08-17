@@ -114,6 +114,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         success: bool,
         error: Option<String>,
     ) -> Result<()> {
+        if self
+            .manager
+            .block_sync_completion_tracker()
+            .complete(query_id, success)
+        {
+            return Ok(());
+        }
         let Some(root_cid) = self.manager.take_query_root(query_id) else {
             tracing::debug!(
                 query_id = query_id.0,

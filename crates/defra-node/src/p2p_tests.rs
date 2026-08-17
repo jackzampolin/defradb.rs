@@ -1765,6 +1765,11 @@ async fn p2p_shutdown_releases_store_for_immediate_reopen() {
     let retained = status["retained_background_tasks"]
         .as_u64()
         .expect("retained_background_tasks");
+    let retry_markers = status["push_retry_markers"]
+        .as_object()
+        .expect("push_retry_markers");
+    assert_eq!(retry_markers["document_markers"], 0);
+    assert_eq!(retry_markers["collection_markers"], 0);
     assert!(
         retained >= 2,
         "the resync sweep and retry clock must be registered, got {retained}"

@@ -124,6 +124,7 @@ where
         let blockstore = coordinator.blockstore().clone();
         let event_tx = coordinator.manager().event_sender();
         let limiter = coordinator.dag_fetch_limiter();
+        let diagnostics = coordinator.manager().diagnostics();
         let source_peer = crate::transport::PeerId::new(source_peer);
         let alternate_providers: Vec<crate::transport::PeerId> = providers
             .into_iter()
@@ -132,11 +133,21 @@ where
         let context = DagFetchContext::new(doc_id, collection_id, creator, source_peer)
             .with_alternate_providers(alternate_providers)
             .with_explicit_replicator(is_explicit_replicator)
-            .with_explicit_replay_authorization(explicit_replay_authorization);
+            .with_explicit_replay_authorization(explicit_replay_authorization)
+            .with_pending_lease(coordinator.manager().pending_dag_lease(root_cid))
+            .with_block_sync_completions(coordinator.manager().block_sync_completion_tracker())
+            .with_rooted_car_completions(coordinator.manager().rooted_car_completion_tracker())
+            .with_rooted_provider_discovery();
 
         coordinator.spawn_pending_dag_fetch_task(root_cid, "pushlog_fetch_dag", async move {
             crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
-                transport, blockstore, event_tx, root_cid, context, limiter,
+                transport,
+                blockstore,
+                event_tx,
+                root_cid,
+                context,
+                limiter,
+                diagnostics,
             )
             .await;
         });
@@ -822,7 +833,12 @@ where
             .try_acquire(&cid)
             .await
         {
-            Ok(_guard) => return process_event(coordinator, event, handler, config).await,
+            Ok(_guard) => {
+                if let Some(result) = skipped_if_already_merged(coordinator, &event, cid).await {
+                    return result;
+                }
+                return process_event(coordinator, event, handler, config).await;
+            }
             Err(wait_for_current_merge) => {
                 if wait_for_current_merge.await.is_err() {
                     tracing::debug!(

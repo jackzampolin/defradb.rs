@@ -171,6 +171,38 @@ impl ProcessQueue {
         })
     }
 
+    /// Acquire exclusive processing rights for every CID in a stable order.
+    ///
+    /// CAR responses can contain blocks shared by several document DAGs.  A
+    /// root-only guard therefore does not prevent two imports from racing the
+    /// same mutable merge marker.  Sorting and de-duplicating the keys lets
+    /// callers hold one owner per affected CID without introducing lock-order
+    /// cycles between overlapping CAR batches.
+    pub(crate) async fn acquire_all<I>(&self, cids: I) -> Vec<ProcessGuard>
+    where
+        I: IntoIterator<Item = Cid>,
+    {
+        let mut cids: Vec<_> = cids.into_iter().collect();
+        cids.sort_unstable();
+        cids.dedup();
+
+        let mut guards = Vec::with_capacity(cids.len());
+        for cid in cids {
+            loop {
+                match self.try_acquire(&cid).await {
+                    Ok(guard) => {
+                        guards.push(guard);
+                        break;
+                    }
+                    Err(waiter) => {
+                        let _ = waiter.await;
+                    }
+                }
+            }
+        }
+        guards
+    }
+
     /// Release the CID and notify all waiters (synchronous version).
     fn release_sync(&self, cid: &Cid) {
         let mut waiters = self.inner.waiters.lock();
@@ -291,6 +323,28 @@ mod tests {
         // Second CID should also acquire (different CID)
         let result = queue.try_acquire(&cid2).await;
         assert!(result.is_ok(), "Different CIDs should be independent");
+    }
+
+    #[tokio::test]
+    async fn acquire_all_deduplicates_and_orders_overlapping_batches() {
+        let queue = ProcessQueue::new();
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+
+        let first = queue.acquire_all([cid2, cid1, cid2]).await;
+        assert_eq!(first.len(), 2);
+        assert_eq!(queue.active_count(), 2);
+
+        let queue_clone = queue.clone();
+        let waiter = tokio::spawn(async move { queue_clone.acquire_all([cid1, cid2]).await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(first);
+        let second = waiter.await.unwrap();
+        assert_eq!(second.len(), 2);
+        drop(second);
+        assert_eq!(queue.active_count(), 0);
     }
 
     #[tokio::test]
