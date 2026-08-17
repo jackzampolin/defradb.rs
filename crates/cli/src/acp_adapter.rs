@@ -1,6 +1,5 @@
 //! Adapter to bridge ACP policy operations to HTTP's AcpOperations trait.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,17 +10,12 @@ use defra_http::router::{AcpOperations, PolicyInfo};
 /// Adapter that implements AcpOperations backed by a ZanzibarStore.
 pub struct AcpAdapter {
     store: Arc<dyn ZanzibarStore>,
-    counter: AtomicU64,
     nac_checker: Arc<dyn db::NodeAccessChecker>,
 }
 
 impl AcpAdapter {
     pub fn new(store: Arc<dyn ZanzibarStore>, nac_checker: Arc<dyn db::NodeAccessChecker>) -> Self {
-        Self {
-            store,
-            counter: AtomicU64::new(1),
-            nac_checker,
-        }
+        Self { store, nac_checker }
     }
 
     pub fn new_arc(
@@ -76,7 +70,11 @@ impl AcpOperations for AcpAdapter {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed)?;
 
-        let counter = self.counter.fetch_add(1, Ordering::SeqCst);
+        let counter = self
+            .store
+            .next_policy_counter()
+            .await
+            .map_err(|e| format!("failed to advance policy counter: {}", e))?;
         let policy = acp::policy_yaml::build_policy(&parsed, counter)
             .map_err(|e| format!("invalid policy: {}", e))?;
         let policy_id = policy.id.clone();

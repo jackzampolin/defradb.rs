@@ -36,6 +36,9 @@ pub trait ZanzibarStore: MaybeSendSync {
 
     async fn list_policies(&self) -> Result<Vec<Policy>>;
 
+    /// Return the next policy-ID counter value, advancing the stored counter.
+    async fn next_policy_counter(&self) -> Result<u64>;
+
     async fn delete_policy(&self, policy_id: &str) -> Result<bool>;
 
     async fn store_relationship(&self, policy_id: &str, rel: &Relationship) -> Result<()>;

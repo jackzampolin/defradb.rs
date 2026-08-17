@@ -87,8 +87,9 @@ impl IndexManager {
                 if $arr.is_empty() {
                     vec![NormalValue::Null]
                 } else {
-                    $arr.iter()
-                        .map(|v| NormalValue::$variant(v.clone()))
+                    Self::deduplicate_array_values($arr.iter().cloned())
+                        .into_iter()
+                        .map(NormalValue::$variant)
                         .collect()
                 }
             };
@@ -101,8 +102,9 @@ impl IndexManager {
                         if arr.is_empty() {
                             vec![NormalValue::Null]
                         } else {
-                            arr.iter()
-                                .map(|v| NormalValue::$variant(v.clone()))
+                            Self::deduplicate_array_values(arr.iter().cloned())
+                                .into_iter()
+                                .map(NormalValue::$variant)
                                 .collect()
                         }
                     }
@@ -116,9 +118,10 @@ impl IndexManager {
                 if $arr.is_empty() {
                     vec![NormalValue::Null]
                 } else {
-                    $arr.iter()
+                    Self::deduplicate_array_values($arr.iter().cloned())
+                        .into_iter()
                         .map(|v| match v {
-                            Some(val) => NormalValue::$variant(val.clone()),
+                            Some(val) => NormalValue::$variant(val),
                             None => NormalValue::Null,
                         })
                         .collect()
@@ -171,7 +174,14 @@ impl IndexManager {
                         .collect()
                 }
             }
-            NormalValue::JsonArray(ref arr) => expand_array!(arr, Json),
+            // JSON array positions are part of their index paths, so repeated values stay distinct.
+            NormalValue::JsonArray(ref arr) => {
+                if arr.is_empty() {
+                    vec![NormalValue::Null]
+                } else {
+                    arr.iter().cloned().map(NormalValue::Json).collect()
+                }
+            }
 
             NormalValue::NillableBoolArray(ref opt) => expand_nillable_array!(opt, Bool),
             NormalValue::NillableIntArray(ref opt) => expand_nillable_array!(opt, Int),
@@ -228,6 +238,16 @@ impl IndexManager {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn deduplicate_array_values<T: PartialEq>(values: impl IntoIterator<Item = T>) -> Vec<T> {
+        let mut unique = Vec::new();
+        for value in values {
+            if !unique.contains(&value) {
+                unique.push(value);
+            }
+        }
+        unique
     }
 
     /// Compute Cartesian product of field value sets.
