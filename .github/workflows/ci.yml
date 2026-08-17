@@ -15,12 +15,13 @@ on:
   merge_group:
     branches: [main]
 
-# Only the tip of each ref keeps a run. Superseded PR pushes and main merge
-# trains cancel prior work so intermediate SHAs cannot stack the self-hosted
-# fleet. PR close is handled by cancel-pr-ci.yml (closed events do not re-enter
-# this concurrency group once the merge ref is gone).
+# Only the tip of each non-main ref keeps a run. Main includes the commit SHA
+# because GitHub replaces an existing pending run even when cancel-in-progress
+# is false; each merged commit must keep its post-merge validation. PR close is
+# handled by cancel-pr-ci.yml (closed events do not re-enter this concurrency
+# group once the merge ref is gone).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'tip' }}
   # Two refs are never cancelled, for different reasons:
   #   merge_group — cancelling a queue run ejects that PR from the queue, so
   #     the queue would stall instead of merging.
