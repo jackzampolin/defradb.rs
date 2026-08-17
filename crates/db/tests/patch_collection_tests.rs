@@ -295,6 +295,13 @@ async fn patch_collection_rejects_mutating_an_existing_policy() {
 #[tokio::test]
 async fn patch_collection_rejects_adding_a_policy_to_a_policy_free_collection() {
     let db = agent_response_db().await;
+    assert!(db
+        .get_collection("AgentResponse")
+        .unwrap()
+        .unwrap()
+        .schema()
+        .policy
+        .is_none());
 
     let err = db
         .patch_collection(
