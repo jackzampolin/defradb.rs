@@ -164,19 +164,23 @@ pub unsafe extern "C" fn add_dac_policy(
                 None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
             };
 
-            let policy_id = policy_store.next_policy_id(&parsed);
-            let policy = match acp::policy_yaml::build_policy(&parsed, 1) {
-                Ok(policy) => acp::Policy {
-                    id: policy_id.clone(),
-                    ..policy
-                },
-                Err(e) => return FfiResult::error(format!("invalid policy: {}", e)),
-            };
-            policy_store.store_policy(&policy_id, &policy_str);
-
             let Some(local_zanzibar_store) = local_zanzibar_store else {
                 return FfiResult::error("local ACP backend is not available");
             };
+
+            let counter = match rt.block_on(local_zanzibar_store.next_policy_counter()) {
+                Ok(counter) => counter,
+                Err(e) => {
+                    return FfiResult::error(format!("failed to advance policy counter: {}", e))
+                }
+            };
+
+            let policy = match acp::policy_yaml::build_policy(&parsed, counter) {
+                Ok(policy) => policy,
+                Err(e) => return FfiResult::error(format!("invalid policy: {}", e)),
+            };
+            let policy_id = policy.id.clone();
+            policy_store.store_policy(&policy_id, &policy_str);
 
             let options = StorePolicyOptions::new()
                 .with_validation()

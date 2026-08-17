@@ -110,6 +110,27 @@ fn test_unique_collection_names_ok() {
     assert!(validate_schema(&collections).is_ok());
 }
 
+#[test]
+fn test_multiple_active_versions_of_collection_fail() {
+    let mut old_version = user_collection();
+    old_version.is_active = false;
+
+    let mut active_version = old_version.clone();
+    active_version.name = "people".into();
+    active_version.version_id = "v2".into();
+    active_version.is_active = true;
+
+    let old_state = vec![old_version.clone(), active_version.clone()];
+    old_version.is_active = true;
+
+    let error = schema::definition_validation::validate_collection_changes(
+        &old_state,
+        &[old_version, active_version],
+    )
+    .unwrap_err();
+    assert!(error.contains("multiple versions of same collection cannot be active"));
+}
+
 // ============================================================================
 // Relation Primary Validation Tests
 // ============================================================================
