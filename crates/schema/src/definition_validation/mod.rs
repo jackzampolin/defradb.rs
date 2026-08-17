@@ -54,6 +54,7 @@ const UPDATE_VALIDATORS: &[Validator] = &[
     validate_collection_id_not_mutated,
     validate_id_not_empty,
     validate_id_unique,
+    validate_single_version_active,
     validate_field_not_moved,
     validate_field_not_mutated,
     validate_policy_not_modified,
