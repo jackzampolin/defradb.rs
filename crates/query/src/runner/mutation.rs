@@ -125,8 +125,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
-        self.execute_parsed_mutations(mutations, mutator, caller_identity, fetcher_override)
-            .await
+        let broadcast_creator = caller_identity.as_ref().map(ToString::to_string);
+        // Keep the large mutation state machine off the Tokio worker stack.
+        // `task_local::scope` polls its child inline; boxing here prevents the
+        // scope wrapper from overflowing the default worker stack on the ACP
+        // create path.
+        let execution = Box::pin(self.execute_parsed_mutations(
+            mutations,
+            mutator,
+            caller_identity,
+            fetcher_override,
+        ));
+        defra_core::signing::scope_broadcast_creator_did(broadcast_creator, execution).await
     }
 
     /// Execute pre-parsed mutations, skipping redundant GraphQL parsing.
