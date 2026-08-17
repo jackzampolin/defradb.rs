@@ -708,7 +708,6 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
                     se_repusher
                         .regenerate_and_push_se_artifacts(&retry.collection_id, &retry.doc_id)
                         .await;
-                    let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(doc_id = %retry.doc_id, peer_id = %peer_id, error = %error, "retry push failed");
@@ -856,7 +855,6 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
                     se_repusher
                         .regenerate_and_push_se_artifacts(&retry.collection_id, &retry.doc_id)
                         .await;
-                    let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(doc_id = %retry.doc_id, peer_id = %peer_id, error = %error, "retry push failed");

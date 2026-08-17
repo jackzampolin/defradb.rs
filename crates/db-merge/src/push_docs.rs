@@ -625,10 +625,27 @@ pub async fn retry_doc<S: Store + 'static>(
             .map_err(|e| format!("doc-ID mapping lookup failed: {}", e))?
         {
             Some(doc_ref) => doc_ref.doc_short_id,
-            None => return Ok(()),
+            None => {
+                return crate::push_docs_common::complete_document_retry_if_absent(
+                    db,
+                    &peer_id.to_string(),
+                    doc_id,
+                    collection_id,
+                )
+                .await;
+            }
         }
     };
     if let Some(filter) = filters.get(collection_id) {
+        let peer_id_str = peer_id.to_string();
+        let peerstore = storage::stores::Peerstore::new(db.store().clone());
+        let Some(filter_guard) = peerstore
+            .acquire_replicator_retry_guard(&peer_id_str)
+            .await
+            .map_err(|error| format!("retry filter guard: {error}"))?
+        else {
+            return Ok(());
+        };
         let txn = db
             .new_txn(true)
             .await
@@ -639,8 +656,13 @@ pub async fn retry_doc<S: Store + 'static>(
         if !document_matches_filter(&datastore, collection_id, doc_short_id, filter, matcher)
             .await?
         {
+            peerstore
+                .complete_retry_scope(&peer_id_str, doc_id, collection_id, false)
+                .await
+                .map_err(|error| format!("failed to clear filtered retry marker: {error}"))?;
             return Ok(());
         }
+        drop(filter_guard);
     }
     let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str)
         .await
@@ -712,19 +734,15 @@ pub async fn retry_doc<S: Store + 'static>(
     }
     drop(block_txn);
     drop(head_txn);
-    let verify_txn = db
-        .new_txn(true)
-        .await
-        .map_err(|error| format!("head verification transaction: {error}"))?;
-    let verify_heads = verify_txn.headstore().map_err(|error| error.to_string())?;
-    let verify_blocks = verify_txn.blockstore().map_err(|error| error.to_string())?;
-    let mut current_heads =
-        load_latest_composite_head_cids(&verify_heads, &verify_blocks, doc_short_id).await;
-    current_heads.sort_unstable();
-    if current_heads != attempted_heads {
-        return Err("document heads changed during retry; retaining dirty marker".to_string());
-    }
-    Ok(())
+    crate::push_docs_common::complete_document_retry_if_current(
+        db,
+        &peer_id.to_string(),
+        doc_id,
+        collection_id,
+        doc_short_id,
+        &attempted_heads,
+    )
+    .await
 }
 
 /// Rederive and announce current collection heads over libp2p.
@@ -791,24 +809,11 @@ pub async fn retry_collection_commit<S: Store + 'static>(
         }
     }
     drop(txn);
-    let verify_txn = db
-        .new_txn(true)
-        .await
-        .map_err(|error| format!("collection head verification transaction: {error}"))?;
-    let verify_systemstore = verify_txn
-        .systemstore()
-        .map_err(|error| error.to_string())?;
-    let verify_headstore = verify_txn.headstore().map_err(|error| error.to_string())?;
-    let verify_short_id =
-        db::collection::require_persisted_collection_short_id(&verify_systemstore, collection_id)
-            .await
-            .map_err(|error| format!("collection retry verification short id: {error}"))?;
-    let mut current_heads =
-        crate::push_docs_common::load_collection_head_cids(&verify_headstore, verify_short_id)
-            .await?;
-    current_heads.sort_unstable();
-    if current_heads != heads {
-        return Err("collection heads changed during retry; retaining dirty marker".to_string());
-    }
-    Ok(())
+    crate::push_docs_common::complete_collection_retry_if_current(
+        db,
+        &peer_id.to_string(),
+        collection_id,
+        &heads,
+    )
+    .await
 }

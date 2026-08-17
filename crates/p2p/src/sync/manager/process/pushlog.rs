@@ -18,13 +18,30 @@ use super::SyncManager;
 
 const MAX_RETRIABLE_PUSHLOG_ATTEMPTS: usize = 4;
 
-fn announced_head_priority(bytes: &[u8]) -> Option<u64> {
-    let block = defra_core::Block::from_dag_cbor(bytes).ok()?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnnouncedBlockKind {
+    Head(u64),
+    Descendant,
+}
+
+impl AnnouncedBlockKind {
+    fn priority(self) -> Option<u64> {
+        match self {
+            Self::Head(priority) => Some(priority),
+            Self::Descendant => None,
+        }
+    }
+}
+
+fn announced_block_kind(bytes: &[u8]) -> AnnouncedBlockKind {
+    let Ok(block) = defra_core::Block::from_dag_cbor(bytes) else {
+        return AnnouncedBlockKind::Descendant;
+    };
     match &block.delta {
         defra_core::CrdtDelta::Composite(_) | defra_core::CrdtDelta::Collection(_) => {
-            Some(block.delta.priority())
+            AnnouncedBlockKind::Head(block.delta.priority())
         }
-        _ => None,
+        _ => AnnouncedBlockKind::Descendant,
     }
 }
 
@@ -210,7 +227,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
 
-        let head_priority = announced_head_priority(&msg.block);
+        let announced_block_kind = announced_block_kind(&msg.block);
+        let head_priority = announced_block_kind.priority();
         if !self.can_process_pushlog(cid)
             && !self.scope_head_is_refresh_or_newer(
                 *cid,
@@ -265,6 +283,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             collection_id = %msg.collection_id,
             "Block stored, checking DAG for missing links"
         );
+
+        // Rolling old Rust senders may still announce dependency blocks before
+        // the composite/collection head. Keep those bytes as useful CAR
+        // descendants, and advance any root already waiting on them, but never
+        // admit or merge them as standalone document heads (#1450). The later
+        // head hint remains the sole durable receiver obligation.
+        if announced_block_kind == AnnouncedBlockKind::Descendant {
+            tracing::debug!(
+                cid = %cid,
+                doc_id = %msg.doc_id,
+                collection_id = %msg.collection_id,
+                "Stored legacy dependency PushLog without treating it as a head"
+            );
+            self.retry_pending_dags_waiting_on(cid).await?;
+            return Ok(());
+        }
 
         // Check for missing linked blocks at every depth of the reachable DAG.
         // A single-level check can incorrectly declare Collection -> Composite
@@ -578,7 +612,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // A fresh registration is immediately due (`insert_pending_dag`
             // leaves `next_retry_at = now`); claim it only after durable
             // replacement succeeds so the fetch owner cannot race rollback.
-            let _claimed = self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now());
+            if !self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now()) {
+                tracing::debug!(
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    collection_id = %msg.collection_id,
+                    "Pending DAG fetch was already claimed; leaving redrive to the receiver clock"
+                );
+                return Ok(());
+            }
 
             // Get providers for the missing blocks
             let providers = self.get_providers_for_cids(&missing);
@@ -645,14 +687,79 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use blockstore::DefraBlockstore;
     use bytes::Bytes;
     use defra_core::{
         Block, CollectionDeltaPayload, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
     };
     use storage::backends::MemoryStore;
+    use tokio::sync::Notify;
 
+    use crate::sync::pending_store::{
+        PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+    };
     use crate::sync::{PeerStateTracker, SyncConfig};
+
+    struct BlockingPendingDagStore {
+        inner: PendingDagStore<MemoryStore>,
+        replace_entered: Notify,
+        replace_release: Notify,
+    }
+
+    impl BlockingPendingDagStore {
+        fn new(store: Arc<MemoryStore>) -> Self {
+            Self {
+                inner: PendingDagStore::new(store),
+                replace_entered: Notify::new(),
+                replace_release: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PendingDagStorage for BlockingPendingDagStore {
+        async fn put(&self, root_cid: &Cid, record: &PersistedPendingDag) -> Result<()> {
+            self.inner.put(root_cid, record).await
+        }
+
+        async fn replace_scope_head(
+            &self,
+            superseded_root: Option<&Cid>,
+            root_cid: &Cid,
+            record: &PersistedPendingDag,
+        ) -> Result<()> {
+            self.replace_entered.notify_one();
+            self.replace_release.notified().await;
+            self.inner
+                .replace_scope_head(superseded_root, root_cid, record)
+                .await
+        }
+
+        async fn remove(&self, root_cid: &Cid) -> Result<()> {
+            self.inner.remove(root_cid).await
+        }
+
+        async fn load_all(&self) -> Result<Vec<(Cid, PersistedPendingDag)>> {
+            self.inner.load_all().await
+        }
+
+        async fn quarantine(&self, root_cid: &Cid, entry: &PersistedQuarantinedDag) -> Result<()> {
+            self.inner.quarantine(root_cid, entry).await
+        }
+
+        async fn is_quarantined(&self, root_cid: &Cid) -> Result<bool> {
+            self.inner.is_quarantined(root_cid).await
+        }
+
+        async fn load_quarantined(&self) -> Result<Vec<(Cid, PersistedQuarantinedDag)>> {
+            self.inner.load_quarantined().await
+        }
+
+        async fn remove_quarantined(&self, root_cid: &Cid) -> Result<()> {
+            self.inner.remove_quarantined(root_cid).await
+        }
+    }
 
     fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
         let block = Block::new(
@@ -768,6 +875,112 @@ mod tests {
         assert_eq!(
             manager.pending_dag_missing(&collection_cid),
             vec![field_cid]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_dependency_pushlog_is_stored_without_becoming_a_head() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+
+        let metadata = defra_core::cbor::to_vec(&"signature-metadata").unwrap();
+        let metadata_cid = defra_core::block::generate_cid_from_bytes(&metadata).unwrap();
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", metadata_cid, metadata, "collection1"),
+                Some("old-rust-peer"),
+                true,
+                None,
+            )
+            .await
+            .expect("legacy metadata should remain usable as a descendant");
+        assert!(blockstore
+            .has(&metadata_cid)
+            .await
+            .expect("metadata blockstore lookup"));
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert!(events.try_recv().is_err());
+
+        let (field_cid, field_block) = create_lww_block("name");
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", field_cid, field_block, "collection1"),
+                Some("old-rust-peer"),
+                true,
+                None,
+            )
+            .await
+            .expect("legacy dependency should remain wire-compatible");
+
+        assert!(blockstore.has(&field_cid).await.expect("blockstore lookup"));
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert!(
+            events.try_recv().is_err(),
+            "a field block must not be merged or registered as a document head"
+        );
+
+        let (head_cid, head_block) = create_composite_block("doc123", "name", field_cid);
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", head_cid, head_block, "collection1"),
+                Some("old-rust-peer"),
+                true,
+                None,
+            )
+            .await
+            .expect("the later composite head should use the stored descendant");
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SyncEvent::BlockReceived { cid, .. }) if cid == head_cid
+        ));
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn durable_registration_does_not_emit_after_receiver_clock_claims_fetch() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+        let pending_store = Arc::new(BlockingPendingDagStore::new(store));
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        let manager = Arc::new(manager);
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let message = make_broadcast("doc123", root_cid, root_block, "collection1");
+
+        let process_manager = Arc::clone(&manager);
+        let process = tokio::spawn(async move {
+            process_manager
+                .process_pushlog(&message, Some("peer-1"), false, None)
+                .await
+        });
+
+        pending_store.replace_entered.notified().await;
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(
+            claimed.len(),
+            1,
+            "the receiver clock should win the fetch claim"
+        );
+        assert_eq!(claimed[0].0, root_cid);
+        pending_store.replace_release.notify_one();
+
+        process
+            .await
+            .expect("PushLog task should not panic")
+            .expect("durable registration should still succeed");
+        assert!(
+            events.try_recv().is_err(),
+            "the PushLog path must not emit after another receiver path claims the root"
         );
     }
 
@@ -922,7 +1135,12 @@ mod tests {
         };
         let (manager, mut events) = SyncManager::new(blockstore.clone(), peer_state, config);
         let manager = Arc::new(manager);
-        let (cid, block) = create_lww_block("name");
+        let (field_cid, field_block) = create_lww_block("name");
+        blockstore
+            .put(&field_cid, &field_block)
+            .await
+            .expect("store composite dependency");
+        let (cid, block) = create_composite_block("doc123", "name", field_cid);
         let message = Arc::new(make_broadcast("doc123", cid, block, "collection1"));
         let authorization = ExplicitReplayAuthorization {
             source_peer_id: "peer-1".to_string(),

@@ -566,10 +566,7 @@ impl Node {
                                 Ok(None) | Err(_) => break,
                             };
                         match replay_result {
-                            Ok(Ok(())) => {
-                                let _ =
-                                    peerstore.complete_retry_document(&peer_id_str, retry).await;
-                            }
+                            Ok(Ok(())) => {}
                             Ok(Err(error)) => {
                                 p2p::sync::reschedule_persisted_push_retry(
                                     &mut retry.retry_info,

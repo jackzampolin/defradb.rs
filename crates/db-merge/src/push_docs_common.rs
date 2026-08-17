@@ -3,7 +3,9 @@ use std::str::FromStr;
 
 use cid::Cid;
 use storage::corekv::{IterOptions, Reader};
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
+#[cfg(not(target_arch = "wasm32"))]
+use storage::keys::headstore::HeadstoreColKey;
+use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
 pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>(
     block_reader: &R,
@@ -134,6 +136,7 @@ pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reade
     cids
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn load_collection_head_cids<R: Reader + ?Sized>(
     head_reader: &R,
     collection_short_id: u32,
@@ -158,6 +161,7 @@ pub(crate) async fn load_collection_head_cids<R: Reader + ?Sized>(
     Ok(heads)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn resolve_collection_id_for_doc<S: storage::corekv::Store>(
     db: &db::DB<S>,
     doc_id: &str,
@@ -191,6 +195,109 @@ pub(crate) async fn resolve_collection_id_for_doc<S: storage::corekv::Store>(
         }
     }
     Ok(None)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn complete_document_retry_if_current<S: storage::corekv::Store>(
+    db: &db::DB<S>,
+    peer_id: &str,
+    doc_id: &str,
+    collection_id: &str,
+    doc_short_id: u64,
+    attempted_heads: &[Cid],
+) -> Result<(), String> {
+    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let Some(_guard) = peerstore
+        .acquire_replicator_retry_guard(peer_id)
+        .await
+        .map_err(|error| format!("retry completion guard: {error}"))?
+    else {
+        return Ok(());
+    };
+    let txn = db
+        .new_txn(true)
+        .await
+        .map_err(|error| format!("head verification transaction: {error}"))?;
+    let heads = txn.headstore().map_err(|error| error.to_string())?;
+    let blocks = txn.blockstore().map_err(|error| error.to_string())?;
+    let mut current_heads = load_latest_composite_head_cids(&heads, &blocks, doc_short_id).await;
+    current_heads.sort_unstable();
+    if current_heads != attempted_heads {
+        return Err("document heads changed during retry; retaining dirty marker".to_string());
+    }
+    peerstore
+        .complete_retry_scope(peer_id, doc_id, collection_id, false)
+        .await
+        .map_err(|error| format!("failed to clear current document retry marker: {error}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn complete_document_retry_if_absent<S: storage::corekv::Store>(
+    db: &db::DB<S>,
+    peer_id: &str,
+    doc_id: &str,
+    collection_id: &str,
+) -> Result<(), String> {
+    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let Some(_guard) = peerstore
+        .acquire_replicator_retry_guard(peer_id)
+        .await
+        .map_err(|error| format!("retry completion guard: {error}"))?
+    else {
+        return Ok(());
+    };
+    let txn = db
+        .new_txn(true)
+        .await
+        .map_err(|error| format!("document absence verification transaction: {error}"))?;
+    let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
+    if db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+        .await
+        .map_err(|error| format!("document absence verification: {error}"))?
+        .is_some()
+    {
+        return Err("document appeared during retry; retaining dirty marker".to_string());
+    }
+    peerstore
+        .complete_retry_scope(peer_id, doc_id, collection_id, false)
+        .await
+        .map_err(|error| format!("failed to clear absent document retry marker: {error}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn complete_collection_retry_if_current<S: storage::corekv::Store>(
+    db: &db::DB<S>,
+    peer_id: &str,
+    collection_id: &str,
+    attempted_heads: &[Cid],
+) -> Result<(), String> {
+    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let Some(_guard) = peerstore
+        .acquire_replicator_retry_guard(peer_id)
+        .await
+        .map_err(|error| format!("retry completion guard: {error}"))?
+    else {
+        return Ok(());
+    };
+    let txn = db
+        .new_txn(true)
+        .await
+        .map_err(|error| format!("collection head verification transaction: {error}"))?;
+    let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
+    let headstore = txn.headstore().map_err(|error| error.to_string())?;
+    let short_id =
+        db::collection::require_persisted_collection_short_id(&systemstore, collection_id)
+            .await
+            .map_err(|error| format!("collection retry verification short id: {error}"))?;
+    let mut current_heads = load_collection_head_cids(&headstore, short_id).await?;
+    current_heads.sort_unstable();
+    if current_heads != attempted_heads {
+        return Err("collection heads changed during retry; retaining dirty marker".to_string());
+    }
+    peerstore
+        .complete_retry_scope(peer_id, "", collection_id, true)
+        .await
+        .map_err(|error| format!("failed to clear current collection retry marker: {error}"))
 }
 
 fn extract_block_links(block_data: &[u8]) -> Vec<Cid> {
@@ -309,5 +416,103 @@ mod tests {
 
         assert_eq!(heads, vec![second_cid]);
         assert_ne!(heads, vec![first_cid]);
+    }
+
+    #[tokio::test]
+    async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
+        let store = Arc::new(MemoryStore::new());
+        let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+        let peerstore = storage::stores::Peerstore::new(store);
+        let peer_id = "peer";
+        let doc_id = "doc";
+        let collection_id = "collection";
+        let doc_short_id = 7_u64;
+        peerstore
+            .create_replicator(peer_id, b"replicator")
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head(peer_id, doc_id, collection_id, "new", 2)
+            .await
+            .unwrap();
+
+        let old = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "schema-v1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let old_bytes = old.to_dag_cbor().unwrap();
+        let old_cid = generate_cid_from_bytes(&old_bytes).unwrap();
+        let current = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "schema-v1".to_string(),
+                priority: 2,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let current_bytes = current.to_dag_cbor().unwrap();
+        let current_cid = generate_cid_from_bytes(&current_bytes).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        for (cid, bytes, priority) in [
+            (old_cid, old_bytes.as_slice(), 1),
+            (current_cid, current_bytes.as_slice(), 2),
+        ] {
+            txn.blockstore()
+                .unwrap()
+                .set(&cid.to_bytes(), bytes)
+                .await
+                .unwrap();
+            txn.headstore()
+                .unwrap()
+                .set(
+                    &HeadstorePriorityKey::new(doc_short_id, priority, cid).bytes(),
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        let error = complete_document_retry_if_current(
+            &db,
+            peer_id,
+            doc_id,
+            collection_id,
+            doc_short_id,
+            &[old_cid],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("heads changed"));
+        assert_eq!(
+            peerstore.get_retry_documents(peer_id).await.unwrap().len(),
+            1
+        );
+
+        complete_document_retry_if_current(
+            &db,
+            peer_id,
+            doc_id,
+            collection_id,
+            doc_short_id,
+            &[current_cid],
+        )
+        .await
+        .unwrap();
+        assert!(peerstore
+            .get_retry_documents(peer_id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

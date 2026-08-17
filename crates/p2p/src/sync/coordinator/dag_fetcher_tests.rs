@@ -336,11 +336,7 @@ impl P2PTransport for TestTransport {
             .unwrap()
             .extend(providers.iter().map(|peer| peer.to_string()));
         let query_id = QueryId(call_index as u64 + 1);
-        let streamed_blocks = if missing.is_empty() {
-            self.streamed_rooted_blocks.lock().unwrap().clone()
-        } else {
-            None
-        };
+        let streamed_blocks = self.streamed_rooted_blocks.lock().unwrap().take();
         if let Some(streamed_blocks) = streamed_blocks {
             let blockstore = Arc::clone(&self.blockstore);
             let completion = self.stream_completion.lock().unwrap().clone();
@@ -380,7 +376,7 @@ impl P2PTransport for TestTransport {
     }
 
     async fn cancel_sync(&self, query_id: QueryId) -> P2PResult<bool> {
-        if self.streamed_rooted_blocks.lock().unwrap().is_some()
+        if self.stream_completion.lock().unwrap().is_some()
             && !self.stream_completed.load(Ordering::SeqCst)
         {
             self.cancelled_before_stream_complete
@@ -547,7 +543,7 @@ async fn poll_fetch_dag_uses_known_missing_frontier_without_recursive_car() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn rooted_provider_response_drains_before_query_is_reaped() {
+async fn rooted_selective_response_drains_before_query_is_reaped() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
@@ -564,13 +560,10 @@ async fn rooted_provider_response_drains_before_query_is_reaped() {
         root_cid,
         root_data,
         HashMap::new(),
-        HashMap::new(),
+        HashMap::from([(leaf_cid, leaf_data)]),
     );
     let completion = crate::sync::manager::BlockSyncCompletionTracker::default();
-    transport.set_streamed_rooted_blocks(
-        vec![(child_cid, child_data), (leaf_cid, leaf_data)],
-        completion.clone(),
-    );
+    transport.set_streamed_rooted_blocks(vec![(child_cid, child_data)], completion.clone());
     // The old 10-second coordinator poll window cancelled this otherwise
     // healthy response before Iroh's 30-second transport bound could report
     // completion. Paused time keeps the regression deterministic and fast.
@@ -602,9 +595,12 @@ async fn rooted_provider_response_drains_before_query_is_reaped() {
     assert!(matches!(blockstore.has(&leaf_cid).await, Ok(true)));
     assert!(
         !transport.cancelled_before_stream_complete(),
-        "a productive rooted CAR must not be cancelled after only its first block"
+        "a productive rooted selective CAR must drain before cancellation"
     );
-    assert_eq!(transport.sync_batches(), vec![Vec::<Cid>::new()]);
+    assert_eq!(
+        transport.sync_batches(),
+        vec![vec![child_cid], vec![leaf_cid]]
+    );
 }
 
 #[tokio::test]

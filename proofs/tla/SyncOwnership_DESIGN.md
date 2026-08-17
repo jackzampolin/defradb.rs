@@ -146,12 +146,14 @@ The deterministic ownership A/B integration test holds topology, logical DAG,
 admission bounds, and transport constant while switching only sender delivery
 shape. Both arms run a real receiving coordinator through pending registration,
 CAR pull, merge, and quiescence. The current-policy arm demonstrates the
-dependency-PushLog feedback: a field-head obligation consumes the fixed slot,
-the composite head receives the actionable capacity nack, and the receiver
-does not reach the source's current head on the first wave. The frozen sender
-then retains its logical-head marker, handles the nack, retries/re-offers the
-root after the field obligation drains, and is required to reach the same final
-state. The target arm witnesses one hint, restart-safe rooted selective-CAR
+dependency-PushLog feedback for a collection DAG: the receiver safely stores
+the legacy field PushLog as a descendant, the standalone composite dependency
+consumes the fixed slot, the collection head receives the actionable capacity
+nack, and the receiver does not reach the source's current head on the first
+wave. The frozen sender then retains its logical-head marker, handles the nack,
+retries/re-offers the root after the dependency obligation drains, and is
+required to reach the same final state. The target arm witnesses one hint,
+restart-safe rooted selective-CAR
 authority, one receiver fetch owner, bounded pending and persisted high-water,
 balanced registered/merged/quarantined terminal counts, zero retained handles
 after shutdown, and a receiver head identical to the source without a sender

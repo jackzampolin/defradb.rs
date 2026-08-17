@@ -1761,14 +1761,17 @@ struct ReceiverOwnershipArm {
 
 /// Run one frozen sender-ownership arm through the real receiving coordinator.
 ///
-/// The full-DAG arm presents the field block as a standalone PushLog before
-/// the composite head. Both blocks depend on the same signature payload, so a
-/// one-root receiver admission bound is saturated before its paced fetch owner
-/// runs. The head-hint arm presents only the composite root and lets the CAR
-/// fetcher acquire the entire DAG under that one durable obligation.
+/// The full-DAG arm presents a legacy field descendant and then the composite
+/// document head before the collection head. The receiver stores the field
+/// without treating it as a head, but the valid composite dependency still
+/// saturates a one-root admission bound before the collection hint arrives.
+/// The head-hint arm presents only the collection root and lets the CAR fetcher
+/// acquire the entire DAG under that one durable obligation.
 async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
-    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+    use defra_core::{
+        Block, CollectionDeltaPayload, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
+    };
 
     let signature_data = defra_core::cbor::to_vec(&"signature-metadata").unwrap();
     let signature_cid = defra_core::block::generate_cid_from_bytes(&signature_data).unwrap();
@@ -1786,7 +1789,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     );
     let field_data = field.to_dag_cbor().unwrap();
     let field_cid = field.generate_cid().unwrap();
-    let root = Block::new(
+    let composite = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
             schema_version_id: "schema".to_string(),
             priority: 1,
@@ -1795,6 +1798,16 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         vec![],
         vec![DAGLink::new("value", field_cid)],
     );
+    let composite_data = composite.to_dag_cbor().unwrap();
+    let composite_cid = composite.generate_cid().unwrap();
+    let root = Block::new(
+        CrdtDelta::Collection(CollectionDeltaPayload {
+            schema_version_id: "schema".to_string(),
+            priority: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("doc", composite_cid)],
+    );
     let root_data = root.to_dag_cbor().unwrap();
     let root_cid = root.generate_cid().unwrap();
 
@@ -1802,6 +1815,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     let source = Arc::new(DefraBlockstore::new(source_store, true));
     source.put(&signature_cid, &signature_data).await.unwrap();
     source.put(&field_cid, &field_data).await.unwrap();
+    source.put(&composite_cid, &composite_data).await.unwrap();
     source.put(&root_cid, &root_data).await.unwrap();
     source.mark_as_merged(&root_cid).await.unwrap();
 
@@ -1831,10 +1845,10 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         .await;
 
     let peer_id = PeerId::new("source-peer".to_string());
-    let request = |cid: Cid, data: Vec<u8>| TransportEvent::TwoStreamRequest {
+    let request = |doc_id: &str, cid: Cid, data: Vec<u8>| TransportEvent::TwoStreamRequest {
         peer_id: peer_id.clone(),
         request: PushLogRequest::new(
-            "doc".to_string(),
+            doc_id.to_string(),
             bytes::Bytes::from(cid.to_bytes()),
             "collection".to_string(),
             "creator".to_string(),
@@ -1851,18 +1865,30 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         announced_bytes += field_data.len();
         pushlogs_transmitted += 1;
         coordinator
-            .handle_transport_event(request(field_cid, field_data.clone()))
+            .handle_transport_event(request("doc", field_cid, field_data.clone()))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), events.recv())
+                .await
+                .is_err(),
+            "legacy field dependency must not become a pending head"
+        );
+        announced_bytes += composite_data.len();
+        pushlogs_transmitted += 1;
+        coordinator
+            .handle_transport_event(request("doc", composite_cid, composite_data.clone()))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
-            .expect("field pending event should arrive")
-            .expect("field pending event should be present")
+            .expect("composite pending event should arrive")
+            .expect("composite pending event should be present")
     } else {
         announced_bytes += root_data.len();
         pushlogs_transmitted += 1;
         coordinator
-            .handle_transport_event(request(root_cid, root_data.clone()))
+            .handle_transport_event(request("", root_cid, root_data.clone()))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(1), events.recv())
@@ -1878,7 +1904,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         announced_bytes += root_data.len();
         pushlogs_transmitted += 1;
         let error = coordinator
-            .handle_transport_event(request(root_cid, root_data.clone()))
+            .handle_transport_event(request("", root_cid, root_data.clone()))
             .await
             .expect_err("full-DAG feedback must hit the fixed admission bound");
         assert!(matches!(
@@ -1907,7 +1933,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     let mut sender_retry_dispatches = 0;
 
     // The frozen full-DAG sender retains its logical-head marker after the
-    // actionable capacity nack. Once the field obligation drains, exercise
+    // actionable capacity nack. Once the composite obligation drains, exercise
     // that marker's retry/re-offer path and require the same final state as the
     // head-hint arm. This establishes amplification and an avoidable durable
     // retry cycle without claiming that a fair old sender can never recover.
@@ -1916,7 +1942,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         announced_bytes += root_data.len();
         pushlogs_transmitted += 1;
         coordinator
-            .handle_transport_event(request(root_cid, root_data.clone()))
+            .handle_transport_event(request("", root_cid, root_data.clone()))
             .await
             .expect("sender retry should re-offer the nacked logical head");
         let retry_pending = tokio::time::timeout(Duration::from_secs(1), events.recv())
@@ -1931,8 +1957,8 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         )
         .await;
         match retry_started {
-            // The first field-root recovery already acquired the shared
-            // dependency frontier, so the composite re-offer normally merges
+            // The first composite-root recovery already acquired the shared
+            // dependency frontier, so the collection re-offer normally merges
             // without another CAR owner.
             ReplicationResult::Merged { .. } => {}
             ReplicationResult::DagFetchStarted { .. } => {
@@ -1957,7 +1983,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     coordinator.shutdown().await;
     let status = coordinator.sync_status();
     ReceiverOwnershipArm {
-        pushlogs_scheduled: if expand_dag { 3 } else { 1 },
+        pushlogs_scheduled: if expand_dag { 4 } else { 1 },
         pushlogs_transmitted,
         announced_bytes,
         pending_high_water: status.pending_dag_high_water as usize,
@@ -2001,9 +2027,9 @@ async fn ownership_ab_full_dag_amplifies_admission_and_requires_sender_retry() {
     let full_dag = run_receiver_ownership_arm(true).await;
     let head_hint = run_receiver_ownership_arm(false).await;
 
-    assert_eq!(full_dag.pushlogs_scheduled, 3);
+    assert_eq!(full_dag.pushlogs_scheduled, 4);
     assert_eq!(head_hint.pushlogs_scheduled, 1);
-    assert_eq!(full_dag.pushlogs_transmitted, 3);
+    assert_eq!(full_dag.pushlogs_transmitted, 4);
     assert_eq!(head_hint.pushlogs_transmitted, 1);
     assert!(full_dag.announced_bytes > head_hint.announced_bytes);
     assert_eq!(full_dag.pending_high_water, 1);
@@ -2023,14 +2049,12 @@ async fn ownership_ab_full_dag_amplifies_admission_and_requires_sender_retry() {
     assert_eq!(full_dag.car_served_bytes, 0);
     assert_eq!(head_hint.car_served_bytes, 0);
     assert_eq!(full_dag.selective_requests, 1);
-    assert_eq!(head_hint.selective_requests, 1);
-    assert_eq!(full_dag.selective_requested_cids, 0);
-    // Empty exact-CID count identifies the bounded rooted discovery request;
-    // it returns both present DAG blocks and needs no selective fallback.
-    assert_eq!(head_hint.selective_requested_cids, 0);
-    assert_eq!(full_dag.selective_present_blocks, 2);
+    assert_eq!(head_hint.selective_requests, 3);
+    assert_eq!(full_dag.selective_requested_cids, 1);
+    assert_eq!(head_hint.selective_requested_cids, 3);
+    assert_eq!(full_dag.selective_present_blocks, 1);
     assert_eq!(head_hint.selective_present_blocks, 3);
-    assert_eq!(full_dag.selective_served_blocks, 2);
+    assert_eq!(full_dag.selective_served_blocks, 1);
     assert_eq!(head_hint.selective_served_blocks, 3);
     assert!(full_dag.selective_served_bytes > 0);
     assert!(head_hint.selective_served_bytes > full_dag.selective_served_bytes);

@@ -586,10 +586,28 @@ impl<S: Store> Peerstore<S> {
         peer_id: &str,
         retry: &super::PersistedPushRetry,
     ) -> Result<()> {
-        let key = if retry.is_collection_commit() {
-            ReplicatorRetryCollectionKey::new(peer_id, &retry.collection_id).bytes()
+        self.complete_retry_scope(
+            peer_id,
+            &retry.doc_id,
+            &retry.collection_id,
+            retry.is_collection_commit(),
+        )
+        .await
+    }
+
+    /// Remove one presence-only retry marker after its current scope state has
+    /// been checked while holding the peer's retry-transition guard.
+    pub async fn complete_retry_scope(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        is_collection: bool,
+    ) -> Result<()> {
+        let key = if is_collection {
+            ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
         } else {
-            ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id).bytes()
+            ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
         };
         retry_push_txn_conflicts(|| async {
             let mut txn = self.store.new_txn(false).await?;

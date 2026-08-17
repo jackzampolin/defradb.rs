@@ -534,9 +534,10 @@ async fn count_missing<B: Blockstore>(blockstore: &Arc<B>, cids: &[Cid]) -> usiz
     remaining
 }
 
-/// Exercise one authenticated provider's rooted CAR authority before exact-CID
-/// recovery. The query is cancellable and bounded, so an unavailable provider
-/// cannot retain a transport task or monopolize the receiver fetch owner.
+/// Exercise one authenticated provider's rooted CAR authority with the exact
+/// missing frontier already known from the local root. The query is
+/// cancellable and bounded, so an unavailable provider cannot retain a
+/// transport task or monopolize the receiver fetch owner.
 async fn poll_fetch_rooted_provider<B: Blockstore, T: P2PTransport>(
     root_cid: &Cid,
     watch_cids: &[Cid],
@@ -555,7 +556,7 @@ async fn poll_fetch_rooted_provider<B: Blockstore, T: P2PTransport>(
         return ProviderWindowOutcome::Complete;
     }
     let query_id = match transport
-        .sync_blocks(*root_cid, vec![source_peer.clone()], Vec::new())
+        .sync_blocks(*root_cid, vec![source_peer.clone()], watch_cids.to_vec())
         .await
     {
         Ok(query_id) => query_id,

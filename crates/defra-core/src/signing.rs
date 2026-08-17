@@ -485,6 +485,7 @@ thread_local! {
     static BROADCAST_CREATOR_DID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static TASK_BROADCAST_CREATOR_DID: Option<String>;
 }
@@ -496,11 +497,21 @@ tokio::task_local! {
 /// clearing an unrelated worker on drop. Async query entry points must use
 /// this scope; the thread-local remains only for synchronous lower-level
 /// callers and tests.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn scope_broadcast_creator_did<F>(did: Option<String>, future: F) -> F::Output
 where
     F: Future,
 {
     TASK_BROADCAST_CREATOR_DID.scope(did, future).await
+}
+
+/// Run an async mutation without server-side task-local P2P state on WASM.
+#[cfg(target_arch = "wasm32")]
+pub async fn scope_broadcast_creator_did<F>(_did: Option<String>, future: F) -> F::Output
+where
+    F: Future,
+{
+    future.await
 }
 
 /// Set the broadcast creator DID for the current thread.
@@ -518,10 +529,16 @@ pub fn set_broadcast_creator_did(did: Option<String>) {
 ///
 /// Returns the DID set by `set_broadcast_creator_did`, or None if no
 /// identity override is active (broadcasts will use the node PeerId).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn get_broadcast_creator_did() -> Option<String> {
     TASK_BROADCAST_CREATOR_DID
         .try_with(Clone::clone)
         .unwrap_or_else(|_| BROADCAST_CREATOR_DID.with(|c| c.borrow().clone()))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn get_broadcast_creator_did() -> Option<String> {
+    BROADCAST_CREATOR_DID.with(|c| c.borrow().clone())
 }
 
 #[cfg(test)]

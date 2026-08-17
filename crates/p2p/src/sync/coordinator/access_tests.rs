@@ -914,23 +914,44 @@ fn cid_for(data: &[u8]) -> Cid {
 }
 
 fn pushlog_request(collection_id: &str) -> PushLogRequest {
+    let block = defra_core::Block::new(
+        defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().expect("encode composite head");
+    let cid = block.generate_cid().expect("composite head cid");
     PushLogRequest::new(
         "doc1".to_string(),
-        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
+        bytes::Bytes::from(cid.to_bytes()),
         collection_id.to_string(),
         "creator1".to_string(),
-        bytes::Bytes::copy_from_slice(BLOCK_DATA),
+        bytes::Bytes::from(block_data),
     )
 }
 
 /// A collection commit: doc-less, so it has no document topic to fall back to.
 fn collection_commit_request(collection_id: &str) -> PushLogRequest {
+    let block = defra_core::Block::new(
+        defra_core::CrdtDelta::Collection(defra_core::CollectionDeltaPayload {
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().expect("encode collection head");
+    let cid = block.generate_cid().expect("collection head cid");
     PushLogRequest::new(
         String::new(),
-        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
+        bytes::Bytes::from(cid.to_bytes()),
         collection_id.to_string(),
         "creator1".to_string(),
-        bytes::Bytes::copy_from_slice(BLOCK_DATA),
+        bytes::Bytes::from(block_data),
     )
 }
 
@@ -2774,8 +2795,10 @@ async fn concurrent_same_cid_pushlog_and_car_have_one_storage_owner() {
         });
     let coordinator = Arc::new(coordinator);
     let peer = random_peer_id();
-    let root_cid = cid_for(BLOCK_DATA);
-    let car_data = crate::sync::car::encode_car(&[root_cid], &[(&root_cid, BLOCK_DATA)])
+    let request = pushlog_request("collection1");
+    let root_cid = Cid::try_from(request.cid.as_ref()).expect("request CID");
+    let root_data = request.block.clone();
+    let car_data = crate::sync::car::encode_car(&[root_cid], &[(&root_cid, root_data.as_ref())])
         .expect("encode test CAR");
 
     let push = {
@@ -2783,7 +2806,11 @@ async fn concurrent_same_cid_pushlog_and_car_have_one_storage_owner() {
         let peer = peer.clone();
         tokio::spawn(async move {
             coordinator
-                .handle_transport_event(pushlog_event(peer, "collection1"))
+                .handle_transport_event(TransportEvent::PushLogRequest {
+                    peer_id: peer,
+                    request,
+                    token: 0,
+                })
                 .await
         })
     };

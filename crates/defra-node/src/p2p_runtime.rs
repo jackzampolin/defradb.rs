@@ -709,9 +709,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                             Ok(None) | Err(_) => break,
                         };
                     match replay_result {
-                        Ok(Ok(())) => {
-                            let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
-                        }
+                        Ok(Ok(())) => {}
                         Ok(Err(error)) => {
                             tracing::warn!(target: "defra_node",
                                 doc_id = %retry.doc_id,
