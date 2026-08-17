@@ -10,7 +10,7 @@ including across a receiver restart.
 
 | Fact | Source | Model consequence |
 |---|---|---|
-| Filtered replay pushes composite heads, and pending-DAG completion fetches their linked encrypted LWW blocks so merge triggers DEK resolution. | `crates/db-merge/src/push_docs.rs`, `crates/db-merge/src/push_docs_transport.rs`, `crates/db-merge/src/merge_handler/composite_fields.rs` | `FilterMode="PreserveEncrypted"` stores the linked ciphertext; the red mode drops it and violates `INV_NoFilteredLoss`. |
+| Filtered replay pushes composite heads, and pending-DAG completion fetches their linked encrypted LWW blocks so merge triggers DEK resolution. | `crates/db-merge/src/push_docs.rs`, `crates/db-merge/src/push_docs_transport.rs`, `crates/db-merge/src/merge_handler/composite_fields.rs` | `DeliverComposite` records the link and durable retry before acknowledgement; `FetchCiphertext` models the later child fetch. The red mode omits the link and violates `INV_NoFilteredLoss`. |
 | Only `AccessDenied` is a terminal encrypted-field skip. `KeyUnavailable` and other transient KMS errors abort the merge transaction. | `crates/db-merge/src/merge_handler/composite_fields.rs`, `crates/db-merge/src/merge_handler/mod.rs` | `KmsFailureMode="Retry"` retains the pending merge; the red terminal mode retires it. |
 | Push-originated pending-DAG registrations are persisted before success acknowledgement and removed only after merge or quarantine. | `crates/p2p/src/sync/pending_store.rs`, `crates/p2p/src/sync/manager/process/pending_dag.rs` | `PendingMode="Durable"` restores the retry obligation after a crash. |
 | A verified remotely fetched encryption block is stored before its key is returned to the merge. | `crates/kms/src/defra_kms.rs` | `keyAvailable` survives `Crash`; an in-flight request or envelope does not. |
@@ -20,16 +20,17 @@ including across a receiver restart.
 
 - `INV_AckBacked`: an acknowledged remote value is applied or still has a
   volatile/durable retry obligation.
-- `INV_NoFilteredLoss`: retiring the sender's delivery record cannot lose the
-  encrypted field block selected for replication.
+- `INV_NoFilteredLoss`: an acknowledged composite selected for replication
+  retains the link to its encrypted field block.
 - `INV_LwwWinner`: key timing and replay order cannot replace a newer local LWW
   value with an older remote value.
 - `LIVE_WinnerMaterialized`: under fair reconnect and key service, both writes
   eventually settle on the LWW winner.
 
 The model starts with the key service unavailable. It explores a failed lookup,
-service recovery, restart before receipt, restart after the key is durably
-stored, and replay against a newer local write.
+service recovery, restart after composite acknowledgement but before its linked
+ciphertext is fetched, restart after the key is durably stored, and replay
+against a newer local write.
 
 ## Configs
 

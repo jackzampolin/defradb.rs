@@ -39,6 +39,8 @@ VARIABLES
   partitionUsed,
   restartAvailable,
   senderPending,
+  compositeStored,
+  ciphertextLinked,
   ciphertextStored,
   volatilePending,
   durablePending,
@@ -53,9 +55,9 @@ VARIABLES
 
 vars ==
   << running, connected, partitionUsed, restartAvailable, senderPending,
-     ciphertextStored, volatilePending, durablePending, requestPending,
-     keyServiceReady, keyEnvelope, keyAvailable, localApplied, remoteApplied,
-     materialized, acknowledged >>
+     compositeStored, ciphertextLinked, ciphertextStored, volatilePending,
+     durablePending, requestPending, keyServiceReady, keyEnvelope, keyAvailable,
+     localApplied, remoteApplied, materialized, acknowledged >>
 
 TypeOK ==
   /\ running \in BOOLEAN
@@ -63,6 +65,8 @@ TypeOK ==
   /\ partitionUsed \in BOOLEAN
   /\ restartAvailable \in BOOLEAN
   /\ senderPending \in BOOLEAN
+  /\ compositeStored \in BOOLEAN
+  /\ ciphertextLinked \in BOOLEAN
   /\ ciphertextStored \in BOOLEAN
   /\ volatilePending \in BOOLEAN
   /\ durablePending \in BOOLEAN
@@ -81,6 +85,8 @@ Init ==
   /\ partitionUsed = FALSE
   /\ restartAvailable = TRUE
   /\ senderPending = TRUE
+  /\ compositeStored = FALSE
+  /\ ciphertextLinked = FALSE
   /\ ciphertextStored = FALSE
   /\ volatilePending = FALSE
   /\ durablePending = FALSE
@@ -98,9 +104,10 @@ Reconnect ==
   /\ ~connected
   /\ connected' = TRUE
   /\ UNCHANGED <<running, partitionUsed, restartAvailable, senderPending,
-                  ciphertextStored, volatilePending, durablePending,
-                  requestPending, keyServiceReady, keyEnvelope, keyAvailable,
-                  localApplied, remoteApplied, materialized, acknowledged>>
+                  compositeStored, ciphertextLinked, ciphertextStored,
+                  volatilePending, durablePending, requestPending,
+                  keyServiceReady, keyEnvelope, keyAvailable, localApplied,
+                  remoteApplied, materialized, acknowledged>>
 
 Partition ==
   /\ running
@@ -109,10 +116,11 @@ Partition ==
   /\ ~remoteApplied
   /\ connected' = FALSE
   /\ partitionUsed' = TRUE
-  /\ UNCHANGED <<running, restartAvailable, senderPending, ciphertextStored,
-                  volatilePending, durablePending, requestPending, keyEnvelope,
-                  keyServiceReady, keyAvailable, localApplied, remoteApplied,
-                  materialized, acknowledged>>
+  /\ UNCHANGED <<running, restartAvailable, senderPending, compositeStored,
+                  ciphertextLinked, ciphertextStored, volatilePending,
+                  durablePending, requestPending, keyEnvelope, keyServiceReady,
+                  keyAvailable, localApplied, remoteApplied, materialized,
+                  acknowledged>>
 
 ApplyLocal ==
   /\ running
@@ -121,34 +129,38 @@ ApplyLocal ==
   /\ materialized' =
        IF materialized >= LocalVersion THEN materialized ELSE LocalVersion
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, volatilePending,
-                  durablePending, requestPending, keyEnvelope, keyAvailable,
-                  keyServiceReady, remoteApplied, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, volatilePending, durablePending,
+                  requestPending, keyEnvelope, keyAvailable, keyServiceReady,
+                  remoteApplied, acknowledged>>
 
-DeliverRemote ==
+DeliverComposite ==
   /\ running
   /\ connected
   /\ senderPending
-  /\ FilterMode = "PreserveEncrypted"
   /\ senderPending' = FALSE
-  /\ ciphertextStored' = TRUE
+  /\ compositeStored' = TRUE
+  /\ ciphertextLinked' = (FilterMode = "PreserveEncrypted")
   /\ volatilePending' = TRUE
   /\ durablePending' = (PendingMode = "Durable")
   /\ acknowledged' = TRUE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  requestPending, keyEnvelope, keyAvailable, localApplied,
-                  keyServiceReady, remoteApplied, materialized>>
+                  ciphertextStored, requestPending, keyEnvelope, keyAvailable,
+                  localApplied, keyServiceReady, remoteApplied, materialized>>
 
-DropRemote ==
+FetchCiphertext ==
   /\ running
   /\ connected
-  /\ senderPending
-  /\ FilterMode = "DropEncrypted"
-  /\ senderPending' = FALSE
+  /\ volatilePending
+  /\ compositeStored
+  /\ ciphertextLinked
+  /\ ~ciphertextStored
+  /\ ciphertextStored' = TRUE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  ciphertextStored, volatilePending, durablePending,
-                  requestPending, keyServiceReady, keyEnvelope, keyAvailable,
-                  localApplied, remoteApplied, materialized, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  volatilePending, durablePending, requestPending,
+                  keyServiceReady, keyEnvelope, keyAvailable, localApplied,
+                  remoteApplied, materialized, acknowledged>>
 
 RequestKey ==
   /\ running
@@ -159,18 +171,20 @@ RequestKey ==
   /\ ~keyEnvelope
   /\ requestPending' = TRUE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, volatilePending,
-                  durablePending, keyEnvelope, keyAvailable, localApplied,
-                  keyServiceReady, remoteApplied, materialized, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, volatilePending, durablePending,
+                  keyEnvelope, keyAvailable, localApplied, keyServiceReady,
+                  remoteApplied, materialized, acknowledged>>
 
 KeyServiceBecomesReady ==
   /\ running
   /\ ~keyServiceReady
   /\ keyServiceReady' = TRUE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, volatilePending,
-                  durablePending, requestPending, keyEnvelope, keyAvailable,
-                  localApplied, remoteApplied, materialized, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, volatilePending, durablePending,
+                  requestPending, keyEnvelope, keyAvailable, localApplied,
+                  remoteApplied, materialized, acknowledged>>
 
 KeyUnavailable ==
   /\ running
@@ -182,9 +196,9 @@ KeyUnavailable ==
   /\ durablePending' =
        IF KmsFailureMode = "Retry" THEN durablePending ELSE FALSE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, keyServiceReady, keyEnvelope,
-                  keyAvailable, localApplied, remoteApplied, materialized,
-                  acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, keyServiceReady, keyEnvelope, keyAvailable,
+                  localApplied, remoteApplied, materialized, acknowledged>>
 
 ReleaseKey ==
   /\ running
@@ -194,9 +208,10 @@ ReleaseKey ==
   /\ requestPending' = FALSE
   /\ keyEnvelope' = TRUE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, volatilePending,
-                  durablePending, keyServiceReady, keyAvailable, localApplied,
-                  remoteApplied, materialized, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, volatilePending, durablePending,
+                  keyServiceReady, keyAvailable, localApplied, remoteApplied,
+                  materialized, acknowledged>>
 
 ReceiveKey ==
   /\ running
@@ -205,9 +220,10 @@ ReceiveKey ==
   /\ keyEnvelope' = FALSE
   /\ keyAvailable' = TRUE
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, volatilePending,
-                  durablePending, requestPending, keyServiceReady, localApplied,
-                  remoteApplied, materialized, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, volatilePending, durablePending,
+                  requestPending, keyServiceReady, localApplied, remoteApplied,
+                  materialized, acknowledged>>
 
 MaterializeRemote ==
   /\ running
@@ -223,8 +239,9 @@ MaterializeRemote ==
        THEN IF materialized >= RemoteVersion THEN materialized ELSE RemoteVersion
        ELSE RemoteVersion
   /\ UNCHANGED <<running, connected, partitionUsed, restartAvailable,
-                  senderPending, ciphertextStored, requestPending, keyEnvelope,
-                  keyServiceReady, keyAvailable, localApplied, acknowledged>>
+                  senderPending, compositeStored, ciphertextLinked,
+                  ciphertextStored, requestPending, keyEnvelope, keyServiceReady,
+                  keyAvailable, localApplied, acknowledged>>
 
 Crash ==
   /\ running
@@ -237,7 +254,8 @@ Crash ==
   /\ volatilePending' = FALSE
   /\ requestPending' = FALSE
   /\ keyEnvelope' = FALSE
-  /\ UNCHANGED <<partitionUsed, senderPending, ciphertextStored, durablePending,
+  /\ UNCHANGED <<partitionUsed, senderPending, compositeStored,
+                  ciphertextLinked, ciphertextStored, durablePending,
                   keyServiceReady, keyAvailable, localApplied, remoteApplied,
                   materialized, acknowledged>>
 
@@ -246,16 +264,17 @@ Recover ==
   /\ running' = TRUE
   /\ volatilePending' = durablePending
   /\ UNCHANGED <<connected, partitionUsed, restartAvailable, senderPending,
-                  ciphertextStored, durablePending, requestPending, keyEnvelope,
-                  keyServiceReady, keyAvailable, localApplied, remoteApplied,
-                  materialized, acknowledged>>
+                  compositeStored, ciphertextLinked, ciphertextStored,
+                  durablePending, requestPending, keyEnvelope, keyServiceReady,
+                  keyAvailable, localApplied, remoteApplied, materialized,
+                  acknowledged>>
 
 Next ==
   \/ Reconnect
   \/ Partition
   \/ ApplyLocal
-  \/ DeliverRemote
-  \/ DropRemote
+  \/ DeliverComposite
+  \/ FetchCiphertext
   \/ RequestKey
   \/ KeyServiceBecomesReady
   \/ KeyUnavailable
@@ -268,8 +287,8 @@ Next ==
 Fairness ==
   /\ WF_vars(Reconnect)
   /\ WF_vars(ApplyLocal)
-  /\ WF_vars(DeliverRemote)
-  /\ WF_vars(DropRemote)
+  /\ WF_vars(DeliverComposite)
+  /\ WF_vars(FetchCiphertext)
   /\ WF_vars(RequestKey)
   /\ WF_vars(KeyServiceBecomesReady)
   /\ WF_vars(KeyUnavailable)
@@ -287,10 +306,10 @@ INV_TypeOK == TypeOK
 INV_AckBacked ==
   ~acknowledged \/ remoteApplied \/ volatilePending \/ durablePending
 
-\* A filter may reject an entire document, but it must not retire the encrypted
-\* field block of a document selected for delivery.
+\* An acknowledged composite selected for delivery must retain its encrypted
+\* field link. Fetching the linked ciphertext may happen after acknowledgement.
 INV_NoFilteredLoss ==
-  senderPending \/ ciphertextStored \/ remoteApplied
+  ~acknowledged \/ ciphertextLinked \/ ciphertextStored \/ remoteApplied
 
 \* The remote replay is older than the concurrent local write. Decryption and
 \* arrival order must not let it overwrite the existing LWW winner.
