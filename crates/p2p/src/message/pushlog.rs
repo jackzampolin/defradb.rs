@@ -367,8 +367,9 @@ pub struct PushLogBroadcast {
     )]
     pub origin_signature: Option<Vec<u8>>,
 
-    /// Transport-authenticated recovery provider. This is ingress metadata,
-    /// never serialized or accepted from the wire.
+    /// Transport-authenticated ingress hop. This is ingress metadata, never
+    /// serialized or accepted from the wire, and is not by itself evidence
+    /// that the peer can serve the linked DAG.
     #[serde(skip)]
     pub(crate) authenticated_source_peer_id: Option<String>,
 
@@ -581,7 +582,8 @@ impl PushLogBroadcast {
     }
 
     /// Record the publisher identity authenticated independently from the
-    /// propagation hop.
+    /// propagation hop. This is the only identity that may back durable DAG
+    /// recovery, and only when the receiver has a live route to it.
     #[allow(dead_code)] // exercised by transport feature implementations
     pub(crate) fn authenticate_origin_peer(&mut self, peer_id: String) {
         self.authenticated_origin_peer_id = Some(peer_id);

@@ -16,14 +16,18 @@
 \*   FetchMode = "RootThenSelective" | "SelectiveMissing" | "RecursiveFirst"
 \*   StreamMode = "DrainResponse" | "CancelOnProgress"
 \*   PendingMode = "ScopeCurrent" | "EveryRoot"
-\*   MergeMode = "SerializedBatch" | "ParallelWriters"
+\*   MergeMode = "SerializedBatch" | "ParallelWriters" |
+\*               "DuplicateTerminal"
 \*
 \* A scope is either a document or a branchable collection.  A monotonically
 \* increasing version abstracts the current composite/collection head CID.
-\* A receiver chooses OriginBound only when the independently authenticated
-\* origin is already transport-routable; otherwise it chooses the authenticated
-\* connected hop.  The two green ProviderMode configurations check both sides
-\* of that runtime selection without permitting an unroutable payload claim.
+\* ProviderMode abstracts the least-qualified peer admitted to a root's fetch
+\* rotation, including alternates. A receiver chooses OriginBound only when
+\* the independently authenticated origin is transport-routable and owns the
+\* complete linked DAG. An authenticated connected hop is retained as a red
+\* mode: gossip relays can possess the head block without possessing any of
+\* its linked descendants. Connected peers may become alternates only with
+\* positive availability evidence for a CID on the missing frontier.
 \* The receiver retry clock is abstracted by ClaimFetch: every possible trigger
 \* must pass through that one action, which admits at most one owner per root.
 EXTENDS Naturals, FiniteSets
@@ -61,7 +65,7 @@ ASSUME OriginAuthMode \in {"TransportBound", "UnsignedClaim"}
 ASSUME FetchMode \in {"RootThenSelective", "SelectiveMissing", "RecursiveFirst"}
 ASSUME StreamMode \in {"DrainResponse", "CancelOnProgress"}
 ASSUME PendingMode \in {"ScopeCurrent", "EveryRoot"}
-ASSUME MergeMode \in {"SerializedBatch", "ParallelWriters"}
+ASSUME MergeMode \in {"SerializedBatch", "ParallelWriters", "DuplicateTerminal"}
 
 VARIABLES
   localV,        \* [Scopes -> 0..MaxV], current sender head
@@ -75,11 +79,12 @@ VARIABLES
   drained,       \* SUBSET Roots, owner retained its CAR through completion
   ready,         \* SUBSET Roots, complete DAGs awaiting the merge writer
   mergeFlights,  \* [Roots -> 0..1], independent merge writers
+  terminalFlights, \* [Roots -> 0..2], durable terminal-cleanup writers
   mergedV,       \* [Scopes -> 0..MaxV], current receiver head
   crashed        \* BOOLEAN, one receiver crash/restart has happened
 
 vars == <<localV, dirty, payloadLedger, inflight, pending, serveAuth, serveScopes,
-          flights, drained, ready, mergeFlights, mergedV, crashed>>
+          flights, drained, ready, mergeFlights, terminalFlights, mergedV, crashed>>
 
 TypeOK ==
   /\ localV \in [Scopes -> 0..MaxV]
@@ -94,6 +99,7 @@ TypeOK ==
   /\ drained \subseteq Roots
   /\ ready \subseteq Roots
   /\ mergeFlights \in [Roots -> 0..1]
+  /\ terminalFlights \in [Roots -> 0..2]
   /\ mergedV \in [Scopes -> 0..MaxV]
   /\ crashed \in BOOLEAN
 
@@ -109,6 +115,7 @@ Init ==
   /\ drained = {}
   /\ ready = {}
   /\ mergeFlights = [r \in Roots |-> 0]
+  /\ terminalFlights = [r \in Roots |-> 0]
   /\ mergedV = [s \in Scopes |-> 0]
   /\ crashed = FALSE
 
@@ -145,7 +152,8 @@ Update(s) ==
         /\ serveScopes' = IF ServeMode = "DurableDerived"
                           THEN serveScopes \cup {s}
                           ELSE serveScopes
-  /\ UNCHANGED <<pending, flights, drained, ready, mergeFlights, mergedV, crashed>>
+  /\ UNCHANGED <<pending, flights, drained, ready, mergeFlights, terminalFlights,
+                 mergedV, crashed>>
 
 \* Marker retry always rederives localV[s].  There is no stored version to
 \* choose.  PayloadLedger is modeled separately as the superseded policy.
@@ -158,7 +166,7 @@ ReHintMarker(s) ==
                     THEN serveScopes \cup {s}
                     ELSE serveScopes
   /\ UNCHANGED <<localV, dirty, payloadLedger, pending, flights, drained, ready,
-                 mergeFlights, mergedV, crashed>>
+                 mergeFlights, terminalFlights, mergedV, crashed>>
 
 \* Current main can retry the CID recorded in its durable delivery ledger.
 ReHintPayload(s, v) ==
@@ -168,13 +176,14 @@ ReHintPayload(s, v) ==
   /\ serveScopes' = IF ServeMode = "DurableDerived"
                     THEN serveScopes \cup {s}
                     ELSE serveScopes
-  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, flights, drained, mergedV, crashed>>
+  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, flights, drained, ready,
+                 mergeFlights, terminalFlights, mergedV, crashed>>
 
 DropHint(s, v) ==
   /\ <<s, v>> \in inflight
   /\ inflight' = inflight \ {<<s, v>>}
   /\ UNCHANGED <<localV, dirty, payloadLedger, pending, serveAuth, serveScopes,
-                 flights, drained, ready, mergeFlights, mergedV, crashed>>
+                 flights, drained, ready, mergeFlights, terminalFlights, mergedV, crashed>>
 
 \* A success acknowledgement is emitted only after one of these two actions.
 ProcessMerged(s, v) ==
@@ -186,7 +195,7 @@ ProcessMerged(s, v) ==
   /\ inflight' = inflight \ {<<s, v>>}
   /\ serveAuth' = serveAuth \ {<<s, v>>}
   /\ UNCHANGED <<localV, pending, serveScopes, flights, drained, ready,
-                 mergeFlights, mergedV, crashed>>
+                 mergeFlights, terminalFlights, mergedV, crashed>>
 
 ProcessRegister(s, v) ==
   /\ <<s, v>> \in inflight
@@ -203,7 +212,7 @@ ProcessRegister(s, v) ==
      IN /\ dirty' = cleared[1]
         /\ payloadLedger' = cleared[2]
   /\ UNCHANGED <<localV, serveAuth, serveScopes, flights, drained, ready,
-                 mergeFlights, mergedV, crashed>>
+                 mergeFlights, terminalFlights, mergedV, crashed>>
 
 \* Overflow is an actionable nack: receiver state is unchanged and sender
 \* durable ownership is not cleared.
@@ -215,14 +224,14 @@ ProcessNack(s, v) ==
   /\ inflight' = inflight \ {<<s, v>>}
   /\ serveAuth' = serveAuth \ {<<s, v>>}
   /\ UNCHANGED <<localV, dirty, payloadLedger, pending, serveScopes, flights, drained,
-                 ready, mergeFlights, mergedV, crashed>>
+                 ready, mergeFlights, terminalFlights, mergedV, crashed>>
 
 \* This is the sole abstract fetch-dispatch seam: retry expiry, connect
 \* expedite, and partial progress all coalesce through the same root claim.
 ClaimFetch(s, v) ==
   /\ <<s, v>> \in pending
   /\ (<<s, v>> \in serveAuth \/ s \in serveScopes)
-  /\ ProviderMode \in {"OriginBound", "AuthenticatedHop"}
+  /\ ProviderMode = "OriginBound"
   \* RootThenSelective first exercises the bounded rooted serving path at the
   \* actual publisher (which may populate a connected relay), then requests
   \* the still-missing exact frontier. SelectiveMissing is retained as a red
@@ -234,7 +243,7 @@ ClaimFetch(s, v) ==
                 THEN drained \cup {<<s, v>>}
                 ELSE drained
   /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
-                 serveScopes, ready, mergeFlights, mergedV, crashed>>
+                 serveScopes, ready, mergeFlights, terminalFlights, mergedV, crashed>>
 
 CompleteFetch(s, v) ==
   /\ <<s, v>> \in pending
@@ -246,7 +255,7 @@ CompleteFetch(s, v) ==
                 THEN drained \ {<<s, v>>}
                 ELSE drained
   /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
-                 serveScopes, mergeFlights, mergedV, crashed>>
+                 serveScopes, mergeFlights, terminalFlights, mergedV, crashed>>
 
 \* All production entrypoints share one merge-writer owner. The model claims
 \* one root at a time; a runtime transaction that claims an ordered batch is a
@@ -259,18 +268,36 @@ ClaimMerge(s, v) ==
        (IF MergeMode = "ParallelWriters" THEN 2 ELSE 1)
   /\ mergeFlights' = [mergeFlights EXCEPT ![<<s, v>>] = 1]
   /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
-                 serveScopes, flights, drained, ready, mergedV, crashed>>
+                 serveScopes, flights, drained, ready, terminalFlights, mergedV, crashed>>
 
 CompleteMerge(s, v) ==
   /\ <<s, v>> \in ready
   /\ mergeFlights[<<s, v>>] = 1
   /\ mergedV' = [mergedV EXCEPT ![s] = IF v > @ THEN v ELSE @]
-  /\ pending' = pending \ {<<s, v>>}
-  /\ serveAuth' = serveAuth \ {<<s, v>>}
   /\ ready' = ready \ {<<s, v>>}
   /\ mergeFlights' = [mergeFlights EXCEPT ![<<s, v>>] = 0]
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+                 serveScopes, flights, drained, terminalFlights, crashed>>
+
+\* Merge and terminal durable cleanup are separate runtime observations.  A
+\* single metadata writer makes repeated completion idempotent instead of
+\* letting same-root delete transactions exhaust OCC retries.
+ClaimTerminal(s, v) ==
+  /\ <<s, v>> \in pending
+  /\ mergedV[s] >= v
+  /\ terminalFlights[<<s, v>>] <
+       (IF MergeMode = "DuplicateTerminal" THEN 2 ELSE 1)
+  /\ terminalFlights' = [terminalFlights EXCEPT ![<<s, v>>] = @ + 1]
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+                 serveScopes, flights, drained, ready, mergeFlights, mergedV, crashed>>
+
+CompleteTerminal(s, v) ==
+  /\ terminalFlights[<<s, v>>] > 0
+  /\ pending' = pending \ {<<s, v>>}
+  /\ serveAuth' = serveAuth \ {<<s, v>>}
+  /\ terminalFlights' = [terminalFlights EXCEPT ![<<s, v>>] = @ - 1]
   /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, serveScopes, flights,
-                 drained, crashed>>
+                 drained, ready, mergeFlights, mergedV, crashed>>
 
 Crash ==
   /\ ~crashed
@@ -279,6 +306,7 @@ Crash ==
   /\ drained' = {}
   /\ ready' = {}
   /\ mergeFlights' = [r \in Roots |-> 0]
+  /\ terminalFlights' = [r \in Roots |-> 0]
   /\ pending' = IF RegisterMode = "Durable" THEN pending ELSE {}
   /\ serveAuth' = {}
   /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, serveScopes, mergedV>>
@@ -292,7 +320,7 @@ Next ==
        ReHintPayload(s, v) \/ DropHint(s, v) \/ ProcessMerged(s, v)
        \/ ProcessRegister(s, v) \/ ProcessNack(s, v)
        \/ ClaimFetch(s, v) \/ CompleteFetch(s, v) \/ ClaimMerge(s, v)
-       \/ CompleteMerge(s, v)
+       \/ CompleteMerge(s, v) \/ ClaimTerminal(s, v) \/ CompleteTerminal(s, v)
   \/ Crash
   \/ Terminating
 
@@ -306,6 +334,8 @@ FairSpec ==
     /\ SF_vars(\E v \in 1..MaxV : CompleteFetch(s, v))
     /\ SF_vars(\E v \in 1..MaxV : ClaimMerge(s, v))
     /\ SF_vars(\E v \in 1..MaxV : CompleteMerge(s, v))
+    /\ SF_vars(\E v \in 1..MaxV : ClaimTerminal(s, v))
+    /\ SF_vars(\E v \in 1..MaxV : CompleteTerminal(s, v))
     /\ SF_vars(\E v \in 1..MaxV : ProcessMerged(s, v) \/ ProcessRegister(s, v))
 
 INV_TypeOK == TypeOK
@@ -322,6 +352,8 @@ INV_SingleFlight == \A r \in Roots : flights[r] <= 1
 
 INV_SingleMergeWriter ==
   Cardinality({r \in Roots : mergeFlights[r] > 0}) <= 1
+
+INV_SingleTerminalWriter == \A r \in Roots : terminalFlights[r] <= 1
 
 \* A productive CAR stream is not a completed fetch.  The single receiver
 \* owner must retain it until transport completion (or until the DAG itself is
@@ -343,12 +375,17 @@ INV_PendingServiceable ==
 
 \* A durable receiver obligation must retain a provider the transport can
 \* actually reach.  Native signed pubsub can bind that provider to the origin.
-\* Iroh prefers the independently verified origin when that endpoint is already
-\* connected, and otherwise binds it to the authenticated immediate hop.  The
-\* signed origin prevents forged hints; the hop fallback preserves recovery in
-\* a sparse gossip mesh without treating an unroutable payload ID as a provider.
+\* Iroh binds recovery to the independently verified origin only when that
+\* endpoint is transport-routable.  The authenticated immediate hop is not
+\* sufficient: a gossip relay may hold only the announced root block.
 INV_PendingHasRoutableProvider ==
-  ProviderMode \in {"OriginBound", "AuthenticatedHop"} \/ pending = {}
+  ProviderMode = "OriginBound" \/ pending = {}
+
+\* Authentication and routability do not prove content availability. Every
+\* provider admitted to the fetch rotation must own requested linked content,
+\* not merely the head block it relayed in the gossip envelope.
+INV_PendingHasCompleteProvider ==
+  ProviderMode # "AuthenticatedHop" \/ pending = {}
 
 \* A routable-looking peer identifier is not sufficient: Iroh relay metadata
 \* authenticates only the last hop, so an origin carried in the payload must
@@ -372,4 +409,6 @@ INV_SenderMarkersOnly == payloadLedger = {}
 INV_MarkersReplayable == dirty \subseteq Scopes
 
 LIVE_EventualCurrency == <>[](\A s \in Scopes : mergedV[s] = localV[s])
+
+LIVE_EventualReceiverQuiescence == <>[](pending = {})
 ====

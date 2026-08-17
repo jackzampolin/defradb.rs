@@ -179,8 +179,8 @@ impl<S: Store> P2PHost<S> {
                     Ok((mut broadcast, encoding)) => {
                         // libp2p signs the original author into Message::source.
                         // Preserve it independently from the authenticated
-                        // propagation hop so recovery can prefer the author
-                        // only when a live route to it exists.
+                        // propagation hop. Durable recovery may use only that
+                        // author, and only when a live route to it exists.
                         if let Some(source) = message.source {
                             let source = source.to_string();
                             broadcast.source_peer_id = Some(source.clone());

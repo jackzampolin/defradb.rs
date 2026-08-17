@@ -53,6 +53,206 @@ fn pending_dag(doc_id: &str, inserted_at: Instant) -> PendingDag {
 }
 
 #[test]
+fn linked_dag_providers_require_positive_missing_cid_evidence() {
+    let manager = test_manager();
+    let root = test_cid(800);
+    let missing = test_cid(801);
+
+    manager.peer_state.peer_connected("root-only");
+    manager.peer_state.peer_has_cid("root-only", root);
+    manager.peer_state.peer_connected("connected-only");
+    manager.peer_state.peer_connected("descendant-provider");
+    manager
+        .peer_state
+        .peer_has_cid("descendant-provider", missing);
+
+    assert_eq!(
+        manager.get_providers_for_cids(&[missing]),
+        vec!["descendant-provider".to_string()],
+        "root possession and connectivity alone must not advertise linked-DAG availability"
+    );
+}
+
+struct BlockingRemoveStore {
+    inner: crate::sync::pending_store::PendingDagStore<MemoryStore>,
+    remove_calls: std::sync::atomic::AtomicUsize,
+    active_writers: std::sync::atomic::AtomicUsize,
+    max_active_writers: std::sync::atomic::AtomicUsize,
+    first_remove_entered: tokio::sync::Notify,
+    release_first_remove: tokio::sync::Notify,
+}
+
+impl BlockingRemoveStore {
+    fn new(inner: crate::sync::pending_store::PendingDagStore<MemoryStore>) -> Self {
+        Self {
+            inner,
+            remove_calls: std::sync::atomic::AtomicUsize::new(0),
+            active_writers: std::sync::atomic::AtomicUsize::new(0),
+            max_active_writers: std::sync::atomic::AtomicUsize::new(0),
+            first_remove_entered: tokio::sync::Notify::new(),
+            release_first_remove: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn max_active_writers(&self) -> usize {
+        self.max_active_writers
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::sync::pending_store::PendingDagStorage for BlockingRemoveStore {
+    async fn put(
+        &self,
+        root_cid: &Cid,
+        record: &crate::sync::pending_store::PersistedPendingDag,
+    ) -> crate::error::Result<()> {
+        self.inner.put(root_cid, record).await
+    }
+
+    async fn replace_scope_head(
+        &self,
+        superseded_root: Option<&Cid>,
+        root_cid: &Cid,
+        record: &crate::sync::pending_store::PersistedPendingDag,
+    ) -> crate::error::Result<()> {
+        self.inner
+            .replace_scope_head(superseded_root, root_cid, record)
+            .await
+    }
+
+    async fn remove(&self, root_cid: &Cid) -> crate::error::Result<()> {
+        let call = self
+            .remove_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let active = self
+            .active_writers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active_writers
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            self.first_remove_entered.notify_one();
+            self.release_first_remove.notified().await;
+        }
+        let result = self.inner.remove(root_cid).await;
+        self.active_writers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    async fn load_all(
+        &self,
+    ) -> crate::error::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
+        self.inner.load_all().await
+    }
+
+    async fn quarantine(
+        &self,
+        root_cid: &Cid,
+        entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+    ) -> crate::error::Result<()> {
+        let active = self
+            .active_writers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active_writers
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        let result = self.inner.quarantine(root_cid, entry).await;
+        self.active_writers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    async fn is_quarantined(&self, root_cid: &Cid) -> crate::error::Result<bool> {
+        self.inner.is_quarantined(root_cid).await
+    }
+
+    async fn load_quarantined(
+        &self,
+    ) -> crate::error::Result<Vec<(Cid, crate::sync::pending_store::PersistedQuarantinedDag)>> {
+        self.inner.load_quarantined().await
+    }
+
+    async fn remove_quarantined(&self, root_cid: &Cid) -> crate::error::Result<()> {
+        self.inner.remove_quarantined(root_cid).await
+    }
+}
+
+#[tokio::test]
+async fn terminal_remove_and_quarantine_share_one_durable_metadata_writer() {
+    use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+    let manager = Arc::new(test_manager());
+    let root = test_cid(900);
+    let store = Arc::new(BlockingRemoveStore::new(PendingDagStore::new(Arc::new(
+        MemoryStore::new(),
+    ))));
+    store
+        .put(
+            &root,
+            &PersistedPendingDag {
+                doc_id: "doc".to_string(),
+                collection_id: "collection".to_string(),
+                head_priority: None,
+                creator: "creator".to_string(),
+                source_peer: Some("peer".to_string()),
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            },
+        )
+        .await
+        .expect("seed pending record");
+    manager.install_pending_dag_store(store.clone()).await;
+
+    let first = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.remove_persisted_pending(&root).await }
+    });
+    store.first_remove_entered.notified().await;
+
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let second = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let second_started = Arc::clone(&second_started);
+        async move {
+            second_started.notify_one();
+            manager.remove_persisted_pending(&root).await;
+        }
+    });
+    second_started.notified().await;
+
+    let quarantine_started = Arc::new(tokio::sync::Notify::new());
+    let quarantine = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let quarantine_started = Arc::clone(&quarantine_started);
+        async move {
+            quarantine_started.notify_one();
+            manager
+                .quarantine_pending_dag(&root, "deterministic rejection")
+                .await;
+        }
+    });
+    quarantine_started.notified().await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        store.max_active_writers(),
+        1,
+        "same-root terminal observations must not enter concurrent store transactions"
+    );
+
+    store.release_first_remove.notify_one();
+    first.await.expect("first terminal task");
+    second.await.expect("second terminal task");
+    quarantine.await.expect("quarantine terminal task");
+    assert!(store.load_all().await.unwrap().is_empty());
+    assert!(store.is_quarantined(&root).await.unwrap());
+}
+
+#[test]
 fn newer_sender_scope_head_invalidates_the_old_fetch_lease() {
     let manager = test_manager();
     let old_root = test_cid(40);

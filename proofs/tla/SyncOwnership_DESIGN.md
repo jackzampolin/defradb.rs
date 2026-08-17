@@ -38,14 +38,17 @@ current composite or collection head CIDs with monotone versions.
 - `flights[root]` counts CAR fetch owners for an exact root.
 - `drained` records whether a fetch owner retained its productive CAR stream
   through transport completion instead of cancelling after the first block.
+- `terminalFlights[root]` counts durable pending-record cleanup writers.
+  Production admits one; the duplicate-terminal red policy permits two
+  merge/quarantine observations to contend on the same storage key.
 - `ProviderMode` distinguishes origin-bound recovery from authenticated-hop
-  recovery. Iroh selects the independently verified origin when that endpoint
-  is already connected to the receiver; otherwise it records the
-  transport-authenticated connected hop. This lets a directly connected hub
-  recover from the actual publisher instead of a partial relay, while a sparse
-  gossip mesh can still recover hop by hop without pretending every receiver
-  has a direct route to the publisher. The red modes retain an unroutable
-  origin or an unverified relay.
+  recovery and abstracts the least-qualified peer admitted to the provider
+  rotation. Iroh may use the independently verified publisher only when that
+  endpoint is transport-routable. Alternates require positive evidence for a
+  CID on the missing frontier; connectivity or root possession is insufficient.
+  An authenticated gossip hop is a red mode: the fleet demonstrated that a
+  relay may possess the announced root while all linked descendants are absent.
+  The other red modes retain an unroutable origin or an unverified relay.
 - `OriginAuthMode` distinguishes an origin bound by native transport metadata
   or an endpoint-key signature from an unsigned peer ID copied out of the
   gossip payload. A signed CRDT block proves content authorship, not that the
@@ -90,6 +93,9 @@ delay.
 - `INV_SingleFlight`: at most one fetch owner exists for an exact root/CID.
 - `INV_SingleMergeWriter`: one receiver-owned writer may hold a batch of ready
   roots, but independent merge writers never overlap.
+- `INV_SingleTerminalWriter`: repeated merge/quarantine observations for one
+  root coalesce through one durable metadata writer, so idempotent cleanup
+  cannot become concurrent OCC writers.
 - `INV_FetchOwnerDrainsResponse`: first-block progress cannot truncate the CAR
   response that the sole fetch owner needs to complete the DAG.
 - `INV_ReceiverQueueBounded`: durable want registrations never exceed `Cap`.
@@ -98,11 +104,14 @@ delay.
   atomically supersedes that sender's older root.
 - `INV_PendingServiceable`: every success-acked pending root retains a
   restart-safe CAR-serving path.
-- `INV_PendingHasRoutableProvider`: every success-acked root retains either the
-  native authenticated publisher or an authenticated connected Iroh hop.
+- `INV_PendingHasRoutableProvider`: every success-acked root retains the
+  independently authenticated publisher through a live transport route.
 - `INV_PendingHasAuthenticatedProvider`: a receiver never transfers durable
   ownership to a provider selected from an unsigned payload claim or an
   unverified relay.
+- `INV_PendingHasCompleteProvider`: neither the durable source nor an alternate
+  fetch candidate may be an authenticated gossip hop that owns only the root;
+  linked-CID alternates require positive availability evidence.
 - `INV_KnownFrontierUsesSelective`: once the head block exposes the missing
   frontier, receiver work requests those exact CIDs instead of first walking
   and serializing the entire historical DAG.
@@ -112,6 +121,8 @@ delay.
   marker/rederive protocol.
 - `LIVE_EventualCurrency`: under fair hint delivery and receiver dispatch, every
   scope eventually stays current despite drops, nacks, and one restart.
+- `LIVE_EventualReceiverQuiescence`: currency is not enough; every merged durable
+  receiver obligation is eventually retired.
 
 The register-then-ack deviation from Go remains honest because `pending` is
 durable in the green policy. An optimistic acknowledgement for an in-flight
@@ -122,7 +133,7 @@ fetch owner is deliberately not expressible.
 | Configuration | Verdict | Boundary isolated |
 | --- | --- | --- |
 | `MC_SyncOwnership_Green.cfg` | GREEN | marker+rederive, durable registration, one fetch owner, current-head ack guard |
-| `MC_SyncOwnership_Green_IrohHop.cfg` | GREEN | signed origin envelope plus transport-authenticated connected-hop recovery on a sparse Iroh mesh |
+| `MC_SyncOwnership_Green_IrohOrigin.cfg` | GREEN | signed, transport-routable Iroh origin owns the complete linked DAG |
 | `MC_SyncOwnership_Red_DocOnlyMarkers.cfg` | RED | a collection update is dropped after no collection marker was recorded |
 | `MC_SyncOwnership_Red_PayloadLedger.cfg` | RED | current-main CID/payload-valued sender durability violates marker-only ownership |
 | `MC_SyncOwnership_Red_VolatileRegistration.cfg` | RED | restart destroys the only state behind a success ack |
@@ -132,10 +143,12 @@ fetch owner is deliberately not expressible.
 | `MC_SyncOwnership_Red_RelayOnlyProvider.cfg` | RED | an unverified payload relay is recorded instead of a transport-authenticated recovery hop |
 | `MC_SyncOwnership_Red_UnroutableOrigin.cfg` | RED | the recorded publisher has no direct-or-relayed CAR route, so durable receiver ownership cannot complete |
 | `MC_SyncOwnership_Red_UnsignedIrohOrigin.cfg` | RED | an Iroh relay accepts an unsigned payload origin as if transport-authenticated |
+| `MC_SyncOwnership_Red_RootOnlyHop.cfg` | RED | an authenticated gossip relay owns the root but cannot serve its linked descendants |
 | `MC_SyncOwnership_Red_CancelOnProgress.cfg` | RED | the receiver cancels a productive CAR stream after its first block, stranding descendants |
 | `MC_SyncOwnership_Red_RecursiveFirst.cfg` | RED | a known missing frontier is delayed behind a recursive historical CAR walk |
 | `MC_SyncOwnership_Red_EveryRoot.cfg` | RED | successive current heads from one sender/scope accumulate obsolete durable roots |
 | `MC_SyncOwnership_Red_ParallelMerge.cfg` | RED | frontend-selected parallel merge workers overlap independent receiver writers |
+| `MC_SyncOwnership_Red_DuplicateTerminal.cfg` | RED | two terminal observations concurrently delete the same durable pending root |
 
 Each red configuration checks only type safety plus the property it is meant to
 violate, keeping its counterexample attributable.

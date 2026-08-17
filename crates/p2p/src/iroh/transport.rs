@@ -513,8 +513,8 @@ mod tests {
 
     use crate::iroh::{spawn_endpoint, IrohDiscoveryConfig, IrohEndpointConfig};
     use crate::message::{
-        PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest, SEArtifact,
-        SEFieldQuery,
+        PushLogBroadcast, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
+        SEArtifact, SEFieldQuery,
     };
     use crate::signing::sign_with_transport;
     use crate::transport::{P2PTransport, TransportEvent};
@@ -691,6 +691,118 @@ mod tests {
 
         transport0.shutdown().await.unwrap();
         task0.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn three_node_relay_preserves_origin_without_promoting_hop() {
+        use bytes::Bytes;
+
+        let key0 = SecretKey::generate();
+        let key1 = SecretKey::generate();
+        let key2 = SecretKey::generate();
+        let (command_tx0, _events0, _replicators0, task0) =
+            spawn_endpoint(test_config(key0.clone())).await.unwrap();
+        let (command_tx1, _events1, _replicators1, task1) =
+            spawn_endpoint(test_config(key1.clone())).await.unwrap();
+        let (command_tx2, mut events2, _replicators2, task2) =
+            spawn_endpoint(test_config(key2.clone())).await.unwrap();
+        let transport0 = IrohTransport::new(command_tx0, key0);
+        let transport1 = IrohTransport::new(command_tx1, key1);
+        let transport2 = IrohTransport::new(command_tx2, key2);
+
+        transport0
+            .dial(
+                transport1.local_peer_id(),
+                transport1.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport1
+            .dial(
+                transport2.local_peer_id(),
+                transport2.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport0
+            .poll_until_connected(transport1.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        transport1
+            .poll_until_connected(transport2.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let topic = DefraTopic::collection("collection");
+        transport0.subscribe(topic.clone()).await.unwrap();
+        transport1.subscribe(topic.clone()).await.unwrap();
+        transport2.subscribe(topic.clone()).await.unwrap();
+
+        async fn wait_for_topic_peer(transport: &IrohTransport, topic: &DefraTopic, peer: &PeerId) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if transport
+                        .topic_peers(topic.clone())
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|candidate| candidate == peer)
+                    {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("gossip topic did not form the expected chain");
+        }
+        wait_for_topic_peer(&transport0, &topic, transport1.local_peer_id()).await;
+        wait_for_topic_peer(&transport1, &topic, transport0.local_peer_id()).await;
+        wait_for_topic_peer(&transport1, &topic, transport2.local_peer_id()).await;
+        wait_for_topic_peer(&transport2, &topic, transport1.local_peer_id()).await;
+
+        let mut broadcast = PushLogBroadcast::new(
+            "doc".to_string(),
+            Bytes::from_static(&[1, 2, 3]),
+            "collection".to_string(),
+            "creator".to_string(),
+            Bytes::from_static(&[4, 5, 6]),
+        );
+        broadcast.source_peer_id = Some(transport0.local_peer_id().to_string());
+        let origin_bytes = broadcast.origin_signing_bytes().unwrap();
+        broadcast.origin_signature = Some(transport0.sign(&origin_bytes).unwrap());
+        transport0.publish(topic, broadcast).await.unwrap();
+
+        loop {
+            let event = timeout(Duration::from_secs(10), events2.recv())
+                .await
+                .expect("timed out waiting for relayed head hint")
+                .expect("iroh event channel closed");
+            if let TransportEvent::GossipMessage {
+                propagation_source,
+                message,
+                ..
+            } = event
+            {
+                assert_eq!(propagation_source, *transport1.local_peer_id());
+                assert_eq!(
+                    message.authenticated_source_peer_id(),
+                    Some(transport1.local_peer_id().as_str())
+                );
+                assert_eq!(
+                    message.authenticated_origin_peer_id(),
+                    Some(transport0.local_peer_id().as_str())
+                );
+                break;
+            }
+        }
+
+        transport0.shutdown().await.unwrap();
+        transport1.shutdown().await.unwrap();
+        transport2.shutdown().await.unwrap();
+        task0.await.unwrap();
+        task1.await.unwrap();
+        task2.await.unwrap();
     }
 
     #[tokio::test]

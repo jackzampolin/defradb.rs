@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gossip_authenticated_hop_is_the_durable_recovery_provider() {
+    async fn gossip_root_only_relay_cannot_become_durable_recovery_provider() {
         use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
 
         let store = Arc::new(MemoryStore::new());
@@ -776,31 +776,17 @@ mod tests {
         message.authenticate_origin_peer("origin-peer".to_string());
         message.authenticate_source_peer("relay-peer".to_string());
 
-        coordinator
+        let result = coordinator
             .handle_gossip_message(
                 PeerId::new("relay-peer".to_string()),
                 message,
                 "collection1".to_string(),
             )
-            .await
-            .expect("head hint should register receiver ownership");
+            .await;
 
-        match events.try_recv().expect("DagNeedsFetch event") {
-            SyncEvent::DagNeedsFetch {
-                root_cid: event_root,
-                sender_peer,
-                ..
-            } => {
-                assert_eq!(event_root, root_cid);
-                assert_eq!(sender_peer.as_deref(), Some("relay-peer"));
-            }
-            other => panic!("expected DagNeedsFetch, got {other:?}"),
-        }
-
-        let records = pending_store.load_all().await.expect("load pending roots");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].0, root_cid);
-        assert_eq!(records[0].1.source_peer.as_deref(), Some("relay-peer"));
+        assert!(matches!(result, Err(crate::error::Error::Unauthorized(_))));
+        assert!(events.try_recv().is_err());
+        assert!(pending_store.load_all().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -819,9 +805,17 @@ mod tests {
             .install_pending_dag_store(pending_store.clone())
             .await;
         coordinator.access.peer_state.peer_connected("origin-peer");
+        coordinator
+            .access
+            .peer_state
+            .peer_connected("root-only-peer");
 
         let (field_cid, _field_block) = create_lww_block("name");
         let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        coordinator
+            .access
+            .peer_state
+            .peer_has_cid("root-only-peer", root_cid);
         let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
         message.source_peer_id = Some("origin-peer".to_string());
         message.authenticate_origin_peer("origin-peer".to_string());
@@ -840,10 +834,15 @@ mod tests {
             SyncEvent::DagNeedsFetch {
                 root_cid: event_root,
                 sender_peer,
+                providers,
                 ..
             } => {
                 assert_eq!(event_root, root_cid);
                 assert_eq!(sender_peer.as_deref(), Some("origin-peer"));
+                assert!(
+                    providers.is_empty(),
+                    "a connected peer known only to hold the root must not become a descendant provider"
+                );
             }
             other => panic!("expected DagNeedsFetch, got {other:?}"),
         }
@@ -959,7 +958,7 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].0, root_cid);
         for (due_root, dag) in &due {
-            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+            coordinator.dispatch_pending_dag_fetch(*due_root, dag);
         }
         match events.try_recv().expect("redrive DagNeedsFetch event") {
             SyncEvent::DagNeedsFetch {

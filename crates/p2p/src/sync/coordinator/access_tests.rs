@@ -958,6 +958,7 @@ fn collection_commit_request(collection_id: &str) -> PushLogRequest {
 fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<usize> {
     let mut message = PushLogBroadcast::from_request(&collection_commit_request(collection_id));
     message.authenticate_source_peer(peer_id.to_string());
+    message.authenticate_origin_peer(peer_id.to_string());
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
@@ -985,6 +986,7 @@ fn gossip_event_on_topic(
 ) -> TransportEvent<usize> {
     let mut message = PushLogBroadcast::from_request(&pushlog_request(collection_id));
     message.authenticate_source_peer(peer_id.to_string());
+    message.authenticate_origin_peer(peer_id.to_string());
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),

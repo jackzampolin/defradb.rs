@@ -256,8 +256,9 @@ async fn create_with_node_chain() {
     }
 }
 
-/// Port: TestP2PCreate_WithP2PCollectionOnLastNodeInNodeChain_ShouldPropagateUpdate
-/// Known gap: multi-hop relay not yet functional for iroh — verifies first hop only.
+/// A three-node Iroh chain must converge through a provider that owns the
+/// complete linked DAG. A relayed root-only hint may not become C's durable
+/// recovery source; after B merges, its normal B→C head hint is serviceable.
 #[tokio::test]
 #[serial]
 async fn create_propagates_to_last_node_in_chain() {
@@ -317,7 +318,7 @@ async fn create_propagates_to_last_node_in_chain() {
         .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user on node0");
 
-    // Verify doc reaches node1 (first hop — always works)
+    // Verify doc reaches node1.
     let node1 = cluster.client(1);
     let node1_ref = &node1;
     poll_until(
@@ -340,19 +341,40 @@ async fn create_propagates_to_last_node_in_chain() {
     )
     .await;
 
-    // Check second hop to node2 (known gap for iroh transport)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    let node2_result = cluster
-        .client(2)
-        .query("query { Users { name age } }")
-        .unwrap_or_default();
-    let node2_has_doc = node2_result["Users"]
-        .as_array()
-        .map(|arr| arr.iter().any(|u| u["name"].as_str() == Some("John")))
-        .unwrap_or(false);
-    if !node2_has_doc {
-        eprintln!("KNOWN GAP: chain relay (0→1→2) not yet functional for iroh transport");
-    }
+    // B owns the full DAG only after its merge. Its B→C announcement must
+    // complete C without promoting A's root-only relayed hint into ownership.
+    let node2 = cluster.client(2);
+    poll_until(
+        || {
+            let result = node2
+                .query("query { Users { name age } }")
+                .unwrap_or_default();
+            result["Users"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter().any(|u| {
+                        u["name"].as_str() == Some("John") && u["age"].as_i64() == Some(21)
+                    })
+                })
+                .unwrap_or(false)
+        },
+        Duration::from_secs(30),
+        Duration::from_millis(300),
+        "doc did not reach node2 through the complete B provider",
+    )
+    .await;
+
+    let status: serde_json::Value =
+        reqwest::get(format!("{}/api/v0/p2p/sync/status", cluster.api_url(2)))
+            .await
+            .expect("node2 sync status request")
+            .json()
+            .await
+            .expect("node2 sync status json");
+    assert_eq!(status["pending_dags"].as_u64(), Some(0));
+    assert_eq!(status["persisted_pending_dags"].as_u64(), Some(0));
+    assert_eq!(status["pending_dag_fetch_exhausted"].as_u64(), Some(0));
+    assert_eq!(status["provider_rotations"].as_u64(), Some(0));
 }
 
 /// Port: TestP2PCreate_WithP2PCollectionAndSubscription_ShouldSucceed

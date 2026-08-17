@@ -396,7 +396,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // Different CIDs for one sender/scope must make one serialized
             // durable replacement decision. Otherwise concurrent heartbeats
             // can both observe the old head and recreate a per-root ledger.
-            let _registration_writer = self.pending_registration_writer.lock().await;
+            let _metadata_writer = self.pending_metadata_writer.lock().await;
             let durable_superseded_root = match self.persisted_scope_decision(
                 *cid,
                 sender_peer,
@@ -660,20 +660,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         Ok(())
     }
 
-    /// Get providers (peers that may have the blocks) for the given CIDs.
-    pub(super) fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<String> {
+    /// Get connected providers with positive evidence for at least one of the
+    /// requested CIDs. Merely being connected or having announced the root is
+    /// not evidence that a peer can serve linked descendants (#1512).
+    pub(crate) fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<String> {
         let mut providers = HashSet::new();
 
         // Add peers known to have any of the CIDs
         for cid in cids {
             for peer in self.peer_state.peers_with_cid(cid) {
-                providers.insert(peer);
-            }
-        }
-
-        // If no specific providers found, use all connected peers
-        if providers.is_empty() {
-            for peer in self.peer_state.connected_peers() {
                 providers.insert(peer);
             }
         }

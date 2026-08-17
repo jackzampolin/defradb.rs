@@ -746,34 +746,23 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .manager
                 .claim_due_pending_dag_retries(tokio::time::Instant::now());
             for (root_cid, dag) in due {
-                self.dispatch_pending_dag_fetch(root_cid, &dag, None);
+                self.dispatch_pending_dag_fetch(root_cid, &dag);
             }
         }
     }
 
-    /// Build the provider list for a fetch dispatch — connected peers, an
-    /// optional caller-supplied peer (e.g. a newly connected one), and the
-    /// DAG's original source, deduplicated — and emit `SyncEvent::DagNeedsFetch`.
-    /// Every dispatch site funnels through here so the wire event shape stays
-    /// uniform regardless of what triggered the dispatch.
-    fn dispatch_pending_dag_fetch(
-        &self,
-        root_cid: Cid,
-        dag: &PendingDag,
-        extra_provider: Option<&str>,
-    ) {
-        let mut providers: Vec<String> = self.access.peer_state.connected_peers();
-        if let Some(extra) = extra_provider {
-            if !providers.iter().any(|peer| peer == extra) {
-                providers.push(extra.to_string());
-            }
-        }
+    /// Build the provider list for a fetch dispatch from positive per-CID
+    /// availability evidence plus the authenticated DAG origin. A newly
+    /// connected or root-only peer may expedite the receiver clock, but it
+    /// must not become a linked-DAG provider merely by doing so (#1512).
+    fn dispatch_pending_dag_fetch(&self, root_cid: Cid, dag: &PendingDag) {
+        let missing: Vec<_> = dag.missing.iter().copied().collect();
+        let mut providers = self.manager.get_providers_for_cids(&missing);
         if let Some(source_peer) = dag.source_peer.clone() {
             if !providers.contains(&source_peer) {
                 providers.push(source_peer);
             }
         }
-        let missing: Vec<_> = dag.missing.iter().copied().collect();
         tracing::debug!(
             root_cid = %root_cid,
             missing_count = missing.len(),

@@ -124,9 +124,10 @@ pub struct SyncManager<B: Blockstore> {
     pub(super) pending_store:
         std::sync::OnceLock<Arc<dyn crate::sync::pending_store::PendingDagStorage>>,
 
-    /// Serializes same-scope durable replacement decisions across distinct
-    /// root CIDs. The storage transaction remains bounded and atomic.
-    pub(super) pending_registration_writer: tokio::sync::Mutex<()>,
+    /// Serializes every durable pending-DAG metadata transition. Registration,
+    /// terminal removal, quarantine, and migration must not become competing
+    /// OCC writers for the same root or sender scope.
+    pub(super) pending_metadata_writer: tokio::sync::Mutex<()>,
 
     /// Roots with a durable registration. Superset guard so the merge path
     /// only pays a delete transaction for roots that actually have records,
@@ -295,7 +296,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // (permanent admission outage); normalize to a 1-slot map.
             max_pending_dags: config.max_pending_dags.max(1),
             pending_store: std::sync::OnceLock::new(),
-            pending_registration_writer: tokio::sync::Mutex::new(()),
+            pending_metadata_writer: tokio::sync::Mutex::new(()),
             persisted_roots: Arc::new(RwLock::new(std::collections::HashSet::new())),
             persisted_scope_heads: Arc::new(RwLock::new(HashMap::new())),
             pending_resync_in_flight: std::sync::atomic::AtomicBool::new(false),
@@ -491,6 +492,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     }
 
     pub(super) async fn remove_persisted_pending(&self, root_cid: &Cid) {
+        let _metadata_writer = self.pending_metadata_writer.lock().await;
         if let Some(store) = self.pending_store() {
             match store.remove(root_cid).await {
                 Ok(()) => {

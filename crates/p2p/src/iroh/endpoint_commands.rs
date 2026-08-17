@@ -33,9 +33,8 @@ use super::protocols;
 ///
 /// Iroh's `delivered_from` authenticates only the last hop. New publishers
 /// therefore sign the canonical envelope with their endpoint key. The signed
-/// origin proves who emitted the hint; durable CAR recovery is separately
-/// bound to the authenticated connected hop so sparse meshes need not pretend
-/// every receiver already has a direct route to the publisher. During a
+/// origin proves who emitted the hint. The connected hop is retained only as
+/// ingress metadata: a gossip relay may not own the linked DAG. During a
 /// rolling upgrade, an unsigned envelope is accepted only when Iroh proves it
 /// arrived directly from its publisher; any payload `SourcePeerID` is ignored.
 fn authenticate_pushlog_origin(
@@ -947,7 +946,7 @@ pub(super) async fn subscribe_topic_str(
                                     origin_peer_id = %origin,
                                     is_direct = msg.scope.is_direct(),
                                     topic = %topic_str_clone,
-                                    "Authenticated Iroh head hint and bound recovery to connected hop"
+                                    "Authenticated Iroh head-hint origin and ingress hop"
                                 );
                                 if encoding != crate::message::PushLogGossipPayloadEncoding::PostcardBroadcast {
                                     debug!(
@@ -1215,7 +1214,7 @@ mod origin_tests {
     }
 
     #[test]
-    fn relayed_origin_is_verified_while_recovery_binds_to_authenticated_hop() {
+    fn relayed_origin_is_verified_and_hop_is_only_ingress_metadata() {
         let origin = iroh::SecretKey::generate();
         let relay = iroh::SecretKey::generate().public();
         let mut message = broadcast();

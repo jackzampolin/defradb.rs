@@ -736,6 +736,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // retire obsolete heads without retaining payload/CID ledgers.
             if record.head_priority.is_none() && head_priority.is_some() {
                 record.head_priority = head_priority;
+                let _metadata_writer = self.pending_metadata_writer.lock().await;
                 match store.put(&root_cid, &record).await {
                     Ok(()) => self.remember_persisted_scope_head(
                         root_cid,
@@ -874,6 +875,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// merge that is now known to fail forever.
     pub async fn quarantine_pending_dag(&self, root_cid: &Cid, reason: &str) {
         let entry = self.build_quarantine_entry(root_cid, reason).await;
+
+        // Registration, successful-merge cleanup, and quarantine are all
+        // transitions of the same durable obligation. Keep their storage
+        // transactions behind one manager-local writer so duplicate terminal
+        // observations cannot exhaust OCC retries against the same keys.
+        let _metadata_writer = self.pending_metadata_writer.lock().await;
 
         // Checked BEFORE the write: a remote re-push of an already-rejected
         // root re-runs this function (repeat rejection is the expected,

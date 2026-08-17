@@ -33,7 +33,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         .try_claim_pending_dag_dispatch(&root_cid, tokio::time::Instant::now())
                     {
                         if let Some(dag) = self.manager.pending_dag_snapshot(&root_cid) {
-                            self.dispatch_pending_dag_fetch(root_cid, &dag, None);
+                            self.dispatch_pending_dag_fetch(root_cid, &dag);
                         }
                     } else {
                         tracing::debug!(
@@ -620,7 +620,7 @@ mod tests {
             .claim_due_pending_dag_retries(tokio::time::Instant::now());
         assert_eq!(due.len(), 1);
         for (due_root, dag) in &due {
-            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+            coordinator.dispatch_pending_dag_fetch(*due_root, dag);
         }
 
         match events.try_recv().expect("clock-driven DagNeedsFetch event") {
@@ -740,7 +740,7 @@ mod tests {
             "root1 should be due after its second rung elapses"
         );
         for (due_root, dag) in due.iter().filter(|(cid, _)| *cid == root1_cid) {
-            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+            coordinator.dispatch_pending_dag_fetch(*due_root, dag);
         }
         match events.try_recv().expect("clock-driven DagNeedsFetch event") {
             SyncEvent::DagNeedsFetch {
