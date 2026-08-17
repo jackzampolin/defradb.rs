@@ -88,7 +88,7 @@ async fn replication_test(cluster: TestCluster) {
 }
 
 #[tokio::test]
-async fn rust_to_go_replicator_backfills_existing_lww_document() {
+async fn go_rust_replicator_backfills_existing_lww_document() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
