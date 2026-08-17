@@ -398,7 +398,8 @@ mod rate_limit_retry_tests {
         let retries = peerstore.get_retry_documents(peer.as_str()).await.unwrap();
         assert_eq!(retries.len(), 1);
         assert_eq!(retries[0].doc_id, "doc-1");
-        assert!(retries[0].pending);
+        assert_eq!(retries[0].scope, storage::stores::RetryScope::Document);
+        assert!(!retries[0].is_collection_commit());
         assert!(!retries[0].retry_info.is_due());
         let saved = peerstore
             .get_replicator(peer.as_str())
