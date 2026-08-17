@@ -22,6 +22,8 @@ mod gql_list_args;
 mod index_fallback_4633;
 #[path = "query/index_management.rs"]
 mod index_management;
+#[path = "query/json_missing_key.rs"]
+mod json_missing_key;
 #[path = "query/lens.rs"]
 mod lens;
 #[path = "query/lens_persistence.rs"]

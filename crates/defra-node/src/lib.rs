@@ -17,6 +17,7 @@
 //! - `http` — GraphQL HTTP server.
 //! - `otel` — OpenTelemetry exporter.
 
+mod acp_ops;
 mod benchmark_data_gen;
 mod benchmark_queries;
 mod benchmark_stats;
@@ -24,6 +25,8 @@ mod benchmark_stats;
 pub mod benchmark_support;
 pub mod coding_search;
 pub mod config;
+#[cfg(test)]
+mod dac_api_tests;
 mod db_impls;
 pub mod dense_search;
 #[cfg(test)]
@@ -43,6 +46,9 @@ use defra_core::signing::SigningConfig;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
 use rand::Rng;
 
+/// Re-exported so callers can name `Arc<dyn DocumentACP>` (the type
+/// [`EmbeddedNode::document_acp`] returns) without depending on `acp` directly.
+pub use acp::{DocumentACP, DocumentPermission, Identity as AcpIdentity};
 pub use coding_search::{
     CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
     CodingSearchTarget,
@@ -145,6 +151,8 @@ pub struct EmbeddedNode {
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
     block_ops: Arc<dyn BlockOps>,
+    acp_ops: Arc<dyn acp_ops::AcpOps>,
+    document_acp: Arc<dyn acp::DocumentACP>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     node_query_identity: Option<identity::Did>,
@@ -482,6 +490,64 @@ impl EmbeddedNode {
         &self.event_bus
     }
 
+    /// Register a DAC policy (Go: client.Store::AddDACPolicy). Returns the policy ID.
+    pub async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
+        self.acp_ops.add_dac_policy(identity, policy).await
+    }
+
+    /// Grant `target` the `relation` on a document (Go: client.Store::AddDACActorRelationship).
+    ///
+    /// `identity` is the requesting actor's DID; it must own the document or
+    /// hold a relation that manages `relation`. `target` is an actor DID, the
+    /// all-actors wildcard `*`, or a structured subject.
+    ///
+    /// Returns `existed_already`: `true` means the relationship was already
+    /// present and the call was a no-op, `false` means it was newly added. A new
+    /// grant also publishes a document-update event.
+    pub async fn add_dac_actor_relationship(
+        &self,
+        identity: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        target: &str,
+    ) -> anyhow::Result<bool> {
+        self.acp_ops
+            .add_dac_actor_relationship(identity, collection, doc_id, relation, target)
+            .await
+    }
+
+    /// Revoke `target`'s `relation` on a document (Go: client.Store::DeleteDACActorRelationship).
+    ///
+    /// `identity` is the requesting actor's DID; it must own the document or
+    /// hold a relation that manages `relation`.
+    ///
+    /// Returns `record_found`: `true` means the relationship existed and was
+    /// deleted, `false` means there was nothing to delete.
+    pub async fn delete_dac_actor_relationship(
+        &self,
+        identity: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        target: &str,
+    ) -> anyhow::Result<bool> {
+        self.acp_ops
+            .delete_dac_actor_relationship(identity, collection, doc_id, relation, target)
+            .await
+    }
+
+    /// Access the raw document ACP handle (Go: `node.DB.DocumentACP()`).
+    ///
+    /// This is an escape hatch for policy and relationship operations the node
+    /// does not wrap. It bypasses node access control and the collection-policy
+    /// lookup, so standard flows belong on [`Self::add_dac_policy`],
+    /// [`Self::add_dac_actor_relationship`], and
+    /// [`Self::delete_dac_actor_relationship`].
+    pub fn document_acp(&self) -> Arc<dyn acp::DocumentACP> {
+        self.document_acp.clone()
+    }
+
     /// Access the resolved node-level embedding runtime config.
     pub fn embedding_config(&self) -> &db::EmbeddingClientConfig {
         &self.embedding_config
@@ -746,7 +812,7 @@ pub struct NodeBuilder {
 }
 
 struct StoreBuildArgs {
-    acp_store: Arc<dyn acp::AcpStore>,
+    persistence: node_acp::Persistence,
     document_acp_config: DocumentAcpConfig,
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
@@ -1112,12 +1178,11 @@ impl NodeBuilder {
                 "embedded node starting (ephemeral, no data_path)"
             );
             let store = Arc::new(storage::MemoryStore::new());
-            let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
 
             Self::build_with_store(
                 store,
                 StoreBuildArgs {
-                    acp_store,
+                    persistence: node_acp::Persistence::Memory,
                     document_acp_config: self.document_acp,
                     db_options,
                     event_bus,
@@ -1238,13 +1303,10 @@ impl NodeBuilder {
             telemetry_handle,
         } = args;
 
-        let acp_store: Arc<dyn acp::AcpStore> =
-            Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-
         Self::build_with_store(
             store,
             StoreBuildArgs {
-                acp_store,
+                persistence: node_acp::Persistence::Persistent,
                 document_acp_config,
                 db_options,
                 event_bus,
@@ -1268,7 +1330,7 @@ impl NodeBuilder {
         args: StoreBuildArgs,
     ) -> anyhow::Result<EmbeddedNode> {
         let StoreBuildArgs {
-            acp_store,
+            persistence,
             document_acp_config,
             db_options,
             event_bus,
@@ -1397,8 +1459,13 @@ impl NodeBuilder {
             registry.start_stale_transaction_cleanup(cleanup.max_idle_age, cleanup.sweep_interval)
         });
 
-        let (document_acp, _strict_replicated_doc_access) =
-            node_acp::create_document_acp(acp_store, &document_acp_config).await?;
+        let acp_setup =
+            node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
+        let document_acp = acp_setup.document_acp.clone();
+        #[cfg(feature = "sourcehub")]
+        let _strict_replicated_doc_access = acp_setup.sourcehub_acp.is_some();
+        #[cfg(not(feature = "sourcehub"))]
+        let _strict_replicated_doc_access = false;
 
         #[cfg(feature = "p2p")]
         if let Some(wire_document_acp) = p2p_result
@@ -1423,14 +1490,26 @@ impl NodeBuilder {
         };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
+        #[cfg(feature = "sourcehub")]
+        let policy_lookup =
+            acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.sourcehub_acp);
+        #[cfg(not(feature = "sourcehub"))]
+        let policy_lookup = acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store);
         let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
             database.clone(),
             query_limits,
             document_acp.clone(),
+            policy_lookup.clone(),
+        ));
+        let acp_ops: Arc<dyn acp_ops::AcpOps> = Arc::new(acp_ops::DbAcpOps::new(
+            database.clone(),
+            document_acp.clone(),
+            policy_lookup,
+            event_bus.clone(),
         ));
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
-            document_acp,
+            document_acp.clone(),
             registry,
             node_query_identity.clone(),
         ));
@@ -1446,6 +1525,8 @@ impl NodeBuilder {
             event_bus,
             schema_ops,
             block_ops,
+            acp_ops,
+            document_acp,
             embedding_config,
             node_identity_did,
             node_query_identity,

@@ -250,6 +250,82 @@ async fn patch_collection_rejects_numeric_kind_in_direct_kind_replacement() {
 }
 
 #[tokio::test]
+async fn patch_collection_rejects_mutating_an_existing_policy() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+    let collections = query::parse_sdl(
+        r#"
+        type Secrets @policy(id: "policy-a", resource: "secrets") {
+            name: String
+        }
+        "#,
+    )
+    .unwrap();
+    db.create_collections_atomic(collections).await.unwrap();
+    assert!(db
+        .get_collection("Secrets")
+        .unwrap()
+        .unwrap()
+        .schema()
+        .policy
+        .is_some());
+
+    let err = db
+        .patch_collection(
+            "Secrets",
+            r#"
+            [{
+                "op": "replace",
+                "path": "/Secrets/Policy",
+                "value": {"ID": "policy-b", "ResourceName": "secrets"}
+            }]
+            "#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("collection policy cannot be mutated."),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn patch_collection_rejects_adding_a_policy_to_a_policy_free_collection() {
+    let db = agent_response_db().await;
+    assert!(db
+        .get_collection("AgentResponse")
+        .unwrap()
+        .unwrap()
+        .schema()
+        .policy
+        .is_none());
+
+    let err = db
+        .patch_collection(
+            "AgentResponse",
+            r#"
+            [{
+                "op": "replace",
+                "path": "/AgentResponse/Policy",
+                "value": {"ID": "policy-a", "ResourceName": "agents"}
+            }]
+            "#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("collection policy cannot be mutated."),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn patch_relation_version_switching_preserves_go_canonical_versions() {
     const AUTHOR_V1: &str = "bafyreibvcavbxqwimz5vdxe5q5href63g3skc6ytg45hm4fqh6wsx57wmq";
     const AUTHOR_V2: &str = "bafyreihv2jdbz3sipc7tqdoycerkcjn6gehr5aleiroqlewvsmjd26unfq";

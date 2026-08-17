@@ -747,6 +747,25 @@ fn test_has_key_empty_string_key() {
     assert!(filter.matches(&fields, &mapping).unwrap());
 }
 
+#[test]
+fn test_missing_nested_field_in_matches_implicit_null() {
+    let mapping = make_extended_mapping();
+    let mut fields = make_extended_fields();
+    fields[5] = Some(json!({"other": 1}));
+
+    let includes_null = Filter::from_conditions(map([(
+        "metadata".to_string(),
+        json!({"score": {"_in": [null, 5]}}),
+    )]));
+    assert!(includes_null.matches(&fields, &mapping).unwrap());
+
+    let excludes_null = Filter::from_conditions(map([(
+        "metadata".to_string(),
+        json!({"score": {"_in": [5]}}),
+    )]));
+    assert!(!excludes_null.matches(&fields, &mapping).unwrap());
+}
+
 // =========================================================================
 // Pattern matching edge cases
 // =========================================================================
