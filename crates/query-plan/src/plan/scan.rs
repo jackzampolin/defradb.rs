@@ -66,6 +66,11 @@ pub struct ScanNode {
     emitted: usize,
     /// The `k` the last search asked for.
     vector_k: usize,
+    /// Document ids the routed phase already returned, so the fallback scan
+    /// does not emit them twice.
+    vector_returned: HashSet<String>,
+    /// Whether the exhaustive fallback has been opened.
+    vector_fell_back: bool,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -112,6 +117,8 @@ impl ScanNode {
             vector_exhausted: false,
             emitted: 0,
             vector_k: 0,
+            vector_returned: HashSet::new(),
+            vector_fell_back: false,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -234,6 +241,49 @@ impl ScanNode {
         // index for a scan that fell through to reading the whole collection.
         self.vector_indexed = true;
         self.exec_info.indexes_fetched += 1;
+        Ok(true)
+    }
+
+    /// Fall back to reading the collection when the index cannot answer the
+    /// page.
+    ///
+    /// A vector index holds an entry per indexed vector, not per document. A
+    /// document whose vector is null or missing is never inserted, and an index
+    /// created over an existing collection holds nothing until each document is
+    /// written again. Exhausting the index therefore does not mean exhausting
+    /// the collection, and stopping there drops rows a caller asked for: with
+    /// one indexed vector among three documents, `limit: 3` returned one row.
+    ///
+    /// So an exhausted index that still owes rows hands the rest of the scan to
+    /// a full read, skipping what it already returned. When the index does
+    /// satisfy the page this never runs, and when it does not the cost is the
+    /// exhaustive scan the query would have paid before routing existed.
+    async fn open_vector_fallback_scan(&mut self) -> Result<bool> {
+        let (Some(route), Some(fetcher)) = (self.vector_route.clone(), self.fetcher.clone()) else {
+            return Ok(false);
+        };
+        if self.vector_fell_back || !self.vector_exhausted || self.emitted >= route.k {
+            return Ok(false);
+        }
+
+        debug!(
+            collection = %self.collection.name,
+            index_id = route.index_id,
+            emitted = self.emitted,
+            wanted = route.k,
+            returned = self.vector_returned.len(),
+            "vector index exhausted before the page filled, reading the collection"
+        );
+
+        if let Some(mut previous) = self.stream.take() {
+            previous.close().await?;
+        }
+        self.stream = Some(
+            fetcher
+                .stream_all_with_deleted(&self.collection.name, self.show_deleted)
+                .await?,
+        );
+        self.vector_fell_back = true;
         Ok(true)
     }
 
@@ -403,6 +453,9 @@ impl PlanNode for ScanNode {
                         if self.wants_more_candidates() && self.open_vector_stream().await? {
                             continue;
                         }
+                        if self.open_vector_fallback_scan().await? {
+                            continue;
+                        }
                         return Ok(false);
                     }
                 };
@@ -430,6 +483,22 @@ impl PlanNode for ScanNode {
                 if let Some(ref filter) = self.filter {
                     if !filter.matches(doc.fields(), &self.document_mapping)? {
                         continue;
+                    }
+                }
+
+                if self.vector_route.is_some() {
+                    match (doc.doc_id(), self.vector_fell_back) {
+                        // Already returned by the routed phase.
+                        (Some(doc_id), true) if self.vector_returned.contains(doc_id) => continue,
+                        (Some(doc_id), false) => {
+                            self.vector_returned.insert(doc_id.to_string());
+                        }
+                        // Nothing to dedupe on, so the fallback cannot tell this
+                        // apart from a row it already returned. Skipping risks
+                        // dropping an unaddressable document; emitting risks a
+                        // duplicate, which is the worse answer.
+                        (None, true) => continue,
+                        _ => {}
                     }
                 }
 

@@ -551,3 +551,102 @@ async fn an_empty_index_is_not_reported_as_serving_the_scan() {
         "nor counted as a fetch\n{explain:#}"
     );
 }
+
+/// Exhausting the index is not exhausting the collection.
+///
+/// A vector index holds an entry per indexed vector. A document whose embedding
+/// is null is never inserted, so a routed scan that stops when the index runs
+/// dry drops rows the caller asked for. With one indexed vector among three
+/// documents, `limit: 3` returned one row.
+#[tokio::test]
+async fn documents_without_a_vector_still_fill_the_page() {
+    let node = node_with("").await;
+
+    query_data(
+        &node,
+        &format!(
+            r#"mutation {{ create_Note(input: {{ title: "has-vector", tag: "even", embedding: [{}] }}) {{ _docID }} }}"#,
+            render(&vector_for(0))
+        ),
+        "seed indexed",
+    )
+    .await;
+    for title in ["no-vector-a", "no-vector-b"] {
+        query_data(
+            &node,
+            &format!(r#"mutation {{ create_Note(input: {{ title: "{title}", tag: "even" }}) {{ _docID }} }}"#),
+            "seed unindexed",
+        )
+        .await;
+    }
+
+    let data = query_data(
+        &node,
+        &similarity_query(&vector_for(0), 3, None),
+        "similarity over a partly indexed collection",
+    )
+    .await;
+    let rows = data["Note"].as_array().expect("rows");
+
+    assert_eq!(
+        rows.len(),
+        3,
+        "every document must be returned, not only the indexed one: {rows:?}"
+    );
+
+    let titles: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["title"].as_str())
+        .collect();
+    for expected in ["has-vector", "no-vector-a", "no-vector-b"] {
+        assert!(
+            titles.contains(&expected),
+            "{expected} missing from {titles:?}"
+        );
+    }
+}
+
+/// A document is returned once, not twice, when the fallback runs.
+#[tokio::test]
+async fn the_fallback_does_not_duplicate_indexed_documents() {
+    let node = node_with("").await;
+
+    for index in 0..3 {
+        query_data(
+            &node,
+            &format!(
+                r#"mutation {{ create_Note(input: {{ title: "indexed-{index}", tag: "even", embedding: [{}] }}) {{ _docID }} }}"#,
+                render(&vector_for(index))
+            ),
+            "seed indexed",
+        )
+        .await;
+    }
+    query_data(
+        &node,
+        r#"mutation { create_Note(input: { title: "unindexed", tag: "even" }) { _docID } }"#,
+        "seed unindexed",
+    )
+    .await;
+
+    let data = query_data(
+        &node,
+        &similarity_query(&vector_for(0), 10, None),
+        "over-wide limit",
+    )
+    .await;
+    let rows = data["Note"].as_array().expect("rows");
+
+    let mut titles: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["title"].as_str())
+        .collect();
+    titles.sort_unstable();
+    let mut unique = titles.clone();
+    unique.dedup();
+    assert_eq!(
+        titles, unique,
+        "a document must not be returned twice: {titles:?}"
+    );
+    assert_eq!(titles.len(), 4, "every document exactly once: {titles:?}");
+}

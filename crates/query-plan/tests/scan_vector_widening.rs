@@ -38,15 +38,30 @@ impl DocStream for ClosingStream {
     }
 }
 
-#[derive(Default)]
 struct WideningFetcher {
     opened: AtomicUsize,
     closed: Arc<AtomicUsize>,
+    /// How many of the corpus\'s documents the index actually holds.
+    indexed: u64,
+}
+
+impl Default for WideningFetcher {
+    fn default() -> Self {
+        Self {
+            opened: AtomicUsize::new(0),
+            closed: Arc::new(AtomicUsize::new(0)),
+            indexed: CORPUS,
+        }
+    }
 }
 
 impl WideningFetcher {
     fn document(short_id: u64) -> document::Document {
         let mut doc = document::Document::new();
+        doc.set(
+            "_docID",
+            document::NormalValue::String(format!("bae-{short_id}")),
+        );
         doc.set(
             "title",
             document::NormalValue::String(format!("doc-{short_id}")),
@@ -79,12 +94,20 @@ impl DocFetcher for WideningFetcher {
         unreachable!("this test never fetches by field value")
     }
 
+    /// A routed scan falls back to this once the index is exhausted and the
+    /// page is still short, so it counts toward the open/close balance too.
     async fn stream_all_with_deleted(
         &self,
         _collection: &str,
         _show_deleted: bool,
     ) -> Result<Box<dyn DocStream>> {
-        unreachable!("a routed scan must not fall back to a full scan")
+        self.opened.fetch_add(1, Ordering::Relaxed);
+        let documents: Vec<(document::Document, bool)> =
+            (1..=CORPUS).map(|id| (Self::document(id), false)).collect();
+        Ok(Box::new(ClosingStream {
+            documents: documents.into_iter(),
+            closes: self.closed.clone(),
+        }))
     }
 
     async fn stream_by_doc_short_ids(
@@ -117,7 +140,7 @@ impl DocFetcher for WideningFetcher {
         k: usize,
         _effort: Option<usize>,
     ) -> Result<Vec<u64>> {
-        Ok((1..=CORPUS.min(k as u64)).collect())
+        Ok((1..=self.indexed.min(k as u64)).collect())
     }
 }
 
@@ -204,5 +227,36 @@ async fn every_replaced_stream_is_closed() {
         fetcher.closed.load(Ordering::Relaxed),
         opened,
         "every stream opened must also be closed"
+    );
+}
+
+/// An index that cannot fill the page hands the rest of the scan to a full
+/// read, rather than reporting a short page as the whole answer.
+#[tokio::test]
+async fn an_exhausted_index_falls_back_to_the_collection() {
+    // The index holds a fraction of the collection, as it does when vectors are
+    // null or the index was created over existing documents.
+    let fetcher = Arc::new(WideningFetcher {
+        indexed: 8,
+        ..WideningFetcher::default()
+    });
+    let mut node = ScanNode::new(collection(), mapping())
+        .with_fetcher(fetcher.clone())
+        .with_vector_route(VectorRoute {
+            index_id: 0,
+            query_vector: vec![1.0],
+            k: (CORPUS as usize) + 8,
+        });
+
+    let rows = drain(&mut node).await;
+
+    assert_eq!(
+        rows, CORPUS as usize,
+        "the fallback must supply every document the index could not"
+    );
+    assert_eq!(
+        fetcher.closed.load(Ordering::Relaxed),
+        fetcher.opened.load(Ordering::Relaxed),
+        "every stream opened, fallback included, must be closed"
     );
 }
