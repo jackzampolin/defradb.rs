@@ -21,6 +21,8 @@ pub use write::{write_delete_block, write_document_blocks};
 
 use std::collections::HashMap;
 
+use tracing::warn;
+
 use cid::Cid;
 use crypto::PrivateKey;
 use datastore::NamespaceView;
@@ -94,6 +96,30 @@ pub(crate) fn compute_signature(
         .map_err(|e| format!("Failed to encode block for signing: {}", e))?;
 
     let sig_type: defra_core::block::SignatureType = signer.key_type.into();
+
+    // A Go peer refuses a signature type it cannot map to a key type, so a block
+    // signed with a Rust-only type replicates between Rust nodes and is rejected
+    // by Go ones. Emitting one is a deployment decision, so it is refused unless
+    // the node has said it accepts a partitioned network.
+    if !sig_type.is_go_verifiable()
+        && !defra_core::block::go_verifiable_policy::non_go_verifiable_signing_allowed()
+    {
+        return Err(format!(
+            "refusing to sign a block with {sig_type:?} ({}): Go peers cannot verify it and \
+             will reject the block during replication. Set {}=1 to allow it on this node.",
+            signer.key_type,
+            defra_core::block::go_verifiable_policy::ALLOW_ENV,
+        ));
+    }
+    if !sig_type.is_go_verifiable() {
+        warn!(
+            signature_type = ?sig_type,
+            key_type = %signer.key_type,
+            "signing a block Go peers cannot verify; it will be rejected when \
+             replicating to a Go node"
+        );
+    }
+
     let sig_bytes = if let Some(remote) = signer.remote_signer.as_ref() {
         remote.sign_sync(&block_bytes, signer.signing_authorization.as_ref())?
     } else {

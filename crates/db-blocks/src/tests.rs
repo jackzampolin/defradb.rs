@@ -189,8 +189,57 @@ fn test_compute_signature_rejects_local_secp256r1_block_signing() {
     );
 }
 
+/// The Go-verifiable policy is process-global, so tests that move it cannot run
+/// beside each other.
+fn go_verifiable_gate() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    defra_core::block::go_verifiable_policy::reset_for_test();
+    guard
+}
+
+/// Denied by default. A Go peer refuses `ES256`, so a node that has not opted in
+/// must not put such a block on the wire. This is the guard #1456 removed.
 #[test]
-fn test_compute_signature_accepts_remote_secp256r1_block_signing() {
+fn test_compute_signature_refuses_remote_secp256r1_without_the_gate() {
+    let _serial = go_verifiable_gate();
+
+    let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+    let public_key = private_key.public_key();
+    let public_key_hex = hex::encode(public_key.raw());
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "schema-v1".to_string(),
+            status: 1,
+            priority: 1,
+        }),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let signer = defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Secp256r1,
+        private_key_bytes: Vec::new(),
+        public_key_bytes: public_key.raw_owned(),
+        public_key_hex,
+        remote_signer: Some(Arc::new(LocalSecp256r1Signer { private_key })),
+        signing_authorization: None,
+    };
+
+    let error = compute_signature(&block, &signer)
+        .expect_err("a type Go cannot verify must be refused by default");
+    assert!(
+        error.contains("DEFRA_ALLOW_NON_GO_VERIFIABLE_SIGNING"),
+        "the refusal must name the way to allow it: {error}"
+    );
+}
+
+#[test]
+fn test_compute_signature_signs_remote_secp256r1_once_the_gate_is_open() {
+    let _serial = go_verifiable_gate();
+    defra_core::block::go_verifiable_policy::allow_non_go_verifiable_signing(true);
+
     let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
     let public_key = private_key.public_key();
     let public_key_hex = hex::encode(public_key.raw());
