@@ -36,12 +36,10 @@ pub unsafe extern "C" fn p2p_sync_status(
         );
 
         let result = NODES
-            .get(node_ptr, |state| {
-                let p2p = match &state.p2p {
-                    Some(p2p) => p2p,
-                    None => return Err(FfiP2PError::no_p2p_system()),
-                };
-
+            .get(node_ptr, |state| state.p2p.clone())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
+            .and_then(|p2p| p2p.ok_or_else(FfiP2PError::no_p2p_system))
+            .and_then(|p2p| {
                 rt.block_on(async {
                     let status = p2p
                         .system
@@ -56,9 +54,7 @@ pub unsafe extern "C" fn p2p_sync_status(
                         ))
                     })
                 })
-            })
-            .ok_or_else(FfiP2PError::invalid_node_handle)
-            .and_then(|result| result);
+            });
 
         into_ffi_result(result)
     }
