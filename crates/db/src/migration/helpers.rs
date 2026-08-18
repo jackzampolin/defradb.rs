@@ -236,7 +236,7 @@ mod tests {
 
     /// A DateTime field reindexed through a lens migration must produce
     /// `NormalValue::Time`, matching the encoding that fresh document indexing
-    /// uses (`encode_time_*`, nanoseconds). Returning `NormalValue::String`
+    /// uses (`encode_time_*`). Returning `NormalValue::String`
     /// here re-encodes the index entries as RFC3339 strings, which diverges
     /// from freshly-built entries and from cursor seek keys (Time-encoded),
     /// breaking index-seek pagination after a reindex.

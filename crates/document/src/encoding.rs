@@ -145,7 +145,7 @@ pub fn json_to_normal_value(value: serde_json::Value) -> Result<NormalValue> {
 /// RFC3339 string) so that secondary-index entries are byte-identical whether a
 /// document is freshly written or rebuilt by a reindex. Divergence here
 /// silently corrupts index-seek pagination and range filters on the field: the
-/// index stores `encode_time_*` (nanoseconds) on the write path but would store
+/// index stores `encode_time_*` on the write path but would store
 /// `encode_string_*` (UTF-8) on the reindex path, so seeks land in the wrong
 /// place.
 ///
@@ -169,7 +169,7 @@ pub fn json_to_normal_value_for_kind(
             value.as_str().map(|s| NormalValue::String(s.to_string()))
         }
         ScalarKind::DateTime => match value {
-            JsonValue::String(s) => DateTime::parse_from_rfc3339(s).ok().map(NormalValue::Time),
+            JsonValue::String(s) => crate::rfc3339::parse_rfc3339(s).map(NormalValue::Time),
             JsonValue::Number(n) => n.as_i64().and_then(|ts| {
                 DateTime::from_timestamp(ts, 0).map(|dt| {
                     NormalValue::Time(dt.with_timezone(&FixedOffset::east_opt(0).unwrap()))
