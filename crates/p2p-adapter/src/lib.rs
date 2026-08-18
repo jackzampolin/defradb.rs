@@ -62,13 +62,14 @@ where
 
 /// Collections that need an initial document replay when adding a replicator.
 ///
-/// Replays collections that are newly authorized, plus existing collections whose
-/// explicit replay capability changed (so a previously invalid authorizer can be
-/// corrected without requiring a remove/add cycle).
+/// Replays collections that are newly authorized, or whose filter or explicit
+/// replay capability changed.
 pub fn collections_requiring_replay(
     effective_collections: &[String],
     collection_cids: &[String],
     existing_collection_ids: &std::collections::HashSet<String>,
+    existing_filters: &p2p::ReplicationFilters,
+    requested_filters: &p2p::ReplicationFilters,
     collections_with_changed_capabilities: &std::collections::HashSet<String>,
 ) -> Vec<String> {
     effective_collections
@@ -76,9 +77,57 @@ pub fn collections_requiring_replay(
         .zip(collection_cids.iter())
         .filter(|(_, cid)| {
             !existing_collection_ids.contains(*cid)
+                || existing_filters.get(*cid) != requested_filters.get(*cid)
                 || collections_with_changed_capabilities.contains(*cid)
         })
         .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn validate_explicit_replay_capabilities(
+    capabilities: Vec<ExplicitReplayCapabilityInput>,
+    expected_authorizer_did: Option<&str>,
+    requested_collections: &std::collections::HashSet<String>,
+    source_peer_id: &str,
+    target_peer_id: &str,
+) -> P2PResult<Vec<(String, String)>> {
+    if capabilities.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let expected_authorizer_did = expected_authorizer_did.ok_or_else(|| {
+        P2PError::invalid_input("explicit replay capabilities require an authenticated identity")
+    })?;
+    capabilities
+        .into_iter()
+        .map(|input| {
+            if !requested_collections.contains(&input.collection_id) {
+                return Err(P2PError::invalid_input(format!(
+                    "explicit replay capability collection '{}' was not requested",
+                    input.collection_id
+                )));
+            }
+
+            let authorization = p2p::verify_explicit_replay_capability(
+                &input.capability,
+                source_peer_id,
+                target_peer_id,
+                &input.collection_id,
+            )
+            .map_err(|error| {
+                P2PError::invalid_input(format!(
+                    "invalid explicit replay capability for collection '{}': {}",
+                    input.collection_id, error
+                ))
+            })?;
+            if authorization.authorizer_did != expected_authorizer_did {
+                return Err(P2PError::invalid_input(format!(
+                    "explicit replay capability authorizer '{}' did not match authenticated identity '{}'",
+                    authorization.authorizer_did, expected_authorizer_did
+                )));
+            }
+            Ok((input.collection_id, input.capability))
+        })
         .collect()
 }
 
@@ -177,6 +226,8 @@ mod resolve_remove_collections_tests {
             &effective_collections,
             &collection_cids,
             &existing_collection_ids,
+            &p2p::ReplicationFilters::new(),
+            &p2p::ReplicationFilters::new(),
             &changed_capabilities,
         );
 
@@ -194,10 +245,50 @@ mod resolve_remove_collections_tests {
             &effective_collections,
             &collection_cids,
             &existing_collection_ids,
+            &p2p::ReplicationFilters::new(),
+            &p2p::ReplicationFilters::new(),
             &changed_capabilities,
         );
 
         assert!(replay_collections.is_empty());
+    }
+
+    #[test]
+    fn collections_requiring_replay_scopes_filter_changes() {
+        let effective_collections = vec!["User".to_string(), "Post".to_string()];
+        let collection_cids = vec!["cid-user".to_string(), "cid-post".to_string()];
+        let existing_collection_ids = collection_cids.iter().cloned().collect();
+        let existing_filters = p2p::ReplicationFilters::from([
+            (
+                "cid-user".to_string(),
+                p2p::ReplicationFilter::new("name".to_string(), serde_json::json!("old")),
+            ),
+            (
+                "cid-post".to_string(),
+                p2p::ReplicationFilter::new("title".to_string(), serde_json::json!("same")),
+            ),
+        ]);
+        let requested_filters = p2p::ReplicationFilters::from([
+            (
+                "cid-user".to_string(),
+                p2p::ReplicationFilter::new("name".to_string(), serde_json::json!("new")),
+            ),
+            (
+                "cid-post".to_string(),
+                p2p::ReplicationFilter::new("title".to_string(), serde_json::json!("same")),
+            ),
+        ]);
+
+        let replay_collections = collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &existing_filters,
+            &requested_filters,
+            &HashSet::new(),
+        );
+
+        assert_eq!(replay_collections, vec!["User".to_string()]);
     }
 
     #[test]

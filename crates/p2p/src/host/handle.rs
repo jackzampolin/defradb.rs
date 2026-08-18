@@ -1,14 +1,11 @@
 //! P2P host handle for interacting with the host.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use cid::Cid;
 use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};
-use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
+use crate::explicit_replay::ExplicitReplayCapabilityCache;
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
@@ -17,12 +14,6 @@ use crate::QueryId;
 
 use super::command::HostCommand;
 use super::ResponseChannel;
-
-#[derive(Clone)]
-struct CachedExplicitReplayCapability {
-    capability: String,
-    authorizer_did: String,
-}
 
 /// Handle to interact with the P2P host.
 #[derive(Clone)]
@@ -35,8 +26,7 @@ pub struct P2PHostHandle {
     /// Keypair for signing messages.
     keypair: Keypair,
     /// Optional explicit replay capabilities keyed by (peer_id, collection_id).
-    explicit_replay_capabilities:
-        Arc<RwLock<HashMap<(String, String), CachedExplicitReplayCapability>>>,
+    explicit_replay_capabilities: ExplicitReplayCapabilityCache,
 }
 
 impl P2PHostHandle {
@@ -46,78 +36,36 @@ impl P2PHostHandle {
         collections: &[String],
         capability: &str,
     ) {
-        let source_peer_id = self.local_peer_id.to_string();
-        let target_peer_id = peer_id.to_string();
-        let mut validated = Vec::with_capacity(collections.len());
         for collection_id in collections {
-            let authorization = match crate::verify_explicit_replay_capability(
-                capability,
-                &source_peer_id,
-                &target_peer_id,
+            if let Err(error) = self.explicit_replay_capabilities.set(
+                &self.local_peer_id.to_string(),
+                &peer_id.to_string(),
                 collection_id,
+                capability,
             ) {
-                Ok(authorization) => authorization,
-                Err(error) => {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        collection_id,
-                        error = %error,
-                        "Refusing to cache invalid explicit replay capability"
-                    );
-                    continue;
-                }
-            };
-            validated.push((
-                collection_id.clone(),
-                CachedExplicitReplayCapability {
-                    capability: capability.to_string(),
-                    authorizer_did: authorization.authorizer_did,
-                },
-            ));
-        }
-
-        let mut capabilities = self.explicit_replay_capabilities.write();
-        for (collection_id, capability) in validated {
-            capabilities.insert((target_peer_id.clone(), collection_id), capability);
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id,
+                    error = %error,
+                    "Refusing to cache invalid explicit replay capability"
+                );
+            }
         }
     }
 
     fn clear_explicit_replay_capability_inner(&self, peer_id: &PeerId, collections: &[String]) {
-        let peer_id = peer_id.to_string();
-        let mut capabilities = self.explicit_replay_capabilities.write();
-        for collection_id in collections {
-            capabilities.remove(&(peer_id.clone(), collection_id.clone()));
-        }
+        self.explicit_replay_capabilities
+            .clear(&peer_id.to_string(), collections);
     }
 
     fn clear_all_explicit_replay_capabilities_inner(&self, peer_id: &PeerId) {
         let peer_id = peer_id.to_string();
-        self.explicit_replay_capabilities
-            .write()
-            .retain(|(stored_peer_id, _), _| stored_peer_id != &peer_id);
+        self.explicit_replay_capabilities.clear_all(&peer_id);
     }
 
     fn attach_explicit_replay_capability(&self, peer_id: &PeerId, request: &mut PushLogRequest) {
-        if request.explicit_replay_capability.is_some() {
-            return;
-        }
-
-        let cached = self
-            .explicit_replay_capabilities
-            .read()
-            .get(&(peer_id.to_string(), request.collection_id.clone()))
-            .cloned();
-        let Some(cached) = cached else {
-            return;
-        };
-
-        // A capability delegates replay authority for one DID. Attaching it to
-        // an unrelated live/public push makes the receiver validate that block
-        // against the wrong authorizer and reject otherwise valid replication.
-        // Keep ordinary pushes on the normal admission path (#1161).
-        if request.creator == cached.authorizer_did {
-            request.explicit_replay_capability = Some(cached.capability);
-        }
+        self.explicit_replay_capabilities
+            .attach(&peer_id.to_string(), request);
     }
 
     /// Create a new handle (internal use only).
@@ -132,7 +80,7 @@ impl P2PHostHandle {
             local_public_key_proto,
             local_peer_id,
             keypair,
-            explicit_replay_capabilities: Arc::new(RwLock::new(HashMap::new())),
+            explicit_replay_capabilities: ExplicitReplayCapabilityCache::default(),
         }
     }
 
@@ -530,9 +478,7 @@ impl P2PHostHandle {
         capability: &str,
     ) -> bool {
         self.explicit_replay_capabilities
-            .read()
-            .get(&(peer_id.to_string(), collection.to_string()))
-            .is_some_and(|existing| existing.capability == capability)
+            .matches(&peer_id.to_string(), collection, capability)
     }
 
     /// Delete a replicator.

@@ -428,46 +428,13 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let requested_collections: HashSet<String> = collection_cids.iter().cloned().collect();
         let local_peer_id = self.handle.local_peer_id_cached().to_string();
         let target_peer_id = peer_id.to_string();
-        let mut validated_capabilities = Vec::new();
-
-        if !explicit_replay_capabilities.is_empty() {
-            let expected_authorizer_did = expected_authorizer_did.ok_or_else(|| {
-                P2PError::invalid_input(
-                    "explicit replay capabilities require an authenticated identity",
-                )
-            })?;
-
-            for capability in explicit_replay_capabilities {
-                if !requested_collections.contains(&capability.collection_id) {
-                    return Err(P2PError::invalid_input(format!(
-                        "explicit replay capability collection '{}' was not requested",
-                        capability.collection_id
-                    )));
-                }
-
-                let authorization = p2p::verify_explicit_replay_capability(
-                    &capability.capability,
-                    &local_peer_id,
-                    &target_peer_id,
-                    &capability.collection_id,
-                )
-                .map_err(|error| {
-                    P2PError::invalid_input(format!(
-                        "invalid explicit replay capability for collection '{}': {}",
-                        capability.collection_id, error
-                    ))
-                })?;
-
-                if authorization.authorizer_did != expected_authorizer_did {
-                    return Err(P2PError::invalid_input(format!(
-                        "explicit replay capability authorizer '{}' did not match authenticated identity '{}'",
-                        authorization.authorizer_did, expected_authorizer_did
-                    )));
-                }
-
-                validated_capabilities.push((capability.collection_id, capability.capability));
-            }
-        }
+        let validated_capabilities = crate::validate_explicit_replay_capabilities(
+            explicit_replay_capabilities,
+            expected_authorizer_did,
+            &requested_collections,
+            &local_peer_id,
+            &target_peer_id,
+        )?;
 
         let collections_with_changed_capabilities: HashSet<String> = validated_capabilities
             .iter()
@@ -527,12 +494,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 }
             }
         };
-        let existing_collection_ids = if existing_filters == replication_filters {
-            existing_collection_ids
-        } else {
-            HashSet::new()
-        };
-
         self.handle
             .dial(peer_id, vec![parsed.transport_addr])
             .await
@@ -581,6 +542,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             &effective_collections,
             &collection_cids,
             &existing_collection_ids,
+            &existing_filters,
+            &replication_filters,
             &collections_with_changed_capabilities,
         );
 
