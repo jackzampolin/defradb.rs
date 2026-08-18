@@ -9,12 +9,19 @@ use crate::error::{Error, Result};
 impl CollectionPatchArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let patch = get_data_from_args(&self.patch, &self.patch_file)?;
+        let migration = if self.migration.is_some() || self.lens_file.is_some() {
+            Some(get_data_from_args(&self.migration, &self.lens_file)?)
+        } else {
+            None
+        };
 
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.collection_patch(&patch).await?;
+        client
+            .collection_patch(&patch, migration.as_deref())
+            .await?;
         Ok(())
     }
 }
