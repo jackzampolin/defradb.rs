@@ -165,12 +165,9 @@ pub fn json_to_normal_value_for_kind(
         ScalarKind::Float64 => value.as_f64().map(NormalValue::Float64),
         ScalarKind::Float32 => value.as_f64().map(|f| NormalValue::Float32(f as f32)),
         ScalarKind::Bool => value.as_bool().map(NormalValue::Bool),
-        ScalarKind::String | ScalarKind::DocID => {
+        ScalarKind::String | ScalarKind::DocID | ScalarKind::Blob => {
             value.as_str().map(|s| NormalValue::String(s.to_string()))
         }
-        ScalarKind::Blob => value
-            .as_str()
-            .map(|s| NormalValue::Bytes(s.as_bytes().to_vec())),
         ScalarKind::DateTime => match value {
             JsonValue::String(s) => DateTime::parse_from_rfc3339(s).ok().map(NormalValue::Time),
             JsonValue::Number(n) => n.as_i64().and_then(|ts| {
