@@ -4,7 +4,7 @@ This POC demonstrates private point and tag lookup over a deterministic DefraDB 
 
 This is a benchmarkable protocol spike, not audited production cryptography.
 
-For the consolidated decision matrix across public lookup, 100 decoys, normal and packed Dense, public windows, finite differences, SinglePass, Chalamet, and live subscriptions, see [`COMPARISON.md`](COMPARISON.md).
+For the evidence status and the requirements for a valid comparison across public lookup, 100 decoys, packed Dense, public windows, finite differences, SinglePass, and Chalamet, see [`COMPARISON.md`](COMPARISON.md).
 
 ## Production-shaped design
 
@@ -35,18 +35,7 @@ The sidecar exposes the two snapshot modes as separate endpoints over the same D
 
 `GET /v1/catalog` advertises the global manifest and the available public window manifests. The client requires every PIR replica to return an identical catalog before generating shares. Window queries are batched in one request, but every window has its own manifest and can therefore use a smaller independently sized table. The original `GET /v1/manifest` and `POST /v1/query` remain global-only compatibility aliases.
 
-The full release endpoint benchmark uses one 4,194,304-bucket global table and 64 equal 65,536-bucket immutable windows, with 64-byte rows and 15 fresh queries per case. Times are p50 on co-located servers; HTTP is real loopback request/JSON/base64/evaluation/reconstruction but excludes TLS and network latency.
-
-| Public range | Capacity queried | Total upload, 2 / 3 servers | Server wall, 2 / 3 servers | HTTP wall, 2 / 3 servers | HTTP reduction vs global, 2 / 3 servers |
-|---|---:|---:|---:|---:|---:|
-| none (`global`) | 100% | 1 MiB / 1.5 MiB | 32.72 / 34.41 ms | 34.69 / 40.62 ms | baseline |
-| 1 window | 1.56% | 16 / 24 KiB | 0.32 / 0.35 ms | 0.76 / 0.74 ms | 97.8% / 98.2% |
-| 4 windows | 6.25% | 64 / 96 KiB | 2.55 / 2.22 ms | 4.03 / 3.37 ms | 88.4% / 91.7% |
-| 16 windows | 25% | 256 / 384 KiB | 9.46 / 11.33 ms | 9.39 / 12.94 ms | 72.9% / 68.1% |
-| 32 windows | 50% | 512 / 768 KiB | 16.91 / 17.89 ms | 17.97 / 24.20 ms | 48.2% / 40.4% |
-| 64 windows | 100% | 1 MiB / 1.5 MiB | 34.40 / 39.59 ms | 35.76 / 52.05 ms | -3.1% / -28.2% |
-
-The measured crossover is therefore between half and all of the history in this equal-window workload. A production client should use the public-window endpoint while the sum of selected table capacities is materially below the global table, then switch to global for near-full-history queries. Querying all windows does the same Dense work as global and adds 64 table dispatches and larger responses. Keeping both alternatives costs 512 MiB per replica in this benchmark—256 MiB global plus 256 MiB across all windows—and catalog construction took 0.74 seconds.
+`bench-endpoints` is a functional and scaling smoke test, not decision data. Its fixed-capacity global and window tables contain only one populated record, so its timings and apparent crossover must not be compared with the populated packed tag-page, decoy, or SinglePass experiments. A production crossover remains unknown until all paths query identical populated global/window tables and return identical padded results.
 
 `serve` accepts either an original single snapshot or this catalog directory layout:
 
@@ -68,32 +57,17 @@ Each directory is built with the existing `build` command: use the full export f
 
 ## Cold tag lookup
 
-[`tag_pages.rs`](src/tag_pages.rs) implements the compact Dense layout. A sealed snapshot groups all values for a tag into fixed-size pages of compact locators. Each page is placed into one of two cuckoo buckets at 90% table load. A cold client needs only the public 86-byte layout description, computes both candidate buckets, privately retrieves both, and accepts the page with the matching 128-bit fingerprint. No per-tag client map is required.
+[`tag_pages.rs`](src/tag_pages.rs) implements packed tag-page Dense XOR. "Packed" describes the table layout, not different PIR cryptography. A sealed snapshot groups all values for a tag into fixed-size pages of compact locators, stores four pages in each row, and places every page in one of two cuckoo candidate buckets at roughly 90% slot occupancy. A cold client needs only the small public layout description, computes both candidate buckets, privately retrieves both through ordinary Dense XOR, and accepts the page with the matching 128-bit fingerprint. No per-tag client map is required.
 
 Two candidates double the number of PIR operations, but remove the much larger costs in the original `build_paged` format: sizing from document count rather than page count, repeating the page key for every value, eight reserved value slots in every bucket, and empty one-hash capacity. Tags exceeding one page use deterministic continuation pages. Querying the observed number of pages can leak result cardinality through request count unless the client pads it.
 
 [`finite_differences.rs`](src/finite_differences.rs) implements the actual two-server information-theoretic construction from [Henzinger and Ragavan, EUROCRYPT 2026](https://eprint.iacr.org/2025/2008), following their [reference implementation](https://github.com/ahenzinger/finite-diffs-pir). Servers encode the packed bucket rows as a low-degree polynomial truth table. A cold client sends one 64-bit share per candidate to each server and holds no mutable state. Each server reads a sublinear translated cloud; the client XOR-reconstructs both candidate rows. The POC includes real preprocessing, querying, and recovery rather than only an analytical model.
 
-The full release workload contains 4,194,304 documents, 1,048,576 tags, four 16-byte locators per tag, and one page per tag:
+`bench-cold` remains a correctness and protocol-scaling experiment. It uses one synthetic global tag-page snapshot and page-zero lookups; it does not give every alternative the same public time window, realistic cardinality distribution, or transport. Its historical timings are deliberately omitted from this overview and must not be used to select between packed Dense, decoys, and SinglePass.
 
-| Cold path | Privacy | Storage/server | Phone upload | Phone download | Server work | Co-located wall |
-|---|---|---:|---:|---:|---:|---:|
-| Existing compact `build_paged` estimate | exact with Dense | 3.56 GiB | 2 MiB | 912 B | one half-table scan/server | not allocated |
-| Packed cuckoo + Dense | exact, two non-colluding servers | 106.7 MiB | 142.2 KiB | 1.5 KiB | 291,272 rows/server | 11.93 ms |
-| Packed cuckoo + finite differences (`m=21,d=9`) | exact, two non-colluding servers | 768 MiB | 32 B | 11.1 MiB | 15,094 rows/server | 2.73 ms |
-| 100 ordinary indexed tags | target is only hidden among 100 | ordinary index | 800 B | 9.4 KiB | 100 indexed lookups | 0.0716 ms |
+The decoy baseline has weaker privacy regardless of performance: the server learns all 100 tags, repeated candidate sets can be intersected, and different decoy sets sent to two servers reveal the real tag through their intersection. Sending the same set to multiple servers adds availability, not query privacy.
 
-Packed Dense reduced replica storage by 34.2x and client upload by 14.4x versus the old compact-layout estimate. It is the selected exact cold-phone path: finite differences reduced summed server time from 23.13 ms to 4.67 ms, but its 11.1 MiB response is likely to dominate a mobile network. Finite-differences preprocessing took 2.16 seconds per snapshot and its selected table is 7.2x the packed Dense snapshot. A lower-response analytical point (`m=24,d=7`) needs 6 GiB per replica and still returns about 3.4 MiB total.
-
-The decoy baseline is operationally compelling when its weaker privacy is acceptable. The server learns all 100 tags, repeated candidate sets can be intersected, and different decoy sets sent to two servers reveal the real tag through their intersection. Sending the same set to multiple servers adds availability, not query privacy.
-
-The resulting routing recommendation is:
-
-- exact cold or occasional phone lookup: packed cuckoo pages with Dense XOR;
-- exact warm session with repeated queries: SinglePass;
-- live insert matching: Compact DPF subscriptions;
-- cold lookup with candidate-set privacy: ordinary indexed decoys;
-- finite differences: retain as a server-CPU/storage experiment, not the default mobile path.
+Snapshot routing is intentionally undecided until the unified benchmark described in [`COMPARISON.md`](COMPARISON.md) exists. Packed tag-page Dense is the current stateless implementation candidate, not a measured production winner. Finite differences remains an experiment.
 
 The new cold paths intentionally remain an in-memory sidecar/benchmark and do not alter DefraDB internals. The catalog endpoints extend the HTTP API while retaining the original global manifest/query routes as compatibility aliases. `bench-cold` performs correctness-checked private recovery for both exact protocols. Production integration should serialize and sign the cuckoo manifest and packed rows, authenticate the snapshot cutoff, expose bounded two-candidate batch endpoints, stream finite-differences responses, and use an independently reviewed implementation before treating either construction as production cryptography.
 
@@ -109,26 +83,7 @@ This is the low-server-work mode:
 - `Q` trades phone storage for online work. Smaller `Q` reads and transfers fewer rows but stores more parity hints. The forward and inverse permutations always consume `8N` bytes in this implementation.
 - The current implementation is an in-memory protocol/demo and benchmark. Durable atomic state, signed update replay, HTTP/TLS endpoints, malicious-server correctness, and recovery are production follow-ups.
 
-Release benchmark, identical snapshots and persistent co-located two-server workers, with `Q=16`:
-
-| Buckets | Row | Dense wall | SinglePass wall | Wall reduction | Summed server work, Dense → SinglePass | Setup | Client state |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 262,144 | 64 B | 1.651 ms | 0.089 ms | 94.58% | 3.056 ms → 0.0037 ms | 12.1 ms | 3 MiB |
-| 1,048,576 | 64 B | 6.747 ms | 0.086 ms | 98.72% | 12.659 ms → 0.0044 ms | 49.5 ms | 12 MiB |
-| 1,048,576 | 256 B | 17.719 ms | 0.091 ms | 99.49% | 34.910 ms → 0.0071 ms | 121.3 ms | 24 MiB |
-| 4,194,304 | 64 B | 25.922 ms | 0.088 ms | 99.66% | 51.604 ms → 0.0055 ms | 236.2 ms | 48 MiB |
-
-At four million 64-byte rows, each Dense server processes an expected 2,097,152 rows and receives a 512 KiB share. SinglePass `Q=16` reads 16 rows (1 KiB) and receives 64 bytes per server: 131,072x fewer row accesses and 8,192x less upload. It returns 1 KiB per server rather than Dense's 64 bytes. The roughly 0.09 ms wall floor is dominated by the local coordinator and thread wake-up; the separately measured two-server evaluation is about 5.5 microseconds.
-
-The full `Q` trade-off at four million 64-byte rows is:
-
-| Q | Setup | Client state | Upload/server | Response/server | Rows/server | Server evaluation | Co-located wall |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 8 | 269.9 ms | 64 MiB | 32 B | 512 B | 8 | 0.0036 ms | 0.085 ms |
-| 16 | 236.2 ms | 48 MiB | 64 B | 1 KiB | 16 | 0.0055 ms | 0.088 ms |
-| 32 | 288.3 ms | 40 MiB | 128 B | 2 KiB | 32 | 0.0086 ms | 0.088 ms |
-
-`Q=16` is the POC default comparison point. `Q=8` is attractive if an additional 16 MiB of phone state is acceptable. Query-page multiplication still applies to high-cardinality tags, and an ordinary follow-up document fetch would reveal the access; return useful encrypted data in the private page or privately retrieve subsequent content.
+`bench-singlepass` validates the expected mechanism and scaling on raw fixed-size synthetic rows. It has not run against the packed tag-page tables or the same public windows as the decoy path, and its state transfer is not measured. It therefore does not establish that SinglePass beats 100 decoys for a Shinzo warm query. Query-page multiplication still applies to high-cardinality tags, and an ordinary follow-up document fetch would reveal the access; return useful encrypted data in the private page or privately retrieve subsequent content.
 
 ## Live subscriptions
 

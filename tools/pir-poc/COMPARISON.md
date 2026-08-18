@@ -1,76 +1,54 @@
-# PIR POC comparison and recommendation
+# PIR POC evidence status and benchmark requirements
 
-This document consolidates the POC work into one decision matrix. It separates cold snapshot retrieval, warm repeated retrieval, public-window routing, and live subscriptions because a protocol that wins one workload can be a poor choice for another.
+The earlier version of this document put measurements from different physical layouts into one table. That made ratios between windowed Dense, packed tag pages, indexed decoys, and SinglePass look comparable when they were not. Those cross-workload ratios are withdrawn. Snapshot protocol ranking remains open until every option runs against the same populated immutable tables and query semantics.
 
-Unless noted otherwise, numbers are from the full release benchmarks run on 2026-08-17 on the same host. Server timings exclude TLS and a real network. "Server work" is the sum across replicas; "wall" is the co-located parallel latency. Storage is per replica. The synthetic layouts measure the allocated row capacity and cryptographic work; they are not a DefraDB GraphQL benchmark.
+## Current decision status
 
-## Executive recommendation
+| Component | Status |
+|---|---|
+| Packed tag-page Dense XOR | Current stateless strict-private implementation candidate; needs the unified benchmark below |
+| Public time-window routing | Supported feature; the disclosed window is an intentional privacy/performance choice |
+| 100 indexed decoys | Lower-privacy baseline; must query the identical selected windows in the unified benchmark |
+| SinglePass | Promising warm-query experiment; not yet compared on the packed tag-page layout or identical windows |
+| Finite differences | Retained cold-query experiment; not selected for production |
+| Binary-Fuse/RAID-style layout | Research proposal only; not implemented or benchmarked |
+| Compact DPF subscriptions | Exact-private live experiment; separate from snapshot selection |
 
-| Situation | Recommended POC path | Why |
+## What packed Dense means
+
+Packed Dense is not a new PIR construction. It is ordinary Dense XOR PIR over a purpose-built immutable tag-page table:
+
+1. All compact document locators for `(tag, page number)` are encoded into a fixed-size page with a fingerprint.
+2. Four pages fit in one bucket row. The cuckoo builder places every page into one of two public candidate buckets at roughly 90% slot occupancy.
+3. From the small public manifest, the client computes both candidate buckets but cannot know which one holds its page.
+4. The client creates independent Dense XOR query shares for both candidates. Every server still scans the complete packed table for each candidate.
+5. The client combines all server answers and accepts the bucket slot with the expected fingerprint.
+
+"Packed" therefore reduces the number of rows that Dense must scan; it does not turn the scan into an indexed lookup. Two candidates also mean two Dense evaluations per page. The current benchmark uses two servers, while Dense share generation itself supports any `n >= 2`. All `n` answers are required.
+
+## Why the old snapshot numbers are not decision data
+
+| Benchmark | What it actually measures | Missing for a fair comparison |
 |---|---|---|
-| Public query | Ordinary index | Essentially free; no query privacy |
-| Candidate-set privacy is acceptable | 100 indexed decoys | By far the lowest server cost, but the server sees all candidates and repeated sets can be intersected |
-| Strict-private cold/occasional snapshot query | Packed Dense | Stateless phone, 86-byte public metadata, modest upload and response, no preprocessing state |
-| Strict-private query with a public coarse time range | Dense over immutable window tables | Same tag privacy, much less server work and phone upload while the selected tables are materially smaller than global |
-| Strict-private repeated/warm queries | SinglePass `Q=16` | Tiny online server work and 128-byte total upload, in exchange for 48 MiB of mutable phone state at 4M rows |
-| Strict-private cold query where upload matters more than download/storage | Finite differences | 32-byte total upload and low server work, but about 11.1 MiB download and 768 MiB storage per replica |
-| Live subscription, candidate-set privacy | 100-decoy inverted index | Nanosecond event lookup; leaks candidates and the matching candidate |
-| Live subscription, exact two-server privacy | Compact DPF | Small registration keys and exact target privacy; CPU and output grow linearly with active subscriptions |
-| Live subscription, stronger `n-1` collusion tolerance and small population | Dense subscription shares | Indexed bit evaluation is extremely cheap, but persistent keys are huge |
+| `bench-cold` | Global synthetic tag pages; page zero; packed Dense and finite differences versus 100 public tag lookups | Identical public time windows, realistic cardinality/page distributions, and HTTP/network |
+| `bench-endpoints` | Dense routing and serialization over fixed-capacity tables containing only one populated record | Real packed tag-page tables and matching decoy/SinglePass requests |
+| `bench-singlepass` | SinglePass mechanics over a raw `N × row_size` synthetic database | Packed tag pages, selected windows, state transfer, and comparison with identical decoy results |
+| `bench` | Dense kernel scaling over raw fixed-size rows | DefraDB tag-page semantics and matching alternatives |
+| Chalamet measurements | A separate small-record experiment | The same data scale, layout, and phone implementation |
 
-The proposed production direction remains a compact immutable tag-page layout, potentially a 4-wise Binary-Fuse/RAID-style layout, evaluated through Dense XOR. That layout is **not implemented or benchmarked yet**. The current measured implementation is the two-candidate packed cuckoo layout in `tag_pages.rs`.
+The endpoint and protocol benchmarks remain useful as correctness tests and scaling diagnostics. They must not be used to claim a global/window crossover or that one snapshot protocol is a particular multiple faster than another.
 
-## Snapshot retrieval comparison
+## Required snapshot benchmark
 
-The cold tag workload contains 4,194,304 documents, 1,048,576 distinct tags, four 16-byte locators per tag, and one tag page per lookup. Normal Dense and SinglePass rows use a separate 4,194,304 × 64-byte synthetic database, so their timing is useful for protocol scaling but is not an identical row layout to the 384-byte packed tag pages.
+The next performance comparison must build one realistic immutable generation and derive global and coarse UTC-window tag-page tables from it. Every path must query the same selected windows, return the same padded locator pages, and include the same transport boundary:
 
-| Option | Privacy/trust | Servers | Phone state | Total upload | Total download | Server work p50 | Wall p50 | Replica storage | Status |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| Ordinary public lookup | none; server sees tag | 1 | none | about 20 B | 64 B | 0.00011 ms | same | ordinary index | measured baseline |
-| 100 indexed decoys | target hidden only among visible candidates | 1 | none | 800 B | 9.4 KiB padded | 0.0716 ms | same | ordinary index | measured; fastest private-ish option |
-| Normal Dense, global 4M × 64 B | exact if at least one of `n` servers does not collude | 2 | none | 1 MiB | 128 B | 56.15 ms | 28.22 ms | 256 MiB | measured; server-count-neutral |
-| Public-window Dense, 1/64 of 4M | exact tag privacy; coarse window is public | 2 | none | 16 KiB | 128 B | 0.47 ms | 0.32 ms local / 0.76 ms HTTP | 4 MiB selected; 512 MiB if global plus all windows are retained | measured endpoint |
-| Packed cuckoo Dense | exact if two servers do not collude | 2 | 86 B public metadata | 142.2 KiB | 1.5 KiB | 23.13 ms | 11.93 ms | 106.7 MiB | measured strict cold default |
-| Finite differences `m=21,d=9` | exact information-theoretic privacy against either server | 2 | 86 B layout metadata | 32 B | 11.1 MiB | 4.67 ms | 2.73 ms + 1.61 ms client reconstruction | 768 MiB | measured; 2.16 s reusable preprocessing |
-| SinglePass `Q=16` | exact if two servers do not collude | 2 | 48 MiB mutable state | 128 B | 2 KiB | 0.00545 ms | 0.0885 ms | 256 MiB database plus client state | measured warm default; 236 ms setup |
-| ChalametPIR | computational single-server privacy | 1 | extrapolated public matrix around 7.8 GiB at 1M records | 22.5 KiB at 4K records | 292 B at 4K | 1.91 ms at 4K | client query 17.3 ms at 4K | 492 KiB hint at 4K | rejected for phone-scale POC |
+- one visible indexed tag;
+- 100 visible decoy tags;
+- packed Dense with two and three servers;
+- SinglePass with setup reported separately and amortized over query counts;
+- finite differences if it remains within the storage/download budget.
 
-There is no zero-upload strict-private option here. A private client must send at least a compact query or maintain synchronized state. The smallest measured cold upload is finite differences at 32 bytes total; the smallest warm upload is SinglePass `Q=16` at 128 bytes total. A public indexed query is the only effectively upload-free choice, and it reveals the tag.
-
-### Public-window crossover
-
-The endpoint benchmark partitions the same 4,194,304-bucket capacity into 64 immutable windows. It includes fresh share generation, loopback HTTP, JSON/base64, server evaluation, and client reconstruction.
-
-| Public range | Total upload, 2 / 3 servers | Summed server work, 2 / 3 servers | HTTP p50, 2 / 3 servers | HTTP reduction vs global, 2 / 3 servers |
-|---|---:|---:|---:|---:|
-| none (`global`) | 1 MiB / 1.5 MiB | 64.50 / 102.62 ms | 34.69 / 40.62 ms | baseline |
-| 1 window | 16 / 24 KiB | 0.47 / 0.65 ms | 0.76 / 0.74 ms | 97.8% / 98.2% |
-| 4 windows | 64 / 96 KiB | 4.89 / 5.97 ms | 4.03 / 3.37 ms | 88.4% / 91.7% |
-| 16 windows | 256 / 384 KiB | 18.54 / 33.57 ms | 9.39 / 12.94 ms | 72.9% / 68.1% |
-| 32 windows | 512 / 768 KiB | 33.65 / 53.08 ms | 17.97 / 24.20 ms | 48.2% / 40.4% |
-| 64 windows | 1 MiB / 1.5 MiB | 68.62 / 118.43 ms | 35.76 / 52.05 ms | -3.1% / -28.2% |
-
-Use public-window lookup while the sum of the selected table capacities is materially below the global table. Switch to global near full history. Querying every window performs the same Dense scan work as global and adds per-table dispatch and response overhead. Storing both alternatives in this synthetic benchmark costs 512 MiB per replica: 256 MiB global plus 256 MiB across all windows.
-
-## Warm-query comparison
-
-SinglePass is not a better cold first query. It becomes attractive after a client has acquired and durably stored its state and expects repeated queries against the same version.
-
-At 4,194,304 × 64-byte rows with `Q=16`:
-
-| Metric | Normal Dense, 2 servers | SinglePass, 2 servers |
-|---|---:|---:|
-| Total upload | 1 MiB | 128 B |
-| Total download | 128 B | 2 KiB |
-| Rows read/server | expected 2,097,152 | 16 |
-| Summed server work p50 | 51.60 ms | 0.00545 ms |
-| Co-located wall p50 | 25.92 ms | 0.0885 ms |
-| Client state | none | 48 MiB mutable |
-| One-time setup | none | 236 ms plus state transfer/persistence |
-| In-flight behavior | stateless batching | one ordered query per mutable state |
-| Server count | any `n >= 2` | exactly 2 |
-
-SinglePass is the strongest result for server CPU, but production needs authenticated state transfer, atomic persistence, ordered updates, and recovery after an ambiguous request. A cold phone that performs only one or two queries should not pay this state cost.
+Until that benchmark exists, time-window support is a functional capability, packed Dense is an implementation candidate, and SinglePass is a warm-query hypothesis—not a measured winner over decoys.
 
 ## Live subscription comparison
 
@@ -101,9 +79,9 @@ For live events, 100 decoys are overwhelmingly cheaper when candidate-set privac
 
 1. Build authenticated immutable generations from one DefraDB cutoff.
 2. Publish a global table and coarse UTC window tables from the same generation.
-3. Route strict cold queries to packed Dense; use public-window tables when the disclosed range materially reduces capacity.
-4. Switch established, high-query clients to SinglePass only after durable state setup.
-5. Offer 100 decoys as an explicit lower-privacy, low-cost tier.
+3. Use the public-window endpoint when the client intentionally discloses a coarse range, without claiming a crossover until the unified benchmark exists.
+4. Treat packed tag-page Dense as the current stateless implementation baseline, not a selected performance winner.
+5. Evaluate SinglePass and 100 decoys on those identical packed window tables before defining cold/warm routing.
 6. Offer Compact DPF as the exact-private live tier; keep decoy subscriptions as the operational default where acceptable.
 7. Keep server count generic for Dense. Three servers raise collusion tolerance from one to two colluding servers, but all three answers are still required; this is not one-server failure tolerance.
 8. Benchmark a real Binary-Fuse/RAID-style tag-page layout before promoting it over packed cuckoo Dense.
