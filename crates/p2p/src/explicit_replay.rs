@@ -11,7 +11,10 @@
 //! call [`revoke_capability`], or use [`ExplicitReplayRevocationRegistry`] with
 //! [`verify_capability_with_revocations`] for a custom synced deny-list.
 
-use std::collections::{HashMap, HashSet};
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
+use std::collections::HashMap;
+use std::collections::HashSet;
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,17 +37,20 @@ pub const MAX_CAPABILITY_TTL: Duration = DEFAULT_CAPABILITY_TTL;
 static PROCESS_REVOCATIONS: LazyLock<ExplicitReplayRevocationRegistry> =
     LazyLock::new(ExplicitReplayRevocationRegistry::default);
 
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
 #[derive(Debug, Clone)]
 struct CachedExplicitReplayCapability {
     capability: String,
     authorizer_did: String,
 }
 
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExplicitReplayCapabilityCache {
     capabilities: Arc<RwLock<HashMap<(String, String), CachedExplicitReplayCapability>>>,
 }
 
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
 impl ExplicitReplayCapabilityCache {
     pub(crate) fn set(
         &self,
