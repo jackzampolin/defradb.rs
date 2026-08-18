@@ -64,6 +64,23 @@ pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>
     ordered
 }
 
+pub(crate) async fn load_replay_blocks<R: Reader + ?Sized, E: Reader + ?Sized>(
+    block_reader: &R,
+    enc_reader: &E,
+    heads: Vec<(Cid, Vec<u8>)>,
+    include_dependencies: bool,
+) -> Vec<(Cid, Vec<u8>)> {
+    if !include_dependencies {
+        return heads;
+    }
+
+    let mut blocks = Vec::new();
+    for (root_cid, root_data) in heads {
+        blocks.extend(load_push_dag_blocks(block_reader, enc_reader, root_cid, root_data).await);
+    }
+    blocks
+}
+
 pub(crate) async fn load_latest_composite_heads<R: Reader + ?Sized, B: Reader + ?Sized>(
     head_reader: &R,
     block_reader: &B,

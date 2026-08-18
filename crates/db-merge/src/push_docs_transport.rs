@@ -8,7 +8,9 @@ use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{load_latest_composite_heads, load_push_dag_blocks};
+use crate::push_docs_common::{
+    load_latest_composite_heads, load_push_dag_blocks, load_replay_blocks,
+};
 use crate::push_docs_creator::resolve_push_creator;
 use crate::push_docs_replay::{
     persist_replay_failures, ReplayDocumentFailure, ReplayPushConfig, ReplayPushGate,
@@ -127,6 +129,9 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
     let blockstore_view = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
+    let encstore_view = txn
+        .encstore()
+        .map_err(|e| format!("failed to get encstore: {}", e))?;
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -221,9 +226,16 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
             };
             let doc_heads =
                 load_latest_composite_heads(&headstore, &blockstore_view, *doc_short_id).await;
+            let doc_blocks = load_replay_blocks(
+                &blockstore_view,
+                &encstore_view,
+                doc_heads,
+                filters.contains_key(collection.collection_id()),
+            )
+            .await;
 
             let mut requests = Vec::new();
-            for (block_cid, block_data) in doc_heads {
+            for (block_cid, block_data) in doc_blocks {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -534,10 +546,25 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .new_txn(true)
         .await
         .map_err(|e| format!("blockstore txn: {}", e))?;
+    let encstore_view = storage::stores::Blockstore::new_with_namespace(
+        db.store().clone(),
+        true,
+        storage::namespace::Namespace::Encstore,
+    );
+    let enc_txn = encstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("encstore txn: {}", e))?;
+    let doc_heads = load_latest_composite_heads(&*head_txn, &*block_txn, doc_short_id).await;
+    let doc_blocks = load_replay_blocks(
+        &*block_txn,
+        &*enc_txn,
+        doc_heads,
+        filters.contains_key(collection_id),
+    )
+    .await;
     let mut successful_blocks = 0usize;
-    for (block_cid, block_data) in
-        load_latest_composite_heads(&*head_txn, &*block_txn, doc_short_id).await
-    {
+    for (block_cid, block_data) in doc_blocks {
         let mut request = PushLogRequest::new(
             doc_id.to_string(),
             Bytes::from(block_cid.to_bytes()),
