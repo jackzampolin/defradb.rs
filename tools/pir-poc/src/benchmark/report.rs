@@ -160,6 +160,161 @@ pub struct LoadResult {
     pub end_to_end_p99_ms: f64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SinglePassBenchmarkReport {
+    pub protocol: &'static str,
+    pub profile: String,
+    pub generated_at_unix_seconds: u64,
+    pub methodology: &'static str,
+    pub dimensions: Vec<SinglePassDimensionResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SinglePassDimensionResult {
+    pub bucket_count: usize,
+    pub row_size: usize,
+    pub snapshot_bytes: usize,
+    pub snapshot_build_ms: f64,
+    pub dense: DenseComparisonResult,
+    pub single_pass: Vec<SinglePassVariantResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DenseComparisonResult {
+    pub samples: usize,
+    pub expected_rows_read_per_server: usize,
+    pub expected_data_bytes_read_per_server: usize,
+    pub query_bytes_per_server: usize,
+    pub answer_bytes_per_server: usize,
+    pub client_query_generation_p50_us: f64,
+    pub co_located_wall_p50_ms: f64,
+    pub co_located_wall_p95_ms: f64,
+    pub sum_server_elapsed_p50_ms: f64,
+    pub client_reconstruct_p50_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SinglePassVariantResult {
+    pub partition_count_q: usize,
+    pub samples: usize,
+    pub setup_ms: f64,
+    pub client_state_bytes: usize,
+    pub client_hint_bytes: usize,
+    pub client_permutation_bytes: usize,
+    pub client_state_to_snapshot_ratio: f64,
+    pub rows_read_per_server: usize,
+    pub data_bytes_read_per_server: usize,
+    pub query_bytes_per_server: usize,
+    pub answer_bytes_per_server: usize,
+    pub client_query_generation_p50_us: f64,
+    pub co_located_wall_p50_ms: f64,
+    pub co_located_wall_p95_ms: f64,
+    pub sum_server_elapsed_p50_ms: f64,
+    pub client_reconstruct_p50_us: f64,
+    pub wall_speedup_vs_dense: f64,
+    pub wall_time_reduction_percent: f64,
+    pub server_time_speedup_vs_dense: f64,
+    pub server_time_reduction_percent: f64,
+    pub server_row_access_reduction_factor: f64,
+    pub total_query_byte_reduction_factor: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ColdPathBenchmarkReport {
+    pub protocol: &'static str,
+    pub profile: String,
+    pub generated_at_unix_seconds: u64,
+    pub methodology: &'static str,
+    pub workload: ColdPathWorkload,
+    pub legacy_paged_layout: LegacyPagedLayoutResult,
+    pub packed_dense: PackedDenseResult,
+    pub finite_differences: Vec<FiniteDifferencesResult>,
+    pub indexed_decoys: IndexedDecoyResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ColdPathWorkload {
+    pub document_count: usize,
+    pub distinct_tag_count: usize,
+    pub documents_per_tag: usize,
+    pub values_per_page: usize,
+    pub locator_bytes: usize,
+    pub decoy_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyPagedLayoutResult {
+    pub description: &'static str,
+    pub bucket_count: usize,
+    pub bucket_capacity: usize,
+    pub row_size: usize,
+    pub estimated_snapshot_bytes: usize,
+    pub query_bytes_per_server_per_page: usize,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PackedDenseResult {
+    pub privacy: &'static str,
+    pub build_ms: f64,
+    pub distinct_tag_count: usize,
+    pub page_count: usize,
+    pub bucket_count: usize,
+    pub bucket_capacity: usize,
+    pub table_load_factor: f64,
+    pub page_size: usize,
+    pub row_size: usize,
+    pub snapshot_bytes_per_server: usize,
+    pub cold_client_metadata_bytes: usize,
+    pub candidate_bucket_queries_per_tag_page: usize,
+    pub expected_rows_processed_per_server: usize,
+    pub expected_data_bytes_processed_per_server: usize,
+    pub query_bytes_per_server: usize,
+    pub response_bytes_per_server: usize,
+    pub client_query_generation_p50_us: f64,
+    pub co_located_wall_p50_ms: f64,
+    pub co_located_wall_p95_ms: f64,
+    pub sum_server_elapsed_p50_ms: f64,
+    pub client_reconstruct_p50_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FiniteDifferencesResult {
+    pub privacy: &'static str,
+    pub variables_m: usize,
+    pub total_degree_d: usize,
+    pub record_capacity: usize,
+    pub encoded_storage_bytes_per_server: usize,
+    pub storage_amplification_vs_packed_dense: f64,
+    pub cloud_rows_per_server_per_candidate: usize,
+    pub rows_processed_per_server_per_tag_page: usize,
+    pub data_bytes_processed_per_server_per_tag_page: usize,
+    pub query_bytes_per_server: usize,
+    pub response_bytes_per_server: usize,
+    pub measured: bool,
+    pub preprocessing_ms: Option<f64>,
+    pub client_query_generation_p50_us: Option<f64>,
+    pub co_located_wall_p50_ms: Option<f64>,
+    pub co_located_wall_p95_ms: Option<f64>,
+    pub sum_server_elapsed_p50_ms: Option<f64>,
+    pub client_reconstruct_p50_ms: Option<f64>,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IndexedDecoyResult {
+    pub privacy: &'static str,
+    pub decoy_count: usize,
+    pub server_count: usize,
+    pub query_bytes: usize,
+    pub padded_response_bytes: usize,
+    pub client_query_generation_p50_us: f64,
+    pub server_lookup_p50_ms: f64,
+    pub server_lookup_p95_ms: f64,
+    pub client_select_p50_us: f64,
+    pub note: &'static str,
+}
+
 pub(super) fn methodology() -> Methodology {
     Methodology {
         privacy_model: "n XOR shares; any n-1 query shares reveal no row; all n answers are required",

@@ -133,6 +133,14 @@ pub struct SnapshotView<'a> {
 }
 
 impl<'a> SnapshotView<'a> {
+    pub(crate) fn new(rows: &'a [u8], bucket_count: usize, row_size: usize) -> Self {
+        Self {
+            rows,
+            bucket_count,
+            row_size,
+        }
+    }
+
     pub(crate) fn rows(&self) -> &'a [u8] {
         self.rows
     }

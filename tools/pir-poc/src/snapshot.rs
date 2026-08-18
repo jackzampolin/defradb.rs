@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use layout::{bucket_for_key, page_key, Manifest, SnapshotConfig, SnapshotView};
@@ -31,6 +31,125 @@ impl Record {
 pub struct Snapshot {
     pub manifest: Manifest,
     rows: Arc<[u8]>,
+}
+
+/// The immutable snapshots exposed by one PIR replica.
+///
+/// `global` supports a tag-private lookup without disclosing a time filter.
+/// Entries in `windows` support the same lookup while deliberately disclosing
+/// one or more coarse window IDs so the server can scan smaller tables.
+#[derive(Clone, Debug)]
+pub struct SnapshotCatalog {
+    global: Arc<Snapshot>,
+    windows: Arc<BTreeMap<String, Arc<Snapshot>>>,
+    manifest: CatalogManifest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatalogManifest {
+    pub global: Manifest,
+    pub windows: BTreeMap<String, Manifest>,
+}
+
+impl CatalogManifest {
+    pub fn validate(&self) -> Result<()> {
+        self.global.validate().context("invalid global snapshot")?;
+        for (window_id, manifest) in &self.windows {
+            validate_window_id(window_id)?;
+            manifest
+                .validate()
+                .with_context(|| format!("invalid snapshot for window {window_id}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl SnapshotCatalog {
+    pub fn new(global: Arc<Snapshot>, windows: BTreeMap<String, Arc<Snapshot>>) -> Result<Self> {
+        global
+            .manifest
+            .validate()
+            .context("invalid global snapshot")?;
+        for (window_id, snapshot) in &windows {
+            validate_window_id(window_id)?;
+            snapshot
+                .manifest
+                .validate()
+                .with_context(|| format!("invalid snapshot for window {window_id}"))?;
+        }
+        let manifest = CatalogManifest {
+            global: global.manifest.clone(),
+            windows: windows
+                .iter()
+                .map(|(window_id, snapshot)| (window_id.clone(), snapshot.manifest.clone()))
+                .collect(),
+        };
+        Ok(Self {
+            global,
+            windows: Arc::new(windows),
+            manifest,
+        })
+    }
+
+    pub fn global_only(global: Arc<Snapshot>) -> Result<Self> {
+        Self::new(global, BTreeMap::new())
+    }
+
+    pub fn global(&self) -> &Arc<Snapshot> {
+        &self.global
+    }
+
+    pub fn window(&self, window_id: &str) -> Option<&Arc<Snapshot>> {
+        self.windows.get(window_id)
+    }
+
+    pub fn windows(&self) -> &BTreeMap<String, Arc<Snapshot>> {
+        &self.windows
+    }
+
+    pub fn manifest(&self) -> &CatalogManifest {
+        &self.manifest
+    }
+
+    /// Loads either the catalog layout or the original single-snapshot layout.
+    ///
+    /// Catalog layout:
+    ///
+    /// ```text
+    /// ROOT/global/{manifest.json,rows.bin}
+    /// ROOT/windows/WINDOW_ID/{manifest.json,rows.bin}
+    /// ```
+    pub fn load(directory: &Path) -> Result<Self> {
+        let global_directory = directory.join("global");
+        if !global_directory.join("manifest.json").is_file() {
+            return Self::global_only(Arc::new(Snapshot::load(directory)?));
+        }
+
+        let global = Arc::new(Snapshot::load(&global_directory)?);
+        let windows_directory = directory.join("windows");
+        let mut windows = BTreeMap::new();
+        if windows_directory.is_dir() {
+            for entry in fs::read_dir(&windows_directory)
+                .with_context(|| format!("read {}", windows_directory.display()))?
+            {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let window_id = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("window directory name is not UTF-8"))?;
+                validate_window_id(&window_id)?;
+                let snapshot = Arc::new(
+                    Snapshot::load(&entry.path())
+                        .with_context(|| format!("load snapshot for public window {window_id}"))?,
+                );
+                windows.insert(window_id, snapshot);
+            }
+        }
+        Self::new(global, windows)
+    }
 }
 
 #[derive(Serialize)]
@@ -323,6 +442,21 @@ pub fn records_from_json(
         .collect()
 }
 
+fn validate_window_id(window_id: &str) -> Result<()> {
+    if window_id.is_empty() || window_id.len() > 128 {
+        bail!("window ID must contain between 1 and 128 bytes");
+    }
+    if window_id == "."
+        || window_id == ".."
+        || !window_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        bail!("window ID contains unsupported characters: {window_id}");
+    }
+    Ok(())
+}
+
 fn validate_config(config: &SnapshotConfig) -> Result<()> {
     if !config.bucket_count.is_power_of_two() {
         bail!("bucket count must be a non-zero power of two");
@@ -448,5 +582,29 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(values, vec![b"only".to_vec()]);
+    }
+
+    #[test]
+    fn catalog_exposes_global_and_independently_sized_windows() {
+        let global =
+            Arc::new(Snapshot::build(vec![Record::new("tag", "global")], config()).unwrap());
+        let mut window_config = config();
+        window_config.bucket_count = 8;
+        window_config.source_cutoff = "2026-W32".into();
+        let window =
+            Arc::new(Snapshot::build(vec![Record::new("tag", "window")], window_config).unwrap());
+        let catalog = SnapshotCatalog::new(
+            Arc::clone(&global),
+            BTreeMap::from([("2026-W32".into(), Arc::clone(&window))]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            catalog.global().manifest.snapshot_id,
+            global.manifest.snapshot_id
+        );
+        assert_eq!(catalog.window("2026-W32").unwrap().manifest.bucket_count, 8);
+        assert_eq!(catalog.manifest().windows.len(), 1);
+        catalog.manifest().validate().unwrap();
     }
 }

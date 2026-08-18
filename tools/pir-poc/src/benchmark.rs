@@ -1,8 +1,11 @@
+mod cold;
 mod config;
+mod endpoints;
 mod kernels;
 mod local;
 mod optimization;
 pub mod report;
+mod single_pass;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,9 +13,11 @@ use std::time::{Duration, Instant};
 use crate::dense;
 use crate::snapshot::Snapshot;
 use anyhow::{bail, Context, Result};
+pub use cold::run as run_cold;
 use config::{
     batch_sizes, dimensions, sample_count, LOAD_BUCKET_COUNT, LOAD_ROW_SIZE, TARGET_SERVER_COUNTS,
 };
+pub use endpoints::run as run_endpoints;
 use local::LocalServerPool;
 pub use optimization::run as run_optimizations;
 use rand::{rngs::StdRng, SeedableRng};
@@ -21,6 +26,7 @@ use report::{
     excluded_protocols, methodology, BatchResult, DimensionResult, IsolatedServerResult,
     LoadResult, PublicQueryResult, TopologyResult,
 };
+pub use single_pass::run as run_single_pass;
 
 const SERVER_WORKER_THREADS: usize = 2;
 

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -6,9 +8,13 @@ use serde::Serialize;
 
 use super::{
     combine_compact, compact_registration, dense_registration, evaluate_dense,
-    CompactSubscriptionServer,
+    CompactSubscriptionServer, OUTPUT_BYTES,
 };
 use crate::benchmark::Profile;
+
+const CANDIDATE_TAGS_PER_SUBSCRIPTION: usize = 100;
+const DECOY_WIRE_BUCKET_BYTES: usize = size_of::<u32>();
+const INDEX_EVENT_STREAM_BUCKETS: usize = 65_536;
 
 #[derive(Debug, Serialize)]
 pub struct SubscriptionBenchmarkReport {
@@ -43,6 +49,29 @@ pub struct FanoutResult {
     pub subscriptions: usize,
     pub server_eval_p50_ms: Vec<f64>,
     pub subscriptions_evaluated_per_second: Vec<f64>,
+    pub response_bytes_per_server_per_event: usize,
+    pub total_response_bytes_per_event: usize,
+    pub indexed_decoys: IndexedDecoyFanoutResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IndexedDecoyFanoutResult {
+    pub privacy: &'static str,
+    pub candidate_tags_per_subscription: usize,
+    pub registration_bytes_per_subscription: usize,
+    pub index_build_ms: f64,
+    pub index_memberships: usize,
+    pub distinct_index_buckets: usize,
+    pub estimated_index_bytes: usize,
+    pub matching_event_notifications: usize,
+    pub missing_event_notifications: usize,
+    pub matching_event_p50_ns: f64,
+    pub missing_event_p50_ns: f64,
+    pub matching_events_per_second: f64,
+    pub missing_events_per_second: f64,
+    pub expected_notifications_per_uniform_event: f64,
+    pub compact_dpf_sum_server_work_p50_ms: f64,
+    pub compact_dpf_to_decoy_server_work_ratio: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +99,9 @@ pub fn run(profile: Profile) -> Result<SubscriptionBenchmarkReport> {
             "Release build; all measurements are in-process and exclude network latency.",
             "Compact DPF evaluates one point per registered subscription for every event.",
             "Fanout measures a whole server event pass, including result-vector allocation.",
+            "The 100-candidate decoy baseline is a one-server public inverted index: registration inserts one target and 99 decoy bucket memberships per logical subscription, then each event performs one hash-index lookup rather than 100 lookups per subscription.",
+            "Decoy hit measurements rotate over up to 65,536 distinct indexed buckets and clone one matching internal subscription handle; misses rotate over up to 65,536 absent buckets and return an empty vector. Both exclude event decoding, transport, persistence, and delivery of the event payload.",
+            "Decoy index bytes estimate Rust HashMap slots, control bytes, and membership-vector capacity, but excludes allocator metadata. Its deterministic collision-free registrations model one matching subscriber and maximize distinct index buckets.",
             "The dense three-server result is a hot single-key lower bound: one indexed bit read per server and event; it does not model a multi-gigabyte subscription-key working set.",
             "Results are medians; black_box prevents benchmark result elimination.",
         ],
@@ -264,6 +296,8 @@ fn benchmark_fanout(
         .iter()
         .map(|times| percentile(times, 50))
         .collect::<Vec<_>>();
+    let indexed_decoys =
+        benchmark_indexed_decoys(bucket_count, event_bucket, subscriptions, profile, &medians)?;
     Ok(FanoutResult {
         subscriptions,
         server_eval_p50_ms: medians.iter().copied().map(millis).collect(),
@@ -271,7 +305,156 @@ fn benchmark_fanout(
             .iter()
             .map(|duration| subscriptions as f64 / duration.as_secs_f64())
             .collect(),
+        response_bytes_per_server_per_event: subscriptions * OUTPUT_BYTES,
+        total_response_bytes_per_event: subscriptions * OUTPUT_BYTES * 2,
+        indexed_decoys,
     })
+}
+
+struct IndexedDecoyServer {
+    subscriptions_by_bucket: HashMap<usize, Vec<u32>>,
+    memberships: usize,
+}
+
+impl IndexedDecoyServer {
+    fn with_capacity(memberships: usize) -> Self {
+        Self {
+            subscriptions_by_bucket: HashMap::with_capacity(memberships),
+            memberships: 0,
+        }
+    }
+
+    fn register(&mut self, subscription: u32, buckets: impl IntoIterator<Item = usize>) {
+        for bucket in buckets {
+            self.subscriptions_by_bucket
+                .entry(bucket)
+                .or_default()
+                .push(subscription);
+            self.memberships += 1;
+        }
+    }
+
+    fn evaluate_event(&self, event_bucket: usize) -> Vec<u32> {
+        self.subscriptions_by_bucket
+            .get(&event_bucket)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn estimated_index_bytes(&self) -> usize {
+        let table_bytes = self.subscriptions_by_bucket.capacity()
+            * (size_of::<usize>() + size_of::<Vec<u32>>() + 1);
+        let membership_bytes = self
+            .subscriptions_by_bucket
+            .values()
+            .map(|subscriptions| subscriptions.capacity() * size_of::<u32>())
+            .sum::<usize>();
+        table_bytes + membership_bytes
+    }
+}
+
+fn benchmark_indexed_decoys(
+    bucket_count: usize,
+    event_bucket: usize,
+    subscriptions: usize,
+    profile: Profile,
+    compact_medians: &[Duration],
+) -> Result<IndexedDecoyFanoutResult> {
+    let memberships = subscriptions * CANDIDATE_TAGS_PER_SUBSCRIPTION;
+    if memberships >= bucket_count {
+        bail!(
+            "decoy benchmark needs {memberships} distinct memberships outside one event bucket, but the domain has only {bucket_count} buckets"
+        );
+    }
+
+    let build_started = Instant::now();
+    let mut server = IndexedDecoyServer::with_capacity(memberships);
+    for subscription in 0..subscriptions {
+        let first_ordinal = subscription * CANDIDATE_TAGS_PER_SUBSCRIPTION;
+        let buckets = (0..CANDIDATE_TAGS_PER_SUBSCRIPTION).map(|candidate| {
+            let ordinal = first_ordinal + candidate;
+            if ordinal == 0 {
+                event_bucket
+            } else {
+                non_event_bucket(event_bucket, ordinal - 1, bucket_count)
+            }
+        });
+        server.register(
+            u32::try_from(subscription).expect("benchmark subscription count fits in u32"),
+            buckets,
+        );
+    }
+    let index_build_ms = millis(build_started.elapsed());
+    let matching_buckets = server
+        .subscriptions_by_bucket
+        .keys()
+        .copied()
+        .take(INDEX_EVENT_STREAM_BUCKETS)
+        .collect::<Vec<_>>();
+    let missing_buckets = (0..bucket_count)
+        .filter(|bucket| !server.subscriptions_by_bucket.contains_key(bucket))
+        .take(INDEX_EVENT_STREAM_BUCKETS)
+        .collect::<Vec<_>>();
+    let matching_notifications = server.evaluate_event(event_bucket).len();
+    let missing_notifications = server.evaluate_event(missing_buckets[0]).len();
+    if matching_notifications != 1 || missing_notifications != 0 {
+        bail!("indexed-decoy benchmark constructed an invalid hit/miss workload");
+    }
+
+    let matching_median = benchmark_indexed_events(&server, &matching_buckets, profile);
+    let missing_median = benchmark_indexed_events(&server, &missing_buckets, profile);
+    let compact_sum = compact_medians.iter().sum::<Duration>();
+    let compact_to_decoy_ratio = compact_sum.as_secs_f64() / matching_median.as_secs_f64();
+
+    Ok(IndexedDecoyFanoutResult {
+        privacy: "candidate-set privacy only: the server sees all 100 buckets and which candidate generated each notification",
+        candidate_tags_per_subscription: CANDIDATE_TAGS_PER_SUBSCRIPTION,
+        registration_bytes_per_subscription: CANDIDATE_TAGS_PER_SUBSCRIPTION
+            * DECOY_WIRE_BUCKET_BYTES,
+        index_build_ms,
+        index_memberships: server.memberships,
+        distinct_index_buckets: server.subscriptions_by_bucket.len(),
+        estimated_index_bytes: server.estimated_index_bytes(),
+        matching_event_notifications: matching_notifications,
+        missing_event_notifications: missing_notifications,
+        matching_event_p50_ns: nanos(matching_median),
+        missing_event_p50_ns: nanos(missing_median),
+        matching_events_per_second: 1.0 / matching_median.as_secs_f64(),
+        missing_events_per_second: 1.0 / missing_median.as_secs_f64(),
+        expected_notifications_per_uniform_event: memberships as f64 / bucket_count as f64,
+        compact_dpf_sum_server_work_p50_ms: millis(compact_sum),
+        compact_dpf_to_decoy_server_work_ratio: compact_to_decoy_ratio,
+    })
+}
+
+fn non_event_bucket(event_bucket: usize, ordinal: usize, bucket_count: usize) -> usize {
+    let bucket = ordinal % (bucket_count - 1);
+    if bucket >= event_bucket {
+        bucket + 1
+    } else {
+        bucket
+    }
+}
+
+fn benchmark_indexed_events(
+    server: &IndexedDecoyServer,
+    event_buckets: &[usize],
+    profile: Profile,
+) -> Duration {
+    let samples = match profile {
+        Profile::Quick => 31,
+        Profile::Full => 101,
+    };
+    let mut timings = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let started = Instant::now();
+        for event_bucket in event_buckets {
+            std::hint::black_box(server.evaluate_event(std::hint::black_box(*event_bucket)));
+        }
+        timings.push(started.elapsed());
+    }
+    timings.sort_unstable();
+    percentile(&timings, 50) / u32::try_from(event_buckets.len()).expect("event stream fits in u32")
 }
 
 fn percentile(values: &[Duration], percentile: usize) -> Duration {
@@ -289,4 +472,32 @@ fn micros(duration: Duration) -> f64 {
 
 fn nanos(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000_000_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_decoy_server_returns_only_matching_subscriptions() {
+        let mut server = IndexedDecoyServer::with_capacity(6);
+        server.register(7, [3, 5, 8]);
+        server.register(9, [5, 13, 21]);
+
+        assert_eq!(server.evaluate_event(3), vec![7]);
+        assert_eq!(server.evaluate_event(5), vec![7, 9]);
+        assert!(server.evaluate_event(34).is_empty());
+        assert_eq!(server.memberships, 6);
+    }
+
+    #[test]
+    fn non_event_bucket_enumerates_every_other_bucket_once() {
+        let event_bucket = 3;
+        let mut buckets = (0..7)
+            .map(|ordinal| non_event_bucket(event_bucket, ordinal, 8))
+            .collect::<Vec<_>>();
+        buckets.sort_unstable();
+
+        assert_eq!(buckets, vec![0, 1, 2, 4, 5, 6, 7]);
+    }
 }
