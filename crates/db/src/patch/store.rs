@@ -1,4 +1,6 @@
 use super::*;
+use lens::TransformStore;
+use storage::keys::systemstore::LensConfigKey;
 
 impl<S: Store> crate::database::DB<S> {
     /// Create and store a new schema version from a validated patched schema.
@@ -16,6 +18,7 @@ impl<S: Store> crate::database::DB<S> {
         collection_id: &str,
         collection_name: &str,
         is_active_explicitly_set: bool,
+        migration: Option<lens::LensConfig>,
     ) -> Result<CollectionVersion> {
         // Go compatibility: default new fields with CType::None to CType::LwwRegister.
         // Go's patchCollection does this in collection_define.go for new fields that
@@ -180,16 +183,6 @@ impl<S: Store> crate::database::DB<S> {
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
 
-        // Update schema_heads with new version CID and priority
-        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
-            if let Ok(mut heads) = self.schema_heads.write() {
-                heads.insert(
-                    actual_name.to_string(),
-                    (vec![new_cid], collection_priority),
-                );
-            }
-        }
-
         // Check if a placeholder version exists with this ID (from pre-registered migration).
         // When set_migration is called before patch_collection, it creates a placeholder
         // with previous_version.transform set. We need to copy that transform to preserve
@@ -273,6 +266,21 @@ impl<S: Store> crate::database::DB<S> {
             new_schema.is_active = true;
         }
 
+        let committed_migration = if let Some(mut config) = migration {
+            config.source_schema_version_id = old_version_id.to_string();
+            config.destination_schema_version_id = new_version_id.clone();
+
+            let txn_lens_store = crate::txn_lens_store::TxnLensStore::new(self.lens_store.clone())?;
+            let transform_id = txn_lens_store.add(config.clone()).await?;
+            new_schema.previous_version = Some(CollectionSource {
+                source_collection_id: old_version_id.to_string(),
+                transform: Some(transform_id.to_string()),
+            });
+            Some((transform_id, config))
+        } else {
+            None
+        };
+
         // Create old schema copy for storage. If new schema is active, mark old as inactive.
         // If new schema is inactive (explicit IsActive=false), old version stays active.
         let mut old_schema_inactive = old_schema.clone();
@@ -352,6 +360,16 @@ impl<S: Store> crate::database::DB<S> {
                 .set(&old_version_index_key.bytes(), b"1")
                 .await
                 .map_err(Error::Storage)?;
+
+            if let Some((transform_id, config)) = &committed_migration {
+                let lens_key = LensConfigKey::new(transform_id.to_string());
+                let lens_data = serde_json::to_vec(config)
+                    .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
+                systemstore
+                    .set(&lens_key.bytes(), &lens_data)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
         } // systemstore reference dropped here
 
         // Store field and collection definition blocks in blockstore for Bitswap sync.
@@ -445,6 +463,31 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         txn.commit().await?;
+
+        if let Some((transform_id, config)) = committed_migration {
+            self.bump_migration_generation();
+            if let Err(error) = self
+                .lens_store()
+                .add_with_id(transform_id.clone(), config)
+                .await
+            {
+                tracing::warn!(
+                    transform_id = %transform_id,
+                    error = %error,
+                    "failed to promote collection patch migration lens"
+                );
+            }
+        }
+
+        // Publish the new head only after all durable patch writes succeed.
+        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
+            if let Ok(mut heads) = self.schema_heads.write() {
+                heads.insert(
+                    actual_name.to_string(),
+                    (vec![new_cid], collection_priority),
+                );
+            }
+        }
 
         // Clean up any pending migration that was linked to this version
         {

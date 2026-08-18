@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 use crate::router::CollectionManagementOperations;
 
@@ -16,11 +17,17 @@ fn mock_collection_version(name: &str) -> schema::CollectionVersion {
 
 /// Mock collection management operations for testing.
 #[derive(Debug, Clone, Default)]
-pub struct MockCollectionManagementOperations;
+pub struct MockCollectionManagementOperations {
+    last_migration: Arc<Mutex<Option<lens::LensConfig>>>,
+}
 
 impl MockCollectionManagementOperations {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn last_migration(&self) -> Option<lens::LensConfig> {
+        self.last_migration.lock().unwrap().clone()
     }
 }
 
@@ -34,7 +41,9 @@ impl CollectionManagementOperations for MockCollectionManagementOperations {
         &self,
         collection_name: &str,
         _patch: &str,
+        migration: Option<lens::LensConfig>,
     ) -> Result<serde_json::Value, String> {
+        *self.last_migration.lock().unwrap() = migration;
         Ok(json!({"name": collection_name, "version": "v2"}))
     }
 
