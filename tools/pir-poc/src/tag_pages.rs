@@ -6,7 +6,10 @@
 //! The two choices avoid a linear client-side minimal-perfect-hash map while
 //! allowing a much denser table than the original one-hash snapshot layout.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    mem::{size_of, size_of_val},
+};
 
 use anyhow::{bail, Context, Result};
 
@@ -86,62 +89,47 @@ pub struct DecodedPage {
 #[derive(Clone, Debug)]
 pub struct TagPageSnapshot {
     pub manifest: TagPageManifest,
+    pub build_metrics: TagPageBuildMetrics,
     rows: Box<[u8]>,
 }
 
 #[derive(Debug)]
-struct EncodedPage {
-    key: Vec<u8>,
-    bytes: Vec<u8>,
+pub(crate) struct EncodedPage {
+    pub(crate) key: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EncodedPageSet {
+    pub(crate) document_count: usize,
+    pub(crate) distinct_tag_count: usize,
+    pub(crate) maximum_pages_per_tag: usize,
+    pub(crate) pages: Vec<EncodedPage>,
+}
+
+impl EncodedPageSet {
+    pub(crate) fn tracked_bytes(&self) -> usize {
+        self.pages.capacity() * size_of::<EncodedPage>()
+            + self
+                .pages
+                .iter()
+                .map(|page| page.key.capacity() + page.bytes.capacity())
+                .sum::<usize>()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagPageBuildMetrics {
+    pub attempts: usize,
+    /// Peak bytes owned by the corpus and layout builder. Allocator and runtime
+    /// overhead are intentionally excluded so runs remain comparable.
+    pub peak_tracked_bytes: usize,
 }
 
 impl TagPageSnapshot {
     pub fn build(records: Vec<Record>, config: TagPageConfig) -> Result<Self> {
-        validate_config(&config)?;
-        let document_count = records.len();
-        let mut by_tag = BTreeMap::<Vec<u8>, Vec<Vec<u8>>>::new();
-        for record in records {
-            if record.key.is_empty() {
-                bail!("empty tags are not supported");
-            }
-            if record.value.len() > config.max_value_bytes {
-                bail!(
-                    "tag value is {} bytes, limit is {}",
-                    record.value.len(),
-                    config.max_value_bytes
-                );
-            }
-            by_tag.entry(record.key).or_default().push(record.value);
-        }
-        for values in by_tag.values_mut() {
-            values.sort();
-        }
-
-        let distinct_tag_count = by_tag.len();
-        let maximum_pages_per_tag = by_tag
-            .values()
-            .map(|values| values.len().div_ceil(config.values_per_page))
-            .max()
-            .unwrap_or_default();
-        let mut pages = Vec::new();
-        for (tag, values) in by_tag {
-            let total_pages = values.len().div_ceil(config.values_per_page);
-            for (page_index, chunk) in values.chunks(config.values_per_page).enumerate() {
-                let key = page_key(&tag, page_index)?;
-                pages.push(EncodedPage {
-                    bytes: encode_page(&key, total_pages, chunk, &config)?,
-                    key,
-                });
-            }
-        }
-
-        Self::from_pages(
-            pages,
-            document_count,
-            distinct_tag_count,
-            maximum_pages_per_tag,
-            config,
-        )
+        let page_set = encode_records(records, &config)?;
+        Self::from_page_set(&page_set, config)
     }
 
     pub fn benchmark(
@@ -149,80 +137,39 @@ impl TagPageSnapshot {
         distinct_tag_count: usize,
         config: TagPageConfig,
     ) -> Result<Self> {
-        validate_config(&config)?;
-        if distinct_tag_count == 0 || document_count < distinct_tag_count {
-            bail!("benchmark needs at least one document per distinct tag");
-        }
-        let base_values = document_count / distinct_tag_count;
-        let extra_values = document_count % distinct_tag_count;
-        let maximum_values = base_values + usize::from(extra_values != 0);
-        let maximum_pages_per_tag = maximum_values.div_ceil(config.values_per_page);
-        let page_count = (0..distinct_tag_count).try_fold(0usize, |total, tag_index| {
-            let values = base_values + usize::from(tag_index < extra_values);
-            total
-                .checked_add(values.div_ceil(config.values_per_page))
-                .context("benchmark tag page count overflow")
-        })?;
-        let mut pages = Vec::with_capacity(page_count);
-        for tag_index in 0..distinct_tag_count {
-            let tag = benchmark_tag(tag_index);
-            let value_count = base_values + usize::from(tag_index < extra_values);
-            let total_pages = value_count.div_ceil(config.values_per_page);
-            for page_index in 0..total_pages {
-                let first_value = page_index * config.values_per_page;
-                let values_on_page = (value_count - first_value).min(config.values_per_page);
-                let values = (0..values_on_page)
-                    .map(|offset| {
-                        benchmark_value(tag_index, first_value + offset, config.max_value_bytes)
-                    })
-                    .collect::<Vec<_>>();
-                let key = page_key(&tag, page_index)?;
-                pages.push(EncodedPage {
-                    bytes: encode_page(&key, total_pages, &values, &config)?,
-                    key,
-                });
-            }
-        }
-        Self::from_pages(
-            pages,
-            document_count,
-            distinct_tag_count,
-            maximum_pages_per_tag,
-            config,
-        )
+        let page_set = benchmark_page_set(document_count, distinct_tag_count, &config)?;
+        Self::from_page_set(&page_set, config)
     }
 
-    fn from_pages(
-        pages: Vec<EncodedPage>,
-        document_count: usize,
-        distinct_tag_count: usize,
-        maximum_pages_per_tag: usize,
-        config: TagPageConfig,
-    ) -> Result<Self> {
+    pub(crate) fn from_page_set(page_set: &EncodedPageSet, config: TagPageConfig) -> Result<Self> {
         let page_size = config.page_size()?;
-        let page_count = pages.len();
+        let page_count = page_set.pages.len();
         let minimum_slots = page_count
             .checked_mul(100)
             .and_then(|value| value.checked_add(config.target_load_percent - 1))
             .context("tag page table size overflow")?
             / config.target_load_percent;
         let bucket_count = minimum_slots.div_ceil(config.bucket_capacity).max(1);
-        let (table_seed, placements) = build_cuckoo_table(&pages, bucket_count, &config)?;
+        let (table_seed, placements, attempts, placement_peak_bytes) =
+            build_cuckoo_table(&page_set.pages, bucket_count, &config)?;
         let row_size = config.row_size()?;
         let mut rows = vec![0u8; bucket_count * row_size];
-        for (slot, page_index) in placements.into_iter().enumerate() {
+        for (slot, page_index) in placements.iter().copied().enumerate() {
             if let Some(page_index) = page_index {
                 let start = slot * page_size;
-                rows[start..start + page_size].copy_from_slice(&pages[page_index].bytes);
+                rows[start..start + page_size].copy_from_slice(&page_set.pages[page_index].bytes);
             }
         }
+        let corpus_bytes = page_set.tracked_bytes();
+        let materialization_bytes =
+            corpus_bytes + placements.capacity() * size_of::<Option<usize>>() + rows.capacity();
 
         Ok(Self {
             manifest: TagPageManifest {
-                document_count,
-                distinct_tag_count,
+                document_count: page_set.document_count,
+                distinct_tag_count: page_set.distinct_tag_count,
                 page_count,
-                maximum_pages_per_tag,
+                maximum_pages_per_tag: page_set.maximum_pages_per_tag,
                 bucket_count,
                 bucket_capacity: config.bucket_capacity,
                 values_per_page: config.values_per_page,
@@ -230,6 +177,10 @@ impl TagPageSnapshot {
                 page_size,
                 row_size,
                 table_seed,
+            },
+            build_metrics: TagPageBuildMetrics {
+                attempts,
+                peak_tracked_bytes: placement_peak_bytes.max(materialization_bytes),
             },
             rows: rows.into_boxed_slice(),
         })
@@ -269,7 +220,12 @@ impl TagPageSnapshot {
         let expected_fingerprint = fingerprint(&key);
         for slot in row.chunks_exact(self.manifest.page_size) {
             if slot[..16] == expected_fingerprint {
-                return decode_page(slot, &self.manifest).map(Some);
+                return decode_page(
+                    slot,
+                    self.manifest.values_per_page,
+                    self.manifest.max_value_bytes,
+                )
+                .map(Some);
             }
         }
         Ok(None)
@@ -297,6 +253,103 @@ impl TagPageSnapshot {
         }
         Ok(None)
     }
+}
+
+pub(crate) fn encode_records(
+    records: Vec<Record>,
+    config: &TagPageConfig,
+) -> Result<EncodedPageSet> {
+    validate_config(config)?;
+    let document_count = records.len();
+    let mut by_tag = BTreeMap::<Vec<u8>, Vec<Vec<u8>>>::new();
+    for record in records {
+        if record.key.is_empty() {
+            bail!("empty tags are not supported");
+        }
+        if record.value.len() > config.max_value_bytes {
+            bail!(
+                "tag value is {} bytes, limit is {}",
+                record.value.len(),
+                config.max_value_bytes
+            );
+        }
+        by_tag.entry(record.key).or_default().push(record.value);
+    }
+    for values in by_tag.values_mut() {
+        values.sort();
+    }
+
+    let distinct_tag_count = by_tag.len();
+    let maximum_pages_per_tag = by_tag
+        .values()
+        .map(|values| values.len().div_ceil(config.values_per_page))
+        .max()
+        .unwrap_or_default();
+    let mut pages = Vec::new();
+    for (tag, values) in by_tag {
+        let total_pages = values.len().div_ceil(config.values_per_page);
+        for (page_index, chunk) in values.chunks(config.values_per_page).enumerate() {
+            let key = page_key(&tag, page_index)?;
+            pages.push(EncodedPage {
+                bytes: encode_page(&key, total_pages, chunk, config)?,
+                key,
+            });
+        }
+    }
+
+    Ok(EncodedPageSet {
+        pages,
+        document_count,
+        distinct_tag_count,
+        maximum_pages_per_tag,
+    })
+}
+
+pub(crate) fn benchmark_page_set(
+    document_count: usize,
+    distinct_tag_count: usize,
+    config: &TagPageConfig,
+) -> Result<EncodedPageSet> {
+    validate_config(config)?;
+    if distinct_tag_count == 0 || document_count < distinct_tag_count {
+        bail!("benchmark needs at least one document per distinct tag");
+    }
+    let base_values = document_count / distinct_tag_count;
+    let extra_values = document_count % distinct_tag_count;
+    let maximum_values = base_values + usize::from(extra_values != 0);
+    let maximum_pages_per_tag = maximum_values.div_ceil(config.values_per_page);
+    let page_count = (0..distinct_tag_count).try_fold(0usize, |total, tag_index| {
+        let values = base_values + usize::from(tag_index < extra_values);
+        total
+            .checked_add(values.div_ceil(config.values_per_page))
+            .context("benchmark tag page count overflow")
+    })?;
+    let mut pages = Vec::with_capacity(page_count);
+    for tag_index in 0..distinct_tag_count {
+        let tag = benchmark_tag(tag_index);
+        let value_count = base_values + usize::from(tag_index < extra_values);
+        let total_pages = value_count.div_ceil(config.values_per_page);
+        for page_index in 0..total_pages {
+            let first_value = page_index * config.values_per_page;
+            let values_on_page = (value_count - first_value).min(config.values_per_page);
+            let values = (0..values_on_page)
+                .map(|offset| {
+                    benchmark_value(tag_index, first_value + offset, config.max_value_bytes)
+                })
+                .collect::<Vec<_>>();
+            let key = page_key(&tag, page_index)?;
+            pages.push(EncodedPage {
+                bytes: encode_page(&key, total_pages, &values, config)?,
+                key,
+            });
+        }
+    }
+    Ok(EncodedPageSet {
+        pages,
+        document_count,
+        distinct_tag_count,
+        maximum_pages_per_tag,
+    })
 }
 
 pub fn benchmark_tag(index: usize) -> [u8; 8] {
@@ -352,19 +405,23 @@ fn encode_page(
     Ok(page)
 }
 
-fn decode_page(page: &[u8], manifest: &TagPageManifest) -> Result<DecodedPage> {
+pub(crate) fn decode_page(
+    page: &[u8],
+    values_per_page: usize,
+    max_value_bytes: usize,
+) -> Result<DecodedPage> {
     let total_pages = u32::from_le_bytes(page[16..20].try_into().expect("fixed header")) as usize;
     let value_count = u16::from_le_bytes(page[20..22].try_into().expect("fixed header")) as usize;
-    if total_pages == 0 || value_count == 0 || value_count > manifest.values_per_page {
+    if total_pages == 0 || value_count == 0 || value_count > values_per_page {
         bail!("tag page contains invalid counts");
     }
-    let value_slot_size = VALUE_LENGTH_BYTES + manifest.max_value_bytes;
+    let value_slot_size = VALUE_LENGTH_BYTES + max_value_bytes;
     let mut values = Vec::with_capacity(value_count);
     for index in 0..value_count {
         let start = PAGE_HEADER_BYTES + index * value_slot_size;
         let value_len =
             u16::from_le_bytes(page[start..start + 2].try_into().expect("fixed length")) as usize;
-        if value_len > manifest.max_value_bytes {
+        if value_len > max_value_bytes {
             bail!("tag page contains an invalid value length");
         }
         values.push(page[start + 2..start + 2 + value_len].to_vec());
@@ -379,14 +436,22 @@ fn build_cuckoo_table(
     pages: &[EncodedPage],
     bucket_count: usize,
     config: &TagPageConfig,
-) -> Result<(u64, Vec<Option<usize>>)> {
+) -> Result<(u64, Vec<Option<usize>>, usize, usize)> {
     let slot_count = bucket_count * config.bucket_capacity;
+    let corpus_bytes = size_of_val(pages)
+        + pages
+            .iter()
+            .map(|page| page.key.capacity() + page.bytes.capacity())
+            .sum::<usize>();
     for table_seed in 0..MAX_BUILD_ATTEMPTS {
         let candidates = pages
             .iter()
             .map(|page| candidate_buckets(&page.key, table_seed, bucket_count))
             .collect::<Vec<_>>();
         let mut slots = vec![None; slot_count];
+        let peak_tracked_bytes = corpus_bytes
+            + candidates.capacity() * size_of::<[usize; 2]>()
+            + slots.capacity() * size_of::<Option<usize>>();
         let mut succeeded = true;
         for page_index in 0..pages.len() {
             if !insert_page(
@@ -401,7 +466,12 @@ fn build_cuckoo_table(
             }
         }
         if succeeded {
-            return Ok((table_seed, slots));
+            return Ok((
+                table_seed,
+                slots,
+                table_seed as usize + 1,
+                peak_tracked_bytes,
+            ));
         }
     }
     bail!(
@@ -455,7 +525,7 @@ fn candidate_buckets(key: &[u8], table_seed: u64, bucket_count: usize) -> [usize
     [first, second]
 }
 
-fn fingerprint(key: &[u8]) -> [u8; 16] {
+pub(crate) fn fingerprint(key: &[u8]) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(FINGERPRINT_DOMAIN);
     hasher.update(key);

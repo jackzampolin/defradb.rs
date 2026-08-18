@@ -2,6 +2,7 @@ pub mod benchmark;
 pub mod demo;
 pub mod dense;
 pub mod finite_differences;
+pub mod fuse_pages;
 pub mod http;
 pub mod service;
 pub mod single_pass;

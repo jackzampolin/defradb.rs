@@ -11,7 +11,9 @@ The earlier version of this document put measurements from different physical la
 | 100 indexed decoys | Lower-privacy baseline; must query the identical selected windows in the unified benchmark |
 | SinglePass | Promising warm-query experiment; not yet compared on the packed tag-page layout or identical windows |
 | Finite differences | Retained cold-query experiment; not selected for production |
-| Binary-Fuse/RAID-style layout | Research proposal only; not implemented or benchmarked |
+| 4-wise Fuse retrieval over Dense XOR | Implemented and benchmarked on the identical populated page corpus; best server-side static layout so far, but roughly doubles phone upload versus packed cuckoo |
+| 3-wise Fuse retrieval over Dense XOR | Implemented and benchmarked; not selected because its storage/upload/build-memory costs are higher and its timing advantage over 4-wise was not stable |
+| RAID-PIR | Evaluated separately as a distribution protocol; not useful for the current three-server/two-colluder target because `r = k` leaves every server with the full table |
 | Compact DPF subscriptions | Exact-private live experiment; separate from snapshot selection |
 
 ## What packed Dense means
@@ -26,6 +28,22 @@ Packed Dense is not a new PIR construction. It is ordinary Dense XOR PIR over a 
 
 "Packed" therefore reduces the number of rows that Dense must scan; it does not turn the scan into an indexed lookup. Two candidates also mean two Dense evaluations per page. The current benchmark uses two servers, while Dense share generation itself supports any `n >= 2`. All `n` answers are required.
 
+## Fuse retrieval result
+
+[`fuse_pages.rs`](src/fuse_pages.rs) uses the Binary Fuse peelable graph as an exact static retrieval table. A complete tag page is assigned across three or four cells so their XOR reconstructs it. All positions are selected in one Dense XOR query share; the client still needs only a constant-size manifest and all server answers.
+
+The full `bench-fuse` run uses 4,194,304 documents, 1,048,576 tags, four 16-byte locators per tag, and the exact same 96-byte page corpus for every layout:
+
+| Layout | Table/server | 2-server upload | 2-server download | 2-server wall p50 range | Summed server p50 range | Build range |
+|---|---:|---:|---:|---:|---:|---:|
+| Packed cuckoo | 106.67 MiB | 142.22 KiB | 1.50 KiB | 11.09–11.74 ms | 21.54–22.64 ms | 612.71–619.61 ms |
+| Fuse-3 | 108.00 MiB | 288.00 KiB | 192 B | 9.44–10.53 ms | 18.03–20.45 ms | 1,514.70–1,567.14 ms |
+| Fuse-4 | 103.50 MiB | 276.00 KiB | 192 B | 9.82–10.79 ms | 19.04–20.86 ms | 1,510.73–1,574.62 ms |
+
+Across two repeated 31-sample passes, Fuse-4 reduced two-server wall time by 2.72–16.37% and summed server time by 3.15–15.93% relative to cuckoo. Deterministically it reduced expected XOR bytes by 51.49%, storage by 2.97%, and download by 87.5%, while increasing upload by 94.06%. Fuse-3/Fuse-4 timing order flipped between runs; Fuse-4 remains the useful implementation because its storage, upload, expected server bytes, and build memory are all lower. See [`FUSE_BENCHMARK.md`](FUSE_BENCHMARK.md) for the three-server data, build-memory accounting, method, and RAID-PIR analysis.
+
+This closes the physical-layout comparison only. It does not make the older decoy and SinglePass numbers comparable: those paths still need the broader identical-window and transport benchmark described below. A real phone/network run is also required to decide whether Fuse-4's small server saving is worth its additional 137 KiB of two-server upload.
+
 ## Why the old snapshot numbers are not decision data
 
 | Benchmark | What it actually measures | Missing for a fair comparison |
@@ -34,6 +52,7 @@ Packed Dense is not a new PIR construction. It is ordinary Dense XOR PIR over a 
 | `bench-endpoints` | Dense routing and serialization over fixed-capacity tables containing only one populated record | Real packed tag-page tables and matching decoy/SinglePass requests |
 | `bench-singlepass` | SinglePass mechanics over a raw `N × row_size` synthetic database | Packed tag pages, selected windows, state transfer, and comparison with identical decoy results |
 | `bench` | Dense kernel scaling over raw fixed-size rows | DefraDB tag-page semantics and matching alternatives |
+| `bench-fuse` | Packed cuckoo, Fuse-3, and Fuse-4 over one identical populated tag-page corpus, with two and three replicated servers | Phone/network transport and the decoy/SinglePass paths |
 | Chalamet measurements | A separate small-record experiment | The same data scale, layout, and phone implementation |
 
 The endpoint and protocol benchmarks remain useful as correctness tests and scaling diagnostics. They must not be used to claim a global/window crossover or that one snapshot protocol is a particular multiple faster than another.
@@ -68,7 +87,8 @@ For live events, 100 decoys are overwhelmingly cheaper when candidate-set privac
 | Option | Why it is not the current default |
 |---|---|
 | Legacy one-hash `build_paged` Dense | Estimated 3.56 GiB per replica and 2 MiB two-server upload for the cold tag workload; it sizes from documents, repeats page keys, reserves empty slots, and can overflow one bucket |
-| 4-wise Binary-Fuse / RAID-Dense | Promising proposed immutable layout, but not implemented or benchmarked; it must beat the measured packed cuckoo layout on storage, candidate count, build reliability, and lookup work |
+| 3-wise Fuse retrieval | Implemented, but uses more storage, upload, expected server bytes, and build memory than 4-wise; measured timing order flipped across repeated runs |
+| RAID-PIR for 3 servers / 2-colluder privacy | With `k = 3, r = 3`, every server stores the full table; it requires a separate protocol and does not improve the current target deployment |
 | Compact DPF for snapshot retrieval | Compact client key, but expanding it across the complete snapshot made server CPU substantially worse than Dense; the selected library is exactly two-party |
 | ChalametPIR | Good single-server response and server timing at small scale, but the tested client matrix extrapolates far beyond phone memory |
 | Path ORAM | Solves mutable access-sequence privacy with position maps, stash, path reads/writes, and reshuffling; much broader complexity than immutable tag retrieval |
@@ -80,11 +100,11 @@ For live events, 100 decoys are overwhelmingly cheaper when candidate-set privac
 1. Build authenticated immutable generations from one DefraDB cutoff.
 2. Publish a global table and coarse UTC window tables from the same generation.
 3. Use the public-window endpoint when the client intentionally discloses a coarse range, without claiming a crossover until the unified benchmark exists.
-4. Treat packed tag-page Dense as the current stateless implementation baseline, not a selected performance winner.
+4. Keep both packed cuckoo and Fuse-4 for the phone/network benchmark: Fuse-4 wins expected server bytes, storage, and response; cuckoo wins cold upload.
 5. Evaluate SinglePass and 100 decoys on those identical packed window tables before defining cold/warm routing.
 6. Offer Compact DPF as the exact-private live tier; keep decoy subscriptions as the operational default where acceptable.
 7. Keep server count generic for Dense. Three servers raise collusion tolerance from one to two colluding servers, but all three answers are still required; this is not one-server failure tolerance.
-8. Benchmark a real Binary-Fuse/RAID-style tag-page layout before promoting it over packed cuckoo Dense.
+8. Revisit RAID-PIR only if deployment grows beyond three servers while keeping a lower collusion threshold; do not combine it with the replicated-layout implementation.
 
 ## Reproduce
 
@@ -92,6 +112,7 @@ For live events, 100 decoys are overwhelmingly cheaper when candidate-set privac
 cargo run -p pir-poc --release -- bench full
 cargo run -p pir-poc --release -- bench-cold full
 cargo run -p pir-poc --release -- bench-endpoints full
+cargo run -p pir-poc --release -- bench-fuse full
 cargo run -p pir-poc --release -- bench-singlepass full
 cargo run -p pir-poc --release -- bench-subscriptions full
 ```

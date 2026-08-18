@@ -8,8 +8,8 @@ For the evidence status and the requirements for a valid comparison across publi
 
 ## Production-shaped design
 
-- The original format hashes a lookup key to one generously sized bucket. The cold-path experiment packs values into tag pages and uses two public cuckoo candidates, producing a roughly 90%-full table with only constant-size client metadata.
-- The client creates `n` XOR shares of a unit vector. Any `n - 1` shares are uniformly random and reveal no bucket.
+- The original format hashes a lookup key to one generously sized bucket. The cold-path experiments encode compact tag pages into either two public cuckoo candidates or an exact 4-wise Fuse retrieval table. Both need only constant-size client metadata.
+- The client creates `n` XOR shares of a selector vector (unit for ordinary Dense, multi-hot for Fuse). Any `n - 1` shares are uniformly random and reveal no selected row.
 - Every server holds the same sealed snapshot and returns the XOR of the selected rows.
 - The client needs all `n` answers. Three servers improve collusion resistance from one to two servers; they do **not** provide one-server failure tolerance.
 - Server count is not hard-coded. The demo targets two and three servers, while share generation and combination accept any `n >= 2`.
@@ -59,6 +59,12 @@ Each directory is built with the existing `build` command: use the full export f
 
 [`tag_pages.rs`](src/tag_pages.rs) implements packed tag-page Dense XOR. "Packed" describes the table layout, not different PIR cryptography. A sealed snapshot groups all values for a tag into fixed-size pages of compact locators, stores four pages in each row, and places every page in one of two cuckoo candidate buckets at roughly 90% slot occupancy. A cold client needs only the small public layout description, computes both candidate buckets, privately retrieves both through ordinary Dense XOR, and accepts the page with the matching 128-bit fingerprint. No per-tag client map is required.
 
+[`fuse_pages.rs`](src/fuse_pages.rs) implements exact 3-wise and 4-wise Fuse retrieval over the same Dense XOR evaluator. It uses the Binary Fuse peelable graph as a static function: the XOR of a key's three or four cells is the complete encoded tag page. The client puts all cell positions into one secret-shared multi-hot selector, so every server performs one Dense evaluation and returns one 96-byte page share. This is exact retrieval for present keys; the embedded 128-bit page fingerprint rejects absent keys or corrupt reconstruction.
+
+`bench-fuse full` compares cuckoo and both Fuse arities on one identical populated corpus of 4,194,304 documents and 1,048,576 tags. Fuse-4 is the useful Fuse variant: across two repeated 31-sample passes it reduced two-server co-located wall time by 2.72–16.37% and summed server time by 3.15–15.93%. Deterministically it reduced expected XOR bytes by 51.49%, storage by 2.97%, and download by 87.5%, while increasing upload by 94.06% and offline build time by about 150%. Its totals were 9.82–10.79 ms, 276 KiB upload, and 192 B download versus 11.09–11.74 ms, 142.22 KiB, and 1.5 KiB for cuckoo. See [`FUSE_BENCHMARK.md`](FUSE_BENCHMARK.md) for the full two/three-server table and build-memory data.
+
+The result leaves a real deployment tradeoff rather than a universal winner. Fuse-4 minimizes expected server bytes, table size, and response; cuckoo minimizes cold-phone upload. A phone plus real-network benchmark must decide whether Fuse-4's extra 137 KiB upload is worth the measured 0.30–1.92 ms in-process server saving. Both layouts stay stateless, require no preload, and support any replicated Dense server count.
+
 Two candidates double the number of PIR operations, but remove the much larger costs in the original `build_paged` format: sizing from document count rather than page count, repeating the page key for every value, eight reserved value slots in every bucket, and empty one-hash capacity. Tags exceeding one page use deterministic continuation pages. Querying the observed number of pages can leak result cardinality through request count unless the client pads it.
 
 [`finite_differences.rs`](src/finite_differences.rs) implements the actual two-server information-theoretic construction from [Henzinger and Ragavan, EUROCRYPT 2026](https://eprint.iacr.org/2025/2008), following their [reference implementation](https://github.com/ahenzinger/finite-diffs-pir). Servers encode the packed bucket rows as a low-degree polynomial truth table. A cold client sends one 64-bit share per candidate to each server and holds no mutable state. Each server reads a sublinear translated cloud; the client XOR-reconstructs both candidate rows. The POC includes real preprocessing, querying, and recovery rather than only an analytical model.
@@ -69,7 +75,9 @@ The decoy baseline has weaker privacy regardless of performance: the server lear
 
 Snapshot routing is intentionally undecided until the unified benchmark described in [`COMPARISON.md`](COMPARISON.md) exists. Packed tag-page Dense is the current stateless implementation candidate, not a measured production winner. Finite differences remains an experiment.
 
-The new cold paths intentionally remain an in-memory sidecar/benchmark and do not alter DefraDB internals. The catalog endpoints extend the HTTP API while retaining the original global manifest/query routes as compatibility aliases. `bench-cold` performs correctness-checked private recovery for both exact protocols. Production integration should serialize and sign the cuckoo manifest and packed rows, authenticate the snapshot cutoff, expose bounded two-candidate batch endpoints, stream finite-differences responses, and use an independently reviewed implementation before treating either construction as production cryptography.
+The new cold paths intentionally remain an in-memory sidecar/benchmark and do not alter DefraDB internals. The catalog endpoints extend the HTTP API while retaining the original global manifest/query routes as compatibility aliases. `bench-cold` and `bench-fuse` perform correctness-checked private recovery. Production integration should serialize and sign the selected layout manifest and rows, authenticate the snapshot cutoff, expose bounded batch endpoints, stream finite-differences responses, and use an independently reviewed implementation before treating any construction as production cryptography.
+
+RAID-PIR was evaluated only after the replicated-layout benchmark and remains separate. Its `k`-server, redundancy-`r` design stores `r/k` of the table per server but tolerates only `r - 1` colluding servers. For the current three-server goal with privacy while any one server remains honest, `r` must equal 3; every server still stores the whole table, so RAID-PIR gives no distribution saving. It first helps this two-colluder target at four servers with `r = 3`, and requires a new protocol rather than a storage flag on Dense XOR.
 
 ## SinglePass snapshot retrieval
 
@@ -189,6 +197,7 @@ cargo run -p pir-poc --release -- bench quick
 cargo run -p pir-poc --release -- bench-opt quick
 cargo run -p pir-poc --release -- bench-cold full
 cargo run -p pir-poc --release -- bench-endpoints full
+cargo run -p pir-poc --release -- bench-fuse full
 cargo run -p pir-poc --release -- bench-singlepass full
 cargo run -p pir-poc --release -- bench-subscriptions full
 cargo run -p pir-poc --release -- build INPUT.json SNAPSHOT_DIR COLLECTION KEY_FIELD VALUE_FIELD

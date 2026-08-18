@@ -14,8 +14,25 @@ pub fn query_shares<R: RngCore + CryptoRng>(
     server_count: usize,
     rng: &mut R,
 ) -> Result<Vec<Vec<u8>>> {
-    if bucket_index >= bucket_count {
-        bail!("bucket index is outside the snapshot");
+    query_shares_for_buckets(&[bucket_index], bucket_count, server_count, rng)
+}
+
+/// Secret-shares a selector containing any number of set bits.
+///
+/// Ordinary Dense XOR selects one row. Static retrieval layouts such as Fuse
+/// recover a value by XORing a small number of rows, so they can use one PIR
+/// request whose reconstructed selector has three or four set bits. Repeated
+/// indices intentionally cancel, matching XOR semantics.
+pub fn query_shares_for_buckets<R: RngCore + CryptoRng>(
+    bucket_indices: &[usize],
+    bucket_count: usize,
+    server_count: usize,
+    rng: &mut R,
+) -> Result<Vec<Vec<u8>>> {
+    for &bucket_index in bucket_indices {
+        if bucket_index >= bucket_count {
+            bail!("bucket index is outside the snapshot");
+        }
     }
     if server_count < 2 {
         bail!("Dense XOR PIR requires at least two servers");
@@ -23,7 +40,9 @@ pub fn query_shares<R: RngCore + CryptoRng>(
 
     let share_size = query_size(bucket_count);
     let mut final_share = vec![0u8; share_size];
-    final_share[bucket_index / 8] = 1 << (bucket_index % 8);
+    for &bucket_index in bucket_indices {
+        final_share[bucket_index / 8] ^= 1 << (bucket_index % 8);
+    }
     let mut shares = Vec::with_capacity(server_count);
     for _ in 1..server_count {
         let mut share = vec![0u8; share_size];
@@ -239,6 +258,49 @@ mod tests {
             assert_eq!(combined, expected);
         }
         assert!(query_shares(19, 64, 1, &mut rng).is_err());
+    }
+
+    #[test]
+    fn multi_bucket_query_recovers_the_xor_of_selected_rows() {
+        let snapshot = Snapshot::benchmark(64, 37, 1).unwrap();
+        let buckets = [2, 17, 41, 63];
+        for server_count in 2..=5 {
+            let shares = query_shares_for_buckets(
+                &buckets,
+                snapshot.manifest.bucket_count,
+                server_count,
+                &mut StdRng::seed_from_u64(server_count as u64),
+            )
+            .unwrap();
+            let selector = combine(&shares).unwrap();
+            assert_eq!(
+                selector.iter().map(|byte| byte.count_ones()).sum::<u32>(),
+                4
+            );
+
+            let answers = shares
+                .iter()
+                .map(|share| answer(snapshot.view(), share).unwrap())
+                .collect::<Vec<_>>();
+            let recovered = combine(&answers).unwrap();
+            let mut expected = vec![0u8; snapshot.manifest.row_size];
+            for bucket in buckets {
+                xor_in_place(&mut expected, snapshot.row(bucket).unwrap());
+            }
+            assert_eq!(recovered, expected);
+        }
+    }
+
+    #[test]
+    fn repeated_multi_bucket_indices_cancel() {
+        let shares =
+            query_shares_for_buckets(&[7, 19, 7], 32, 3, &mut StdRng::seed_from_u64(9)).unwrap();
+        let combined = combine(&shares).unwrap();
+        assert_eq!(combined[19 / 8], 1 << (19 % 8));
+        assert_eq!(
+            combined.iter().map(|byte| byte.count_ones()).sum::<u32>(),
+            1
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod cold;
 mod config;
 mod endpoints;
+mod fuse;
 mod kernels;
 mod local;
 mod optimization;
@@ -18,6 +19,7 @@ use config::{
     batch_sizes, dimensions, sample_count, LOAD_BUCKET_COUNT, LOAD_ROW_SIZE, TARGET_SERVER_COUNTS,
 };
 pub use endpoints::run as run_endpoints;
+pub use fuse::run as run_fuse;
 use local::LocalServerPool;
 pub use optimization::run as run_optimizations;
 use rand::{rngs::StdRng, SeedableRng};

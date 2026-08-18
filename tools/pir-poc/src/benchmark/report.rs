@@ -315,6 +315,89 @@ pub struct IndexedDecoyResult {
     pub note: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub struct FuseComparisonReport {
+    pub protocol: &'static str,
+    pub profile: String,
+    pub generated_at_unix_seconds: u64,
+    pub methodology: &'static str,
+    pub workload: FuseComparisonWorkload,
+    pub encoded_corpus_build_ms: f64,
+    pub encoded_corpus_tracked_bytes: usize,
+    pub layouts: Vec<FuseLayoutResult>,
+    pub raid_pir: RaidPirAssessment,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuseComparisonWorkload {
+    pub document_count: usize,
+    pub distinct_tag_count: usize,
+    pub documents_per_tag: usize,
+    pub encoded_page_count: usize,
+    pub values_per_page: usize,
+    pub locator_bytes: usize,
+    pub page_bytes: usize,
+    pub selected_page: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuseLayoutResult {
+    pub layout: &'static str,
+    pub retrieval_cells_or_candidates: usize,
+    pub table_rows: usize,
+    pub row_bytes: usize,
+    pub table_bytes_per_server: usize,
+    pub storage_expansion_vs_encoded_pages: f64,
+    pub cold_client_metadata_bytes: usize,
+    pub layout_build_ms: f64,
+    pub build_attempts: usize,
+    pub peak_tracked_build_bytes: usize,
+    pub peak_build_memory_note: &'static str,
+    pub topologies: Vec<FuseTopologyResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuseTopologyResult {
+    pub server_count: usize,
+    pub privacy_collusion_tolerance: usize,
+    pub required_answers: usize,
+    pub dense_evaluations_per_server: usize,
+    pub expected_rows_xored_per_server: usize,
+    pub expected_data_bytes_xored_per_server: usize,
+    pub query_bytes_per_server: usize,
+    pub total_client_upload_bytes: usize,
+    pub response_bytes_per_server: usize,
+    pub total_client_download_bytes: usize,
+    pub client_query_generation_p50_us: f64,
+    pub co_located_wall_p50_ms: f64,
+    pub co_located_wall_p95_ms: f64,
+    pub sum_server_elapsed_p50_ms: f64,
+    pub client_reconstruct_p50_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RaidPirAssessment {
+    pub reference: &'static str,
+    pub status: &'static str,
+    pub scope: &'static str,
+    pub potential_benefit: &'static str,
+    pub incompatibility: &'static str,
+    pub availability_note: &'static str,
+    pub recommendation: &'static str,
+    pub configurations: Vec<RaidPirConfiguration>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RaidPirConfiguration {
+    pub server_count_k: usize,
+    pub redundancy_r: usize,
+    pub maximum_colluding_servers: usize,
+    pub table_fraction_per_server: f64,
+    pub query_fraction_per_server: f64,
+    pub fuse_4_table_bytes_per_server: usize,
+    pub note: &'static str,
+}
+
 pub(super) fn methodology() -> Methodology {
     Methodology {
         privacy_model: "n XOR shares; any n-1 query shares reveal no row; all n answers are required",

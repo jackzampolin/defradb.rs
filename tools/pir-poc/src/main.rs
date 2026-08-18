@@ -31,6 +31,10 @@ async fn main() -> Result<()> {
             let profile = profile(args.get(1));
             print_json(&pir_poc::benchmark::run_endpoints(profile).await?)
         }
+        Some("bench-fuse") => {
+            let profile = profile(args.get(1));
+            print_json(&pir_poc::benchmark::run_fuse(profile)?)
+        }
         Some("subscription-demo") => print_json(&pir_poc::subscription::demo().await?),
         Some("bench-subscriptions") => {
             let profile = profile(args.get(1));
@@ -142,6 +146,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "pir-poc commands:\n  demo\n  singlepass-demo\n  subscription-demo\n  bench [quick|full]\n  bench-opt [quick|full]\n  bench-cold [quick|full]\n  bench-endpoints [quick|full]\n  bench-singlepass [quick|full]\n  bench-subscriptions [quick|full]\n  build INPUT OUTPUT COLLECTION KEY_FIELD VALUE_FIELD\n  serve SNAPSHOT_OR_CATALOG_DIR BIND_ADDRESS\n  query KEY SERVER [SERVER ...]\n  query-window KEY WINDOW[,WINDOW...] SERVER [SERVER ...]"
+        "pir-poc commands:\n  demo\n  singlepass-demo\n  subscription-demo\n  bench [quick|full]\n  bench-opt [quick|full]\n  bench-cold [quick|full]\n  bench-endpoints [quick|full]\n  bench-fuse [quick|full]\n  bench-singlepass [quick|full]\n  bench-subscriptions [quick|full]\n  build INPUT OUTPUT COLLECTION KEY_FIELD VALUE_FIELD\n  serve SNAPSHOT_OR_CATALOG_DIR BIND_ADDRESS\n  query KEY SERVER [SERVER ...]\n  query-window KEY WINDOW[,WINDOW...] SERVER [SERVER ...]"
     );
 }
