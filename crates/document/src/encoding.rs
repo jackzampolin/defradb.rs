@@ -172,7 +172,7 @@ pub fn json_to_normal_value_for_kind(
             .as_str()
             .map(|s| NormalValue::Bytes(s.as_bytes().to_vec())),
         ScalarKind::DateTime => match value {
-            JsonValue::String(s) => DateTime::parse_from_rfc3339(s).ok().map(NormalValue::Time),
+            JsonValue::String(s) => crate::rfc3339::parse_rfc3339(s).map(NormalValue::Time),
             JsonValue::Number(n) => n.as_i64().and_then(|ts| {
                 DateTime::from_timestamp(ts, 0).map(|dt| {
                     NormalValue::Time(dt.with_timezone(&FixedOffset::east_opt(0).unwrap()))

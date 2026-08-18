@@ -178,3 +178,29 @@ fn the_encoding_is_a_marker_and_two_varints() {
         "the marker must still identify a timestamp"
     );
 }
+
+/// The encoder refuses a leap second rather than clamping it. Clamped, it
+/// produced the same bytes as `:59.999999999`, so a unique index saw a false
+/// duplicate and a range bound skipped the row.
+#[test]
+fn a_leap_second_is_refused_by_the_encoder() {
+    let leap = chrono::DateTime::parse_from_rfc3339("2016-12-31T23:59:60Z").unwrap();
+    let last = chrono::DateTime::parse_from_rfc3339("2016-12-31T23:59:59.999999999Z").unwrap();
+
+    let encoded_last = storage::field_value::encode_field_value(
+        Vec::new(),
+        &document::NormalValue::Time(last),
+        false,
+    )
+    .expect("an ordinary instant encodes");
+
+    let refused = storage::field_value::encode_field_value(
+        Vec::new(),
+        &document::NormalValue::Time(leap),
+        false,
+    );
+    assert!(refused.is_err(), "a leap second must not encode");
+
+    // If it had encoded, it would have collided with the instant below it.
+    assert!(!encoded_last.is_empty());
+}

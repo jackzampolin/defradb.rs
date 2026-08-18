@@ -7,7 +7,7 @@ use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use document::NormalValue;
 use schema::FieldKind;
 
-use crate::corekv::Result;
+use crate::corekv::{Error, Result};
 use crate::encoding::{self, EncodedType};
 
 // Re-export IndexedField from its canonical location
@@ -15,14 +15,24 @@ pub use crate::keys::datastore::IndexedField;
 
 /// A leap second's remainder exceeds one second in chrono but never in Go's
 /// `time.Time`, so it is capped rather than left to break key ordering.
-fn encode_time_value(buf: Vec<u8>, value: &DateTime<FixedOffset>, descending: bool) -> Vec<u8> {
+fn encode_time_value(
+    buf: Vec<u8>,
+    value: &DateTime<FixedOffset>,
+    descending: bool,
+) -> Result<Vec<u8>> {
+    if document::is_leap_second(value) {
+        return Err(Error::Other(format!(
+            "cannot index {value}: a leap second has no Go `time.Time` representation"
+        )));
+    }
+
     let seconds = value.timestamp();
-    let nanos = value.timestamp_subsec_nanos().min(999_999_999);
-    if descending {
+    let nanos = value.timestamp_subsec_nanos();
+    Ok(if descending {
         encoding::encode_time_descending(buf, seconds, nanos)
     } else {
         encoding::encode_time_ascending(buf, seconds, nanos)
-    }
+    })
 }
 
 /// Encode a NormalValue to bytes using order-preserving encoding.
@@ -112,8 +122,8 @@ pub fn encode_field_value(buf: Vec<u8>, val: &NormalValue, descending: bool) -> 
         } else {
             encoding::encode_bytes_ascending(buf, v)
         }),
-        NormalValue::Time(v) => Ok(encode_time_value(buf, v, descending)),
-        NormalValue::NillableTime(Some(v)) => Ok(encode_time_value(buf, v, descending)),
+        NormalValue::Time(v) => encode_time_value(buf, v, descending),
+        NormalValue::NillableTime(Some(v)) => encode_time_value(buf, v, descending),
         // JSON leaf values with path+value encoding
         NormalValue::JsonLeaf(leaf) => Ok(if descending {
             encoding::json::encode_json_descending(buf, leaf)
