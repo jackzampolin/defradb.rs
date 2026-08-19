@@ -264,29 +264,59 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(1000))]
 
     #[test]
-    fn prop_time_roundtrip_ascending(nanos in any::<i64>()) {
-        let encoded = encoding::encode_time_ascending(vec![], nanos);
-        let (rest, decoded) = encoding::decode_time_ascending(&encoded).unwrap();
+    fn prop_time_roundtrip_ascending(
+        seconds in any::<i64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let encoded = encoding::encode_time_ascending(vec![], seconds, nanos);
+        let (rest, s, n) = encoding::decode_time_ascending(&encoded).unwrap();
         prop_assert!(rest.is_empty());
-        prop_assert_eq!(decoded, nanos);
+        prop_assert_eq!(s, seconds);
+        prop_assert_eq!(n, nanos);
     }
 
     #[test]
-    fn prop_time_roundtrip_descending(nanos in any::<i64>()) {
-        let encoded = encoding::encode_time_descending(vec![], nanos);
-        let (rest, decoded) = encoding::decode_time_descending(&encoded).unwrap();
+    fn prop_time_roundtrip_descending(
+        seconds in any::<i64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let encoded = encoding::encode_time_descending(vec![], seconds, nanos);
+        let (rest, s, n) = encoding::decode_time_descending(&encoded).unwrap();
         prop_assert!(rest.is_empty());
-        prop_assert_eq!(decoded, nanos);
+        prop_assert_eq!(s, seconds);
+        prop_assert_eq!(n, nanos);
     }
 
     #[test]
-    fn prop_time_sort_order_ascending(a in any::<i64>(), b in any::<i64>()) {
-        let enc_a = encoding::encode_time_ascending(vec![], a);
-        let enc_b = encoding::encode_time_ascending(vec![], b);
+    fn prop_time_sort_order_ascending(
+        a_secs in any::<i64>(),
+        a_nanos in 0u32..1_000_000_000,
+        b_secs in any::<i64>(),
+        b_nanos in 0u32..1_000_000_000,
+    ) {
+        let enc_a = encoding::encode_time_ascending(vec![], a_secs, a_nanos);
+        let enc_b = encoding::encode_time_ascending(vec![], b_secs, b_nanos);
 
-        match a.cmp(&b) {
+        match (a_secs, a_nanos).cmp(&(b_secs, b_nanos)) {
             std::cmp::Ordering::Less => prop_assert!(enc_a < enc_b),
             std::cmp::Ordering::Greater => prop_assert!(enc_a > enc_b),
+            std::cmp::Ordering::Equal => prop_assert_eq!(enc_a, enc_b),
+        }
+    }
+
+    #[test]
+    fn prop_time_sort_order_descending(
+        a_secs in any::<i64>(),
+        a_nanos in 0u32..1_000_000_000,
+        b_secs in any::<i64>(),
+        b_nanos in 0u32..1_000_000_000,
+    ) {
+        let enc_a = encoding::encode_time_descending(vec![], a_secs, a_nanos);
+        let enc_b = encoding::encode_time_descending(vec![], b_secs, b_nanos);
+
+        match (a_secs, a_nanos).cmp(&(b_secs, b_nanos)) {
+            std::cmp::Ordering::Less => prop_assert!(enc_a > enc_b),
+            std::cmp::Ordering::Greater => prop_assert!(enc_a < enc_b),
             std::cmp::Ordering::Equal => prop_assert_eq!(enc_a, enc_b),
         }
     }

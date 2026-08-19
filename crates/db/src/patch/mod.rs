@@ -51,11 +51,23 @@ impl<S: Store> crate::database::DB<S> {
     /// - `CollectionNotFound` if the collection doesn't exist
     /// - `InvalidPatch` if the patch is invalid or cannot be applied
     /// - `Schema` if the resulting schema is invalid
-    #[instrument(skip(self, patch), fields(collection = %collection_name), name = "db.patch_collection")]
     pub async fn patch_collection(
         &self,
         collection_name: &str,
         patch: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.patch_collection_with_migration(collection_name, patch, None, identity)
+            .await
+    }
+
+    /// Apply a JSON Patch and its migration as one operation.
+    #[instrument(skip(self, patch, migration), fields(collection = %collection_name), name = "db.patch_collection")]
+    pub async fn patch_collection_with_migration(
+        &self,
+        collection_name: &str,
+        patch: &str,
+        migration: Option<lens::LensConfig>,
         identity: Option<&identity::Did>,
     ) -> Result<CollectionVersion> {
         self.check_node_access(identity, acp::nac::NodePermission::CollectionPatch)
@@ -293,6 +305,7 @@ impl<S: Store> crate::database::DB<S> {
             &collection_id,
             collection_name,
             is_active_explicitly_set,
+            migration,
         )
         .await
     }

@@ -3,7 +3,6 @@
 //! Policies are created on-chain via SourceHub transactions, then cached locally
 //! in the ZanzibarStore for reads (list/get). This matches the FFI pattern.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,11 +10,13 @@ use async_trait::async_trait;
 use acp::{Policy, StorePolicyOptions, ZanzibarStore};
 use defra_http::router::{AcpLightClientStatus, AcpOperations, PolicyInfo};
 
+/// Placeholder: SourceHub assigns the id, so this value never reaches storage.
+const UNASSIGNED_ID_COUNTER: u64 = 1;
+
 /// Adapter that implements AcpOperations with SourceHub for writes and local store for reads.
 pub struct SourceHubAcpAdapter {
     sourcehub_acp: Arc<sourcehub::SourceHubDocumentACP>,
     local_store: Arc<dyn ZanzibarStore>,
-    counter: AtomicU64,
     nac_checker: Arc<dyn db::NodeAccessChecker>,
 }
 
@@ -28,7 +29,6 @@ impl SourceHubAcpAdapter {
         Self {
             sourcehub_acp,
             local_store,
-            counter: AtomicU64::new(1),
             nac_checker,
         }
     }
@@ -101,18 +101,19 @@ impl AcpOperations for SourceHubAcpAdapter {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed)?;
 
-        let counter = self.counter.fetch_add(1, Ordering::SeqCst);
-        let policy = acp::policy_yaml::build_policy(&parsed, counter)
+        let mut policy = acp::policy_yaml::build_policy(&parsed, UNASSIGNED_ID_COUNTER)
             .map_err(|e| format!("invalid policy: {}", e))?;
 
         let options = StorePolicyOptions::new()
             .with_validation()
             .with_dpi_enforcement();
 
-        // DPI validation before submitting on-chain
-        self.local_store
-            .store_policy_with_options(&policy, &options)
-            .await
+        // Reject an invalid policy before it reaches the chain.
+        policy
+            .validate()
+            .map_err(|e| format!("failed to validate policy: {}", e))?;
+        policy
+            .validate_dpi()
             .map_err(|e| format!("failed to validate policy: {}", e))?;
 
         // Submit on-chain via SourceHub
@@ -122,19 +123,13 @@ impl AcpOperations for SourceHubAcpAdapter {
             .await
             .map_err(|e| format!("SourceHub create policy failed: {}", e))?;
 
-        // Re-store the policy under the on-chain ID so relationship validation
-        // can find it. The initial store used a locally-computed SHA256 ID, but
-        // the schema references the on-chain ID. Go doesn't cache locally at all
-        // (it queries Source Hub on-demand), but since our doc_acp_adapter validates
-        // against the local store, we need the policy indexed by on-chain ID.
-        if policy_id != policy.id {
-            let mut on_chain_policy = policy;
-            on_chain_policy.id = policy_id.clone();
-            self.local_store
-                .store_policy_with_options(&on_chain_policy, &options)
-                .await
-                .map_err(|e| format!("failed to cache policy with on-chain ID: {}", e))?;
-        }
+        // The schema references the on-chain id, and doc_acp_adapter validates
+        // against this store.
+        policy.id = policy_id.clone();
+        self.local_store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .map_err(|e| format!("failed to cache policy with on-chain ID: {}", e))?;
 
         Ok(policy_id)
     }

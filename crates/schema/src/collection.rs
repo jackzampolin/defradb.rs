@@ -328,7 +328,9 @@ impl CollectionVersion {
     pub fn validate(&self) -> Result<()> {
         self.validate_no_duplicate_names()?;
         self.validate_no_duplicate_index_names()?;
+        self.validate_encrypted_indexes()?;
         self.validate_fields()?;
+        self.validate_relation_id_field_kinds()?;
         self.validate_policy()?;
         self.validate_downsample()?;
         Ok(())
@@ -339,6 +341,41 @@ impl CollectionVersion {
         for index in &self.indexes {
             if !seen.insert(&index.name) {
                 return Err(SchemaError::DuplicateIndexName(index.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_encrypted_indexes(&self) -> Result<()> {
+        let mut encrypted_fields = HashSet::new();
+        for index in &self.encrypted_indexes {
+            if self.field_by_name(&index.field_name).is_none() {
+                return Err(SchemaError::EncryptedIndexUnknownField(
+                    index.field_name.clone(),
+                ));
+            }
+            if !encrypted_fields.insert(index.field_name.as_str()) {
+                return Err(SchemaError::EncryptedIndexAlreadyExists(
+                    index.field_name.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_relation_id_field_kinds(&self) -> Result<()> {
+        for field in self
+            .relation_fields()
+            .filter(|field| !field.kind.is_array())
+        {
+            let id_field_name = Self::relation_id_field_name(&field.name);
+            if let Some(id_field) = self.field_by_name(&id_field_name) {
+                if id_field.kind != FieldKind::doc_id() {
+                    return Err(SchemaError::InvalidRelationIdFieldKind {
+                        field_name: id_field_name,
+                        actual: id_field.kind.graphql_type_name().to_string(),
+                    });
+                }
             }
         }
         Ok(())

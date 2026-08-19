@@ -38,10 +38,11 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
         &self,
         collection_name: &str,
         patch: &str,
+        migration: Option<lens::LensConfig>,
     ) -> Result<serde_json::Value, String> {
         let version = self
             .database
-            .patch_collection(collection_name, patch, None)
+            .patch_collection_with_migration(collection_name, patch, migration, None)
             .await
             .map_err(|e| format!("{}", e))?;
 

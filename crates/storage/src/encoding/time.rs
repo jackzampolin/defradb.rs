@@ -7,70 +7,60 @@ use super::{
     encode_varint_descending, TIME_MARKER,
 };
 
-/// Encode a timestamp (as nanoseconds since Unix epoch) in ascending order
-pub fn encode_time_ascending(mut buf: Vec<u8>, unix_nanos: i64) -> Vec<u8> {
+/// Encode `(seconds since the epoch, sub-second nanoseconds)` in ascending
+/// order, as two varints matching Go's `encodeTime`.
+///
+/// One `i64` of nanoseconds would only span 1677-2262, far narrower than the
+/// range RFC3339 and the schema accept. `nanos` must be the sub-second
+/// remainder, in `0..1_000_000_000`, or lexicographic order stops matching
+/// chronological order.
+pub fn encode_time_ascending(mut buf: Vec<u8>, seconds: i64, nanos: u32) -> Vec<u8> {
     buf.push(TIME_MARKER);
-    encode_varint_ascending(buf, unix_nanos)
+    buf = encode_varint_ascending(buf, seconds);
+    encode_varint_ascending(buf, i64::from(nanos))
 }
 
-/// Encode a timestamp in descending order
-pub fn encode_time_descending(mut buf: Vec<u8>, unix_nanos: i64) -> Vec<u8> {
+/// Encode a timestamp in descending order. Both components are complemented,
+/// as Go's `EncodeTimeDescending` spells out with `^t.Unix()`.
+pub fn encode_time_descending(mut buf: Vec<u8>, seconds: i64, nanos: u32) -> Vec<u8> {
     buf.push(TIME_MARKER);
-    encode_varint_descending(buf, unix_nanos)
+    buf = encode_varint_descending(buf, seconds);
+    encode_varint_descending(buf, i64::from(nanos))
 }
 
-/// Decode a timestamp from ascending encoding
-pub fn decode_time_ascending(buf: &[u8]) -> Result<(&[u8], i64)> {
+/// Decode an ascending timestamp as `(seconds, nanos)`.
+pub fn decode_time_ascending(buf: &[u8]) -> Result<(&[u8], i64, u32)> {
+    let rest = strip_marker(buf)?;
+    let (rest, seconds) = decode_varint_ascending(rest)?;
+    let (rest, nanos) = decode_varint_ascending(rest)?;
+    Ok((rest, seconds, sub_second(nanos)?))
+}
+
+/// Decode a descending timestamp as `(seconds, nanos)`.
+pub fn decode_time_descending(buf: &[u8]) -> Result<(&[u8], i64, u32)> {
+    let rest = strip_marker(buf)?;
+    let (rest, seconds) = decode_varint_descending(rest)?;
+    let (rest, nanos) = decode_varint_descending(rest)?;
+    Ok((rest, seconds, sub_second(nanos)?))
+}
+
+fn strip_marker(buf: &[u8]) -> Result<&[u8]> {
     if buf.is_empty() || buf[0] != TIME_MARKER {
         return Err(Error::Other(format!(
             "cannot decode time: marker not found in {:?}",
             buf.first()
         )));
     }
-    decode_varint_ascending(&buf[1..])
+    Ok(&buf[1..])
 }
 
-/// Decode a timestamp from descending encoding
-pub fn decode_time_descending(buf: &[u8]) -> Result<(&[u8], i64)> {
-    if buf.is_empty() || buf[0] != TIME_MARKER {
-        return Err(Error::Other(format!(
-            "cannot decode time: marker not found in {:?}",
-            buf.first()
-        )));
-    }
-    decode_varint_descending(&buf[1..])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_time_encoding() {
-        let test_values: Vec<i64> = vec![
-            i64::MIN,
-            -1_000_000_000, // -1 second
-            0,
-            1_000_000_000, // +1 second
-            i64::MAX,
-        ];
-
-        for v in &test_values {
-            let buf = encode_time_ascending(vec![], *v);
-            let (_, decoded) = decode_time_ascending(&buf).unwrap();
-            assert_eq!(decoded, *v, "time roundtrip failed for {}", v);
-
-            let buf = encode_time_descending(vec![], *v);
-            let (_, decoded) = decode_time_descending(&buf).unwrap();
-            assert_eq!(decoded, *v, "descending time roundtrip failed for {}", v);
-        }
-    }
-
-    #[test]
-    fn test_decode_time_missing_marker() {
-        let buf = vec![0x50, 0x01, 0x02];
-        let result = decode_time_ascending(&buf);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("marker not found"));
-    }
+fn sub_second(nanos: i64) -> Result<u32> {
+    u32::try_from(nanos)
+        .ok()
+        .filter(|n| *n < 1_000_000_000)
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "cannot decode time: {nanos} is not a sub-second nanosecond remainder"
+            ))
+        })
 }

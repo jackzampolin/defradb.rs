@@ -265,15 +265,20 @@ impl<S: Store> DB<S> {
     }
 
     /// Open a database and load existing collections from the store.
-    pub async fn open(store: S) -> Result<Self> {
+    pub async fn open(store: S) -> Result<Self>
+    where
+        S: 'static,
+    {
         Self::open_with_options(store, DbOptions::default()).await
     }
 
     /// Open a database with options and load existing collections from the store.
-    pub async fn open_with_options(store: S, options: DbOptions) -> Result<Self> {
+    pub async fn open_with_options(store: S, options: DbOptions) -> Result<Self>
+    where
+        S: 'static,
+    {
         let db = Self::with_options(store, options)?;
-        db.load_collections().await?;
-        db.initialize_migrations().await?;
+        db.finish_open().await?;
         Ok(db)
     }
 
@@ -326,16 +331,35 @@ impl<S: Store> DB<S> {
     /// Use this when you already have an `Arc<S>` and want to share
     /// the store between the database and other components (e.g., blockstore),
     /// while also loading existing collections from the store.
-    pub async fn open_from_arc(store: Arc<S>) -> Result<Self> {
+    pub async fn open_from_arc(store: Arc<S>) -> Result<Self>
+    where
+        S: 'static,
+    {
         Self::open_from_arc_with_options(store, DbOptions::default()).await
     }
 
     /// Open a database from an Arc-wrapped store with options and load existing collections.
-    pub async fn open_from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
+    pub async fn open_from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self>
+    where
+        S: 'static,
+    {
         let db = Self::from_arc_with_options(store, options)?;
-        db.load_collections().await?;
-        db.initialize_migrations().await?;
+        db.finish_open().await?;
         Ok(db)
+    }
+
+    /// The startup sequence every open path runs once the store is attached.
+    ///
+    /// There are two ways in, taking a store and taking an `Arc` of one, and
+    /// they have to do the same work: a step added to only one of them runs for
+    /// half the callers.
+    async fn finish_open(&self) -> Result<()>
+    where
+        S: 'static,
+    {
+        self.load_collections().await?;
+        self.initialize_migrations().await?;
+        self.migrate_index_format().await
     }
 
     /// Set the event bus for subscription notifications.
