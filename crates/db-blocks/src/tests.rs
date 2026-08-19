@@ -155,9 +155,6 @@ impl defra_core::signing::RemoteSigner for LocalSecp256r1Signer {
     }
 }
 
-// Go's internal/core/block/signing.go:74-79 rejects any key type other than
-// secp256k1 or Ed25519 with ErrUnsupportedKeyForSigning. Rust must match so
-// that a Rust node cannot produce blocks a Go node will refuse to verify.
 #[test]
 fn test_compute_signature_rejects_local_secp256r1_block_signing() {
     let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
@@ -192,10 +189,24 @@ fn test_compute_signature_rejects_local_secp256r1_block_signing() {
     );
 }
 
+/// The Go-verifiable policy is process-global, so tests that move it cannot run
+/// beside each other.
+fn go_verifiable_gate() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    defra_core::block::go_verifiable_policy::reset_for_test();
+    guard
+}
+
+/// Denied by default. A Go peer refuses `ES256`, so a node that has not opted in
+/// must not put such a block on the wire. This is the guard #1456 removed.
 #[test]
-fn test_compute_signature_rejects_remote_secp256r1_block_signing() {
+fn test_compute_signature_refuses_remote_secp256r1_without_the_gate() {
+    let _serial = go_verifiable_gate();
+
     let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
     let public_key = private_key.public_key();
+    let public_key_hex = hex::encode(public_key.raw());
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
@@ -211,16 +222,70 @@ fn test_compute_signature_rejects_remote_secp256r1_block_signing() {
         key_type: defra_core::signing::SigningKeyType::Secp256r1,
         private_key_bytes: Vec::new(),
         public_key_bytes: public_key.raw_owned(),
-        public_key_hex: hex::encode(public_key.raw()),
+        public_key_hex,
         remote_signer: Some(Arc::new(LocalSecp256r1Signer { private_key })),
         signing_authorization: None,
     };
 
-    let err = compute_signature(&block, &signer)
-        .expect_err("secp256r1 block signing must be rejected even when delegated to remote");
+    let error = compute_signature(&block, &signer)
+        .expect_err("a type Go cannot verify must be refused by default");
     assert!(
-        err.contains("secp256r1") || err.contains("ES256") || err.contains("secp256k1"),
-        "unexpected error: {err}"
+        error.contains("DEFRA_ALLOW_NON_GO_VERIFIABLE_SIGNING"),
+        "the refusal must name the way to allow it: {error}"
+    );
+}
+
+#[test]
+fn test_compute_signature_signs_remote_secp256r1_once_the_gate_is_open() {
+    let _serial = go_verifiable_gate();
+    defra_core::block::go_verifiable_policy::allow_non_go_verifiable_signing(true);
+
+    let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+    let public_key = private_key.public_key();
+    let public_key_hex = hex::encode(public_key.raw());
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "schema-v1".to_string(),
+            status: 1,
+            priority: 1,
+        }),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let signer = defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Secp256r1,
+        private_key_bytes: Vec::new(),
+        public_key_bytes: public_key.raw_owned(),
+        public_key_hex: public_key_hex.clone(),
+        remote_signer: Some(Arc::new(LocalSecp256r1Signer { private_key })),
+        signing_authorization: None,
+    };
+
+    let (_cid, sig_cbor) = compute_signature(&block, &signer)
+        .expect("a delegated secp256r1 signature must be produced")
+        .expect("a composite block is signed");
+
+    let signature = defra_core::block::Signature::from_dag_cbor(&sig_cbor)
+        .expect("the signature block must decode");
+    assert_eq!(
+        signature.header.sig_type,
+        defra_core::block::SignatureType::ES256
+    );
+    assert_eq!(
+        signature.header.identity,
+        public_key_hex.clone().into_bytes()
+    );
+
+    let block_bytes = block.to_dag_cbor().expect("block encodes");
+    let recovered = crypto::public_key_from_string(crypto::KeyType::Secp256r1, &public_key_hex)
+        .expect("the identity in the header must resolve to a P-256 key");
+    assert!(
+        recovered
+            .verify(&block_bytes, &signature.value)
+            .expect("verification must not error"),
+        "the delegated signature must verify against the block bytes"
     );
 }
 
