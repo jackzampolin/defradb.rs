@@ -15,12 +15,13 @@ on:
   merge_group:
     branches: [main]
 
-# Only the tip of each ref keeps a run. Superseded PR pushes and main merge
-# trains cancel prior work so intermediate SHAs cannot stack the self-hosted
-# fleet. PR close is handled by cancel-pr-ci.yml (closed events do not re-enter
-# this concurrency group once the merge ref is gone).
+# Only the tip of each non-main ref keeps a run. Main includes the commit SHA
+# because GitHub replaces an existing pending run even when cancel-in-progress
+# is false; each merged commit must keep its post-merge validation. PR close is
+# handled by cancel-pr-ci.yml (closed events do not re-enter this concurrency
+# group once the merge ref is gone).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'tip' }}
   # Two refs are never cancelled, for different reasons:
   #   merge_group — cancelling a queue run ejects that PR from the queue, so
   #     the queue would stall instead of merging.
@@ -32,6 +33,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Cache-server communication failures should fall back to direct compilation.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
   # Two defradb.rs runner slots per studio host can now co-run jobs (plus
   # other repos' runners on the same hosts). Bound each Cargo process so two
   # simultaneous compiles fit inside a 32-core host with room for linking and
@@ -51,25 +54,50 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       full: ${{ steps.decide.outputs.full }}
+      integration_matrix: ${{ steps.decide.outputs.integration_matrix }}
     steps:
       - id: decide
         uses: actions/github-script@v7
         with:
           script: |
-            if (context.eventName !== 'pull_request') {
-              core.setOutput('full', 'true');
-              return;
+            let full = true;
+            if (context.eventName === 'pull_request') {
+              const stack = context.payload.pull_request && context.payload.pull_request.stack;
+              if (stack) {
+                const isTip = stack.position === stack.size;
+                const isLowest = stack.base && stack.base.ref === context.payload.pull_request.base.ref;
+                full = isTip || isLowest;
+                core.info(`stack #${stack.number} pos ${stack.position}/${stack.size} full=${full}`);
+              }
             }
-            const stack = context.payload.pull_request && context.payload.pull_request.stack;
-            if (!stack) {
-              core.setOutput('full', 'true');
-              return;
-            }
-            const isTip = stack.position === stack.size;
-            const isLowest = stack.base && stack.base.ref === context.payload.pull_request.base.ref;
-            const full = isTip || isLowest;
             core.setOutput('full', full ? 'true' : 'false');
-            core.info(`stack #${stack.number} pos ${stack.position}/${stack.size} full=${full}`);
+
+            // Integration matrix. Defined here rather than statically on the
+            // `integration` job so the suite list can depend on the event.
+            //
+            // signed-docs (#978) sets DEFRA_MULTIPLIERS=signed-docs so every
+            // cluster gets .with_signing() auto-applied. Signing is the
+            // node's DEFAULT configuration, so this leg is the primary
+            // integration signal and runs on every PR. The `rust` suite is
+            // the --no-signing mirror of the same test set; it runs only on
+            // non-PR events (push to main, merge queue) so each PR occupies
+            // the studio-1 slot with one full suite instead of two. An
+            // unsigned-only regression therefore surfaces on the main run
+            // after merge rather than at PR time — accepted trade, revert to
+            // unconditional if that starts biting.
+            //
+            // Each host uses sccache with incremental compilation disabled so
+            // jobs sharing its persistent target tree keep consistent flags.
+            const slot = { cargo_incremental: '0', rustc_wrapper: 'sccache' };
+            const suites = [
+              { suite: 'signed-docs', needs_go: false, multipliers: 'signed-docs', host: 'studio-1', ...slot },
+              { suite: 'go-compat', needs_go: true, host: 'studio-2', ...slot },
+              { suite: 'iroh', needs_go: false, host: 'studio-2', ...slot },
+            ];
+            if (context.eventName !== 'pull_request') {
+              suites.push({ suite: 'rust', needs_go: false, host: 'studio-1', ...slot });
+            }
+            core.setOutput('integration_matrix', JSON.stringify({ include: suites }));
 
   # Studio jobs are pinned to a runner slot so each job's incremental target
   # state stays warm on one machine (a suite that bounces between hosts turns
@@ -78,10 +106,11 @@ jobs:
   #
   #   primary (labels ...,studio,studio-N) — one job at a time, so two
   #   node-spawning jobs can only co-run on DIFFERENT hosts, where they
-  #   cannot contend on localhost ports. studio-1 carries rust and
-  #   signed-docs; studio-2 carries conformance, go-compat, and iroh. `build`
-  #   floats between the two and publishes its binaries to both, so every
-  #   suite restores from its own host's cache whichever host built them.
+  #   cannot contend on localhost ports. studio-1 carries signed-docs (plus
+  #   the unsigned rust mirror on non-PR runs); studio-2 carries conformance,
+  #   go-compat, and iroh. `build` floats between the two and publishes its
+  #   binaries to both, so every suite restores from its own host's cache
+  #   whichever host built them.
   #
   #   light (labels ...,defra-light,studio-N-b) — deliberately NOT labeled
   #   `studio`/`studio-N`, so node-spawning jobs can never land there. Serves
@@ -147,12 +176,9 @@ jobs:
     name: WASM Build Check
     needs: ci-scope
     if: needs.ci-scope.outputs.full == 'true'
-    # spark-1: the wasm32 target doesn't care about host arch, and pinning
-    # here takes this job off the vps (which now serves release.yml's x86_64
-    # builds only) and out of p2p-linux's way. No GitHub-hosted rust-cache:
-    # the runner workspace persists between jobs, so the warm target dir plus
-    # host-local sccache beat cache download/upload round-trips.
-    runs-on: [self-hosted, Linux, ARM64, spark, spark-1]
+    # Share the Linux runner with p2p-linux rather than depending on a
+    # dedicated host; the two jobs serialize when both are selected.
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -204,7 +230,21 @@ jobs:
           GECKODRIVER_VERSION: "0.37.1"
         run: |
           set -euo pipefail
-          CACHE="$HOME/.cache/defra-wasm-browser/${FIREFOX_VERSION}-${GECKODRIVER_VERSION}"
+          case "$(uname -m)" in
+            x86_64)
+              FIREFOX_PLATFORM="linux-x86_64"
+              GECKODRIVER_PLATFORM="linux64"
+              ;;
+            aarch64|arm64)
+              FIREFOX_PLATFORM="linux-aarch64"
+              GECKODRIVER_PLATFORM="linux-aarch64"
+              ;;
+            *)
+              echo "::error::unsupported browser host architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          CACHE="$HOME/.cache/defra-wasm-browser/${FIREFOX_VERSION}-${GECKODRIVER_VERSION}-${FIREFOX_PLATFORM}"
           echo "BROWSER_CACHE=$CACHE" >> "$GITHUB_ENV"
           if [ -x "$CACHE/firefox/firefox" ] && [ -x "$CACHE/geckodriver" ]; then
             echo "Browser cache hit — $CACHE"
@@ -215,18 +255,18 @@ jobs:
           rm -rf "$CACHE"; mkdir -p "$CACHE"
           TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-          FF_URL="https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/linux-aarch64/en-US/firefox-${FIREFOX_VERSION}.tar.xz"
+          FF_URL="https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/${FIREFOX_PLATFORM}/en-US/firefox-${FIREFOX_VERSION}.tar.xz"
           curl -fsSL -o "$TMP/firefox.tar.xz" "$FF_URL"
           # Mozilla publishes a digest per release; verify rather than trust.
           WANT="$(curl -fsSL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/SHA256SUMS" \
-                  | awk -v p="linux-aarch64/en-US/firefox-${FIREFOX_VERSION}.tar.xz" '$2 == p {print $1}')"
+                  | awk -v p="${FIREFOX_PLATFORM}/en-US/firefox-${FIREFOX_VERSION}.tar.xz" '$2 == p {print $1}')"
           GOT="$(sha256sum "$TMP/firefox.tar.xz" | awk '{print $1}')"
           if [ "$WANT" != "$GOT" ]; then
             echo "::error::Firefox checksum mismatch (expected $WANT, got $GOT)"; exit 1
           fi
           tar -C "$CACHE" -xJf "$TMP/firefox.tar.xz"
 
-          GD_URL="https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-linux-aarch64.tar.gz"
+          GD_URL="https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-${GECKODRIVER_PLATFORM}.tar.gz"
           curl -fsSL -o "$TMP/gd.tar.gz" "$GD_URL"
           tar -C "$CACHE" -xzf "$TMP/gd.tar.gz"
           "$CACHE/firefox/firefox" --version
@@ -303,23 +343,26 @@ jobs:
 
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
 
-      # Cache binaries BEFORE any feature-on rebuild. `cargo test --workspace`
-      # above left a default-feature `defra` at target/debug/defra; the otel
-      # steps below recompile it with `--features otel`, so caching must happen
-      # first or the integration matrix would restore a telemetry-enabled
-      # binary as its "standard" defra.
+      # The cached node binaries are built with the `super-dev` profile
+      # (Cargo.toml): dependencies at opt-level 2 with no debug info,
+      # workspace crates with line tables. Integration nodes spend their time
+      # in dependency code (crypto, storage, tokio), so opt-level 2 deps make
+      # the suites materially faster at runtime, and the slimmer objects cut
+      # the link time that dominates warm rebuilds. The separate
+      # target/super-dev tree also means the otel feature builds below can
+      # never pollute what gets cached. Kept before the otel steps so the
+      # publish to the sibling happens as early as possible.
       - name: Cache pre-built binaries
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p "$CACHE_DIR"
 
-          # Standard (default-feature) binary — compiled by cargo test above.
-          cp target/debug/defra "$CACHE_DIR/defra"
+          cargo build -p cli --profile super-dev
+          cp target/super-dev/defra "$CACHE_DIR/defra"
 
-          # Iroh binary — needs feature build
-          cargo build -p cli --features iroh
-          cp target/debug/defra "$CACHE_DIR/defra-iroh"
+          cargo build -p cli --profile super-dev --features iroh
+          cp target/super-dev/defra "$CACHE_DIR/defra-iroh"
 
           # Symlink for backbone CI consumption
           ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
@@ -352,23 +395,32 @@ jobs:
 
           # Staged through .tmp and renamed on the peer, so an interrupted
           # copy cannot leave a truncated binary that the peer would later
-          # treat as a valid cache hit.
-          if ssh $SSH_OPTS "$PEER" "mkdir -p '$CACHE_DIR'" \
-            && scp -p $SSH_OPTS "$CACHE_DIR/defra" "$PEER:$CACHE_DIR/defra.tmp" \
-            && scp -p $SSH_OPTS "$CACHE_DIR/defra-iroh" "$PEER:$CACHE_DIR/defra-iroh.tmp" \
-            && ssh $SSH_OPTS "$PEER" \
-                 "mv '$CACHE_DIR/defra.tmp' '$CACHE_DIR/defra' \
-                  && mv '$CACHE_DIR/defra-iroh.tmp' '$CACHE_DIR/defra-iroh'"; then
-            echo "Published binaries to $PEER:$CACHE_DIR"
-          else
-            echo "::warning::could not publish binary cache to $PEER — its first integration job will rebuild"
+          # treat as a valid cache hit. Two attempts: on 2026-08-14 a single
+          # transient SSH failure here (and on the consumer's pull) cost the
+          # sibling's first integration job a 40-minute rebuild.
+          published=""
+          for attempt in 1 2; do
+            if ssh $SSH_OPTS "$PEER" "mkdir -p '$CACHE_DIR'" \
+              && scp -p $SSH_OPTS "$CACHE_DIR/defra" "$PEER:$CACHE_DIR/defra.tmp" \
+              && scp -p $SSH_OPTS "$CACHE_DIR/defra-iroh" "$PEER:$CACHE_DIR/defra-iroh.tmp" \
+              && ssh $SSH_OPTS "$PEER" \
+                   "mv '$CACHE_DIR/defra.tmp' '$CACHE_DIR/defra' \
+                    && mv '$CACHE_DIR/defra-iroh.tmp' '$CACHE_DIR/defra-iroh'"; then
+              echo "Published binaries to $PEER:$CACHE_DIR (attempt $attempt)"
+              published=1
+              break
+            fi
+            [ "$attempt" -eq 1 ] && sleep 10
+          done
+          if [ -z "$published" ]; then
+            echo "::warning::could not publish binary cache to $PEER after 2 attempts — its first integration job will rebuild"
           fi
 
-      # OTel-only tests, run AFTER caching so the otel rebuild of target/debug/defra
-      # never pollutes the cached standard binary. The cli otel test spawns a real
-      # node against an unreachable collector and asserts the dedup hint fires
-      # exactly once — the Docker-free regression guard for the SDK's
-      # `internal-logs` feature. Issue #977 / #1004.
+      # OTel-only tests. These build in target/debug, a different tree from
+      # the cached super-dev binaries, so ordering is publish-latency only.
+      # The cli otel test spawns a real node against an unreachable collector
+      # and asserts the dedup hint fires exactly once — the Docker-free
+      # regression guard for the SDK's `internal-logs` feature. Issue #977 / #1004.
       - run: cargo test -p telemetry --features otlp
       - run: cargo test -p cli --features otel --test telemetry_dedup
 
@@ -500,36 +552,11 @@ jobs:
       # `max-parallel: 1` whole-matrix serialization. Both hosts restore from
       # a host-local binary cache that `build` publishes to each of them; the
       # self-build below is the fallback for when that publish did not land.
-      matrix:
-        include:
-          # Each host uses sccache with incremental compilation disabled so
-          # jobs sharing its persistent target tree keep consistent flags.
-          - suite: rust
-            needs_go: false
-            host: studio-1
-            cargo_incremental: "0"
-            rustc_wrapper: sccache
-          - suite: go-compat
-            needs_go: true
-            host: studio-2
-            cargo_incremental: "0"
-            rustc_wrapper: sccache
-          - suite: iroh
-            needs_go: false
-            host: studio-2
-            cargo_incremental: "0"
-            rustc_wrapper: sccache
-          # #978: re-run the rust integration suite with
-          # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
-          # .with_signing() auto-applied. Catches regressions in
-          # unrelated features that only surface when blocks carry
-          # Signature links (mirrors Go DefraDB PR #4746).
-          - suite: signed-docs
-            needs_go: false
-            multipliers: signed-docs
-            host: studio-1
-            cargo_incremental: "0"
-            rustc_wrapper: sccache
+      #
+      # The suite list comes from `ci-scope`: signed-docs (the node default)
+      # runs on every full run, while the unsigned `rust` mirror is scoped to
+      # non-PR events. See the matrix construction there for the rationale.
+      matrix: ${{ fromJson(needs.ci-scope.outputs.integration_matrix) }}
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
@@ -563,15 +590,29 @@ jobs:
           PEER=$(.github/scripts/studio-peer.sh)
           SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 
+          # Staged via .tmp so an interrupted copy cannot leave a truncated
+          # binary that later runs would treat as a valid cache hit. Two
+          # attempts, matching the producer's publish: a transient SSH
+          # failure on this pull is what turned 2026-08-14's runs into
+          # 40-minute rebuilds.
+          pulled=""
+          if ! { [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; } && [ -n "$PEER" ]; then
+            for attempt in 1 2; do
+              if scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" \
+                && scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp"; then
+                pulled=1
+                break
+              fi
+              rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
+              [ "$attempt" -eq 1 ] && sleep 10
+            done
+          fi
+
           if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
             echo "Cache hit (local) — restoring from $CACHE_DIR"
             cp "$CACHE_DIR/defra" target/ci/defra
             cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
-          elif [ -n "$PEER" ] \
-            && scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" \
-            && scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp"; then
-            # Staged via .tmp so an interrupted copy cannot leave a truncated
-            # binary that later runs would treat as a valid cache hit.
+          elif [ -n "$pulled" ]; then
             mv "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra"
             mv "$CACHE_DIR/defra-iroh.tmp" "$CACHE_DIR/defra-iroh"
             echo "Cache hit (peer $PEER over Thunderbolt)"
@@ -581,12 +622,12 @@ jobs:
             rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
             echo "::warning::binary cache missed on this host and on peer '${PEER:-none}' — rebuilding (~40 min)"
             echo "Cache miss (local and peer ${PEER:-none}) — building binaries"
-            cargo build -p cli
-            cp target/debug/defra target/ci/defra
-            cp target/debug/defra "$CACHE_DIR/defra"
-            cargo build -p cli --features iroh
-            cp target/debug/defra target/ci/defra-iroh
-            cp target/debug/defra "$CACHE_DIR/defra-iroh"
+            cargo build -p cli --profile super-dev
+            cp target/super-dev/defra target/ci/defra
+            cp target/super-dev/defra "$CACHE_DIR/defra"
+            cargo build -p cli --profile super-dev --features iroh
+            cp target/super-dev/defra target/ci/defra-iroh
+            cp target/super-dev/defra "$CACHE_DIR/defra-iroh"
           fi
 
           chmod +x target/ci/defra target/ci/defra-iroh
@@ -678,40 +719,35 @@ jobs:
             exit 1
           fi
 
-      # Parallelism is bounded at 8 rather than left to libtest's default.
-      # The guard-release port race that once forced `--test-threads=1` is
-      # handled in the harness (`defra-harness` retries a node start with
-      # fresh ports, 3 attempts, on an EADDRINUSE exit), so serializing is
-      # no longer the mitigation it was.
-      #
-      # 8 is the knee of the measured curve: it recovers 3.8x of the 4.3x
-      # total speedup available at 16 threads while halving the number of
-      # concurrently live node clusters. That headroom is deliberate —
-      # studio-1 also hosts runners for seven other repos, and
-      # `Cluster::restart_node` re-binds a node's original port holding no
-      # guard and with no retry, so the steal window widens with concurrency.
+      # A bind failure can reach the harness log watcher before the child-exit
+      # path classifies it for retry. Keep node-spawning suites serial until
+      # the harness handles both readiness failure paths.
+      # `--profile super-dev` matches the cached node binaries: the test
+      # binaries link ~7.5x less debug object volume, which is where the
+      # first leg's in-step compile toll went, and sccache keys per flag set
+      # so the profile costs one warmup compile per host.
       - name: Run rust integration tests (basic)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test basic
-          -- --test-threads=8 --skip ::go_
+          -- --test-threads=1 --skip ::go_
 
       - name: Run rust integration tests (core suites)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test query --test acp --test nac
           --test encryption --test identity
           --test backup --test fts
-          -- --test-threads=8 --skip ::go_
+          -- --test-threads=1 --skip ::go_
 
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test p2p
-          -- --test-threads=8 --skip ::go_
+          -- --test-threads=1 --skip ::go_
 
       # go-compat runs the `go_*` half of every dual-runtime test against
       # the upstream Go DefraDB binary. Catches cross-implementation
@@ -726,7 +762,7 @@ jobs:
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test basic --test query --test acp --test nac --test backup --test p2p
           --test identity
           -- --test-threads=1 go_
@@ -778,7 +814,7 @@ jobs:
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test p2p_iroh
           -- --test-threads=1 connection::
 
@@ -804,15 +840,13 @@ jobs:
     # Linux runner. Builds its own binary — the `build` job caches Mach-O
     # binaries that cannot run here.
     #
-    # spark-2: dedicated host so this node-spawning job runs in parallel with
-    # wasm-check (spark-1) instead of serializing behind it on the vps, which
-    # now serves release.yml's x86_64 builds only. Still Linux/epoll — the
-    # scheduling-race coverage is arch-independent.
+    # Share the Linux runner with wasm-check. This remains Linux/epoll, and the
+    # scheduling-race coverage is architecture-independent.
     name: P2P Integration (Linux)
     needs: ci-scope
     if: needs.ci-scope.outputs.full == 'true'
-    runs-on: [self-hosted, Linux, ARM64, spark, spark-2]
-    timeout-minutes: 45
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
     env:
       # The workflow-level PROTOC points at a macOS Homebrew path; override it
       # with the apt-installed protoc for this Linux job.
@@ -847,14 +881,14 @@ jobs:
       - name: Build defra binaries
         run: |
           mkdir -p target/ci
-          cargo build -p cli
-          cp target/debug/defra target/ci/defra
-          cargo build -p cli --features iroh
-          cp target/debug/defra target/ci/defra-iroh
+          cargo build -p cli --profile super-dev
+          cp target/super-dev/defra target/ci/defra
+          cargo build -p cli --profile super-dev --features iroh
+          cp target/super-dev/defra target/ci/defra-iroh
           "$DEFRA_RUST_BINARY" version --format json
           "$DEFRA_IROH_BINARY" version --format json
 
-      # Same selection as the macOS rust leg: pure-Rust P2P topologies only
+      # Same selection as the macOS signed-docs/rust legs: pure-Rust P2P topologies only
       # (`--skip ::go_` drops the go_go_/go_rust_ variants). Kept serial while
       # the macOS legs run at 8: this leg exists to expose Linux scheduling
       # races, so a fixed serial schedule keeps a failure attributable to the
@@ -862,7 +896,7 @@ jobs:
       # it is nowhere near the critical path.
       - name: Run rust P2P integration tests
         run: >-
-          cargo test -p integration-test
+          cargo test --profile super-dev -p integration-test
           --test p2p
           -- --test-threads=1 --skip ::go_
 
