@@ -10,6 +10,8 @@ use schema::{
 
 const DIMENSIONS: u32 = 4;
 
+/// `SIMILARITY` ranks by dot product, so a routable index must be built with
+/// the matching metric. A cosine index is covered separately.
 fn vector_index(id: u32, field: &str, dimensions: u32) -> IndexDescription {
     IndexDescription {
         name: format!("by_{field}"),
@@ -24,7 +26,7 @@ fn vector_index(id: u32, field: &str, dimensions: u32) -> IndexDescription {
     }
     .as_vector(VectorIndexDescription {
         algorithm: VectorAlgorithm::Hnsw,
-        metric: DistanceMetric::Cosine,
+        metric: DistanceMetric::Dot,
         dimensions,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
@@ -238,4 +240,72 @@ fn the_index_on_the_target_field_is_chosen() {
         vector_index(9, "embedding", DIMENSIONS),
     ];
     assert_eq!(route(&routable(), &indexes).unwrap().index_id, 9);
+}
+
+/// A cosine index ranks by a different measure than `SIMILARITY`, so its
+/// nearest neighbours are not the query's top scorers. Routing to it would
+/// return the wrong documents, so it must be refused.
+#[test]
+fn a_cosine_index_is_refused() {
+    let index = IndexDescription {
+        name: "by_embedding".to_string(),
+        id: 1,
+        fields: vec![IndexedFieldDescription {
+            name: "embedding".to_string(),
+            descending: false,
+        }],
+        unique: false,
+        kind: None,
+        auto_generated: false,
+    }
+    .as_vector(VectorIndexDescription::with_defaults(
+        VectorAlgorithm::Hnsw,
+        DistanceMetric::Cosine,
+        DIMENSIONS,
+    ));
+
+    assert_eq!(
+        route(&routable(), &[index]),
+        Err(NotRouted::MetricMismatch {
+            index_metric: DistanceMetric::Cosine
+        })
+    );
+}
+
+/// Every algorithm can be built with either metric, so the refusal must be
+/// about the metric and never about which engine was chosen.
+#[test]
+fn the_metric_decides_regardless_of_algorithm() {
+    for algorithm in VectorAlgorithm::ALL {
+        for metric in DistanceMetric::ALL {
+            // The schema refuses a pair the algorithm cannot rank by, so such an
+            // index never reaches routing.
+            if !algorithm.supports_metric(*metric) {
+                continue;
+            }
+            let index = IndexDescription {
+                name: "by_embedding".to_string(),
+                id: 1,
+                fields: vec![IndexedFieldDescription {
+                    name: "embedding".to_string(),
+                    descending: false,
+                }],
+                unique: false,
+                kind: None,
+                auto_generated: false,
+            }
+            .as_vector(VectorIndexDescription::with_defaults(
+                *algorithm, *metric, DIMENSIONS,
+            ));
+
+            let routed = route(&routable(), &[index]).is_ok();
+            assert_eq!(
+                routed,
+                *metric == DistanceMetric::Dot,
+                "{} with {}",
+                algorithm.as_str(),
+                metric.as_str()
+            );
+        }
+    }
 }

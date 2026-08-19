@@ -534,6 +534,13 @@ impl<'a> SdlParser<'a> {
             Some(_) => return Err(QueryError::parse("@vectorIndex algorithm must be a string")),
         };
 
+        let metric = match get_directive_arg(directive, "metric") {
+            None => None,
+            Some(graphql_parser::schema::Value::String(text))
+            | Some(graphql_parser::schema::Value::Enum(text)) => Some(text.clone()),
+            Some(_) => return Err(QueryError::parse("@vectorIndex metric must be a string")),
+        };
+
         let hnsw = match get_directive_arg(directive, "HNSW") {
             None => None,
             Some(graphql_parser::schema::Value::Object(members)) => {
@@ -637,6 +644,7 @@ impl<'a> SdlParser<'a> {
         Ok(super::directives::VectorIndexConfig {
             dimensions,
             algorithm,
+            metric,
             hnsw,
             ivfpq,
             ssg,

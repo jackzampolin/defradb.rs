@@ -77,6 +77,7 @@ const GLOBAL_VALIDATORS: &[Validator] = &[
     validate_materialized_has_no_policy,
     validate_embedding_and_kind_compatible,
     validate_embedding_fields_for_generation,
+    validate_vector_index_metrics,
     validate_embedding_provider_and_model,
 ];
 
@@ -90,6 +91,7 @@ pub fn validate_new_collections(new_collections: &[CollectionVersion]) -> Result
 
     let validators: &[Validator] = &[
         validate_embedding_and_kind_compatible,
+        validate_vector_index_metrics,
         validate_embedding_fields_for_generation,
         validate_embedding_provider_and_model,
         validate_index_fields_not_counter,

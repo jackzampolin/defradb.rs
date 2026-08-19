@@ -26,7 +26,7 @@ fn vector_index() -> Vec<IndexDescription> {
     }
     .as_vector(VectorIndexDescription {
         algorithm: VectorAlgorithm::Hnsw,
-        metric: DistanceMetric::Cosine,
+        metric: DistanceMetric::Dot,
         dimensions: VECTOR.len() as u32,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,

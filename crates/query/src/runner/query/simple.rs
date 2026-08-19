@@ -37,9 +37,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // show_deleted, the scan filter, and a downstream limit without ever
         // materializing the collection. doc_ids and index-scan lookups fetch
         // specific documents rather than scanning, so they stay materialized.
-        let source = if let Some(narrowed) = try_vector_narrow(select, collection, fetcher).await? {
-            narrowed
-        } else if select.show_deleted {
+        let source = if select.show_deleted {
             ScanSource::Fetcher(Arc::new(FetcherWrapper::new(fetcher)))
         } else if let Some(ref doc_ids) = select.doc_ids {
             // Deduplicate doc_ids while preserving order (Go compatibility)
@@ -146,45 +144,4 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         Ok(JsonValue::Array(results))
     }
-}
-
-/// Narrows a scan to the nearest documents when a vector index can answer the
-/// query. `None` leaves the existing paths untouched.
-async fn try_vector_narrow(
-    select: &query_types::mapper::Select,
-    collection: &schema::CollectionVersion,
-    fetcher: &dyn query_plan::fetcher::DocFetcher,
-) -> Result<Option<ScanSource>> {
-    use query_plan::planner::vector_routing::{route, similarity_query};
-
-    if !fetcher.supports_vector_search() {
-        return Ok(None);
-    }
-
-    let Ok(route) = route(&similarity_query(select), &collection.indexes) else {
-        return Ok(None);
-    };
-
-    let doc_short_ids = fetcher
-        .vector_search(
-            &select.collection_name,
-            route.index_id,
-            &route.query_vector,
-            route.k,
-            None,
-        )
-        .await?;
-
-    debug!(
-        collection = %select.collection_name,
-        index_id = route.index_id,
-        k = route.k,
-        found = doc_short_ids.len(),
-        "narrowed scan with a vector index"
-    );
-
-    Ok(Some(ScanSource::VectorNarrowed {
-        fetcher: Arc::new(FetcherWrapper::new(fetcher)),
-        doc_short_ids,
-    }))
 }

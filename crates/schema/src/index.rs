@@ -260,35 +260,80 @@ mod tests {
 /// Go defines only `HNSW`. `FLAT` is a wire divergence: exact and linear in the
 /// corpus, so it is the right choice for a small collection and the oracle an
 /// approximate index is checked against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum VectorAlgorithm {
+/// Declares the variants, their wire names, and `ALL` from one list, so an
+/// engine cannot be added to the enum yet be missing from the name mapping or
+/// from the coverage every consumer derives from `ALL`.
+macro_rules! vector_algorithms {
+    (
+        $(#[doc = $first_doc:literal])* $first:ident => $first_name:literal,
+        $($(#[doc = $doc:literal])* $variant:ident => $name:literal),+ $(,)?
+    ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+        pub enum VectorAlgorithm {
+            $(#[doc = $first_doc])*
+            #[default]
+            #[serde(rename = $first_name)]
+            $first,
+            $(
+                $(#[doc = $doc])*
+                #[serde(rename = $name)]
+                $variant,
+            )+
+        }
+
+        impl VectorAlgorithm {
+            /// Every algorithm the engine can build and search.
+            ///
+            /// The SDL parser, the CLI, and the query-path tests all derive from
+            /// this, so adding a variant makes it selectable and covered rather
+            /// than reachable only through its own engine tests.
+            pub const ALL: &'static [Self] = &[Self::$first, $(Self::$variant),+];
+
+            /// The name used in `@vectorIndex(algorithm:)` and on the wire.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    Self::$first => $first_name,
+                    $(Self::$variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+// The first entry is the default.
+vector_algorithms! {
     /// Hierarchical Navigable Small World graph.
-    #[default]
-    #[serde(rename = "HNSW")]
-    Hnsw,
+    Hnsw => "HNSW",
     /// Exhaustive scan. Exact, no build parameters, no tuning.
-    #[serde(rename = "FLAT")]
-    Flat,
+    Flat => "FLAT",
     /// Coarse lists of product-quantized codes. Approximate and lossy, in
     /// exchange for a code far smaller than the vector it stands for.
-    #[serde(rename = "IVF_PQ")]
-    IvfPq,
+    IvfPq => "IVF_PQ",
     /// Satellite System Graph: one flat layer, edges pruned by angle.
-    #[serde(rename = "SSG")]
-    Ssg,
+    Ssg => "SSG",
 }
 
 impl VectorAlgorithm {
+    pub fn from_sdl_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|algorithm| algorithm.as_str() == name)
+    }
+
     pub fn is_go_compatible(self) -> bool {
         matches!(self, Self::Hnsw)
     }
 
-    pub fn as_str(self) -> &'static str {
+    /// Whether this algorithm can rank by `metric`.
+    ///
+    /// IVF-PQ scores through its codebooks by squared distance, which does not
+    /// order a dot product, so the pair is refused when the definition is
+    /// written rather than when the first document is indexed.
+    pub fn supports_metric(self, metric: DistanceMetric) -> bool {
         match self {
-            Self::Hnsw => "HNSW",
-            Self::Flat => "FLAT",
-            Self::IvfPq => "IVF_PQ",
-            Self::Ssg => "SSG",
+            Self::IvfPq => metric == DistanceMetric::Cosine,
+            Self::Hnsw | Self::Flat | Self::Ssg => true,
         }
     }
 }
@@ -307,6 +352,22 @@ pub enum DistanceMetric {
 }
 
 impl DistanceMetric {
+    pub const ALL: &'static [Self] = &[Self::Cosine, Self::Dot];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cosine => "COSINE",
+            Self::Dot => "DOT",
+        }
+    }
+
+    pub fn from_sdl_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|metric| metric.as_str() == name)
+    }
+
     pub fn is_go_compatible(self) -> bool {
         matches!(self, Self::Cosine)
     }
@@ -445,6 +506,28 @@ impl Default for IvfPqParams {
             nprobe: default_ivfpq_nprobe(),
             m: 0,
             sample_bytes: default_ivfpq_sample_bytes(),
+        }
+    }
+}
+
+impl VectorIndexDescription {
+    /// A description carrying the chosen algorithm's default parameters.
+    ///
+    /// The per-algorithm block belongs to exactly one algorithm, so filling it
+    /// here keeps every caller that has no tuning to express from repeating the
+    /// match and forgetting an engine.
+    pub fn with_defaults(
+        algorithm: VectorAlgorithm,
+        metric: DistanceMetric,
+        dimensions: u32,
+    ) -> Self {
+        Self {
+            algorithm,
+            metric,
+            dimensions,
+            hnsw: matches!(algorithm, VectorAlgorithm::Hnsw).then(HnswParams::default),
+            ivfpq: matches!(algorithm, VectorAlgorithm::IvfPq).then(IvfPqParams::default),
+            ssg: matches!(algorithm, VectorAlgorithm::Ssg).then(SsgParams::default),
         }
     }
 }

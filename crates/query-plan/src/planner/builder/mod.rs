@@ -252,9 +252,50 @@ impl Planner {
         let filter_for_plan = filter_parts.filter_for_plan;
         let is_complex_filter = filter_parts.is_complex_filter;
 
+        // A routable similarity query is answered by its vector index, which is
+        // the only index that can serve the `ORDER BY similarity` and the limit
+        // together. A scalar index would narrow the filter and then leave every
+        // matching document to be scored, so resolving this first and suppressing
+        // scalar selection keeps the choice deterministic rather than dependent
+        // on which indexes a collection happens to carry.
+        //
+        // A row rejected above the scan is invisible to it, and the scan is what
+        // widens the candidate set when a page comes up short. An `OrderNode`
+        // blocks and consumes everything, so widening cannot instead be driven by
+        // the consumer still pulling. Rather than return a short page, these
+        // shapes take the exhaustive path, which scores every matching document
+        // and is therefore always right.
+        let rows_rejected_above_the_scan = filter_has_relations
+            || is_complex_filter
+            || (self.acp.is_some() && collection.policy.is_some());
+
+        let vector_route = self
+            .fetcher
+            .as_ref()
+            .filter(|_| !rows_rejected_above_the_scan)
+            .filter(|fetcher| fetcher.supports_vector_search())
+            .and_then(|_| {
+                match crate::planner::vector_routing::route(
+                    &crate::planner::vector_routing::similarity_query(select),
+                    &collection.indexes,
+                ) {
+                    Ok(route) => Some(route),
+                    Err(reason) => {
+                        debug!(
+                            collection = %select.collection_name,
+                            ?reason,
+                            "vector routing declined"
+                        );
+                        None
+                    }
+                }
+            });
+
         // Check if an index can be used for the filter or ordering.
         // Index selection works for both pre-loaded docs and fetcher-based loading.
-        let (index_scan, index_provides_ordering) = if let Some(ref fetcher) = self.fetcher {
+        let (index_scan, index_provides_ordering) = if vector_route.is_some() {
+            (None, false)
+        } else if let Some(ref fetcher) = self.fetcher {
             // Only use index if fetcher supports index queries
             if fetcher.supports_index_queries() {
                 self.try_select_index(select, &collection)
@@ -314,6 +355,9 @@ impl Planner {
             // Attach fetcher if available for on-demand data loading
             if let Some(ref fetcher) = self.fetcher {
                 scan = scan.with_fetcher(fetcher.clone());
+            }
+            if let Some(route) = vector_route {
+                scan = scan.with_vector_route(route);
             }
             // Keep separately supplied document IDs out of the scan filter.
             if let Some(ref doc_ids) = select.doc_ids {

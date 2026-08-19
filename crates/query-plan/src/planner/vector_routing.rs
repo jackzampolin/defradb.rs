@@ -2,14 +2,16 @@
 //!
 //! Ported from Go's `tryRouteSimilarityToVectorIndex`, with one deliberate
 //! difference: Go refuses a query that carries a filter, because its graph
-//! would have to over-fetch and backfill (its issue 5071). This engine filters
-//! during the walk, so a filtered query routes like any other. That matters
-//! because the hybrid retrieval path in `db-search` folds `exclude_doc_ids`
-//! into a filter on essentially every call, and under Go's rule it could never
-//! be routed at all.
+//! would have to over-fetch and backfill (its issue 5071). This engine does the
+//! over-fetch instead of refusing: the filter is applied to documents, and
+//! `ScanNode` asks the index for a wider `k` whenever the filter leaves the page
+//! short, so a filtered query routes like any other and still returns a full
+//! page. That matters because the hybrid retrieval path in `db-search` folds
+//! `exclude_doc_ids` into a filter on essentially every call, and under Go's
+//! rule it could never be routed at all.
 
 use query_types::mapper::{OrderDirection, Requestable, Select};
-use schema::{IndexDescription, VectorIndexDescription};
+use schema::{DistanceMetric, IndexDescription, VectorIndexDescription};
 
 /// What a routable query resolved to.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +47,9 @@ pub enum NotRouted {
     /// The query vector's length does not match the index's declared
     /// dimensions. Scoring it would silently use the shared prefix only.
     DimensionMismatch { expected: u32, actual: usize },
+    /// The index ranks by a different measure than `SIMILARITY` does, so its
+    /// nearest neighbours are not the query's highest scorers.
+    MetricMismatch { index_metric: DistanceMetric },
 }
 
 /// The query shape the decision is made from.
@@ -165,6 +170,17 @@ pub fn route(
         return Err(NotRouted::DimensionMismatch {
             expected: vector.dimensions,
             actual: similarity.vector.len(),
+        });
+    }
+
+    // `SIMILARITY` ranks by dot product (`SimilarityNode`), so only a dot-product
+    // index holds the same order. A cosine index normalizes away magnitude: its
+    // nearest neighbours are not the highest dot scorers, so routing to one
+    // returns the wrong documents rather than merely approximate ones. Declining
+    // costs a scan and keeps the answer right.
+    if vector.metric != DistanceMetric::Dot {
+        return Err(NotRouted::MetricMismatch {
+            index_metric: vector.metric,
         });
     }
 

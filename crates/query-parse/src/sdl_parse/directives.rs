@@ -48,7 +48,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
         "fulltext" => &["language", "k1", "b"],
-        "vectorIndex" => &["dimensions", "algorithm", "HNSW", "IVFPQ", "SSG"],
+        "vectorIndex" => &["dimensions", "algorithm", "metric", "HNSW", "IVFPQ", "SSG"],
         "immutable" => &[],
         _ => &[],
     }
@@ -218,6 +218,9 @@ pub struct VectorIndexConfig {
     pub dimensions: Option<u32>,
     /// `None` means HNSW, matching the reference where it is the only value.
     pub algorithm: Option<String>,
+    /// How the index ranks. Applies to every algorithm, so it sits here rather
+    /// than inside the HNSW block, which the older form still accepts.
+    pub metric: Option<String>,
     /// Present when the `IVFPQ` argument was given.
     pub ivfpq: Option<IvfPqConfig>,
     /// Present when the `SSG` argument was given.

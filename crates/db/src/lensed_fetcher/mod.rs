@@ -303,6 +303,33 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         true
     }
 
+    async fn vector_search(
+        &self,
+        collection_name: &str,
+        index_id: u32,
+        query_vector: &[f64],
+        k: usize,
+        effort: Option<usize>,
+    ) -> query::error::Result<Vec<u64>> {
+        let (collection, datastore, _) =
+            crate::collection_loader::get_collection_with_lazy_load(&self.txn, collection_name)
+                .await?;
+
+        crate::vector_search::search_vector_index(
+            &collection,
+            &datastore,
+            index_id,
+            query_vector,
+            k,
+            effort,
+        )
+        .await
+    }
+
+    fn supports_vector_search(&self) -> bool {
+        true
+    }
+
     async fn get_document_at_cid(
         &self,
         cid: &str,

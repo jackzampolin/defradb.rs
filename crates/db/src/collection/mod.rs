@@ -204,6 +204,10 @@ impl Collection {
         &self.write_indexes
     }
 
+    pub(crate) fn queryable_indexes(&self) -> &[IndexDescription] {
+        &self.queryable_indexes
+    }
+
     pub(crate) fn schema_for_queries(&self) -> CollectionVersion {
         let mut schema = self.def.clone();
         schema.indexes.clone_from(&self.queryable_indexes);
