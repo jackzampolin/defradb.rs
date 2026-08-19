@@ -49,26 +49,25 @@ fn the_response_reports_the_kind() {
         id: 3,
         fields: Vec::new(),
         unique: false,
-        kind: Some(IndexKind::Vector(VectorIndexDescription {
+        kind: IndexKind::Vector(VectorIndexDescription {
             algorithm: VectorAlgorithm::Hnsw,
             metric: DistanceMetric::Cosine,
             dimensions: 4,
             hnsw: Some(HnswParams::default()),
             ivfpq: None,
             ssg: None,
-        })),
+        }),
     };
     let json = serde_json::to_value(&described).unwrap();
-    assert_eq!(json["Kind"]["Algorithm"], "HNSW");
-    assert_eq!(json["Kind"]["Dimensions"], 4);
+    assert_eq!(json["Kind"], 1);
+    assert_eq!(json["KindDescription"]["Algorithm"], "HNSW");
+    assert_eq!(json["KindDescription"]["Dimensions"], 4);
 
     let ordinary = GoIndexDescription {
-        kind: None,
+        kind: IndexKind::Ordered(schema::OrderedIndexDescription { unique: false }),
         ..described
     };
     let json = serde_json::to_value(&ordinary).unwrap();
-    assert!(
-        json.get("Kind").is_none(),
-        "an ordinary index omits the kind rather than sending null"
-    );
+    assert_eq!(json["Kind"], 0);
+    assert_eq!(json["KindDescription"]["Unique"], false);
 }

@@ -1,9 +1,10 @@
 //! The index kind is what a vector index carries inside a collection
 //! definition, and a collection definition replicates. These lock the shape.
 
+use proptest::prelude::*;
 use schema::{
-    DistanceMetric, HnswParams, IndexDescription, IndexKind, OrderedIndexDescription,
-    VectorAlgorithm, VectorIndexDescription,
+    DistanceMetric, HnswParams, IndexDescription, IndexKind, IvfPqParams, OrderedIndexDescription,
+    SsgParams, VectorAlgorithm, VectorIndexDescription,
 };
 
 fn vector_description() -> VectorIndexDescription {
@@ -17,47 +18,36 @@ fn vector_description() -> VectorIndexDescription {
     }
 }
 
-/// The algorithm and metric are strings on the wire, not numbers, so a stored
-/// descriptor stays readable and a new value is additive.
 #[test]
-fn the_kind_serialises_with_gos_field_names() {
+fn the_kind_serializes_as_a_discriminated_envelope() {
     let json = serde_json::to_value(IndexKind::Vector(vector_description())).unwrap();
-    assert_eq!(json["Algorithm"], "HNSW");
-    assert_eq!(json["Metric"], "COSINE");
-    assert_eq!(json["Dimensions"], 768);
-    assert_eq!(json["HNSW"]["M"], 16);
-    assert_eq!(json["HNSW"]["EfConstruction"], 128);
-    assert_eq!(json["HNSW"]["EfSearch"], 64);
-    assert!(json.get("Unique").is_none(), "a vector index is not unique");
+    assert_eq!(json["Kind"], 1);
+    assert_eq!(json["KindDescription"]["Algorithm"], "HNSW");
+    assert_eq!(json["KindDescription"]["Metric"], "COSINE");
+    assert_eq!(json["KindDescription"]["Dimensions"], 768);
+    assert_eq!(json["KindDescription"]["HNSW"]["M"], 16);
 
     let ordered =
         serde_json::to_value(IndexKind::Ordered(OrderedIndexDescription { unique: true })).unwrap();
-    assert_eq!(ordered["Unique"], true);
-    assert!(ordered.get("Algorithm").is_none());
+    assert_eq!(ordered["Kind"], 0);
+    assert_eq!(ordered["KindDescription"]["Unique"], true);
 }
 
-/// There is no discriminator: the kind is sniffed from a vector-only field
-/// being present, matching Go's `parseIndexKind`. A descriptor carrying neither
-/// is an ordered index.
 #[test]
-fn the_kind_is_sniffed_not_tagged() {
-    let vector: IndexKind = serde_json::from_str(r#"{"Algorithm":"HNSW"}"#).unwrap();
+fn the_kind_tag_controls_deserialization() {
+    let vector: IndexKind =
+        serde_json::from_str(r#"{"Kind":1,"KindDescription":{"Algorithm":"HNSW"}}"#).unwrap();
     assert!(matches!(vector, IndexKind::Vector(_)));
 
-    let by_dimensions: IndexKind = serde_json::from_str(r#"{"Dimensions":4}"#).unwrap();
-    assert!(matches!(by_dimensions, IndexKind::Vector(_)));
-
-    let ordered: IndexKind = serde_json::from_str(r#"{"Unique":true}"#).unwrap();
+    let ordered: IndexKind =
+        serde_json::from_str(r#"{"Kind":0,"KindDescription":{"Unique":true}}"#).unwrap();
     assert_eq!(
         ordered,
         IndexKind::Ordered(OrderedIndexDescription { unique: true })
     );
 
-    let bare: IndexKind = serde_json::from_str("{}").unwrap();
-    assert_eq!(
-        bare,
-        IndexKind::Ordered(OrderedIndexDescription { unique: false })
-    );
+    let error = serde_json::from_str::<IndexKind>(r#"{"Kind":42}"#).unwrap_err();
+    assert!(error.to_string().contains("unknown index kind: 42"));
 }
 
 #[test]
@@ -73,7 +63,10 @@ fn a_vector_kind_round_trips() {
 fn a_description_without_a_kind_is_an_ordered_index() {
     let legacy: IndexDescription =
         serde_json::from_str(r#"{"Name":"by_email","ID":3,"Unique":true}"#).unwrap();
-    assert!(legacy.kind.is_none());
+    assert_eq!(
+        legacy.kind,
+        Some(IndexKind::Ordered(OrderedIndexDescription { unique: true }))
+    );
     assert!(!legacy.is_vector());
     assert!(legacy.resolved_unique());
 
@@ -119,4 +112,65 @@ fn a_vector_index_description_round_trips() {
     let back: IndexDescription = serde_json::from_str(&text).unwrap();
     assert_eq!(back, desc);
     assert!(back.is_vector());
+}
+
+fn index_kinds() -> impl Strategy<Value = IndexKind> {
+    let algorithms = prop_oneof![
+        Just(VectorAlgorithm::Hnsw),
+        Just(VectorAlgorithm::Flat),
+        Just(VectorAlgorithm::IvfPq),
+        Just(VectorAlgorithm::Ssg),
+    ];
+    let metrics = prop_oneof![Just(DistanceMetric::Cosine), Just(DistanceMetric::Dot)];
+    let hnsw = prop::option::of((any::<u32>(), any::<u32>(), any::<u32>()).prop_map(
+        |(m, ef_construction, ef_search)| HnswParams {
+            m,
+            ef_construction,
+            ef_search,
+        },
+    ));
+    let ivfpq = prop::option::of(
+        (any::<u32>(), any::<u32>(), any::<u32>(), any::<u64>()).prop_map(
+            |(nlist, nprobe, m, sample_bytes)| IvfPqParams {
+                nlist,
+                nprobe,
+                m,
+                sample_bytes,
+            },
+        ),
+    );
+    let ssg = prop::option::of(
+        (any::<u32>(), any::<u32>(), any::<u32>()).prop_map(|(r, angle, pool)| SsgParams {
+            r,
+            angle,
+            pool,
+        }),
+    );
+
+    prop_oneof![
+        any::<bool>().prop_map(|unique| IndexKind::Ordered(OrderedIndexDescription { unique })),
+        (algorithms, metrics, any::<u32>(), hnsw, ivfpq, ssg).prop_map(
+            |(algorithm, metric, dimensions, hnsw, ivfpq, ssg)| {
+                IndexKind::Vector(VectorIndexDescription {
+                    algorithm,
+                    metric,
+                    dimensions,
+                    hnsw,
+                    ivfpq,
+                    ssg,
+                })
+            }
+        )
+    ]
+}
+
+proptest! {
+    #[test]
+    fn every_index_kind_round_trips_through_the_envelope(kind in index_kinds()) {
+        let json = serde_json::to_vec(&kind).unwrap();
+        prop_assert_eq!(serde_json::from_slice::<IndexKind>(&json).unwrap(), kind);
+
+        let cbor = serde_ipld_dagcbor::to_vec(&kind).unwrap();
+        prop_assert_eq!(serde_ipld_dagcbor::from_slice::<IndexKind>(&cbor).unwrap(), kind);
+    }
 }
