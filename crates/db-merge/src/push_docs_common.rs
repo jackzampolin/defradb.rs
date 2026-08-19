@@ -72,6 +72,43 @@ pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reade
     doc_short_id: u64,
 ) -> Vec<Cid> {
     let mut cids = Vec::new();
+
+    // The composite head keyspace is the authoritative current frontier. A
+    // document may have concurrent sibling heads with different priorities;
+    // collapsing this set to the maximum priority loses an obligation when a
+    // marker retry is the sender's only durable source of truth. This matches
+    // Go's getHeadsForDocShortID path.
+    let head_prefix = HeadstoreDocKey::field_prefix(doc_short_id, "C");
+    let head_prefix_len = head_prefix.len();
+    if let Ok(mut iter) = head_reader
+        .iterator(IterOptions::new().with_prefix(head_prefix))
+        .await
+    {
+        while let Ok(Some(pair)) = iter.next().await {
+            let cid_str = String::from_utf8_lossy(&pair.key[head_prefix_len..]);
+            let Ok(cid) = Cid::from_str(&cid_str) else {
+                continue;
+            };
+            let Ok(Some(block_bytes)) = block_reader.get(&cid.to_bytes()).await else {
+                continue;
+            };
+            let Ok(block) = defra_core::Block::from_dag_cbor(&block_bytes) else {
+                continue;
+            };
+            if matches!(block.delta, defra_core::CrdtDelta::Composite(_)) {
+                cids.push(cid);
+            }
+        }
+        let _ = iter.close().await;
+    }
+
+    if !cids.is_empty() {
+        return cids;
+    }
+
+    // Recovery fallback for stores whose authoritative head entries are
+    // absent but whose commit-priority index is intact. The index includes
+    // history, so only its highest composite priority is current in this mode.
     let mut max_priority: Option<u64> = None;
 
     if let Ok(mut iter) = head_reader
@@ -109,26 +146,6 @@ pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reade
                     cids.push(cid);
                 }
             }
-        }
-        let _ = iter.close().await;
-    }
-
-    if !cids.is_empty() {
-        return cids;
-    }
-
-    let field_prefix = HeadstoreDocKey::field_prefix(doc_short_id, "C");
-    let field_prefix_len = field_prefix.len();
-    if let Ok(mut iter) = head_reader
-        .iterator(IterOptions::new().with_prefix(field_prefix))
-        .await
-    {
-        while let Ok(Some(pair)) = iter.next().await {
-            let cid_str = String::from_utf8_lossy(&pair.key[field_prefix_len..]);
-            let Ok(cid) = Cid::from_str(&cid_str) else {
-                continue;
-            };
-            cids.push(cid);
         }
         let _ = iter.close().await;
     }
@@ -329,7 +346,7 @@ mod tests {
     use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
     #[tokio::test]
-    async fn latest_composite_head_selection_prefers_highest_priority_index() {
+    async fn current_composite_frontier_retains_lower_priority_sibling() {
         let store = Arc::new(MemoryStore::new());
         let db = Arc::new(DB::from_arc(store).unwrap());
         let doc_short_id = 7_u64;
@@ -407,15 +424,17 @@ mod tests {
         txn.commit().await.unwrap();
 
         let txn = db.new_txn(true).await.unwrap();
-        let heads = load_latest_composite_head_cids(
+        let mut heads = load_latest_composite_head_cids(
             &txn.headstore().unwrap(),
             &txn.blockstore().unwrap(),
             doc_short_id,
         )
         .await;
 
-        assert_eq!(heads, vec![second_cid]);
-        assert_ne!(heads, vec![first_cid]);
+        heads.sort_unstable();
+        let mut expected = vec![first_cid, second_cid];
+        expected.sort_unstable();
+        assert_eq!(heads, expected);
     }
 
     #[tokio::test]

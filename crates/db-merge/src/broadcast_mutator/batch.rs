@@ -117,7 +117,10 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
         Ok(())
     }
 
-    async fn register_pending_static(sync: &SyncCoordinator<B, T>, pending: &PendingBroadcast) {
+    async fn register_pending_static(
+        sync: &SyncCoordinator<B, T>,
+        pending: &PendingBroadcast,
+    ) -> p2p::error::Result<()> {
         let creator_ref = pending.creator_did.as_deref();
         if let Some(document_json) = pending.document_json.as_ref() {
             sync.push_document_to_replicators_with_creator(
@@ -128,7 +131,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
                 document_json,
                 creator_ref,
             )
-            .await;
+            .await?;
         } else {
             sync.push_to_replicators_with_creator(
                 &pending.cid,
@@ -137,7 +140,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
                 &pending.collection_id,
                 creator_ref,
             )
-            .await;
+            .await?;
         }
 
         if let (Some(col_cid), Some(col_block)) = (
@@ -151,8 +154,9 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
                 &pending.collection_id,
                 creator_ref,
             )
-            .await;
+            .await?;
         }
+        Ok(())
     }
 
     async fn broadcast_pending_static(sync: &SyncCoordinator<B, T>, pending: PendingBroadcast) {
@@ -338,8 +342,11 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
 
         let pending_broadcasts = std::mem::take(&mut *self.pending_broadcasts.lock().await);
         if !pending_broadcasts.is_empty() {
+            let mut marker_errors = Vec::new();
             for pending in &pending_broadcasts {
-                Self::register_pending_static(&self.sync, pending).await;
+                if let Err(error) = Self::register_pending_static(&self.sync, pending).await {
+                    marker_errors.push(error.to_string());
+                }
             }
             let sync = self.sync.clone();
             self.sync.spawn_non_authoritative_broadcast_task(
@@ -350,6 +357,12 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
                     }
                 },
             );
+            if !marker_errors.is_empty() {
+                return Err(query::error::QueryError::execution(format!(
+                    "committed batch has undurable P2P head markers: {}",
+                    marker_errors.join("; ")
+                )));
+            }
         }
 
         Ok(())

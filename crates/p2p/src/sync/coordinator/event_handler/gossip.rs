@@ -154,16 +154,23 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
-        let is_explicit_replicator =
-            self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
-
-        self.manager
-            .process_pushlog(
-                &message,
-                Some(recovery_source.as_str()),
-                is_explicit_replicator,
-                None,
-            )
-            .await
+        // Gossip authenticates the propagation hop and the signed origin, but
+        // it is not the explicit-replicator handshake. In particular, a
+        // configured relay must not confer its merge authorization on a
+        // different origin principal carried by the envelope.
+        if authenticated_origin == propagation_source.as_str() {
+            self.manager
+                .process_pushlog_from_dag_provider(
+                    &message,
+                    Some(recovery_source.as_str()),
+                    false,
+                    None,
+                )
+                .await
+        } else {
+            self.manager
+                .process_pushlog(&message, Some(recovery_source.as_str()), false, None)
+                .await
+        }
     }
 }

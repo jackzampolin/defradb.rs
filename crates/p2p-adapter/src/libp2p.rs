@@ -543,41 +543,34 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             addrs.insert(peer_id.to_string(), addr_str.to_string());
         }
 
+        let replicator_info = p2p::ReplicatorInfo::from_raw_with_filters(
+            peer_id.to_string(),
+            collection_cids.clone(),
+            vec![addr_str.to_string()],
+            replication_filters.clone(),
+        );
+        if let Some(ref pusher) = self.doc_pusher {
+            pusher
+                .persist_replicator_info(&replicator_info)
+                .await
+                .map_err(|error| {
+                    P2PError::persistence(format!(
+                        "failed to durably register replicator {peer_id}: {error}"
+                    ))
+                })?;
+        }
+
         if let Some(ref coordinator) = self.sync_coordinator {
             let transport_peer_id = p2p::transport::PeerId::from(peer_id);
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
             coordinator
-                .create_replicator_info(&transport_peer_id, info, false)
+                .create_replicator_info(&transport_peer_id, replicator_info.clone(), false)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         } else {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
             self.handle
-                .create_replicator_info(peer_id, info)
+                .create_replicator_info(peer_id, replicator_info)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
-        }
-
-        if let Some(ref pusher) = self.doc_pusher {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
-            if let Err(error) = pusher.persist_replicator_info(&info).await {
-                tracing::warn!(peer_id = %peer_id, error = %error, "failed to persist replicator");
-            }
         }
 
         // Replay new collections, plus collections whose explicit replay

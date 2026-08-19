@@ -888,6 +888,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 providers.push(source_peer);
             }
         }
+        for provider in dag
+            .alternate_providers
+            .iter()
+            .take(crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS)
+        {
+            if !providers.contains(provider) {
+                providers.push(provider.clone());
+            }
+        }
         tracing::debug!(
             root_cid = %root_cid,
             missing_count = missing.len(),

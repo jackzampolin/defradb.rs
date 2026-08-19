@@ -25,11 +25,6 @@ pub(crate) fn block_context_from_data(block_data: &[u8]) -> BlockContext {
     }
 }
 
-/// Ceiling on alternate providers kept per fetch, so a stalled batch never
-/// rotates through an unbounded peer list (each dead provider costs a full
-/// 30s selective-fetch timeout).
-const MAX_ALTERNATE_PROVIDERS: usize = 3;
-
 #[derive(Debug, Clone)]
 pub(crate) struct DagFetchContext {
     pub(crate) doc_id: String,
@@ -75,7 +70,9 @@ impl DagFetchContext {
             if peer != self.source_peer && !self.alternate_providers.contains(&peer) {
                 self.alternate_providers.push(peer);
             }
-            if self.alternate_providers.len() == MAX_ALTERNATE_PROVIDERS {
+            if self.alternate_providers.len()
+                == crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS
+            {
                 break;
             }
         }

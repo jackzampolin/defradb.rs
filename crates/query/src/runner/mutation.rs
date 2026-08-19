@@ -966,17 +966,23 @@ mod tests {
 
     struct CapturingMutator {
         created_docs: Mutex<Vec<Document>>,
+        broadcast_creators: Mutex<Vec<Option<String>>>,
     }
 
     impl CapturingMutator {
         fn new() -> Self {
             Self {
                 created_docs: Mutex::new(Vec::new()),
+                broadcast_creators: Mutex::new(Vec::new()),
             }
         }
 
         fn created_docs(&self) -> Vec<Document> {
             self.created_docs.lock().unwrap().clone()
+        }
+
+        fn broadcast_creators(&self) -> Vec<Option<String>> {
+            self.broadcast_creators.lock().unwrap().clone()
         }
     }
 
@@ -984,6 +990,10 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl crate::mutator::DocMutator for CapturingMutator {
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
+            self.broadcast_creators
+                .lock()
+                .unwrap()
+                .push(defra_core::signing::get_broadcast_creator_did());
             if doc.id().is_none() {
                 // Stand in for the genesis-CID identity a real create would
                 // derive: seed a valid DocID from the capture order.
@@ -1020,6 +1030,41 @@ mod tests {
         ) -> Result<Option<Document>> {
             Ok(None)
         }
+    }
+
+    #[tokio::test]
+    async fn query_executor_mutation_scopes_broadcast_creator_did() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        );
+        let mutator = Arc::new(CapturingMutator::new());
+        let runner =
+            QueryRunner::new(MockFetcher::new(), vec![collection]).with_mutator(mutator.clone());
+        let did =
+            identity::Did::new("did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw").unwrap();
+
+        let response = runner
+            .execute(
+                QueryRequest::new(
+                    r#"mutation { add_User(input: [{ name: "Alice" }]) { _docID } }"#,
+                )
+                .with_identity(Some(did.clone())),
+            )
+            .await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(mutator.broadcast_creators(), vec![Some(did.to_string())]);
+        assert_eq!(defra_core::signing::get_broadcast_creator_did(), None);
     }
 
     // =========================================================================

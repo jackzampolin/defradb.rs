@@ -31,6 +31,26 @@ current composite or collection head CIDs with monotone versions.
   separately bounds roots that have crossed the clock's fetch-ownership seam;
   durable wants may wait, but scheduled event handoffs and retained tasks may
   not form another queue behind the attempt semaphore.
+- `originBound` records the qualified recovery origin chosen for each durable
+  root generation. A same-root replay is idempotent and cannot replace that
+  binding without linked-DAG availability evidence. `OriginRebound` retains
+  the counterexample where a relay replay captures the provider slot.
+  `ProviderOf(root)` makes the provider identity dimension explicit: an
+  `Origin` binding is serviceable, while the red action changes the same live
+  root to a `Relay` binding without changing its CID or scope.
+- `qualifiedProvider` records that the root has at least one routable peer that
+  owns the linked DAG. Usually the bound origin establishes both facts. In an
+  Iroh relay chain, the signed envelope can authenticate an origin that the
+  receiver cannot route to; a later direct same-root hint from a peer that has
+  completed the DAG adds a durable alternate without replacing `originBound`
+  or resetting the root's retry clock. The alternate set is bounded in Rust
+  and survives receiver restart with the pending obligation.
+- `qualifiedOffers` separates delivery of that authenticated direct hint from
+  its durable admission. In the relay-chain configuration, fairness applies to
+  B's existing downstream scope marker after B has completed and merged its
+  own upstream receiver instance. An ordinary gossip relay or exact-root-only
+  relay cannot create this offer; Rust requires authenticated direct PushLog
+  delivery, including the configured or signed two-stream replicator seams.
 - `serveAuth` records the volatile exact-root CAR grant installed before a
   hint. It is always lost on sender restart.
 - `serveScopes` records the exact-root block-serving policy from which authority
@@ -54,15 +74,18 @@ current composite or collection head CIDs with monotone versions.
 - `terminalFlights[root]` counts durable pending-record cleanup writers.
   Production admits one; the duplicate-terminal red policy permits two
   merge/quarantine observations to contend on the same storage key.
-- `ProviderMode` distinguishes origin-bound recovery from authenticated-hop
-  recovery and abstracts the least-qualified peer admitted to the provider
-  rotation. Iroh may use the independently verified publisher only when that
+- `ProviderMode` distinguishes origin-bound recovery, Iroh recovery through a
+  later qualified alternate, and authenticated-hop recovery. It abstracts the
+  least-qualified peer admitted to the provider rotation. Iroh may use the
+  independently verified publisher only when that
   endpoint has a reconnectable transport route. A temporary disconnect is a
   stuttering interval, not a terminal disposition: the durable root stays
   pending and the one receiver clock waits for fair reconnection. Alternates
-  require positive evidence for a
-  CID on the missing frontier; connectivity or root possession is insufficient.
-  An authenticated gossip hop is a red mode: the fleet demonstrated that a
+  require either positive evidence for a CID on the missing frontier or
+  authenticated direct PushLog delivery from a sender path that owns rooted
+  CAR authority. Connectivity or root possession observed through a relayed
+  gossip envelope is insufficient. An authenticated gossip hop is a red mode:
+  the fleet demonstrated that a
   relay may possess the announced root while all linked descendants are absent.
   The other red modes retain an unroutable origin or an unverified relay.
 - `OriginAuthMode` distinguishes an origin bound by native transport metadata
@@ -133,6 +156,26 @@ serialization while retaining Rust's ordered batch transaction optimization.
 Frontend and transport adapters are not allowed to select a different merge
 ownership policy.
 
+`SameRootReannounce` makes provider retention explicit rather than deriving it
+from a process-global provider assumption. The green transition preserves
+`originBound`; the red rebind configuration loses it while the receiver still
+owns `pending`. `OfferQualifiedAlternate` and `AddQualifiedAlternate` model the
+Iroh chain case separately: the immutable origin remains bound, the
+independently authenticated direct announcer becomes serviceable only after it
+owns the complete DAG, and `ClaimFetch` cannot run until that qualified
+provider is durable.
+
+`ProcessRegister` rejects an arriving version already covered by an equal or
+newer pending head. Both green configurations use `MaxV = 2`, so supersession,
+late arrival of the stale lower version, and stale-ack protection are reachable
+rather than vacuously excluded by the model constants.
+
+The two full green configurations check the cross-scope safety product. The
+fairness checks are split into document, collection, and Iroh relay-chain
+configurations. The document and collection configurations each remain at
+`MaxV = 2`; this keeps the temporal graph tractable while exercising
+supersession and eventual quiescence for both replayable scope kinds.
+
 For a configured multi-hop replicator chain, the model composes once per hop.
 After B completes `CompleteMerge` for A's head, B may become the sender of a
 new downstream instance to C: B records its B→C scope marker and announces the
@@ -168,6 +211,13 @@ delay.
 - `INV_FetchOwnerDrainsResponse`: first-block progress cannot truncate the CAR
   response that the sole fetch owner needs to complete the DAG.
 - `INV_ReceiverQueueBounded`: durable want registrations never exceed `Cap`.
+- `INV_PendingRetainsBoundProvider`: a live durable root retains the qualified
+  recovery origin selected when ownership transferred.
+- `INV_FetchHasQualifiedProvider`: an Iroh fetch cannot claim its single-flight
+  owner until either the origin is routable or an authenticated direct
+  complete-DAG offer has been durably admitted. `qualifiedProvider` abstracts
+  a non-empty bounded candidate set; the exact three-alternate cap and
+  principal identities are enforced by Rust conformance tests.
 - `INV_OnePendingHeadPerScope`: one sender retains only its current durable
   receiver obligation for a document or collection scope; a newer causal head
   atomically supersedes that sender's older root.
@@ -182,7 +232,8 @@ delay.
   unverified relay.
 - `INV_PendingHasCompleteProvider`: neither the durable source nor an alternate
   fetch candidate may be an authenticated gossip hop that owns only the root;
-  linked-CID alternates require positive availability evidence.
+  linked-CID alternates require positive availability evidence or authenticated
+  direct sender authority.
 - `INV_PendingHasServingAuthorization`: a complete, routable origin must also
   be able to authorize the receiver at the block-serving boundary. With ACP
   enabled, endpoint authentication alone is insufficient: the endpoint must
@@ -211,6 +262,9 @@ fetch owner is deliberately not expressible.
 | --- | --- | --- |
 | `MC_SyncOwnership_Green.cfg` | GREEN | marker+rederive, durable registration, one fetch owner, current-head ack guard |
 | `MC_SyncOwnership_Green_IrohOrigin.cfg` | GREEN | signed, transport-routable Iroh origin owns the complete linked DAG |
+| `MC_SyncOwnership_Green_Liveness_IrohRelay.cfg` | GREEN | immutable signed origin plus durable qualified same-root alternate reaches currency |
+| `MC_SyncOwnership_Green_Liveness_Doc.cfg` | GREEN | two-version document supersession eventually reaches currency and quiescence |
+| `MC_SyncOwnership_Green_Liveness_Collection.cfg` | GREEN | two-version collection supersession eventually reaches currency and quiescence |
 | `MC_SyncOwnership_Red_DocOnlyMarkers.cfg` | RED | a collection update is dropped after no collection marker was recorded |
 | `MC_SyncOwnership_Red_PayloadLedger.cfg` | RED | current-main CID/payload-valued sender durability violates marker-only ownership |
 | `MC_SyncOwnership_Red_VolatileRegistration.cfg` | RED | restart destroys the only state behind a success ack |
@@ -218,6 +272,7 @@ fetch owner is deliberately not expressible.
 | `MC_SyncOwnership_Red_StaleAckClears.cfg` | RED | an old ack clears the marker for a newer head |
 | `MC_SyncOwnership_Red_VolatileServeAuthority.cfg` | RED | sender restart loses the CAR authority behind a success-acked pending root |
 | `MC_SyncOwnership_Red_RelayOnlyProvider.cfg` | RED | an unverified payload relay is recorded instead of a transport-authenticated recovery hop |
+| `MC_SyncOwnership_Red_ProviderRebind.cfg` | RED | a same-root replay replaces the immutable recovery origin |
 | `MC_SyncOwnership_Red_UnroutableOrigin.cfg` | RED | the recorded publisher has no direct-or-relayed CAR route, so durable receiver ownership cannot complete |
 | `MC_SyncOwnership_Red_UnsignedIrohOrigin.cfg` | RED | an Iroh relay accepts an unsigned payload origin as if transport-authenticated |
 | `MC_SyncOwnership_Red_RootOnlyHop.cfg` | RED | an authenticated gossip relay owns the root but cannot serve its linked descendants |

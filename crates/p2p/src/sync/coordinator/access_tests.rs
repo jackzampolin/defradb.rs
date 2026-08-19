@@ -1143,6 +1143,32 @@ async fn recv_block_received(
         .expect("event channel closed")
 }
 
+/// Test coordinators do not spawn the production receiver retry clock. Drive
+/// its single-owner boundary explicitly for a locally complete PushLog head.
+async fn dispatch_complete_pending<B: Blockstore + 'static, T: P2PTransport>(
+    coordinator: &SyncCoordinator<B, T>,
+) {
+    let roots = coordinator.manager().pending_dag_cids();
+    assert_eq!(roots.len(), 1, "expected one durable merge obligation");
+    let root = roots[0];
+    assert!(coordinator
+        .manager()
+        .try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+    assert!(coordinator
+        .manager()
+        .retry_pending_dag(&root)
+        .await
+        .expect("receiver clock dispatch should succeed"));
+}
+
+async fn recv_complete_pushlog<B: Blockstore + 'static, T: P2PTransport>(
+    coordinator: &SyncCoordinator<B, T>,
+    events: &mut tokio::sync::mpsc::Receiver<SyncEvent>,
+) -> SyncEvent {
+    dispatch_complete_pending(coordinator).await;
+    recv_block_received(events).await
+}
+
 // --- DocSync access check tests ---
 
 #[tokio::test]
@@ -1850,7 +1876,8 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
 
     coordinator
         .push_to_replicators(&root_cid, &root_data, "doc1", "collection1")
-        .await;
+        .await
+        .unwrap();
 
     let snapshot = timeout(Duration::from_secs(5), async {
         loop {
@@ -2453,6 +2480,39 @@ async fn pushlog_controlled_mode_rejects_non_replicator_connected_peer() {
 }
 
 #[tokio::test]
+async fn committed_head_marker_failure_is_returned_before_queue_admission() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    let block = defra_core::Block::new(
+        defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
+            schema_version_id: "collection1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+
+    let error = coordinator
+        .push_to_replicators(&cid, &data, "doc1", "collection1")
+        .await
+        .expect_err("a missing durable recorder must fail the committed head handoff");
+    assert!(matches!(error, Error::DurableHeadMarker(_)));
+    let snapshot = coordinator.sync_status().push_backlog;
+    assert_eq!(snapshot.head_hints_failed_local, 1);
+    assert_eq!(snapshot.enqueued_total, 0);
+}
+
+#[tokio::test]
 async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -2472,8 +2532,8 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -2484,7 +2544,7 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
                 "collection subscription should not mark the source as an explicit replicator"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -2503,8 +2563,8 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -2515,7 +2575,7 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
                 "registered replicator should preserve explicit replicator trust"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -2537,8 +2597,8 @@ async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_re
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -2549,7 +2609,7 @@ async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_re
                 "ordinary direct replicator pushes should not imply explicit replay trust"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -2567,8 +2627,8 @@ async fn two_stream_controlled_mode_accepts_unknown_peer() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -2579,7 +2639,7 @@ async fn two_stream_controlled_mode_accepts_unknown_peer() {
                 "two-stream transport auth and explicit replay trust remain separate"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -2603,8 +2663,8 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -2615,7 +2675,7 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
                 "collection subscription should not mark two-stream senders as explicit replicators"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -2665,6 +2725,48 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
         "gossip on a subscribed collection must be accepted, got {:?}",
         result
     );
+}
+
+#[tokio::test]
+async fn gossip_relay_cannot_confer_explicit_replicator_trust_on_origin() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let relay = random_peer_id();
+    let origin = random_peer_id();
+    replicators.add_replicator("collection1", relay.as_str());
+    peer_state.peer_connected(relay.as_str());
+    peer_state.peer_connected(origin.as_str());
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let mut event = gossip_event(relay.clone(), "collection1");
+    let TransportEvent::GossipMessage { message, .. } = &mut event else {
+        unreachable!("gossip helper must create gossip event");
+    };
+    message.authenticate_origin_peer(origin.to_string());
+
+    coordinator.handle_transport_event(event).await.unwrap();
+
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(origin.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "the relay's configured status must not authorize a different origin"
+            );
+        }
+        other => panic!("expected DagReady, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3010,8 +3112,8 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -3022,7 +3124,7 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
                 "authenticated two-stream explicit replicator push should preserve explicit trust"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -3087,11 +3189,11 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
         .unwrap();
 
     assert_eq!(blockstore.put_attempts(), 2);
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived { sender_peer, .. } => {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected BlockReceived after retry, got {:?}", other),
+        other => panic!("expected DagReady after retry, got {:?}", other),
     }
 }
 
@@ -3125,11 +3227,11 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
         .unwrap();
 
     assert_eq!(blockstore.put_attempts(), 2);
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived { sender_peer, .. } => {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected BlockReceived after gossip retry, got {:?}", other),
+        other => panic!("expected DagReady after gossip retry, got {:?}", other),
     }
 }
 
@@ -3227,9 +3329,10 @@ async fn concurrent_same_cid_pushlog_and_car_have_one_storage_owner() {
 
     push.await.unwrap().unwrap();
     assert_eq!(blockstore.max_active_writes(), 1);
+    dispatch_complete_pending(&coordinator).await;
     assert!(matches!(
-        events.try_recv().expect("PushLog emits merge event"),
-        SyncEvent::BlockReceived { cid, .. } if cid == root_cid
+        events.try_recv().expect("receiver clock emits merge event"),
+        SyncEvent::DagReady { root_cid: cid, .. } if cid == root_cid
     ));
 }
 

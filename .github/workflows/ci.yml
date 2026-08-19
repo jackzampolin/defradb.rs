@@ -450,6 +450,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Check TLA ownership and convergence models
+        run: proofs/tla/run-all.sh
+
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-ci"
@@ -899,6 +907,14 @@ jobs:
           cargo test --profile super-dev -p integration-test
           --test p2p
           -- --test-threads=1 --skip ::go_
+
+      - name: Run P2P ownership durability fences
+        run: |
+          cargo test --profile super-dev -p integration-test --test p2p_admission -- --test-threads=1
+          cargo test --profile super-dev -p integration-test --test p2p_admission_restart -- --test-threads=1
+          cargo test --profile super-dev -p integration-test --test p2p_admission_fairness -- --test-threads=1
+          cargo test --profile super-dev -p integration-test --test p2p_backlog -- --test-threads=1
+          cargo test --profile super-dev -p integration-test --test issue1154_repro -- --test-threads=1
 
       # Node logs are the only forensics for a poll-timeout failure; without
       # this upload a red run leaves nothing to diagnose.

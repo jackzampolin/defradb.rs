@@ -30,6 +30,11 @@ use crate::ExplicitReplayAuthorization;
 
 const PENDING_STORE_TXN_MAX_ATTEMPTS: usize = 3;
 
+/// Maximum number of same-root announcers retained in addition to the
+/// immutable origin provider. Each unavailable provider consumes a bounded
+/// selective-CAR attempt, so this durable list must remain bounded too.
+pub(crate) const MAX_PENDING_DAG_ALTERNATE_PROVIDERS: usize = 3;
+
 async fn retry_pending_store_conflicts<T, F, Fut>(
     operation: &'static str,
     mut attempt: F,
@@ -116,6 +121,11 @@ pub struct PersistedPendingDag {
     pub head_priority: Option<u64>,
     pub creator: String,
     pub source_peer: Option<String>,
+    /// Additional authenticated peers that announced this exact root.
+    /// The original source remains immutable; alternates only extend the
+    /// recovery rotation and therefore cannot hijack ownership.
+    #[serde(default)]
+    pub alternate_providers: Vec<String>,
     pub is_explicit_replicator: bool,
     pub explicit_replay_authorization: Option<PersistedReplayAuthorization>,
 }
@@ -383,6 +393,7 @@ mod tests {
             head_priority: None,
             creator: "creator".to_string(),
             source_peer: Some("peer-1".to_string()),
+            alternate_providers: Vec::new(),
             is_explicit_replicator: true,
             explicit_replay_authorization: Some(PersistedReplayAuthorization {
                 source_peer_id: "peer-1".to_string(),
@@ -397,6 +408,35 @@ mod tests {
 
     fn cid(seed: &[u8]) -> Cid {
         Cid::new_v1(0x55, Code::Sha2_256.digest(seed))
+    }
+
+    #[test]
+    fn legacy_pending_record_decodes_with_no_alternate_providers() {
+        #[derive(Serialize)]
+        struct LegacyPendingDag {
+            doc_id: String,
+            collection_id: String,
+            head_priority: Option<u64>,
+            creator: String,
+            source_peer: Option<String>,
+            is_explicit_replicator: bool,
+            explicit_replay_authorization: Option<PersistedReplayAuthorization>,
+        }
+
+        let bytes = defra_core::cbor::to_vec(&LegacyPendingDag {
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            head_priority: Some(1),
+            creator: "creator".to_string(),
+            source_peer: Some("origin".to_string()),
+            is_explicit_replicator: true,
+            explicit_replay_authorization: None,
+        })
+        .expect("encode legacy record");
+
+        let decoded = PersistedPendingDag::from_bytes(&bytes).expect("decode legacy record");
+        assert_eq!(decoded.source_peer.as_deref(), Some("origin"));
+        assert!(decoded.alternate_providers.is_empty());
     }
 
     #[tokio::test]

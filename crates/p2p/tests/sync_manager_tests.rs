@@ -105,18 +105,23 @@ async fn test_process_pushlog_stores_block() {
     // Should not be merged yet
     assert!(!blockstore.is_merged(&cid).await.unwrap());
 
-    // Should receive BlockReceived event
+    // Complete-at-arrival heads still enter receiver-owned state before the
+    // sender can clear its marker. The one receiver clock claims the merge.
+    assert_eq!(manager.pending_dag_count(), 1);
+    assert!(manager.try_claim_pending_dag_dispatch(&cid, tokio::time::Instant::now()));
+    assert!(manager.retry_pending_dag(&cid).await.unwrap());
+
     let event = events.try_recv().unwrap();
     match event {
-        SyncEvent::BlockReceived {
-            cid: event_cid,
+        SyncEvent::DagReady {
+            root_cid: event_cid,
             doc_id,
             ..
         } => {
             assert_eq!(event_cid, cid);
             assert_eq!(doc_id, "doc123");
         }
-        _ => panic!("Expected BlockReceived event"),
+        _ => panic!("Expected DagReady event"),
     }
 }
 
@@ -251,7 +256,7 @@ async fn test_process_pushlog_cid_mismatch_returns_error() {
 }
 
 #[tokio::test]
-async fn test_sequential_unmerged_reannouncement_is_processed_again() {
+async fn test_sequential_unmerged_reannouncement_is_idempotently_registered() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
@@ -272,18 +277,12 @@ async fn test_sequential_unmerged_reannouncement_is_processed_again() {
     // Block should be stored
     assert!(blockstore.has(&cid).await.unwrap());
 
-    // Once the first receive has exited, its unmerged head can be retried.
-    let mut received_count = 0;
-    while let Ok(event) = events.try_recv() {
-        if let SyncEvent::BlockReceived { .. } = event {
-            received_count += 1;
-        }
-    }
-    assert_eq!(received_count, 2);
+    assert_eq!(manager.pending_dag_count(), 1);
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn test_process_pushlog_returns_error_when_receiver_dropped() {
+async fn test_process_pushlog_registration_does_not_depend_on_event_receiver() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, events) =
@@ -294,15 +293,11 @@ async fn test_process_pushlog_returns_error_when_receiver_dropped() {
 
     let (cid, msg) = create_test_head_broadcast();
 
-    // Processing should fail with ChannelSend error since receiver is dropped
+    // The transport reply is backed by receiver ownership, not by successful
+    // delivery of an optimistic merge event.
     let result = manager.process_pushlog(&msg, None, false, None).await;
-    assert!(result.is_err());
-    match result {
-        Err(Error::ChannelSend) => {
-            // Expected - channel send failed because receiver was dropped
-        }
-        other => panic!("Expected ChannelSend error, got {:?}", other),
-    }
+    assert!(result.is_ok());
+    assert_eq!(manager.pending_dag_count(), 1);
 
     // Block should still be stored (we store before sending event)
     assert!(blockstore.has(&cid).await.unwrap());
@@ -356,17 +351,23 @@ async fn test_pending_dag_tracking() {
         .await
         .unwrap();
 
-    // Should receive BlockReceived since no missing links
+    assert_eq!(manager.pending_dag_count(), 1);
+    assert!(manager.try_claim_pending_dag_dispatch(&cid, tokio::time::Instant::now()));
+    assert!(manager.retry_pending_dag(&cid).await.unwrap());
+
     let event = events.try_recv().unwrap();
     match event {
-        SyncEvent::BlockReceived { cid: event_cid, .. } => {
+        SyncEvent::DagReady {
+            root_cid: event_cid,
+            ..
+        } => {
             assert_eq!(event_cid, cid);
         }
-        _ => panic!("Expected BlockReceived event"),
+        _ => panic!("Expected DagReady event"),
     }
 
-    // No pending dags since block was complete
-    assert_eq!(manager.pending_dag_count(), 0);
+    // Ready is not terminal; merge/quarantine owns durable cleanup.
+    assert_eq!(manager.pending_dag_count(), 1);
 }
 
 #[tokio::test]
@@ -759,7 +760,7 @@ mod pending_persistence {
     #[tokio::test]
     async fn current_sender_scope_head_atomically_supersedes_older_durable_root() {
         let store = Arc::new(MemoryStore::new());
-        let (manager, mut events, pending_store) = manager_with_store(store).await;
+        let (manager, mut events, pending_store) = manager_with_store(store.clone()).await;
         let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old");
         let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new");
 
@@ -817,6 +818,90 @@ mod pending_persistence {
         assert_eq!(manager.pending_dag_count(), 2);
 
         while events.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn same_root_reannouncement_retains_durable_recovery_provider() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut events, pending_store) = manager_with_store(store.clone()).await;
+        let (root, root_bytes) = composite_with_priority_and_missing_field(1, "field");
+        let pushlog = pushlog_for(&root, &root_bytes);
+
+        manager
+            .process_pushlog(&pushlog, Some("origin"), true, None)
+            .await
+            .expect("register origin provider");
+        manager
+            .process_pushlog(&pushlog, Some("root-only-relay"), false, None)
+            .await
+            .expect("same root is idempotently covered");
+        for relay in [
+            "downstream-1",
+            "downstream-2",
+            "downstream-3",
+            "downstream-4",
+        ] {
+            manager
+                .process_pushlog(&pushlog, Some(relay), true, None)
+                .await
+                .expect("additional same-root provider is covered");
+        }
+
+        let records = pending_store.load_all().await.expect("load pending roots");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, root);
+        assert_eq!(records[0].1.source_peer.as_deref(), Some("origin"));
+        assert_eq!(
+            records[0].1.alternate_providers,
+            ["downstream-1", "downstream-2", "downstream-3"]
+        );
+        assert_eq!(manager.pending_dag_count(), 1);
+
+        let restarted = manager_with_store(store).await.0;
+        assert_eq!(restarted.resync_persisted_pending_dags().await, 1);
+        let restored = restarted
+            .pending_dag_snapshot(&root)
+            .expect("pending root restored by restart resync");
+        assert_eq!(restored.source_peer.as_deref(), Some("origin"));
+        assert_eq!(
+            restored.alternate_providers,
+            ["downstream-1", "downstream-2", "downstream-3"]
+        );
+
+        while events.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn complete_at_arrival_head_is_durable_before_ack_and_restart() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut events, pending_store) = manager_with_store(store.clone()).await;
+        let (root, pushlog) = create_test_head_broadcast();
+
+        manager
+            .process_pushlog(&pushlog, Some("origin"), true, None)
+            .await
+            .expect("register complete head");
+
+        let records = pending_store.load_all().await.expect("load pending roots");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, root);
+        assert!(
+            events.try_recv().is_err(),
+            "merge must wait for receiver clock"
+        );
+        drop(manager);
+        drop(events);
+
+        let (restarted, mut restarted_events, restarted_store) = manager_with_store(store).await;
+        restarted.resync_persisted_pending_dags().await;
+        assert_eq!(restarted_store.load_all().await.expect("load").len(), 1);
+        assert_eq!(restarted.pending_dag_cids(), vec![root]);
+        assert!(restarted.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+        assert!(restarted.retry_pending_dag(&root).await.expect("ready"));
+        assert!(matches!(
+            restarted_events.try_recv(),
+            Ok(SyncEvent::DagReady { root_cid, .. }) if root_cid == root
+        ));
     }
 
     #[tokio::test]
@@ -1374,6 +1459,7 @@ mod pending_persistence {
                     head_priority: None,
                     creator: "creator1".to_string(),
                     source_peer: Some("peer-1".to_string()),
+                    alternate_providers: Vec::new(),
                     is_explicit_replicator: true,
                     explicit_replay_authorization: None,
                 },

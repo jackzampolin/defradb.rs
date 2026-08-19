@@ -10,7 +10,7 @@
 \*   FlightMode = "SingleFlight" | "Duplicate"
 \*   AckGuardMode = "HeadCurrent" | "Unguarded"
 \*   ServeMode = "DurableDerived" | "VolatileGrant"
-\*   ProviderMode = "OriginBound" | "OriginUnauthorized" |
+\*   ProviderMode = "OriginBound" | "OriginRebound" | "OriginUnauthorized" |
 \*                  "AuthenticatedHop" | "OriginUnroutable" | "RelayOnly"
 \*   OriginAuthMode = "TransportBound" | "UnsignedClaim"
 \*   FetchMode = "RootThenSelective" | "SelectiveMissing" | "RecursiveFirst"
@@ -75,7 +75,7 @@ CONSTANTS
 Scopes == Docs \cup Cols
 Roots == Scopes \X (1..MaxV)
 
-ASSUME Docs # {} /\ Cols # {} /\ Docs \cap Cols = {}
+ASSUME Scopes # {} /\ Docs \cap Cols = {}
 ASSUME MaxV \in Nat /\ MaxV >= 1
 ASSUME Cap \in Nat /\ Cap >= 1
 ASSUME FetchCap \in Nat /\ FetchCap >= 1 /\ FetchCap <= Cap
@@ -84,8 +84,9 @@ ASSUME RegisterMode \in {"Durable", "Volatile"}
 ASSUME FlightMode \in {"SingleFlight", "Duplicate"}
 ASSUME AckGuardMode \in {"HeadCurrent", "Unguarded"}
 ASSUME ServeMode \in {"DurableDerived", "VolatileGrant"}
-ASSUME ProviderMode \in {"OriginBound", "OriginUnauthorized", "AuthenticatedHop",
-                         "OriginUnroutable", "RelayOnly"}
+ASSUME ProviderMode \in {"OriginBound", "OriginThenAlternate", "OriginRebound",
+                         "OriginUnauthorized", "AuthenticatedHop", "OriginUnroutable",
+                         "RelayOnly"}
 ASSUME OriginAuthMode \in {"TransportBound", "UnsignedClaim"}
 ASSUME FetchMode \in {"RootThenSelective", "SelectiveMissing", "RecursiveFirst"}
 ASSUME StreamMode \in {"DrainResponse", "CancelOnProgress"}
@@ -101,6 +102,9 @@ VARIABLES
   payloadLedger, \* SUBSET Roots, forbidden durable CID/payload delivery state
   inflight,      \* SUBSET Roots, announced hints not yet processed
   pending,       \* SUBSET Roots, durable receiver want registrations
+  originBound,   \* SUBSET Roots, roots bound to the qualified origin provider
+  qualifiedOffers, \* SUBSET Roots, authenticated direct hints from complete-DAG peers
+  qualifiedProvider, \* SUBSET Roots, roots with a routable content-owning provider
   serveAuth,     \* SUBSET Roots, volatile exact-root CAR grants
   serveScopes,   \* SUBSET Scopes, restart-derived rooted pull policy
   flights,       \* [Roots -> 0..2], paced CAR fetch owners
@@ -113,7 +117,8 @@ VARIABLES
   mergedV,       \* [Scopes -> 0..MaxV], current receiver head
   crashed        \* BOOLEAN, one receiver crash/restart has happened
 
-vars == <<localV, dirty, payloadLedger, inflight, pending, serveAuth, serveScopes,
+vars == <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider,
+          serveAuth, serveScopes,
           flights, drained, ready, mergeFlights, terminalFlights, fetchExhausted,
           lostCompletions, mergedV, crashed>>
 
@@ -123,6 +128,9 @@ TypeOK ==
   /\ payloadLedger \subseteq Roots
   /\ inflight \subseteq Roots
   /\ pending \subseteq Roots
+  /\ originBound \subseteq Roots
+  /\ qualifiedOffers \subseteq Roots
+  /\ qualifiedProvider \subseteq Roots
   /\ serveAuth \subseteq Roots
   /\ serveScopes \subseteq Scopes
   /\ Cardinality(pending) <= Cap
@@ -143,6 +151,9 @@ Init ==
   /\ payloadLedger = {}
   /\ inflight = {}
   /\ pending = {}
+  /\ originBound = {}
+  /\ qualifiedOffers = {}
+  /\ qualifiedProvider = {}
   /\ serveAuth = {}
   /\ serveScopes = {}
   /\ flights = [r \in Roots |-> 0]
@@ -193,7 +204,7 @@ Update(s) ==
         /\ serveScopes' = IF ServeMode = "DurableDerived"
                           THEN serveScopes \cup {s}
                           ELSE serveScopes
-  /\ UNCHANGED <<pending, flights, drained, ready, mergeFlights, terminalFlights,
+  /\ UNCHANGED <<pending, originBound, qualifiedOffers, qualifiedProvider, flights, drained, ready, mergeFlights, terminalFlights,
                  fetchExhausted, lostCompletions, mergedV, crashed>>
 
 \* Marker retry always rederives localV[s].  There is no stored version to
@@ -206,7 +217,7 @@ ReHintMarker(s) ==
   /\ serveScopes' = IF ServeMode = "DurableDerived"
                     THEN serveScopes \cup {s}
                     ELSE serveScopes
-  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, flights, drained, ready,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, originBound, qualifiedOffers, qualifiedProvider, flights, drained, ready,
                  mergeFlights, terminalFlights, fetchExhausted, lostCompletions,
                  mergedV, crashed>>
 
@@ -218,14 +229,14 @@ ReHintPayload(s, v) ==
   /\ serveScopes' = IF ServeMode = "DurableDerived"
                     THEN serveScopes \cup {s}
                     ELSE serveScopes
-  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, flights, drained, ready,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, originBound, qualifiedOffers, qualifiedProvider, flights, drained, ready,
                  mergeFlights, terminalFlights, fetchExhausted, lostCompletions,
                  mergedV, crashed>>
 
 DropHint(s, v) ==
   /\ <<s, v>> \in inflight
   /\ inflight' = inflight \ {<<s, v>>}
-  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, serveAuth, serveScopes,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth, serveScopes,
                  flights, drained, ready, mergeFlights, terminalFlights,
                  fetchExhausted, lostCompletions, mergedV, crashed>>
 
@@ -238,27 +249,59 @@ ProcessMerged(s, v) ==
         /\ payloadLedger' = cleared[2]
   /\ inflight' = inflight \ {<<s, v>>}
   /\ serveAuth' = serveAuth \ {<<s, v>>}
-  /\ UNCHANGED <<localV, pending, serveScopes, flights, drained, ready,
+  /\ UNCHANGED <<localV, pending, originBound, qualifiedOffers, qualifiedProvider, serveScopes, flights, drained, ready,
                  mergeFlights, terminalFlights, fetchExhausted, lostCompletions,
                  mergedV, crashed>>
 
 ProcessRegister(s, v) ==
   /\ <<s, v>> \in inflight
   /\ mergedV[s] < v
-  /\ LET superseded == {r \in pending : r[1] = s /\ r[2] < v}
+  /\ LET covered == \E r \in pending : r[1] = s /\ r[2] >= v
+         superseded == {r \in pending : r[1] = s /\ r[2] < v}
+         retired == IF PendingMode = "ScopeCurrent" THEN superseded ELSE {}
          retained == IF PendingMode = "ScopeCurrent"
                      THEN pending \ superseded
                      ELSE pending
-     IN /\ (<<s, v>> \in retained \/ Cardinality(retained) < Cap)
-        /\ pending' = retained \cup {<<s, v>>}
+     IN /\ (covered \/ <<s, v>> \in retained \/ Cardinality(retained) < Cap)
+        /\ pending' = IF covered THEN retained ELSE retained \cup {<<s, v>>}
+        \* A duplicate root keeps the provider that accepted the original
+        \* durable transfer. OriginRebound is the countermodel in which a
+        \* same-root relay replay overwrites that binding without availability
+        \* evidence for the linked DAG.
+        /\ originBound' =
+             IF covered
+             THEN IF ProviderMode = "OriginRebound"
+                  THEN originBound \ {<<s, v>>}
+                  ELSE originBound
+             ELSE (originBound \ retired) \cup
+                  (IF ProviderMode \in {"OriginBound", "OriginThenAlternate", "OriginRebound"}
+                   THEN {<<s, v>>}
+                   ELSE {})
+        /\ qualifiedProvider' =
+             IF covered
+             THEN qualifiedProvider
+             ELSE (qualifiedProvider \ retired) \cup
+                  (IF ProviderMode \in {"OriginBound", "OriginRebound"}
+                   THEN {<<s, v>>}
+                   ELSE {})
+        /\ qualifiedOffers' = qualifiedOffers \ retired
+        \* Supersession invalidates every process-local owner for the retired
+        \* durable generation. A stale fetch or merge completion cannot keep a
+        \* bounded slot or later discharge the newer root.
+        /\ flights' = [r \in Roots |-> IF r \in retired THEN 0 ELSE flights[r]]
+        /\ drained' = drained \ retired
+        /\ ready' = ready \ retired
+        /\ mergeFlights' =
+             [r \in Roots |-> IF r \in retired THEN 0 ELSE mergeFlights[r]]
+        /\ terminalFlights' =
+             [r \in Roots |-> IF r \in retired THEN 0 ELSE terminalFlights[r]]
+        /\ lostCompletions' = lostCompletions \ retired
   /\ inflight' = inflight \ {<<s, v>>}
   /\ <<s, v>> \in serveAuth
   /\ LET cleared == ClearOwned(s, v)
      IN /\ dirty' = cleared[1]
         /\ payloadLedger' = cleared[2]
-  /\ UNCHANGED <<localV, serveAuth, serveScopes, flights, drained, ready,
-                 mergeFlights, terminalFlights, fetchExhausted, lostCompletions,
-                 mergedV, crashed>>
+  /\ UNCHANGED <<localV, serveAuth, serveScopes, fetchExhausted, mergedV, crashed>>
 
 \* Overflow is an actionable nack: receiver state is unchanged and sender
 \* durable ownership is not cleared.
@@ -269,9 +312,60 @@ ProcessNack(s, v) ==
   /\ Cardinality(pending) >= Cap
   /\ inflight' = inflight \ {<<s, v>>}
   /\ serveAuth' = serveAuth \ {<<s, v>>}
-  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, serveScopes, flights, drained,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, pending, originBound, qualifiedOffers, qualifiedProvider, serveScopes, flights, drained,
                  ready, mergeFlights, terminalFlights, fetchExhausted,
                  lostCompletions, mergedV, crashed>>
+
+\* Replaying an already-registered root is an idempotent announcement. The
+\* green policy retains the origin chosen by the durable ownership transfer;
+\* OriginRebound captures the runtime defect where identical head bytes from
+\* another peer replace that origin without linked-DAG availability evidence.
+SameRootReannounce(s, v) ==
+  /\ <<s, v>> \in pending
+  /\ ProviderMode = "OriginRebound"
+  /\ originBound' = originBound \ {<<s, v>>}
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, qualifiedOffers, qualifiedProvider, serveAuth,
+                 serveScopes, flights, drained, ready, mergeFlights,
+                 terminalFlights, fetchExhausted, lostCompletions, mergedV,
+                 crashed>>
+
+\* In a configured A->B->C chain, B may offer A's same root to C only after B
+\* completed its own receiver instance, merged the complete DAG, and crossed
+\* the authenticated direct-replicator seam to C. This explicit environment
+\* action is separate from gossip: an authenticated root-only relay cannot
+\* produce a qualified offer. Fairness represents delivery of B's durable
+\* downstream marker, not spontaneous provider creation.
+OfferQualifiedAlternate(s, v) ==
+  /\ <<s, v>> \in pending
+  /\ ProviderMode = "OriginThenAlternate"
+  /\ <<s, v>> \notin qualifiedProvider
+  /\ <<s, v>> \notin qualifiedOffers
+  /\ qualifiedOffers' = qualifiedOffers \cup {<<s, v>>}
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound,
+                 qualifiedProvider, serveAuth, serveScopes, flights, drained,
+                 ready, mergeFlights, terminalFlights, fetchExhausted,
+                 lostCompletions, mergedV, crashed>>
+
+\* Durable registration of the authenticated complete-DAG offer extends the
+\* recovery rotation without replacing the bound origin or resetting the
+\* receiver clock.
+AddQualifiedAlternate(s, v) ==
+  /\ <<s, v>> \in pending
+  /\ ProviderMode = "OriginThenAlternate"
+  /\ <<s, v>> \in qualifiedOffers
+  /\ <<s, v>> \notin qualifiedProvider
+  /\ qualifiedProvider' = qualifiedProvider \cup {<<s, v>>}
+  /\ qualifiedOffers' = qualifiedOffers \ {<<s, v>>}
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound,
+                 serveAuth, serveScopes, flights, drained, ready, mergeFlights,
+                 terminalFlights, fetchExhausted, lostCompletions, mergedV,
+                 crashed>>
+
+HasQualifiedProvider(r) ==
+  \/ /\ ProviderMode \in {"OriginBound", "OriginRebound"}
+     /\ r \in originBound
+  \/ /\ ProviderMode = "OriginThenAlternate"
+     /\ r \in qualifiedProvider
 
 \* This is the sole abstract fetch-dispatch seam: retry expiry, connect
 \* expedite, and partial progress all coalesce through the same root claim.
@@ -282,7 +376,7 @@ ProcessNack(s, v) ==
 ClaimFetch(s, v) ==
   /\ <<s, v>> \in pending
   /\ (<<s, v>> \in serveAuth \/ s \in serveScopes)
-  /\ ProviderMode = "OriginBound"
+  /\ HasQualifiedProvider(<<s, v>>)
   \* RootThenSelective first exercises the bounded rooted serving path at the
   \* actual publisher, then requests a capped descendant closure from the
   \* already-known missing frontier. SelectiveMissing is retained as a red
@@ -295,7 +389,7 @@ ClaimFetch(s, v) ==
   /\ drained' = IF StreamMode = "DrainResponse"
                 THEN drained \cup {<<s, v>>}
                 ELSE drained
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, ready, mergeFlights, terminalFlights, fetchExhausted,
                  lostCompletions, mergedV, crashed>>
 
@@ -315,7 +409,7 @@ FailFetchBeforeWaiter(s, v) ==
   /\ drained' = IF CompletionMode = "LatchedDrain" /\ flights[<<s, v>>] = 1
                 THEN drained \ {<<s, v>>}
                 ELSE drained
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, ready, mergeFlights, terminalFlights, fetchExhausted,
                  mergedV, crashed>>
 
@@ -335,7 +429,7 @@ ContendedIngest(s, v) ==
   /\ drained' = IF flights[<<s, v>>] = 1
                 THEN drained \ {<<s, v>>}
                 ELSE drained
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, ready, mergeFlights, terminalFlights,
                  lostCompletions, mergedV, crashed>>
 
@@ -351,7 +445,7 @@ StarveTransportCompletion(s, v) ==
   /\ flights[<<s, v>>] > 0
   /\ <<s, v>> \in drained
   /\ lostCompletions' = lostCompletions \cup {<<s, v>>}
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, flights, drained, ready, mergeFlights,
                  terminalFlights, fetchExhausted, mergedV, crashed>>
 
@@ -367,7 +461,7 @@ StarveRecoveryServe(s, v) ==
   /\ flights[<<s, v>>] > 0
   /\ <<s, v>> \in drained
   /\ lostCompletions' = lostCompletions \cup {<<s, v>>}
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, flights, drained, ready, mergeFlights,
                  terminalFlights, fetchExhausted, mergedV, crashed>>
 
@@ -382,7 +476,7 @@ StarveRecoveryAuthorization(s, v) ==
   /\ flights[<<s, v>>] > 0
   /\ <<s, v>> \in drained
   /\ lostCompletions' = lostCompletions \cup {<<s, v>>}
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, flights, drained, ready, mergeFlights,
                  terminalFlights, fetchExhausted, mergedV, crashed>>
 
@@ -395,7 +489,7 @@ CompleteFetch(s, v) ==
   /\ drained' = IF flights[<<s, v>>] = 1
                 THEN drained \ {<<s, v>>}
                 ELSE drained
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, mergeFlights, terminalFlights, fetchExhausted,
                  lostCompletions, mergedV, crashed>>
 
@@ -409,7 +503,7 @@ ClaimMerge(s, v) ==
   /\ Cardinality({r \in Roots : mergeFlights[r] > 0}) <
        (IF MergeMode = "ParallelWriters" THEN 2 ELSE 1)
   /\ mergeFlights' = [mergeFlights EXCEPT ![<<s, v>>] = 1]
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, flights, drained, ready, terminalFlights,
                  fetchExhausted, lostCompletions, mergedV, crashed>>
 
@@ -419,7 +513,7 @@ CompleteMerge(s, v) ==
   /\ mergedV' = [mergedV EXCEPT ![s] = IF v > @ THEN v ELSE @]
   /\ ready' = ready \ {<<s, v>>}
   /\ mergeFlights' = [mergeFlights EXCEPT ![<<s, v>>] = 0]
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, flights, drained, terminalFlights, fetchExhausted,
                  lostCompletions, crashed>>
 
@@ -432,13 +526,16 @@ ClaimTerminal(s, v) ==
   /\ terminalFlights[<<s, v>>] <
        (IF MergeMode = "DuplicateTerminal" THEN 2 ELSE 1)
   /\ terminalFlights' = [terminalFlights EXCEPT ![<<s, v>>] = @ + 1]
-  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, serveAuth,
+  /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, pending, originBound, qualifiedOffers, qualifiedProvider, serveAuth,
                  serveScopes, flights, drained, ready, mergeFlights,
                  fetchExhausted, lostCompletions, mergedV, crashed>>
 
 CompleteTerminal(s, v) ==
   /\ terminalFlights[<<s, v>>] > 0
   /\ pending' = pending \ {<<s, v>>}
+  /\ originBound' = originBound \ {<<s, v>>}
+  /\ qualifiedOffers' = qualifiedOffers \ {<<s, v>>}
+  /\ qualifiedProvider' = qualifiedProvider \ {<<s, v>>}
   /\ serveAuth' = serveAuth \ {<<s, v>>}
   \* Removing the durable generation invalidates its fetch lease. A fetch
   \* claimed during the merge-to-cleanup window cannot retain a global owner
@@ -462,6 +559,9 @@ Crash ==
   /\ terminalFlights' = [r \in Roots |-> 0]
   /\ lostCompletions' = {}
   /\ pending' = IF RegisterMode = "Durable" THEN pending ELSE {}
+  /\ originBound' = IF RegisterMode = "Durable" THEN originBound ELSE {}
+  /\ qualifiedOffers' = {}
+  /\ qualifiedProvider' = IF RegisterMode = "Durable" THEN qualifiedProvider ELSE {}
   /\ serveAuth' = {}
   /\ UNCHANGED <<localV, dirty, payloadLedger, inflight, serveScopes,
                  fetchExhausted, mergedV>>
@@ -473,7 +573,8 @@ Next ==
   \/ \E s \in Scopes : Update(s) \/ ReHintMarker(s)
   \/ \E s \in Scopes, v \in 1..MaxV :
        ReHintPayload(s, v) \/ DropHint(s, v) \/ ProcessMerged(s, v)
-       \/ ProcessRegister(s, v) \/ ProcessNack(s, v)
+       \/ ProcessRegister(s, v) \/ ProcessNack(s, v) \/ SameRootReannounce(s, v)
+       \/ OfferQualifiedAlternate(s, v) \/ AddQualifiedAlternate(s, v)
        \/ ClaimFetch(s, v) \/ FailFetchBeforeWaiter(s, v)
        \/ ContendedIngest(s, v)
        \/ StarveTransportCompletion(s, v)
@@ -490,6 +591,8 @@ FairSpec ==
   Spec /\ \A s \in Scopes :
     /\ WF_vars(ReHintMarker(s))
     /\ SF_vars(\E v \in 1..MaxV : ReHintPayload(s, v))
+    /\ SF_vars(\E v \in 1..MaxV : OfferQualifiedAlternate(s, v))
+    /\ SF_vars(\E v \in 1..MaxV : AddQualifiedAlternate(s, v))
     /\ SF_vars(\E v \in 1..MaxV : ClaimFetch(s, v))
     /\ SF_vars(\E v \in 1..MaxV : CompleteFetch(s, v))
     /\ SF_vars(\E v \in 1..MaxV : ClaimMerge(s, v))
@@ -553,6 +656,13 @@ INV_PendingServiceable ==
 INV_PendingHasRoutableProvider ==
   ProviderMode = "OriginBound" \/ pending = {}
 
+\* An initially unreachable Iroh publisher may remain the immutable ownership
+\* origin while a later direct same-root announcer becomes the recovery
+\* provider. No fetch may start before that independently qualified candidate
+\* is durable, and the candidate survives receiver restart with the obligation.
+INV_FetchHasQualifiedProvider ==
+  \A r \in Roots : flights[r] > 0 => HasQualifiedProvider(r)
+
 \* Authentication and routability do not prove content availability. Every
 \* provider admitted to the fetch rotation must own requested linked content,
 \* not merely the head block it relayed in the gossip envelope.
@@ -575,6 +685,18 @@ INV_PendingHasServingAuthorization ==
 INV_PendingHasAuthenticatedProvider ==
   /\ (OriginAuthMode = "TransportBound" \/ pending = {})
   /\ (ProviderMode # "RelayOnly" \/ pending = {})
+
+\* Provider identity is modeled independently from the root tuple. The green
+\* binding names the publisher that transferred ownership; the red rebind
+\* action replaces it with an authenticated relay that has only the envelope.
+ProviderOf(r) == IF r \in originBound THEN "Origin" ELSE "Relay"
+
+\* The provider chosen when ownership is durably transferred belongs to that
+\* root generation. Re-announcing identical signed head bytes is idempotent;
+\* it cannot replace the origin with a peer that has not demonstrated linked
+\* DAG availability.
+INV_PendingRetainsBoundProvider ==
+  \A r \in pending : ProviderOf(r) = "Origin"
 
 \* A recursive historical-root walk must not occupy the bounded owner before
 \* the already-known missing frontier is requested. A bounded descendant

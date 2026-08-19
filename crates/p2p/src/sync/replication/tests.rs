@@ -1294,6 +1294,7 @@ async fn coordinator_with_live_pending_dag(
                 head_priority: None,
                 creator: "peer1".to_string(),
                 source_peer: Some("sender1".to_string()),
+                alternate_providers: Vec::new(),
                 is_explicit_replicator: true,
                 explicit_replay_authorization: None,
             },
@@ -2184,7 +2185,7 @@ async fn ownership_ab_full_dag_amplifies_admission_and_requires_sender_retry() {
     assert_eq!(head_hint.provider_rotations, 0);
     assert_eq!(full_dag.sender_retry_dispatches, 1);
     assert_eq!(head_hint.sender_retry_dispatches, 0);
-    assert_eq!(full_dag.retry_dispatches, 1);
+    assert_eq!(full_dag.retry_dispatches, 2);
     assert_eq!(head_hint.retry_dispatches, 1);
     assert_eq!(full_dag.retry_suppressions, 0);
     assert_eq!(head_hint.retry_suppressions, 0);
@@ -2192,9 +2193,9 @@ async fn ownership_ab_full_dag_amplifies_admission_and_requires_sender_retry() {
     assert_eq!(head_hint.exhausted_roots, 0);
     assert_eq!(full_dag.capacity_nacks, 1);
     assert_eq!(head_hint.capacity_nacks, 0);
-    assert_eq!(full_dag.registered_terminal, 1);
+    assert_eq!(full_dag.registered_terminal, 2);
     assert_eq!(head_hint.registered_terminal, 1);
-    assert_eq!(full_dag.merged_terminal, 1);
+    assert_eq!(full_dag.merged_terminal, 2);
     assert_eq!(head_hint.merged_terminal, 1);
     assert_eq!(full_dag.quarantined_terminal, 0);
     assert_eq!(head_hint.quarantined_terminal, 0);

@@ -33,6 +33,9 @@ pub struct PendingDag {
     /// Always included in the Bitswap provider list during retries so the
     /// blocks can be fetched even if the peer isn't in connected_peers().
     pub source_peer: Option<String>,
+    /// Authenticated same-root announcers retained as recovery alternates.
+    /// These never replace `source_peer` or reset the receiver retry clock.
+    pub alternate_providers: Vec<String>,
     /// True when the DAG originated from an explicit replicator push.
     pub is_explicit_replicator: bool,
     /// Capability-based explicit replay authorization carried by two-stream pushes.

@@ -50,7 +50,8 @@ where
 
         let creator_ref = creator_did.as_deref();
         if let Some(document_json) = document_json.as_ref() {
-            self.sync
+            if let Err(error) = self
+                .sync
                 .push_document_to_replicators_with_creator(
                     &doc_cid,
                     &doc_block,
@@ -59,9 +60,13 @@ where
                     document_json,
                     creator_ref,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(%error, %doc_id, %collection_id, "Committed transaction has an undurable P2P document marker");
+            }
         } else {
-            self.sync
+            if let Err(error) = self
+                .sync
                 .push_to_replicators_with_creator(
                     &doc_cid,
                     &doc_block,
@@ -69,10 +74,14 @@ where
                     &collection_id,
                     creator_ref,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(%error, %doc_id, %collection_id, "Committed transaction has an undurable P2P document marker");
+            }
         }
         if let Some((col_cid, col_block)) = collection_block.as_ref() {
-            self.sync
+            if let Err(error) = self
+                .sync
                 .push_to_replicators_with_creator(
                     col_cid,
                     col_block,
@@ -80,7 +89,10 @@ where
                     &collection_id,
                     creator_ref,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(%error, %collection_id, "Committed transaction has an undurable P2P collection marker");
+            }
         }
 
         let sync = self.sync.clone();

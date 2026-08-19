@@ -756,6 +756,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 creator: record.creator.clone(),
                 missing: missing.iter().copied().collect(),
                 source_peer: record.source_peer.clone(),
+                alternate_providers: record
+                    .alternate_providers
+                    .iter()
+                    .take(crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS)
+                    .cloned()
+                    .collect(),
                 is_explicit_replicator: record.is_explicit_replicator,
                 explicit_replay_authorization: record
                     .explicit_replay_authorization
@@ -928,6 +934,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     head_priority: dag.head_priority,
                     creator: dag.creator.clone(),
                     source_peer: dag.source_peer.clone(),
+                    alternate_providers: dag.alternate_providers.clone(),
                     is_explicit_replicator: dag.is_explicit_replicator,
                     explicit_replay_authorization: dag
                         .explicit_replay_authorization
@@ -940,6 +947,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     head_priority: None,
                     creator: String::new(),
                     source_peer: None,
+                    alternate_providers: Vec::new(),
                     is_explicit_replicator: false,
                     explicit_replay_authorization: None,
                 }),

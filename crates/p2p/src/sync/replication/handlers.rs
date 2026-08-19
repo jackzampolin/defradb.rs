@@ -324,7 +324,7 @@ where
             // replicators. This is independent of optional gossip
             // rebroadcast, which remains disabled in production for stage 3.
             if !collection_id_for_broadcast.is_empty() {
-                coordinator
+                if let Err(error) = coordinator
                     .push_to_replicators_with_creator(
                         &cid,
                         &block_data,
@@ -332,7 +332,15 @@ where
                         collection_id_for_broadcast,
                         (!creator_for_forward.is_empty()).then_some(creator_for_forward.as_str()),
                     )
-                    .await;
+                    .await
+                {
+                    return ReplicationResult::MergedButBroadcastFailed {
+                        cid,
+                        doc_id: doc_id_for_result,
+                        collection_id: collection_id_for_result,
+                        broadcast_error: error.to_string(),
+                    };
+                }
             }
 
             // Optionally re-broadcast (skip if metadata incomplete - can't broadcast without doc/collection IDs)
@@ -704,7 +712,7 @@ where
         {
             continue;
         }
-        coordinator
+        if let Err(error) = coordinator
             .push_to_replicators_with_creator(
                 &block.cid,
                 block.block_data.as_ref(),
@@ -712,7 +720,15 @@ where
                 &block.collection_id,
                 (!block.creator.is_empty()).then_some(block.creator.as_str()),
             )
-            .await;
+            .await
+        {
+            results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                cid: block.cid,
+                doc_id: block.doc_id.clone(),
+                collection_id: block.collection_id.clone(),
+                broadcast_error: error.to_string(),
+            };
+        }
     }
 
     if config.rebroadcast_on_merge {

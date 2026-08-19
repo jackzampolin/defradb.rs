@@ -111,8 +111,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// 2. Claim one CID owner or nack/suppress a duplicate without waiting
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
-    /// 5. Emit BlockReceived only once the full reachable DAG is locally present;
-    ///    otherwise durably register the root for the receiver retry clock
+    /// 5. Durably register the root for the receiver retry clock, which emits
+    ///    merge work once the full reachable DAG is locally present
     ///
     /// # Go Compatibility
     ///
@@ -124,6 +124,48 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         sender_peer: Option<&str>,
         is_explicit_replicator: bool,
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    ) -> Result<()> {
+        let recovery_provider_evidenced =
+            is_explicit_replicator || explicit_replay_authorization.is_some();
+        self.process_pushlog_with_provider_evidence(
+            msg,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+            recovery_provider_evidenced,
+        )
+        .await
+    }
+
+    /// Process a hint delivered directly by its authenticated transport peer.
+    /// Direct delivery is the protocol evidence that this peer owns the rooted
+    /// CAR authority promised by the hint; relayed gossip must use
+    /// [`Self::process_pushlog`] unless its signed origin is also the immediate
+    /// transport peer.
+    pub(crate) async fn process_pushlog_from_dag_provider(
+        &self,
+        msg: &PushLogBroadcast,
+        sender_peer: Option<&str>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    ) -> Result<()> {
+        self.process_pushlog_with_provider_evidence(
+            msg,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+            true,
+        )
+        .await
+    }
+
+    async fn process_pushlog_with_provider_evidence(
+        &self,
+        msg: &PushLogBroadcast,
+        sender_peer: Option<&str>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        recovery_provider_evidenced: bool,
     ) -> Result<()> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_ref())
@@ -180,6 +222,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            recovery_provider_evidenced,
         )
         .await
     }
@@ -192,6 +235,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         sender_peer: Option<&str>,
         is_explicit_replicator: bool,
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        recovery_provider_evidenced: bool,
     ) -> Result<()> {
         // Check if already merged
         match self
@@ -314,67 +358,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         };
 
         if missing.is_empty() {
-            // DAG is complete - emit BlockReceived for merge
-            tracing::info!(
+            tracing::debug!(
                 ?cid,
                 doc_id = %msg.doc_id,
-                "DAG complete, emitting BlockReceived event"
+                collection_id = %msg.collection_id,
+                "DAG arrived complete; registering durable merge obligation"
             );
-
-            if self
-                .event_tx
-                .send(SyncEvent::BlockReceived {
-                    cid: *cid,
-                    doc_id: msg.doc_id.clone(),
-                    collection_id: msg.collection_id.clone(),
-                    creator: msg.creator.clone(),
-                    sender_peer: sender_peer.map(str::to_owned),
-                    is_explicit_replicator,
-                    explicit_replay_authorization,
-                })
-                .await
-                .is_err()
-            {
-                tracing::error!(
-                    ?cid,
-                    doc_id = %msg.doc_id,
-                    "CRITICAL: Failed to send BlockReceived event - block stored but will not be merged. \
-                     Event receiver may have been dropped."
-                );
-                return Err(Error::ChannelSend);
-            }
-
-            // Not wrapped in retry_retriable_pushlog_op: the inner blockstore
-            // reads already propagate typed `BlockstoreTxnConflict` via
-            // `Error::from_blockstore`, and those are the only retriable errors
-            // surfaced here. DAG-traversal failures (missing links, bitswap
-            // timeouts, channel-send) are terminal in this context, so an outer
-            // retry would not make progress.
-            match self.retry_pending_dags_waiting_on(cid).await {
-                Ok(completed_roots) => {
-                    if !completed_roots.is_empty() {
-                        tracing::info!(
-                            received_cid = %cid,
-                            completed_count = completed_roots.len(),
-                            completed_roots = ?completed_roots,
-                            "Late PushLog block completed pending DAGs"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        received_cid = %cid,
-                        error = %e,
-                        "Failed to retry pending DAGs after PushLog block arrival"
-                    );
-                    return Err(e);
-                }
-            }
         } else {
-            // DAG has missing blocks - track as pending and request Bitswap fetch.
-            // Debug level: this fires per PushLog with missing links and is
-            // expected during catch-up; the terminal outcome is logged at info
-            // (DagReady) or warn (final failure) — see issue #858.
             tracing::debug!(
                 ?cid,
                 missing_count = missing.len(),
@@ -382,7 +372,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 collection_id = %msg.collection_id,
                 "DAG has missing links, requesting Bitswap fetch"
             );
+        }
 
+        {
+            // Every unmerged success-acked head, including a complete-at-arrival
+            // DAG, enters the same durable receiver clock. The clock emits the
+            // merge work and keeps the registration until merge or quarantine
+            // reaches a durable terminal disposition.
             // Different CIDs for one sender/scope must make one serialized
             // durable replacement decision. Otherwise concurrent heartbeats
             // can both observe the old head and recreate a per-root ledger.
@@ -399,6 +395,100 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     doc_id = %msg.doc_id,
                     collection_id = %msg.collection_id,
                     "Head merged while awaiting durable pending registration"
+                );
+                return Ok(());
+            }
+
+            // A root already owned by the receiver is idempotently covered by
+            // that durable registration. Do not let a relay or another
+            // collection-authorized peer replace its recovery provider, reset
+            // its backoff, or rewrite its authorization metadata merely by
+            // replaying the same signed head bytes.
+            let existing = self.pending_dag_snapshot(cid);
+            if let Some(mut existing) = existing {
+                // A stronger explicit-replay authorization may arrive through
+                // the same authenticated provider after an ordinary hint. Keep
+                // the provider/backoff owner, but durably upgrade the merge
+                // authorization before acknowledging that replay.
+                let same_provider = existing.source_peer.as_deref() == sender_peer;
+                let upgrades_authorization = same_provider
+                    && explicit_replay_authorization.is_some()
+                    && (existing.explicit_replay_authorization != explicit_replay_authorization
+                        || !existing.is_explicit_replicator);
+                // Exact-root equality alone is not availability evidence: a
+                // gossip relay may hold only the envelope head. Admit a new
+                // durable provider only through authenticated direct PushLog
+                // delivery (including configured or signed two-stream
+                // replicators). Honest downstream fanout crosses this seam
+                // only after the sender has merged the complete DAG.
+                let new_alternate = sender_peer.filter(|provider| {
+                    recovery_provider_evidenced
+                        && existing.source_peer.as_deref() != Some(*provider)
+                        && !existing
+                            .alternate_providers
+                            .iter()
+                            .any(|candidate| candidate == *provider)
+                        && existing.alternate_providers.len()
+                            < crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS
+                });
+                if upgrades_authorization || new_alternate.is_some() {
+                    if let Some(provider) = new_alternate {
+                        existing.alternate_providers.push(provider.to_owned());
+                        existing.alternate_providers.sort_unstable();
+                        existing.alternate_providers.dedup();
+                    }
+                    if upgrades_authorization {
+                        existing.is_explicit_replicator = true;
+                        existing.explicit_replay_authorization =
+                            explicit_replay_authorization.clone();
+                    }
+                    if let Some(store) = self.pending_store() {
+                        let record = crate::sync::pending_store::PersistedPendingDag {
+                            doc_id: existing.doc_id.clone(),
+                            collection_id: existing.collection_id.clone(),
+                            head_priority: existing.head_priority,
+                            creator: existing.creator.clone(),
+                            source_peer: existing.source_peer.clone(),
+                            alternate_providers: existing.alternate_providers.clone(),
+                            is_explicit_replicator: existing.is_explicit_replicator,
+                            explicit_replay_authorization: existing
+                                .explicit_replay_authorization
+                                .as_ref()
+                                .map(Into::into),
+                        };
+                        store.replace_scope_head(None, cid, &record).await?;
+                    }
+                    if let Some(current) = self.pending_dags.write().get_mut(cid) {
+                        current.alternate_providers = existing.alternate_providers.clone();
+                        if upgrades_authorization {
+                            current.is_explicit_replicator = true;
+                            current.explicit_replay_authorization =
+                                explicit_replay_authorization.clone();
+                        }
+                    }
+                    tracing::debug!(
+                        cid = %cid,
+                        source_peer = ?sender_peer,
+                        alternate_count = existing.alternate_providers.len(),
+                        authorization_upgraded = upgrades_authorization,
+                        "Extended receiver-owned root recovery without replacing its provider"
+                    );
+                    return Ok(());
+                }
+                tracing::debug!(
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    collection_id = %msg.collection_id,
+                    announced_source_peer = ?sender_peer,
+                    "Incoming root is already receiver-owned; retaining its recovery provider"
+                );
+                return Ok(());
+            }
+            if self.persisted_roots.read().contains(cid) {
+                tracing::debug!(
+                    cid = %cid,
+                    announced_source_peer = ?sender_peer,
+                    "Incoming root is durably receiver-owned; retaining its recovery provider"
                 );
                 return Ok(());
             }
@@ -438,6 +528,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         creator: msg.creator.clone(),
                         missing: missing.iter().cloned().collect(),
                         source_peer: sender_peer.map(str::to_owned),
+                        alternate_providers: Vec::new(),
                         is_explicit_replicator,
                         explicit_replay_authorization: explicit_replay_authorization.clone(),
                         is_recovery_registered: false,
@@ -553,6 +644,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     head_priority,
                     creator: msg.creator.clone(),
                     source_peer: sender_peer.map(str::to_owned),
+                    alternate_providers: Vec::new(),
                     is_explicit_replicator,
                     explicit_replay_authorization: explicit_replay_authorization
                         .as_ref()
@@ -629,6 +721,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 doc_id = %msg.doc_id,
                 collection_id = %msg.collection_id,
                 "Pending DAG durably registered and left due for receiver clock"
+            );
+        }
+
+        // This head can also be a missing descendant of another registered
+        // root. Advance that root's frontier after this head's own durable
+        // obligation is safely installed.
+        let completed_roots = self.retry_pending_dags_waiting_on(cid).await?;
+        if !completed_roots.is_empty() {
+            tracing::info!(
+                received_cid = %cid,
+                completed_count = completed_roots.len(),
+                completed_roots = ?completed_roots,
+                "PushLog head completed other pending DAGs"
             );
         }
 
@@ -894,11 +999,16 @@ mod tests {
             .await
             .expect("the later composite head should use the stored descendant");
 
+        assert!(manager.try_claim_pending_dag_dispatch(&head_cid, tokio::time::Instant::now()));
+        assert!(manager
+            .retry_pending_dag(&head_cid)
+            .await
+            .expect("receiver clock should find the locally complete DAG"));
         assert!(matches!(
             events.try_recv(),
-            Ok(SyncEvent::BlockReceived { cid, .. }) if cid == head_cid
+            Ok(SyncEvent::DagReady { root_cid, .. }) if root_cid == head_cid
         ));
-        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(manager.pending_dag_count(), 1);
     }
 
     #[tokio::test]
@@ -1089,8 +1199,7 @@ mod tests {
             event_buffer_size: 1,
             ..SyncConfig::default()
         };
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), peer_state, config);
-        let manager = Arc::new(manager);
+        let (manager, _events) = SyncManager::new(blockstore.clone(), peer_state, config);
         let (field_cid, field_block) = create_lww_block("name");
         blockstore
             .put(&field_cid, &field_block)
@@ -1107,30 +1216,10 @@ mod tests {
             capability: None,
         };
 
-        manager
-            .event_tx
-            .send(SyncEvent::SyncError {
-                cid,
-                error: "hold event channel full".to_string(),
-            })
-            .await
-            .unwrap();
-
-        let owner_manager = Arc::clone(&manager);
-        let owner_message = Arc::clone(&message);
-        let owner = tokio::spawn(async move {
-            owner_manager
-                .process_pushlog(&owner_message, Some("peer-1"), false, None)
-                .await
-        });
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !blockstore.has(&cid).await.unwrap() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("ordinary announcement should store the block");
+        let owner = manager
+            .process_queue
+            .try_acquire_nowait(&cid)
+            .expect("simulate the ordinary announcement owner");
 
         let replay_result = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1143,31 +1232,24 @@ mod tests {
             Err(Error::PushLogInFlight { cid: ref busy_cid }) if busy_cid == &cid.to_string()
         ));
 
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::SyncError { .. })
-        ));
-        owner.await.unwrap().unwrap();
-
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::BlockReceived {
-                explicit_replay_authorization: None,
-                ..
-            })
-        ));
+        drop(owner);
+        manager
+            .process_pushlog(&message, Some("peer-1"), false, None)
+            .await
+            .expect("ordinary announcement should durably register");
         manager
             .process_pushlog(&message, Some("peer-1"), true, Some(authorization.clone()))
             .await
             .expect("durable sender retry should succeed after the owner completes");
-
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::BlockReceived {
-                explicit_replay_authorization: Some(actual),
-                ..
-            }) if actual == authorization
-        ));
+        assert_eq!(manager.pending_dag_count(), 1);
+        let pending = manager
+            .pending_dag_snapshot(&cid)
+            .expect("receiver obligation remains live");
+        assert_eq!(
+            pending.explicit_replay_authorization.as_ref(),
+            Some(&authorization)
+        );
+        assert_eq!(pending.source_peer.as_deref(), Some("peer-1"));
     }
 
     #[tokio::test]

@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use integration_test::TestCluster;
 
 const SCHEMA: &str = "type User { name: String  age: Int }";
-const HEALTHY_DOCS: usize = 12;
+// Match the healthy peer's two-slot quota. A larger batch also overloads the
+// healthy peer and turns this isolation fence into a retry-ladder timing test.
+const HEALTHY_DOCS: usize = 2;
 
 async fn pending_dags(hub_api: &str) -> u64 {
     let Ok(response) = reqwest::get(format!("{hub_api}/api/v0/p2p/sync/status")).await else {
@@ -28,7 +30,7 @@ async fn pending_dags(hub_api: &str) -> u64 {
 /// With `MAX_PENDING_DAGS = 8` the per-peer quota is `max(8/4, 1) = 2`, well
 /// below the global cap. One noisy pusher floods head-only writes it never lets
 /// resolve (it is frozen), so it can occupy at most its 2-slot quota; a healthy
-/// pusher writing into the remaining slots must still land every document.
+/// pusher filling its own two-slot quota must still land every document.
 ///
 /// Anti-vacuity: only the noisy peer is active before the freeze, and the
 /// global cap (8) can never fill from a single peer capped at 2 — so any
