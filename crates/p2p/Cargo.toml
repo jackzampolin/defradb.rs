@@ -14,11 +14,10 @@ defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 crypto = { path = "../crypto" }
 blockstore = { path = "../blockstore" }
-crdt = { path = "../crdt" }
 storage = { path = "../storage" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
-kms = { path = "../kms" }
+kms = { path = "../kms", optional = true }
 
 # libp2p transport
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"], optional = true }
@@ -82,6 +81,7 @@ default = []
 test-utils = ["libp2p-transport"]
 libp2p-transport = [
     "dep:iroh-bitswap",
+    "dep:kms",
     "dep:libp2p",
     "dep:libp2p-stream",
     "dep:multiaddr",
@@ -91,11 +91,10 @@ libp2p-transport = [
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-p2p = { path = ".", features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [package.metadata.cargo-machete]
-ignored = ["crdt", "multiaddr", "noq", "rand"]
+ignored = ["multiaddr", "noq", "rand"]
 
 [lints]
 workspace = true

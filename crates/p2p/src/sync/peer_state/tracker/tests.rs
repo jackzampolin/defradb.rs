@@ -1,9 +1,11 @@
 use super::*;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 fn test_peer_id() -> String {
-    libp2p::PeerId::random().to_string()
+    static NEXT_PEER_ID: AtomicU64 = AtomicU64::new(0);
+    format!("test-peer-{}", NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 fn test_cid() -> Cid {
@@ -334,7 +336,7 @@ pub fn test_concurrent_peer_operations() {
     for i in 0..10 {
         let tracker_clone = Arc::clone(&tracker);
         let handle = thread::spawn(move || {
-            let peer = libp2p::PeerId::random().to_string();
+            let peer = test_peer_id();
             let cid = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
                 .unwrap();
 
@@ -372,7 +374,7 @@ pub fn test_concurrent_cid_tracking() {
     use std::thread;
 
     let tracker = Arc::new(PeerStateTracker::new());
-    let peer = libp2p::PeerId::random().to_string();
+    let peer = test_peer_id();
     tracker.peer_connected(&peer);
 
     let mut handles = vec![];
@@ -419,7 +421,7 @@ pub fn test_global_peer_limits_enforced_on_connect() {
 
     // Add 6 peers - peer 6 should trigger eviction
     for _ in 0..6 {
-        let peer = libp2p::PeerId::random().to_string();
+        let peer = test_peer_id();
         tracker.peer_connected(&peer);
     }
 
@@ -441,8 +443,8 @@ pub fn test_global_limits_evicts_disconnected_first() {
     );
 
     // Add 2 peers
-    let peer1 = libp2p::PeerId::random().to_string();
-    let peer2 = libp2p::PeerId::random().to_string();
+    let peer1 = test_peer_id();
+    let peer2 = test_peer_id();
     tracker.peer_connected(&peer1);
     tracker.peer_connected(&peer2);
 
@@ -450,8 +452,8 @@ pub fn test_global_limits_evicts_disconnected_first() {
     tracker.peer_disconnected(&peer2);
 
     // Add 2 more peers
-    let peer3 = libp2p::PeerId::random().to_string();
-    let peer4 = libp2p::PeerId::random().to_string();
+    let peer3 = test_peer_id();
+    let peer4 = test_peer_id();
     tracker.peer_connected(&peer3);
     tracker.peer_connected(&peer4);
 

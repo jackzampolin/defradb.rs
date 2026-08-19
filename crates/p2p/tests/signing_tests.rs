@@ -1,3 +1,5 @@
+#![cfg(feature = "libp2p-transport")]
+
 //! Tests for message signing and verification.
 
 use uuid::Uuid;
