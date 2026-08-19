@@ -1755,9 +1755,21 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert!(!response.has_errors());
         assert_eq!(response.data, Some(serde_json::json!({"ok": true})));
+        // The conflict counters are process-global and every test that runs a
+        // query through the retry loop moves them, so an exact delta is a race:
+        // it read 3 where it wanted 2 in CI. The loop's own behaviour is pinned
+        // exactly by `attempts` above; what is left to check here is that the
+        // telemetry fired at all, which a lower bound does without depending on
+        // what else the binary is running.
         let metrics_after = telemetry::conflict_metrics_snapshot().embedded_execute;
-        assert_eq!(metrics_after.attempts - metrics_before.attempts, 2);
-        assert_eq!(metrics_after.successes - metrics_before.successes, 1);
+        assert!(
+            metrics_after.attempts - metrics_before.attempts >= 2,
+            "the two retried attempts must be recorded"
+        );
+        assert!(
+            metrics_after.successes - metrics_before.successes >= 1,
+            "the eventual success must be recorded"
+        );
     }
 
     #[tokio::test]
