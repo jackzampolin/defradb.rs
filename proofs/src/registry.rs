@@ -107,7 +107,10 @@ pub const PROPERTIES: &[Property] = &[
         axis: Tla,
         anchor: "crates/p2p/src/sync coordinator + pending DAG clock; crates/db-merge push replay; crates/storage peerstore retry markers",
         model_ref: "MC_SyncOwnership_Green.cfg",
-        tiers: &[Behavioral],
+        // The deterministic A/B and restart/fanout witnesses live in the
+        // integration-test crate, outside this conformance binary's behavioral
+        // harness. Keep this binding honest until that harness drives them.
+        tiers: &[Boundary],
     },
     Property {
         family: "Sync ownership transfer (head hint / receiver pull)",
@@ -115,7 +118,7 @@ pub const PROPERTIES: &[Property] = &[
         axis: Tla,
         anchor: "crates/p2p/src/sync coordinator + pending DAG clock; crates/db-merge document marker rederive",
         model_ref: "MC_SyncOwnership_Green_Liveness_Doc.cfg",
-        tiers: &[Behavioral],
+        tiers: &[Boundary],
     },
     Property {
         family: "Sync ownership transfer (head hint / receiver pull)",
@@ -123,7 +126,7 @@ pub const PROPERTIES: &[Property] = &[
         axis: Tla,
         anchor: "crates/p2p/src/sync coordinator + pending DAG clock; crates/db-merge collection marker rederive",
         model_ref: "MC_SyncOwnership_Green_Liveness_Collection.cfg",
-        tiers: &[Behavioral],
+        tiers: &[Boundary],
     },
     Property {
         family: "Sync ownership transfer (head hint / receiver pull)",
@@ -131,7 +134,7 @@ pub const PROPERTIES: &[Property] = &[
         axis: Tla,
         anchor: "crates/p2p/src/sync/manager/process/pushlog.rs; crates/p2p/src/sync/pending_store.rs; crates/p2p/src/sync/coordinator/mod.rs",
         model_ref: "MC_SyncOwnership_Green_Liveness_IrohRelay.cfg",
-        tiers: &[Behavioral],
+        tiers: &[Boundary],
     },
     Property {
         family: "Multi-instance claim",

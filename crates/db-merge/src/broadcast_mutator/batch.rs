@@ -334,6 +334,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatchController
     for BroadcastBatchMutator<S, B, T>
 {
+    /// Commit the inner mutation batch, then durably register its outbound P2P
+    /// markers. An error reporting `undurable P2P head markers` is post-commit:
+    /// callers must not interpret it as a rolled-back mutation and retry the
+    /// logical write blindly.
     async fn commit(&self) -> query::error::Result<()> {
         if let Err(err) = self.inner_controller.commit().await {
             self.pending_broadcasts.lock().await.clear();

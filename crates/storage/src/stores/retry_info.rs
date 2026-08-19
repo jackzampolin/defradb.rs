@@ -3,15 +3,26 @@
 /// Tracks the number of retries and the next retry time using exponential
 /// backoff intervals matching Go DefraDB's replicator retry behavior.
 use std::time::Duration;
+use std::{hash::Hash, hash::Hasher};
 use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Go-compatible document retry ladder: 30s through a 32-minute cap.
+///
+/// Source parity: Go `cli/config/config.go`, default
+/// `replicator.retryintervals`.
 pub const RETRY_INTERVALS_SECS: &[u64] = &[30, 60, 120, 240, 480, 960, 1920];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RetryInfo {
     pub num_retries: u32,
     pub next_retry_unix: u64,
+    /// Durable round-robin start for the peer's presence-only scope markers.
+    ///
+    /// All scopes share this peer clock.  Persisting the cursor prevents a
+    /// bounded consumer from retrying the same failing lexical prefix after
+    /// every sweep or process restart.
+    #[serde(default)]
+    pub dispatch_cursor: u64,
 }
 
 /// Durable sender obligations surfaced through P2P sync diagnostics.
@@ -113,6 +124,7 @@ impl RetryInfo {
         Self {
             num_retries: 0,
             next_retry_unix: 0,
+            dispatch_cursor: 0,
         }
     }
 
@@ -127,14 +139,31 @@ impl RetryInfo {
 
     /// Bump the retry counter and schedule the next retry with exponential backoff.
     pub fn bump(&mut self) {
+        self.bump_for("");
+    }
+
+    /// Advance with deterministic bounded jitter derived from the peer and
+    /// retry rung.  The published Go-compatible ladder remains the cap while
+    /// peers do not wake in lockstep after a fleet-wide outage.
+    pub fn bump_for(&mut self, retry_key: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let idx = (self.num_retries as usize).min(RETRY_INTERVALS_SECS.len() - 1);
         let cap = RETRY_INTERVALS_SECS[idx];
-        self.next_retry_unix = now + cap;
+        let floor = (cap / 2).max(1);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        retry_key.hash(&mut hasher);
+        self.num_retries.hash(&mut hasher);
+        let delay = floor + hasher.finish() % (cap - floor + 1);
+        self.next_retry_unix = now + delay;
         self.num_retries += 1;
+    }
+
+    /// Move the next bounded pass to a different lexical marker prefix.
+    pub fn advance_dispatch_cursor(&mut self) {
+        self.dispatch_cursor = self.dispatch_cursor.wrapping_add(1);
     }
 
     /// Schedule another attempt without recording a delivery failure.
@@ -160,11 +189,30 @@ impl RetryInfo {
 mod tests {
     use super::*;
 
+    #[derive(serde::Serialize)]
+    struct LegacyRetryInfo {
+        num_retries: u32,
+        next_retry_unix: u64,
+    }
+
     #[test]
     fn test_new_initial_is_due() {
         let info = RetryInfo::new_initial();
         assert!(info.is_due());
         assert_eq!(info.num_retries, 0);
+    }
+
+    #[test]
+    fn legacy_retry_info_decodes_with_zero_dispatch_cursor() {
+        let bytes = defra_core::cbor::to_vec(&LegacyRetryInfo {
+            num_retries: 4,
+            next_retry_unix: 42,
+        })
+        .unwrap();
+        let decoded = RetryInfo::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.num_retries, 4);
+        assert_eq!(decoded.next_retry_unix, 42);
+        assert_eq!(decoded.dispatch_cursor, 0);
     }
 
     #[test]

@@ -291,6 +291,17 @@ INV_SameDocSerialized ==
 INV_SingleMergeWriter ==
   Cardinality(UNION {inCrit[d] : d \in Docs}) <= 1
 
+\* Anti-vacuity witness for the per-document lock model.  A configuration
+\* using LockMode="PerDoc" must be able to reach two active documents, proving
+\* same-document serialization is not merely an alias for a global lock.
+TwoDocsActive ==
+  \E d1, d2 \in Docs :
+    /\ d1 # d2
+    /\ inCrit[d1] # {}
+    /\ inCrit[d2] # {}
+
+NoCrossDocParallel == ~TwoDocsActive
+
 \* ---- Shared-guard mutual exclusion: a local user-write and a merge are NEVER both in
 \* the critical section on the SAME doc (#1021). This is the property the counter fix
 \* actually relies on — that a local counter RMW and a same-doc merge RMW cannot

@@ -97,7 +97,17 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
-            let transport_event = match p2p::convert_host_event(event) {
+            let transport_event = p2p::convert_host_event(event);
+            if admission == p2p::sync::DispatchAdmission::Saturated {
+                if let Err(error) = coordinator
+                    .handle_transport_event_with_admission(transport_event, admission)
+                    .await
+                {
+                    tracing::debug!(%error, "rejected saturated embedded P2P request");
+                }
+                return;
+            }
+            let transport_event = match transport_event {
                 p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
                     if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
                         // Stores artifacts AND sends the signed ack Go's push waits for.
@@ -237,6 +247,15 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
+            if admission == p2p::sync::DispatchAdmission::Saturated {
+                if let Err(error) = coordinator
+                    .handle_transport_event_with_admission(event, admission)
+                    .await
+                {
+                    tracing::debug!(%error, "rejected saturated embedded Iroh request");
+                }
+                return;
+            }
             let event = match event {
                 p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
                     handle_se_artifacts_received(

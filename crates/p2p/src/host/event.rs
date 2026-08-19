@@ -176,22 +176,6 @@ pub enum HostEvent {
 impl HostEvent {
     /// Assign every host event to the shared bounded scheduler.
     pub fn dispatch_class(&self) -> crate::sync::DispatchClass {
-        use crate::sync::DispatchClass;
-
-        match self {
-            Self::CarFetchRequest { .. } => DispatchClass::Recovery,
-            Self::GossipRawMessage { .. }
-            | Self::BitswapComplete { .. }
-            | Self::BitswapBlockReceived { .. }
-            | Self::DocSyncReply { .. }
-            | Self::BranchableSyncReply { .. }
-            | Self::CarFetchResponse { .. } => DispatchClass::Completion,
-            Self::PushLogRequest { .. }
-            | Self::GossipMessage { .. }
-            | Self::TwoStreamRequest { .. }
-            | Self::DocSyncRequest { .. }
-            | Self::BranchableSyncRequest { .. } => DispatchClass::Admission,
-            _ => DispatchClass::Inline,
-        }
+        crate::sync::classify_p2p_event!(self, HostEvent)
     }
 }

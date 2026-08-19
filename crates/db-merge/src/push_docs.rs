@@ -200,7 +200,7 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
             }
         }
 
-        for (doc_short_id, doc_id) in &doc_ids {
+        'documents: for (doc_short_id, doc_id) in &doc_ids {
             if let Some(filter) = filters.get(collection.collection_id()) {
                 if !document_matches_filter(
                     &datastore,
@@ -251,13 +251,39 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
 
             let mut replay_head_cids: Vec<_> = doc_blocks.iter().map(|(cid, _)| *cid).collect();
             replay_head_cids.sort_unstable();
+
+            if doc_blocks.is_empty() {
+                continue;
+            }
+
+            // Conservation comes before the fallible serving capability. If
+            // the bounded selective-CAR table is full (or signing fails), the
+            // durable marker keeps this document and every later document in
+            // the replay eligible for the shared retry clock.
+            let Some(marker_guard) = peerstore
+                .acquire_replicator_retry_guard(peer_id.as_str())
+                .await
+                .map_err(|error| format!("failed to coordinate replay marker: {error}"))?
+            else {
+                return Ok(());
+            };
+            peerstore
+                .observe_push_head(peer_id.as_str(), doc_id, collection.collection_id())
+                .await
+                .map_err(|error| format!("failed to register replay marker: {error}"))?;
+            drop(marker_guard);
+
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
-                let grant = car_authority
-                    .register(peer_id.clone(), block_cid)
-                    .ok_or_else(|| {
-                        format!("selective CAR authority full for replay head {block_cid}")
-                    })?;
+                let Some(grant) = car_authority.register(peer_id.clone(), block_cid) else {
+                    tracing::warn!(
+                        %peer_id,
+                        %doc_id,
+                        %block_cid,
+                        "Selective CAR authority full; retaining replay marker"
+                    );
+                    continue 'documents;
+                };
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -273,17 +299,6 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
             }
 
             if !requests.is_empty() {
-                let Some(_marker_guard) = peerstore
-                    .acquire_replicator_retry_guard(peer_id.as_str())
-                    .await
-                    .map_err(|error| format!("failed to coordinate replay marker: {error}"))?
-                else {
-                    return Ok(());
-                };
-                peerstore
-                    .observe_push_head(peer_id.as_str(), doc_id, collection.collection_id())
-                    .await
-                    .map_err(|error| format!("failed to register replay marker: {error}"))?;
                 let t = transport.clone();
                 let pid = peer_id.clone();
                 let gate = replay_gate.clone();

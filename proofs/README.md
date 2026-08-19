@@ -102,7 +102,7 @@ a binding.
 ### Realized status — all 21 families bound
 
 **19 behavioral tests** (driven against fresh `target/debug/defra`, each break-tested
-for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
+for non-vacuity), **2 Lean-axis contract bindings**, **7 honest Boundaries** (one,
 Transaction & merge-queue concurrency, is now both — a Behavioral no-loss/no-double-apply
 storm leg plus a Boundary internal-serialization leg). One
 of these (`partition::convergence_concurrent_same_doc_writes_merge`) found a real
@@ -116,7 +116,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | B3 filtered replication | Behavioral | `replication.rs` |
 | DAG convergence | Behavioral | `replication.rs` (live-forward) + `partition.rs` (partition heal; concurrent same-doc merge — the bug it found+fixed) |
 | Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss + resume across node restart) |
-| Sync ownership transfer | Behavioral | deterministic full-DAG/head-hint A/B fence; `p2p_admission_restart`; marker migration/storage tests; mixed Go/Rust PushLog fixture |
+| Sync ownership transfer | Boundary + external integration | deterministic full-DAG/head-hint A/B fence; `p2p_admission_restart`; marker migration/storage tests; mixed Go/Rust PushLog fixture. These run in repository CI, not this conformance binary's `tests/behavioral/` harness. |
 | ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |

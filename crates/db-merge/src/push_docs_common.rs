@@ -201,13 +201,9 @@ pub(crate) async fn resolve_collection_id_for_doc<S: storage::corekv::Store>(
         else {
             continue;
         };
-        let short_id = db::collection::require_persisted_collection_short_id(
-            &systemstore,
-            collection.collection_id(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        if short_id == doc_ref.collection_short_id {
+        // Collections are loaded with their persisted root IDs. Avoid one
+        // systemstore round-trip per collection for every dirty document.
+        if collection.resolved_root_id() == doc_ref.collection_short_id {
             return Ok(Some(collection.collection_id().to_string()));
         }
     }

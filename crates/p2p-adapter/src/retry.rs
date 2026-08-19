@@ -6,6 +6,14 @@ use p2p::transport::{P2PTransport, PeerAddr, PeerId};
 
 use crate::TransportDocPusher;
 
+fn capacity_retry_delay(error: &str) -> Option<std::time::Duration> {
+    let is_capacity = p2p::error::is_at_capacity_message(error)
+        || error
+            .strip_suffix(p2p::error::AT_CAPACITY_MESSAGE)
+            .is_some_and(|prefix| prefix.ends_with(": "));
+    is_capacity.then_some(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL)
+}
+
 /// Record head announcements and acknowledgements behind the peer-scoped
 /// retry writer. A success acknowledgement clears only the marker still
 /// covered by the acknowledged head fence.
@@ -165,21 +173,13 @@ pub async fn run_retry_pass<S, T>(
     };
 
     for (peer_id_str, info_bytes) in peers {
-        let retry_guard = match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
-            Ok(Some(guard)) => guard,
-            Ok(None) | Err(_) => continue,
-        };
-        drop(retry_guard);
-        let mut peer_retry = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
-            Ok(info) => info,
-            Err(error) => {
-                tracing::warn!(peer_id = %peer_id_str, %error, "invalid retry info");
-                continue;
-            }
-        };
+        if let Err(error) = storage::stores::RetryInfo::from_bytes(&info_bytes) {
+            tracing::warn!(peer_id = %peer_id_str, %error, "invalid retry info");
+            continue;
+        }
         let peer_id = PeerId::new(peer_id_str.clone());
 
-        let mut markers = match peerstore.get_retry_documents(&peer_id_str).await {
+        let markers = match peerstore.get_retry_documents(&peer_id_str).await {
             Ok(markers) => markers,
             Err(error) => {
                 tracing::debug!(peer_id = %peer_id, %error, "failed to load retry markers");
@@ -200,16 +200,13 @@ pub async fn run_retry_pass<S, T>(
             // second two-second redial clock for markers whose ladder has not
             // elapsed yet.
             redial_replicator(&peerstore, transport, &peer_id).await;
-            peer_retry.bump();
-            let _ = peerstore
-                .update_retry_document(&peer_id_str, &peer_retry)
-                .await;
+            let _ = peerstore.reschedule_retry_peer(&peer_id_str, None).await;
             finish_peer(&peerstore, &peer_id_str, false).await;
             continue;
         }
 
         let mut fast_failures = 0usize;
-        for marker in &mut markers {
+        for marker in &markers {
             if !force && !marker.retry_info.is_due() {
                 continue;
             }
@@ -226,13 +223,11 @@ pub async fn run_retry_pass<S, T>(
             };
             let replay_result =
                 tokio::time::timeout(std::time::Duration::from_secs(15), replay).await;
-            let _transition_guard =
-                match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
-                    Ok(Some(guard)) => guard,
-                    Ok(None) | Err(_) => break,
-                };
             match replay_result {
                 Ok(Ok(())) => {
+                    // The PushLog acknowledgement already made the marker
+                    // transition durable.  SE fan-out is network work and must
+                    // never retain the peer's storage-transition writer.
                     if let Some(repusher) = se_repusher {
                         repusher
                             .regenerate_and_push_se_artifacts(&marker.collection_id, &marker.doc_id)
@@ -246,10 +241,16 @@ pub async fn run_retry_pass<S, T>(
                         %error,
                         "retry push failed"
                     );
-                    marker.retry_info.bump();
-                    let _ = peerstore
-                        .update_retry_document(&peer_id_str, &marker.retry_info)
-                        .await;
+                    if let Some(delay) = capacity_retry_delay(&error.to_string()) {
+                        let _ = peerstore
+                            .reschedule_retry_peer(&peer_id_str, Some(delay))
+                            .await;
+                        // Receiver saturation applies to the peer, not just
+                        // this scope.  Rotate the durable cursor and wait for
+                        // the paced sweep rather than hammering adjacent docs.
+                        break;
+                    }
+                    let _ = peerstore.reschedule_retry_peer(&peer_id_str, None).await;
                     fast_failures += 1;
                     if fast_failures >= 3 {
                         break;
@@ -257,10 +258,7 @@ pub async fn run_retry_pass<S, T>(
                 }
                 Err(_) => {
                     tracing::warn!(doc_id = %marker.doc_id, %peer_id, "retry push timed out");
-                    marker.retry_info.bump();
-                    let _ = peerstore
-                        .update_retry_document(&peer_id_str, &marker.retry_info)
-                        .await;
+                    let _ = peerstore.reschedule_retry_peer(&peer_id_str, None).await;
                     break;
                 }
             }
@@ -314,6 +312,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_nack_uses_the_paced_sweep_without_becoming_a_push_failure() {
+        let error = "peer rejected replay after 0 successful block(s): at capacity: receiver is saturated, back off";
+        assert_eq!(
+            capacity_retry_delay(error),
+            Some(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL)
+        );
+        assert_eq!(capacity_retry_delay("connection reset"), None);
+    }
 
     fn failure(acknowledged: bool) -> p2p::sync::PushFailure {
         p2p::sync::PushFailure {

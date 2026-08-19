@@ -421,9 +421,11 @@ impl AppStateBuilder {
         mut self,
         collection_mgmt: Arc<dyn CollectionManagementOperations>,
     ) -> Self {
-        self.collection_versions = Some(Arc::new(CollectionVersionsFromManagement(Arc::clone(
-            &collection_mgmt,
-        ))));
+        self.collection_versions.get_or_insert_with(|| {
+            Arc::new(CollectionVersionsFromManagement(Arc::clone(
+                &collection_mgmt,
+            )))
+        });
         self.collection_mgmt = Some(collection_mgmt);
         self
     }

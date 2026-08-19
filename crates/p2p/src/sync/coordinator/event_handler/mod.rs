@@ -362,6 +362,58 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             | TransportEvent::GossipRawMessage {
                 propagation_source, ..
             } => Err(Self::saturated_error(&propagation_source)),
+            TransportEvent::SEQueryRequest { peer_id, request } => {
+                let error = Self::saturated_error(&peer_id);
+                let reply = crate::message::QuerySEArtifactsReply::error(
+                    &request.message_id,
+                    AT_CAPACITY_MESSAGE,
+                );
+                if let Err(send_error) = self
+                    .runtime
+                    .transport
+                    .send_se_query_response(&peer_id, reply)
+                    .await
+                {
+                    tracing::debug!(%peer_id, error = %send_error, "Failed to send SE query capacity nack");
+                }
+                Err(error)
+            }
+            TransportEvent::ManageRequest { peer_id, request } => {
+                let error = Self::saturated_error(&peer_id);
+                let reply =
+                    crate::message::ManageReply::error(&request.message_id, AT_CAPACITY_MESSAGE);
+                if let Err(send_error) = self
+                    .runtime
+                    .transport
+                    .send_manage_response(&peer_id, reply)
+                    .await
+                {
+                    tracing::debug!(%peer_id, error = %send_error, "Failed to send management capacity nack");
+                }
+                Err(error)
+            }
+            TransportEvent::ManageQueryRequest { peer_id, request } => {
+                let error = Self::saturated_error(&peer_id);
+                let reply = crate::message::ManageQueryReply::error(
+                    &request.message_id,
+                    AT_CAPACITY_MESSAGE,
+                );
+                if let Err(send_error) = self
+                    .runtime
+                    .transport
+                    .send_manage_query_response(&peer_id, reply)
+                    .await
+                {
+                    tracing::debug!(%peer_id, error = %send_error, "Failed to send management query capacity nack");
+                }
+                Err(error)
+            }
+            TransportEvent::SEArtifactsReceived { peer_id, .. } => {
+                // The Iroh form is fire-and-forget and the legacy libp2p ack is
+                // owned by the runtime adapter. Dropping this bounded request
+                // closes that attempt; the sender's durable marker retries it.
+                Err(Self::saturated_error(&peer_id))
+            }
             other => self.handle_transport_event(other).await,
         }
     }

@@ -31,6 +31,47 @@ pub enum DispatchClass {
     Completion,
 }
 
+/// Keep the libp2p host and transport-agnostic event enums on one exhaustive
+/// scheduling contract.  Both enums intentionally share these variant names;
+/// adding a variant to either enum now fails to compile until its ownership
+/// class is chosen here.
+macro_rules! classify_p2p_event {
+    ($event:expr, $event_type:ident) => {
+        match $event {
+            $event_type::CarFetchRequest { .. } => $crate::sync::DispatchClass::Recovery,
+
+            $event_type::PushLogRequest { .. }
+            | $event_type::GossipMessage { .. }
+            | $event_type::GossipRawMessage { .. }
+            | $event_type::TwoStreamRequest { .. }
+            | $event_type::DocSyncRequest { .. }
+            | $event_type::BranchableSyncRequest { .. }
+            | $event_type::SEArtifactsReceived { .. }
+            | $event_type::SEQueryRequest { .. }
+            | $event_type::ManageRequest { .. }
+            | $event_type::ManageQueryRequest { .. } => $crate::sync::DispatchClass::Admission,
+
+            $event_type::PeerConnected(_)
+            | $event_type::PeerDisconnected(_)
+            | $event_type::BitswapProgress { .. }
+            | $event_type::BitswapComplete { .. }
+            | $event_type::BitswapBlockReceived { .. }
+            | $event_type::DocSyncReply { .. }
+            | $event_type::BranchableSyncReply { .. }
+            | $event_type::CarFetchResponse { .. }
+            | $event_type::SEQueryReply { .. }
+            | $event_type::ManageReply { .. }
+            | $event_type::ManageQueryReply { .. } => $crate::sync::DispatchClass::Completion,
+
+            $event_type::PeerSubscribed { .. }
+            | $event_type::PeerUnsubscribed { .. }
+            | $event_type::Listening(_) => $crate::sync::DispatchClass::Inline,
+        }
+    };
+}
+
+pub(crate) use classify_p2p_event;
+
 /// Classifies an event once at the shared transport boundary.
 pub trait DispatchEvent {
     fn dispatch_class(&self) -> DispatchClass;
@@ -289,6 +330,27 @@ mod tests {
     use tokio::sync::{mpsc, Mutex, Semaphore};
 
     use super::*;
+
+    #[test]
+    fn remote_raw_gossip_is_admission_and_peer_lifecycle_is_completion() {
+        let raw = crate::transport::TransportEvent::<()>::GossipRawMessage {
+            propagation_source: crate::transport::PeerId::new("peer".to_string()),
+            message_id: crate::transport::MessageId::new("message".to_string()),
+            topic: "topic".to_string(),
+            data: Vec::new(),
+        };
+        assert_eq!(raw.dispatch_class(), DispatchClass::Admission);
+
+        let connected = crate::transport::TransportEvent::<()>::PeerConnected(
+            crate::transport::PeerId::new("peer".to_string()),
+        );
+        assert_eq!(connected.dispatch_class(), DispatchClass::Completion);
+
+        let listening = crate::transport::TransportEvent::<()>::Listening(
+            crate::transport::PeerAddr::new("address".to_string()),
+        );
+        assert_eq!(listening.dispatch_class(), DispatchClass::Inline);
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum TestEvent {

@@ -379,6 +379,12 @@ pub struct PushLogBroadcast {
     /// authenticated propagation hop.
     #[serde(skip)]
     pub(crate) authenticated_origin_peer_id: Option<String>,
+
+    /// Canonical unsigned bytes recovered from the received CBOR map. Keeping
+    /// this out-of-band value lets an older reader verify a newer envelope
+    /// without dropping unknown signed fields during struct decoding.
+    #[serde(skip)]
+    received_origin_signing_bytes: Option<Vec<u8>>,
 }
 
 /// Pre-origin-hint postcard shape retained for rolling compatibility.
@@ -409,6 +415,7 @@ impl From<LegacyPostcardPushLogBroadcast> for PushLogBroadcast {
             origin_signature: None,
             authenticated_source_peer_id: None,
             authenticated_origin_peer_id: None,
+            received_origin_signing_bytes: None,
         }
     }
 }
@@ -540,6 +547,7 @@ impl PushLogBroadcast {
             origin_signature: None,
             authenticated_source_peer_id: None,
             authenticated_origin_peer_id: None,
+            received_origin_signing_bytes: None,
         }
     }
 
@@ -558,15 +566,20 @@ impl PushLogBroadcast {
             origin_signature: None,
             authenticated_source_peer_id: None,
             authenticated_origin_peer_id: None,
+            received_origin_signing_bytes: None,
         }
     }
 
     /// Bytes covered by the Iroh origin signature.
     pub(crate) fn origin_signing_bytes(&self) -> Result<Vec<u8>, defra_core::cbor::Error> {
+        if let Some(bytes) = &self.received_origin_signing_bytes {
+            return Ok(bytes.clone());
+        }
         let mut unsigned = self.clone();
         unsigned.origin_signature = None;
         unsigned.authenticated_source_peer_id = None;
         unsigned.authenticated_origin_peer_id = None;
+        unsigned.received_origin_signing_bytes = None;
         defra_core::cbor::to_vec(&unsigned)
     }
 
@@ -620,14 +633,7 @@ impl PushLogBroadcast {
                     PushLogGossipPayloadEncoding::CborRequest,
                 )
             })
-            .or_else(|_| {
-                defra_core::cbor::from_slice::<Self>(payload)
-                    .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
-            })
-            .or_else(|_| {
-                postcard::from_bytes::<Self>(payload)
-                    .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::PostcardBroadcast))
-            })
+            .or_else(|_| decode_cbor_broadcast(payload))
             .or_else(|_| {
                 postcard::from_bytes::<LegacyPostcardPushLogBroadcast>(payload).map(|broadcast| {
                     (
@@ -655,6 +661,26 @@ impl PushLogBroadcast {
             payload_shape_hint: describe_gossip_payload_shape(payload),
         }
     }
+}
+
+fn decode_cbor_broadcast(
+    payload: &[u8],
+) -> Result<(PushLogBroadcast, PushLogGossipPayloadEncoding), defra_core::cbor::Error> {
+    let mut broadcast = defra_core::cbor::from_slice::<PushLogBroadcast>(payload)?;
+    let mut value = defra_core::cbor::from_slice::<ciborium::Value>(payload)?;
+    let ciborium::Value::Map(fields) = &mut value else {
+        return Err(defra_core::cbor::Error::Deserialize(
+            "PushLog broadcast must be a CBOR map".to_string(),
+        ));
+    };
+    fields.retain(
+        |(key, _)| !matches!(key, ciborium::Value::Text(name) if name == "OriginSignature"),
+    );
+    let unsigned_payload = defra_core::cbor::to_vec(&value)?;
+    if broadcast.origin_signature.is_some() {
+        broadcast.received_origin_signing_bytes = Some(unsigned_payload);
+    }
+    Ok((broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
 }
 
 #[cfg(test)]
@@ -766,7 +792,7 @@ mod tests {
     #[test]
     fn cbor_gossip_payload_tolerates_unknown_future_fields() {
         #[derive(Serialize)]
-        struct FutureBroadcast {
+        struct FutureUnsignedBroadcast {
             #[serde(rename = "DocID")]
             doc_id: String,
             #[serde(rename = "CID", with = "super::super::cbor::bytes_as_cbor")]
@@ -777,20 +803,56 @@ mod tests {
             creator: String,
             #[serde(rename = "Block", with = "super::super::cbor::bytes_as_cbor")]
             block: Bytes,
+            #[serde(rename = "SourcePeerID")]
+            source_peer_id: String,
             #[serde(rename = "FutureField")]
             future_field: String,
         }
 
-        let future = FutureBroadcast {
+        #[derive(Serialize)]
+        struct FutureSignedBroadcast {
+            #[serde(rename = "DocID")]
+            doc_id: String,
+            #[serde(rename = "CID", with = "super::super::cbor::bytes_as_cbor")]
+            cid: Bytes,
+            #[serde(rename = "CollectionID")]
+            collection_id: String,
+            #[serde(rename = "Creator")]
+            creator: String,
+            #[serde(rename = "Block", with = "super::super::cbor::bytes_as_cbor")]
+            block: Bytes,
+            #[serde(rename = "SourcePeerID")]
+            source_peer_id: String,
+            #[serde(rename = "OriginSignature", with = "super::super::cbor::bytes_as_cbor")]
+            origin_signature: Bytes,
+            #[serde(rename = "FutureField")]
+            future_field: String,
+        }
+
+        let future = FutureUnsignedBroadcast {
             doc_id: "doc-future".to_string(),
             cid: Bytes::from_static(&[9, 8, 7]),
             collection_id: "collection-future".to_string(),
             creator: "creator-future".to_string(),
             block: Bytes::from_static(&[6, 5, 4]),
-            future_field: "ignored by older decoders".to_string(),
+            source_peer_id: "origin-future".to_string(),
+            future_field: "covered by older verifiers".to_string(),
         };
 
-        let encoded = defra_core::cbor::to_vec(&future).expect("future payload should encode");
+        let unsigned_payload = defra_core::cbor::to_vec(&future).unwrap();
+        let expected_signing_bytes = unsigned_payload;
+        let signed = FutureSignedBroadcast {
+            doc_id: future.doc_id.clone(),
+            cid: future.cid.clone(),
+            collection_id: future.collection_id.clone(),
+            creator: future.creator.clone(),
+            block: future.block.clone(),
+            source_peer_id: future.source_peer_id.clone(),
+            origin_signature: Bytes::from_static(&[7; 64]),
+            future_field: future.future_field.clone(),
+        };
+
+        let encoded = defra_core::cbor::to_vec(&signed).expect("future payload should encode");
         let (decoded, encoding) = PushLogBroadcast::decode_gossip_payload(&encoded)
             .expect("future payload should decode as broadcast");
 
@@ -800,5 +862,9 @@ mod tests {
         assert_eq!(decoded.creator, future.creator);
         assert_eq!(decoded.cid, future.cid);
         assert_eq!(decoded.block, future.block);
+        assert_eq!(
+            decoded.origin_signing_bytes().unwrap(),
+            expected_signing_bytes
+        );
     }
 }

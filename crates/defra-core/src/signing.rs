@@ -519,6 +519,7 @@ where
 /// When set, P2P broadcasts use this DID as the Creator field instead of
 /// the node's PeerId. This enables ACP registration on the receiving node:
 /// the merge handler registers the document with this DID as owner.
+#[cfg(test)]
 pub fn set_broadcast_creator_did(did: Option<String>) {
     BROADCAST_CREATOR_DID.with(|c| {
         *c.borrow_mut() = did;
@@ -563,5 +564,18 @@ mod broadcast_creator_tests {
         assert_eq!(anonymous_creator, None);
 
         set_broadcast_creator_did(None);
+    }
+
+    #[tokio::test]
+    async fn completed_creator_scope_cannot_contaminate_next_anonymous_mutation() {
+        let owner = scope_broadcast_creator_did(Some("did:key:owner".to_string()), async {
+            get_broadcast_creator_did()
+        })
+        .await;
+        assert_eq!(owner.as_deref(), Some("did:key:owner"));
+
+        let anonymous =
+            scope_broadcast_creator_did(None, async { get_broadcast_creator_did() }).await;
+        assert_eq!(anonymous, None);
     }
 }

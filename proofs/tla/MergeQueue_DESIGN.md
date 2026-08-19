@@ -97,7 +97,8 @@ Run from `proofs/tla` (Java resolved by `./tools/tlc`; on this box
 | `MC_MergeQueue_Green` | `MC_MergeQueue_Green.tla` | GlobalMerge + Closed | GREEN (all hold) | one merge owner; ordered batching permitted by the ownership refinement |
 | `MC_MergeQueue_Red_NoMutex` | `MC_MergeQueue_Red_NoMutex.tla` | None + Closed | RED | `INV_SameDocSerialized` violated; with only `INV_NoDoubleApply`, `applied[b1]=2` |
 | `MC_MergeQueue_Red_FailOpen` | `MC_MergeQueue_Red_FailOpen.tla` | PerDoc + Open | RED | `INV_NoSilentDrop` violated |
-| `MC_MergeQueue_CrossDocParallel` | `MC_MergeQueue_CrossDocParallel.tla` | PerDoc-only | RED | `INV_SingleMergeWriter` violated: `inCrit = [d1↦{b1}, d2↦{b3}]` |
+| `MC_MergeQueue_CrossDocParallel` | `MC_MergeQueue_CrossDocParallel.tla` | PerDoc-only | RED | anti-vacuity: `NoCrossDocParallel` is violated, proving per-doc locks permit cross-doc overlap |
+| `MC_MergeQueue_Red_PerDocWriters` | `MC_MergeQueue_CrossDocParallel.tla` | PerDoc-only | RED | `INV_SingleMergeWriter` violated: `inCrit = [d1↦{b1}, d2↦{b3}]` |
 
 ## Modeling boundaries (honest reach)
 

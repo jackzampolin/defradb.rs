@@ -209,6 +209,15 @@ impl Node {
                 // -> Rust artifact push is fire-and-forget, so use the no-ack
                 // `handle_artifacts_received` (Go -> Rust over iroh, which
                 // expects a PushSEArtifactsReply ack, is a follow-up).
+                if admission == p2p::sync::DispatchAdmission::Saturated {
+                    if let Err(error) = coordinator_for_events
+                        .handle_transport_event_with_admission(event, admission)
+                        .await
+                    {
+                        tracing::debug!(%error, "rejected saturated CLI Iroh request");
+                    }
+                    return;
+                }
                 let event = match event {
                     p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
                         let doc_ids = db_merge::se::serve::handle_artifacts_received(

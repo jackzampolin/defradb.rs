@@ -273,26 +273,7 @@ impl<ResponseToken> TransportEvent<ResponseToken> {
 
     /// Assign every transport event to the shared bounded scheduler.
     pub fn dispatch_class(&self) -> crate::sync::DispatchClass {
-        use crate::sync::DispatchClass;
-
-        match self {
-            // Recovery serving retains an independent bounded reserve. Slow
-            // ownership registration must not prevent a provider from serving
-            // a receiver-owned CAR obligation.
-            Self::CarFetchRequest { .. } => DispatchClass::Recovery,
-            Self::GossipRawMessage { .. }
-            | Self::BitswapComplete { .. }
-            | Self::BitswapBlockReceived { .. }
-            | Self::DocSyncReply { .. }
-            | Self::BranchableSyncReply { .. }
-            | Self::CarFetchResponse { .. } => DispatchClass::Completion,
-            Self::PushLogRequest { .. }
-            | Self::GossipMessage { .. }
-            | Self::TwoStreamRequest { .. }
-            | Self::DocSyncRequest { .. }
-            | Self::BranchableSyncRequest { .. } => DispatchClass::Admission,
-            _ => DispatchClass::Inline,
-        }
+        crate::sync::classify_p2p_event!(self, TransportEvent)
     }
 }
 

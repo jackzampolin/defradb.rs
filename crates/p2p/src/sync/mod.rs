@@ -38,6 +38,7 @@ pub use coordinator::{
     LoadReplicatorsResult, PushFailure, SyncCoordinator, SyncShutdownHandle, SyncStatus,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
+pub(crate) use event_dispatcher::classify_p2p_event;
 pub(crate) use event_dispatcher::DispatchDiagnostics;
 pub use event_dispatcher::{DispatchAdmission, DispatchClass, DispatchEvent, DispatchSnapshot};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};

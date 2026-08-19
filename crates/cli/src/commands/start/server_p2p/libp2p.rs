@@ -245,7 +245,17 @@ impl Node {
 
                 // Intercept SE events: the CLI must store inbound artifacts and
                 // serve/route SE queries itself (the coordinator does not). #976.
-                let transport_event = match p2p::convert_host_event(event) {
+                let transport_event = p2p::convert_host_event(event);
+                if admission == p2p::sync::DispatchAdmission::Saturated {
+                    if let Err(error) = coordinator_for_events
+                        .handle_transport_event_with_admission(transport_event, admission)
+                        .await
+                    {
+                        tracing::debug!(%error, "rejected saturated CLI P2P request");
+                    }
+                    return;
+                }
+                let transport_event = match transport_event {
                     p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
                         let doc_ids = match peer_id.as_str().parse::<libp2p::PeerId>() {
                             Ok(pid) => {

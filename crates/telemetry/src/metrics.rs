@@ -22,12 +22,14 @@ impl RetryLayer {
     const COUNT: usize = 4;
 
     #[cfg(feature = "otlp")]
-    const fn as_str(self) -> &'static str {
+    const fn labels(self) -> &'static [&'static str] {
         match self {
-            Self::HttpAutoCommit => "http_auto_commit",
-            Self::EmbeddedExecute => "embedded_execute",
-            Self::Merge => "merge",
-            Self::PushMarker => "push_marker",
+            Self::HttpAutoCommit => &["http_auto_commit"],
+            Self::EmbeddedExecute => &["embedded_execute"],
+            Self::Merge => &["merge"],
+            // Preserve the pre-stage-3 label for one compatibility window
+            // while exposing the marker-based name to new dashboards.
+            Self::PushMarker => &["push_marker", "push_ledger"],
         }
     }
 }
@@ -134,27 +136,33 @@ pub fn record_conflict_tracker_size(
 #[cfg(feature = "otlp")]
 fn emit_retry_attempt(layer: RetryLayer) {
     with_instruments(|metrics| {
-        metrics
-            .retry_attempts
-            .add(1, &[KeyValue::new("layer", layer.as_str())]);
+        for label in layer.labels() {
+            metrics
+                .retry_attempts
+                .add(1, &[KeyValue::new("layer", *label)]);
+        }
     });
 }
 
 #[cfg(feature = "otlp")]
 fn emit_retry_success(layer: RetryLayer) {
     with_instruments(|metrics| {
-        metrics
-            .retry_successes
-            .add(1, &[KeyValue::new("layer", layer.as_str())]);
+        for label in layer.labels() {
+            metrics
+                .retry_successes
+                .add(1, &[KeyValue::new("layer", *label)]);
+        }
     });
 }
 
 #[cfg(feature = "otlp")]
 fn emit_retry_exhaustion(layer: RetryLayer) {
     with_instruments(|metrics| {
-        metrics
-            .retry_exhaustions
-            .add(1, &[KeyValue::new("layer", layer.as_str())]);
+        for label in layer.labels() {
+            metrics
+                .retry_exhaustions
+                .add(1, &[KeyValue::new("layer", *label)]);
+        }
     });
 }
 

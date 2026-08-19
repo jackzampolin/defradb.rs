@@ -525,7 +525,7 @@ mod regression_827 {
 }
 
 #[test]
-fn test_decode_gossip_payload_from_postcard_broadcast() {
+fn test_postcard_new_struct_encoding_decodes_as_legacy_five_field_shape() {
     let broadcast = PushLogBroadcast::new(
         "doc-postcard-broadcast".to_string(),
         Bytes::from(vec![1, 2, 3, 4]),

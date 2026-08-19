@@ -20,6 +20,8 @@ use std::time::Duration;
 use storage::backends::MemoryStore;
 use tokio::sync::mpsc;
 
+type StreamedBlocks = Arc<Mutex<Option<Vec<(Cid, Vec<u8>)>>>>;
+
 fn make_cid(data: &[u8]) -> Cid {
     let hash = Code::Sha2_256.digest(data);
     Cid::new_v1(0x71, hash)
@@ -51,7 +53,7 @@ struct TestTransport {
     connected_peers: Arc<Mutex<Vec<PeerId>>>,
     cancelled_queries: Arc<Mutex<Vec<u64>>>,
     hang_car_requests: Arc<AtomicBool>,
-    streamed_rooted_blocks: Arc<Mutex<Option<Vec<(Cid, Vec<u8>)>>>>,
+    streamed_rooted_blocks: StreamedBlocks,
     stream_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
     early_failure_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
     early_deferred_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,

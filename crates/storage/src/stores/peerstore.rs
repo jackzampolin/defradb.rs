@@ -117,9 +117,9 @@ impl<S: Store> Peerstore<S> {
 
     /// Acquire permission to process retry state while the replicator exists.
     ///
-    /// The guard must be retained through transport replay and any resulting
-    /// marker update. It serializes each peer's live registration, retry/ack,
-    /// and forget transitions so an old ack cannot race a newer dirty marker.
+    /// This guard is for short storage transitions only. It must not be held
+    /// across transport replay or any other network I/O. Atomic retry-state
+    /// methods reacquire the same lock when they commit their transition.
     pub async fn acquire_replicator_retry_guard(
         &self,
         peer_id: &str,
@@ -274,7 +274,7 @@ impl<S: Store> Peerstore<S> {
             if !txn.has(&id_key.bytes()).await? {
                 let mut info = super::RetryInfo::from_bytes(retry_info_bytes)
                     .unwrap_or_else(|_| super::RetryInfo::new_initial());
-                info.bump();
+                info.bump_for(peer_id);
                 txn.set(
                     &id_key.bytes(),
                     &info.to_bytes().map_err(crate::corekv::Error::Other)?,
@@ -368,7 +368,7 @@ impl<S: Store> Peerstore<S> {
                 let id_key = ReplicatorRetryIDKey::new(&peer);
                 if !txn.has(&id_key.bytes()).await? {
                     let mut info = super::RetryInfo::new_initial();
-                    info.bump();
+                    info.bump_for(&peer);
                     txn.set(
                         &id_key.bytes(),
                         &info.to_bytes().map_err(crate::corekv::Error::Other)?,
@@ -419,7 +419,6 @@ impl<S: Store> Peerstore<S> {
     }
 
     async fn load_scope_markers(&self, peer_id: &str) -> Result<Vec<super::PushRetryMarker>> {
-        self.migrate_push_retry_markers(Some(peer_id)).await?;
         let retry_info = self
             .get_retry_info(peer_id)
             .await?
@@ -474,6 +473,10 @@ impl<S: Store> Peerstore<S> {
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
                 .then_with(|| a.collection_id.cmp(&b.collection_id))
         });
+        if !result.is_empty() {
+            let offset = retry_info.dispatch_cursor as usize % result.len();
+            result.rotate_left(offset);
+        }
         Ok(result)
     }
 
@@ -534,17 +537,38 @@ impl<S: Store> Peerstore<S> {
         Ok(stats)
     }
 
-    pub async fn update_retry_document(
+    /// Advance the current peer schedule after an attempted replay.
+    ///
+    /// This method owns the per-peer writer and reads the current value inside
+    /// the write transaction.  Callers never blind-write a stale snapshot over
+    /// reconnect activation or a concurrent marker registration.
+    pub async fn reschedule_retry_peer(
         &self,
         peer_id: &str,
-        retry_info: &super::RetryInfo,
-    ) -> Result<()> {
-        let bytes = retry_info.to_bytes().map_err(crate::corekv::Error::Other)?;
+        defer_for: Option<std::time::Duration>,
+    ) -> Result<bool> {
+        let _retry_guard = retry_peer_lock(peer_id).write_arc().await;
         retry_push_txn_conflicts(|| async {
             let mut txn = self.store.new_txn(false).await?;
-            txn.set(&ReplicatorRetryIDKey::new(peer_id).bytes(), &bytes)
+            if !txn.has(&ReplicatorKey::new(peer_id).bytes()).await? {
+                return Ok(false);
+            }
+            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
+            let Some(bytes) = txn.get(&key).await? else {
+                return Ok(false);
+            };
+            let mut info =
+                super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?;
+            info.advance_dispatch_cursor();
+            if let Some(delay) = defer_for {
+                info.defer_for(delay);
+            } else {
+                info.bump_for(peer_id);
+            }
+            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
                 .await?;
-            txn.commit().await
+            txn.commit().await?;
+            Ok(true)
         })
         .await
     }
@@ -670,16 +694,51 @@ impl<S: Store> Peerstore<S> {
 
     /// Stop sweeping a peer once no document or collection marker remains.
     pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
-        if !self.load_scope_markers(peer_id).await?.is_empty() {
-            return Ok(());
+        retry_push_txn_conflicts(|| self.clear_retry_peer_once(peer_id)).await
+    }
+
+    async fn clear_retry_peer_once(&self, peer_id: &str) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        let mut has_markers = false;
+        let mut empty_legacy_keys = Vec::new();
+
+        for (prefix, expected_prefix) in [
+            (
+                ReplicatorRetryDocIDKey::peer_prefix(peer_id),
+                format!("/rep/retry/doc/{peer_id}/"),
+            ),
+            (
+                ReplicatorRetryCollectionKey::peer_prefix(peer_id),
+                format!("/rep/retry/col/{peer_id}/"),
+            ),
+        ] {
+            let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
+            while let Some(pair) = iter.next().await? {
+                let key = String::from_utf8_lossy(&pair.key);
+                if key
+                    .strip_prefix(&expected_prefix)
+                    .is_some_and(str::is_empty)
+                {
+                    empty_legacy_keys.push(pair.key);
+                } else {
+                    has_markers = true;
+                    break;
+                }
+            }
+            drop(iter);
+            if has_markers {
+                break;
+            }
         }
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
+
+        if !has_markers {
+            for key in empty_legacy_keys {
+                txn.delete(&key).await?;
+            }
             txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
                 .await?;
-            txn.commit().await
-        })
-        .await
+        }
+        txn.commit().await
     }
 }
 

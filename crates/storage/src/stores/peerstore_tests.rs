@@ -504,6 +504,7 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
     .unwrap();
     txn.commit().await.unwrap();
 
+    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 1);
     let legacy = peerstore.get_retry_documents("peer").await.unwrap();
     assert_eq!(legacy.len(), 1);
     assert_eq!(legacy[0].doc_id, "doc");
@@ -523,6 +524,71 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
     let schedule = super::super::RetryInfo::from_bytes(&schedule).unwrap();
     assert!(schedule.is_due());
     assert_eq!(schedule.num_retries, 0);
+}
+
+#[tokio::test]
+async fn peer_retry_cursor_rotates_bounded_marker_prefix_after_failure() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+    for doc_id in ["a", "b", "c", "d"] {
+        peerstore
+            .record_push_failure("peer", doc_id, "collection", &initial)
+            .await
+            .unwrap();
+    }
+
+    let first = peerstore.get_retry_documents("peer").await.unwrap();
+    assert_eq!(first[0].doc_id, "a");
+    assert!(peerstore.reschedule_retry_peer("peer", None).await.unwrap());
+
+    let second = peerstore.get_retry_documents("peer").await.unwrap();
+    assert_eq!(second[0].doc_id, "b");
+    let schedule = super::super::RetryInfo::from_bytes(
+        &peerstore.get_retry_info("peer").await.unwrap().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(schedule.dispatch_cursor, 1);
+}
+
+#[tokio::test]
+async fn capacity_reschedule_rotates_without_advancing_failure_ladder() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &initial)
+        .await
+        .unwrap();
+    let before = super::super::RetryInfo::from_bytes(
+        &peerstore.get_retry_info("peer").await.unwrap().unwrap(),
+    )
+    .unwrap();
+
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(peerstore
+        .reschedule_retry_peer("peer", Some(std::time::Duration::from_secs(2)))
+        .await
+        .unwrap());
+
+    let after = super::super::RetryInfo::from_bytes(
+        &peerstore.get_retry_info("peer").await.unwrap().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after.num_retries, before.num_retries);
+    assert_eq!(after.dispatch_cursor, before.dispatch_cursor + 1);
+    assert!(after.next_retry_unix >= now + 2);
 }
 
 #[tokio::test]
@@ -590,6 +656,35 @@ async fn sweep_clear_removes_preexisting_empty_document_retry() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
+    let store = Arc::new(MemoryStore::new());
+    let clear_store = Peerstore::new(Arc::clone(&store));
+    let register_store = Peerstore::new(Arc::clone(&store));
+    let peerstore = Peerstore::new(store);
+    let mut txn = peerstore.store.new_txn(false).await.unwrap();
+    txn.set(
+        &ReplicatorRetryIDKey::new("peer").bytes(),
+        &super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let (clear_result, register_result) = tokio::join!(
+        clear_store.clear_retry_peer("peer"),
+        register_store.observe_push_head("peer", "doc", "collection")
+    );
+    clear_result.unwrap();
+    register_result.unwrap();
+
+    assert_eq!(
+        peerstore.get_retry_documents("peer").await.unwrap().len(),
+        1
+    );
+    assert!(peerstore.get_retry_info("peer").await.unwrap().is_some());
 }
 
 #[tokio::test]
