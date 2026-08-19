@@ -709,17 +709,11 @@ jobs:
           fi
 
       # Parallelism is bounded at 8 rather than left to libtest's default.
-      # The guard-release port race that once forced `--test-threads=1` is
-      # handled in the harness (`defra-harness` retries a node start with
-      # fresh ports, 3 attempts, on an EADDRINUSE exit), so serializing is
-      # no longer the mitigation it was.
       #
       # 8 is the knee of the measured curve: it recovers 3.8x of the 4.3x
       # total speedup available at 16 threads while halving the number of
       # concurrently live node clusters. That headroom is deliberate —
-      # studio-1 also hosts runners for seven other repos, and
-      # `Cluster::restart_node` re-binds a node's original port holding no
-      # guard and with no retry, so the steal window widens with concurrency.
+      # studio-1 also hosts runners for seven other repos.
       # `--profile super-dev` matches the cached node binaries: the test
       # binaries link ~7.5x less debug object volume, which is where the
       # first leg's in-step compile toll went, and sccache keys per flag set
@@ -742,10 +736,13 @@ jobs:
 
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
+        # A libp2p bind failure can reach the harness log watcher before the
+        # child-exit path classifies it for retry. Keep this port-heavy suite
+        # serial until the harness handles both readiness failure paths.
         run: >-
           cargo test --profile super-dev -p integration-test
           --test p2p
-          -- --test-threads=8 --skip ::go_
+          -- --test-threads=1 --skip ::go_
 
       # go-compat runs the `go_*` half of every dual-runtime test against
       # the upstream Go DefraDB binary. Catches cross-implementation
