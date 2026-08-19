@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// `root_cid` is the DAG root being synchronized for correlation and logging.
 /// `wanted_cids` are the CAR roots to include in the response.
-/// If `recursive` is true, the responder walks the DAG from `root_cid`.
+/// If `recursive` is true, the responder walks the DAG from `wanted_cids`
+/// (falling back to `root_cid` for legacy requests with no want list).
 /// If `recursive` is false, the responder returns only the explicitly wanted blocks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CarFetchRequest {
@@ -41,8 +42,19 @@ impl CarFetchRequest {
         }
     }
 
+    /// Fetch a bounded descendant closure rooted at the known missing
+    /// frontier. This is distinct from a historical walk from `root_cid`:
+    /// every traversal root is a CID the receiver already proved missing.
+    pub fn selective_dag(root_cid: Cid, wanted_cids: Vec<Cid>) -> Self {
+        Self {
+            root_cid,
+            wanted_cids: dedupe_cids(wanted_cids),
+            recursive: true,
+        }
+    }
+
     pub fn response_roots(&self) -> Vec<Cid> {
-        if self.recursive || self.wanted_cids.is_empty() {
+        if self.wanted_cids.is_empty() {
             vec![self.root_cid]
         } else {
             self.wanted_cids.clone()
@@ -82,6 +94,19 @@ mod tests {
         let child_b = make_cid(b"child-b");
         let req = CarFetchRequest::selective_blocks(root, vec![child_a, child_b, child_a]);
         assert!(!req.recursive);
+        assert_eq!(req.root_cid, root);
+        assert_eq!(req.wanted_cids, vec![child_a, child_b]);
+        assert_eq!(req.response_roots(), vec![child_a, child_b]);
+    }
+
+    #[test]
+    fn selective_dag_walks_only_from_deduped_missing_frontier() {
+        let root = make_cid(b"root");
+        let child_a = make_cid(b"child-a");
+        let child_b = make_cid(b"child-b");
+        let req = CarFetchRequest::selective_dag(root, vec![child_a, child_b, child_a]);
+
+        assert!(req.recursive);
         assert_eq!(req.root_cid, root);
         assert_eq!(req.wanted_cids, vec![child_a, child_b]);
         assert_eq!(req.response_roots(), vec![child_a, child_b]);

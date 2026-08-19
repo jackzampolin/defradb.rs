@@ -39,21 +39,6 @@ impl Drop for EncryptionConfigGuard {
     }
 }
 
-/// RAII guard that clears the `broadcast_creator_did` thread-local on Drop.
-///
-/// Critical for P2P identity correctness — without this, a panicking
-/// mutation can leave the previous caller's DID on the blocking-pool
-/// worker, and the next anonymous mutation would silently broadcast
-/// with someone else's identity (registered as that identity on the
-/// receiving peer via `acp_merge_handler`). See #757.
-struct BroadcastCreatorDidGuard;
-
-impl Drop for BroadcastCreatorDidGuard {
-    fn drop(&mut self) {
-        defra_core::signing::set_broadcast_creator_did(None);
-    }
-}
-
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL mutation and return JSON results.
     ///
@@ -125,8 +110,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
-        self.execute_parsed_mutations(mutations, mutator, caller_identity, fetcher_override)
-            .await
+        let caller_did = caller_identity.as_ref().map(ToString::to_string);
+        // Embedded callers may establish a node identity outside the query.
+        // Preserve that identity when no request actor overrides it, while
+        // HTTP callers enter with neither ambient form for anonymous requests.
+        let acting_identity = caller_did
+            .clone()
+            .or_else(defra_core::current_identity::get_effective_identity);
+        // Keep the large mutation state machine off the Tokio worker stack.
+        // `task_local::scope` polls its child inline; boxing here prevents the
+        // scope wrapper from overflowing the default worker stack on the ACP
+        // create path.
+        let execution = Box::pin(self.execute_parsed_mutations(
+            mutations,
+            mutator,
+            caller_identity,
+            fetcher_override,
+        ));
+        defra_core::current_identity::with_scoped_identity(
+            acting_identity,
+            defra_core::signing::scope_broadcast_creator_did(caller_did, execution),
+        )
+        .await
     }
 
     /// Execute pre-parsed mutations, skipping redundant GraphQL parsing.
@@ -408,29 +413,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             ));
         } else {
             defra_core::encryption::set_encryption_config(None);
-        }
-
-        // Bind a RAII guard for broadcast_creator_did. Critical for P2P
-        // identity correctness — without this, a panicking mutation can
-        // leave the previous caller's DID on the blocking-pool worker,
-        // and the next anonymous mutation would silently broadcast with
-        // someone else's identity. See #757.
-        let _broadcast_creator_did_guard = BroadcastCreatorDidGuard;
-
-        // Scope the ambient acting identity to the caller for the duration of
-        // this mutation so DB-layer NAC checks can resolve who is acting. Only
-        // override when there IS a caller identity; when absent, leave the
-        // ambient untouched so an embedded node's outer node DID survives across
-        // multiple mutations in one execute(). Restores the prior value on drop.
-        let _current_identity_guard = caller_identity.as_ref().map(|did| {
-            defra_core::current_identity::scoped_current_identity(Some(did.to_string()))
-        });
-
-        // Set broadcast identity for P2P: PushLog Creator field will carry this
-        // DID instead of the node PeerId, enabling ACP owner registration on the
-        // receiving node during merge.
-        if let Some(ref did) = caller_identity {
-            defra_core::signing::set_broadcast_creator_did(Some(did.to_string()));
         }
 
         let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
@@ -984,17 +966,23 @@ mod tests {
 
     struct CapturingMutator {
         created_docs: Mutex<Vec<Document>>,
+        broadcast_creators: Mutex<Vec<Option<String>>>,
     }
 
     impl CapturingMutator {
         fn new() -> Self {
             Self {
                 created_docs: Mutex::new(Vec::new()),
+                broadcast_creators: Mutex::new(Vec::new()),
             }
         }
 
         fn created_docs(&self) -> Vec<Document> {
             self.created_docs.lock().unwrap().clone()
+        }
+
+        fn broadcast_creators(&self) -> Vec<Option<String>> {
+            self.broadcast_creators.lock().unwrap().clone()
         }
     }
 
@@ -1002,6 +990,10 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl crate::mutator::DocMutator for CapturingMutator {
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
+            self.broadcast_creators
+                .lock()
+                .unwrap()
+                .push(defra_core::signing::get_broadcast_creator_did());
             if doc.id().is_none() {
                 // Stand in for the genesis-CID identity a real create would
                 // derive: seed a valid DocID from the capture order.
@@ -1038,6 +1030,41 @@ mod tests {
         ) -> Result<Option<Document>> {
             Ok(None)
         }
+    }
+
+    #[tokio::test]
+    async fn query_executor_mutation_scopes_broadcast_creator_did() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        );
+        let mutator = Arc::new(CapturingMutator::new());
+        let runner =
+            QueryRunner::new(MockFetcher::new(), vec![collection]).with_mutator(mutator.clone());
+        let did =
+            identity::Did::new("did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw").unwrap();
+
+        let response = runner
+            .execute(
+                QueryRequest::new(
+                    r#"mutation { add_User(input: [{ name: "Alice" }]) { _docID } }"#,
+                )
+                .with_identity(Some(did.clone())),
+            )
+            .await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(mutator.broadcast_creators(), vec![Some(did.to_string())]);
+        assert_eq!(defra_core::signing::get_broadcast_creator_did(), None);
     }
 
     // =========================================================================
@@ -1106,46 +1133,6 @@ mod tests {
         }
 
         assert!(defra_core::encryption::get_encryption_config().is_none());
-    }
-
-    #[test]
-    fn broadcast_creator_did_guard_clears_on_normal_drop() {
-        defra_core::signing::set_broadcast_creator_did(None);
-        defra_core::signing::set_broadcast_creator_did(Some("did:key:test".to_string()));
-        assert!(defra_core::signing::get_broadcast_creator_did().is_some());
-
-        {
-            let _guard = BroadcastCreatorDidGuard;
-            assert!(defra_core::signing::get_broadcast_creator_did().is_some());
-        }
-
-        assert!(defra_core::signing::get_broadcast_creator_did().is_none());
-    }
-
-    #[test]
-    fn broadcast_creator_did_guard_clears_on_panic_unwind() {
-        defra_core::signing::set_broadcast_creator_did(None);
-        defra_core::signing::set_broadcast_creator_did(Some("did:key:alice".to_string()));
-
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = BroadcastCreatorDidGuard;
-            panic!("simulated mutation panic");
-        });
-
-        // Critical: a panicking mutation must NOT leave Alice's DID on
-        // this thread for the next anonymous mutation to broadcast as.
-        assert!(defra_core::signing::get_broadcast_creator_did().is_none());
-    }
-
-    #[test]
-    fn broadcast_creator_did_guard_self_heals_from_leaked_state() {
-        defra_core::signing::set_broadcast_creator_did(Some("did:key:leaked".to_string()));
-
-        {
-            let _guard = BroadcastCreatorDidGuard;
-        }
-
-        assert!(defra_core::signing::get_broadcast_creator_did().is_none());
     }
 
     #[tokio::test]

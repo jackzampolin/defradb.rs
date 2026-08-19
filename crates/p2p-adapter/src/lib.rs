@@ -9,12 +9,12 @@ mod doc_sync;
 mod iroh;
 #[cfg(feature = "libp2p")]
 mod libp2p;
-#[cfg(feature = "libp2p")]
-mod libp2p_doc_pusher;
 pub mod manage;
 mod read_gate;
 mod replicator_status;
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
+mod retry;
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
 mod transport_doc_pusher;
 #[cfg(feature = "iroh")]
 mod transport_version_syncer;
@@ -25,11 +25,11 @@ mod version_syncer;
 pub use iroh::IrohP2PAdapter;
 #[cfg(feature = "libp2p")]
 pub use libp2p::{CollectionLookup, P2PAdapter, VersionSyncer};
-#[cfg(feature = "libp2p")]
-pub use libp2p_doc_pusher::{DbDocPusher, DocPusher};
 pub use read_gate::{DbBlockClassifier, DbBlockReadGate};
 pub use replicator_status::{load_persisted_replicators, set_persisted_replicator_status};
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
+pub use retry::{activate_retry_peer, run_retry_pass, spawn_failure_recorder, spawn_retry_loop};
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 #[cfg(feature = "iroh")]
 pub use transport_version_syncer::{DbTransportVersionSyncer, TransportVersionSyncer};

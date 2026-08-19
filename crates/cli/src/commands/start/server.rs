@@ -80,8 +80,8 @@ impl Node {
 
         let mut db_options =
             db::DbOptions::new().with_max_txn_retries(config.datastore.max_txn_retries);
-        if let Some(identity) = user_identity {
-            db_options = db_options.with_node_identity_arc(identity);
+        if let Some(identity) = user_identity.as_ref() {
+            db_options = db_options.with_node_identity_arc(identity.clone());
             info!("Database configured with user identity");
         }
         let embedding_api_key = if config.embedding.api_key_env.is_empty() {
@@ -137,6 +137,7 @@ impl Node {
             event_bus.clone(),
             config,
             peer_keypair,
+            user_identity,
             se_key,
         )
         .await?;

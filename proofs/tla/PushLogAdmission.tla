@@ -6,9 +6,8 @@
 \* THE MECHANISM: a pushed head block whose DAG has missing links must be REGISTERED in
 \* the hub's bounded pending-DAG map (capacity = SyncConfig::max_pending_dags, Go-era
 \* MAX_PENDING_DAGS) before the hub can complete it via Bitswap and merge. The pusher
-\* drives its persisted retry ladder off the PushLogReply: a success reply is TERMINAL —
-\* the pusher deletes its retry record for the doc (defra-node/src/lib.rs remove_retry_doc)
-\* and will never re-push it unless an unrelated later update arrives.
+\* drives its persisted retry ladder off the PushLogReply: a success clears the durable
+\* scope marker only after ownership was honestly transferred.
 \*
 \* THE BUG (fa4a84f7 regression of #592): when the pending map is at capacity the hub
 \* drops the registration and returns Ok(()) — which both reply seams turn into
@@ -18,14 +17,14 @@
 \* THE INVARIANT (heart of the fix): a success PushLogReply implies the pushed block is
 \* either MERGED or REGISTERED AS PENDING on the hub. No code path may reply success
 \* after discarding state. On capacity overflow the hub must nack (RATE_LIMITED_MESSAGE),
-\* which the pusher's live backoff consumer (broadcast.rs send_ordered_pushlogs_via_transport)
-\* and persisted retry ladder both handle — so the doc stays queued and eventually merges.
+\* which the sender hands to its persisted scope-marker ladder — so the scope stays
+\* dirty, rederives its current head, and eventually merges.
 \*
 \* One knob:
 \*   ReplyMode = "NackOnFull"    - capacity overflow replies RATE_LIMITED_MESSAGE; the
 \*                                 pusher keeps its retry record and re-pushes. [GREEN]
-\*             = "SuccessOnFull" - current-main behavior: drop registration, reply
-\*                                 success; the pusher deletes its retry record. [RED]
+\*             = "SuccessOnFull" - historical regression: drop registration, reply
+\*                                 success; the pusher clears its marker. [RED]
 \*
 \* Abstractions: pusher identity is irrelevant to the invariant (any fan-in of pushers
 \* contends for the same global capacity), so docs are the unit and "the pusher" is the

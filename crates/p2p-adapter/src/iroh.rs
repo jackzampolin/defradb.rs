@@ -218,11 +218,19 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
 #[async_trait]
 impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     async fn sync_status(&self) -> P2PResult<serde_json::Value> {
-        match self.sync_coordinator.as_ref() {
-            Some(coordinator) => serde_json::to_value(coordinator.sync_status())
-                .map_err(|error| P2PError::transport(error.to_string())),
-            None => Ok(serde_json::Value::Null),
+        let Some(coordinator) = self.sync_coordinator.as_ref() else {
+            return Ok(serde_json::Value::Null);
+        };
+        let mut status = serde_json::to_value(coordinator.sync_status())
+            .map_err(|error| P2PError::transport(error.to_string()))?;
+        if let (Some(pusher), Some(object)) = (self.doc_pusher.as_ref(), status.as_object_mut()) {
+            object.insert(
+                "push_retry_markers".to_string(),
+                serde_json::to_value(pusher.push_retry_marker_stats().await?)
+                    .map_err(|error| P2PError::transport(error.to_string()))?,
+            );
         }
+        Ok(status)
     }
 
     async fn local_peer_id(&self) -> P2PResult<String> {
@@ -475,40 +483,33 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             addrs.insert(peer_id.to_string(), addr_str.to_string());
         }
 
+        let replicator_info = p2p::ReplicatorInfo::from_raw_with_filters(
+            peer_id.to_string(),
+            collection_cids.clone(),
+            vec![addr_str.to_string()],
+            replication_filters.clone(),
+        );
+        if let Some(ref pusher) = self.doc_pusher {
+            pusher
+                .persist_replicator_info(&replicator_info)
+                .await
+                .map_err(|error| {
+                    P2PError::persistence(format!(
+                        "failed to durably register replicator {peer_id}: {error}"
+                    ))
+                })?;
+        }
+
         if let Some(ref coordinator) = self.sync_coordinator {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
             coordinator
-                .create_replicator_info(&peer_id, info, false)
+                .create_replicator_info(&peer_id, replicator_info.clone(), false)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         } else {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
             self.transport
-                .create_replicator_info(&peer_id, info)
+                .create_replicator_info(&peer_id, replicator_info)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
-        }
-
-        if let Some(ref pusher) = self.doc_pusher {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
-            if let Err(error) = pusher.persist_replicator_info(&info).await {
-                tracing::warn!(peer_id = %peer_id, error = %error, "failed to persist replicator");
-            }
         }
 
         // Only replay collections that weren't already replicated by this peer.
@@ -526,6 +527,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 let push_peer = peer_id;
                 let push_options = self.replicator_push_options.load();
                 let push_se_key = push_options.se_encryption_key;
+                let push_identity = push_options.se_identity_pubkey;
                 let push_filters = replication_filters.clone();
 
                 tracing::info!(
@@ -541,6 +543,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                             &new_collection_names,
                             &push_filters,
                             push_se_key.as_ref().map(|key| key.as_slice()),
+                            push_identity.as_deref(),
                         )
                         .await
                     {
@@ -969,6 +972,7 @@ mod tests {
     fn test_endpoint_config(secret_key: iroh::SecretKey) -> IrohEndpointConfig {
         IrohEndpointConfig {
             secret_key,
+            node_identity: None,
             relay_mode: IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,

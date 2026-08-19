@@ -7,11 +7,12 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The v1.8.0 GitHub asset is a long-lived pre-release that upstream can replace
-# in place, so TLA_SHA256 rather than the tag is the authoritative pin. When
-# upgrading, change the version and the checksum together.
-TLA_VERSION="${TLA_VERSION:-1.8.0}"
-TLA_SHA256="${TLA_SHA256:-e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5}"
+# Use the immutable stable release rather than the rolling v1.8.0 pre-release,
+# whose asset is rebuilt in place. Upstream publishes SHA-1
+# bee4a54f3ee3d4afc347c3240ec2d9e93b075104 for this exact jar; this wrapper
+# pins the stronger locally-computed SHA-256 below.
+TLA_VERSION="${TLA_VERSION:-1.7.4}"
+TLA_SHA256="${TLA_SHA256:-936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88}"
 JAR="$DIR/tla2tools.jar"
 
 sha256_of() {

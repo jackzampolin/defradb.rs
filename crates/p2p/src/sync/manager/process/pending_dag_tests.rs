@@ -32,9 +32,11 @@ fn pending_dag_from(doc_id: &str, source_peer: Option<&str>, inserted_at: Instan
     PendingDag {
         doc_id: doc_id.to_string(),
         collection_id: "collection".to_string(),
+        head_priority: None,
         creator: "creator".to_string(),
         missing: HashSet::new(),
         source_peer: source_peer.map(str::to_owned),
+        alternate_providers: Vec::new(),
         is_explicit_replicator: false,
         explicit_replay_authorization: None,
         is_recovery_registered: false,
@@ -48,7 +50,300 @@ fn pending_dag_from(doc_id: &str, source_peer: Option<&str>, inserted_at: Instan
 }
 
 fn pending_dag(doc_id: &str, inserted_at: Instant) -> PendingDag {
-    pending_dag_from(doc_id, Some("peer"), inserted_at)
+    let mut dag = pending_dag_from(doc_id, Some("peer"), inserted_at);
+    dag.is_recovery_registered = true;
+    dag
+}
+
+#[test]
+fn linked_dag_providers_require_positive_missing_cid_evidence() {
+    let manager = test_manager();
+    let root = test_cid(800);
+    let missing = test_cid(801);
+
+    manager.peer_state.peer_connected("root-only");
+    manager.peer_state.peer_has_cid("root-only", root);
+    manager.peer_state.peer_connected("connected-only");
+    manager.peer_state.peer_connected("descendant-provider");
+    manager
+        .peer_state
+        .peer_has_cid("descendant-provider", missing);
+
+    assert_eq!(
+        manager.get_providers_for_cids(&[missing]),
+        vec!["descendant-provider".to_string()],
+        "root possession and connectivity alone must not advertise linked-DAG availability"
+    );
+}
+
+struct BlockingRemoveStore {
+    inner: crate::sync::pending_store::PendingDagStore<MemoryStore>,
+    remove_calls: std::sync::atomic::AtomicUsize,
+    active_writers: std::sync::atomic::AtomicUsize,
+    max_active_writers: std::sync::atomic::AtomicUsize,
+    first_remove_entered: tokio::sync::Notify,
+    release_first_remove: tokio::sync::Notify,
+}
+
+impl BlockingRemoveStore {
+    fn new(inner: crate::sync::pending_store::PendingDagStore<MemoryStore>) -> Self {
+        Self {
+            inner,
+            remove_calls: std::sync::atomic::AtomicUsize::new(0),
+            active_writers: std::sync::atomic::AtomicUsize::new(0),
+            max_active_writers: std::sync::atomic::AtomicUsize::new(0),
+            first_remove_entered: tokio::sync::Notify::new(),
+            release_first_remove: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn max_active_writers(&self) -> usize {
+        self.max_active_writers
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::sync::pending_store::PendingDagStorage for BlockingRemoveStore {
+    async fn put(
+        &self,
+        root_cid: &Cid,
+        record: &crate::sync::pending_store::PersistedPendingDag,
+    ) -> crate::error::Result<()> {
+        self.inner.put(root_cid, record).await
+    }
+
+    async fn replace_scope_head(
+        &self,
+        superseded_root: Option<&Cid>,
+        root_cid: &Cid,
+        record: &crate::sync::pending_store::PersistedPendingDag,
+    ) -> crate::error::Result<()> {
+        self.inner
+            .replace_scope_head(superseded_root, root_cid, record)
+            .await
+    }
+
+    async fn remove(&self, root_cid: &Cid) -> crate::error::Result<()> {
+        let call = self
+            .remove_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let active = self
+            .active_writers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active_writers
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            self.first_remove_entered.notify_one();
+            self.release_first_remove.notified().await;
+        }
+        let result = self.inner.remove(root_cid).await;
+        self.active_writers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    async fn load_all(
+        &self,
+    ) -> crate::error::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
+        self.inner.load_all().await
+    }
+
+    async fn quarantine(
+        &self,
+        root_cid: &Cid,
+        entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+    ) -> crate::error::Result<()> {
+        let active = self
+            .active_writers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active_writers
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        let result = self.inner.quarantine(root_cid, entry).await;
+        self.active_writers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    async fn is_quarantined(&self, root_cid: &Cid) -> crate::error::Result<bool> {
+        self.inner.is_quarantined(root_cid).await
+    }
+
+    async fn load_quarantined(
+        &self,
+    ) -> crate::error::Result<Vec<(Cid, crate::sync::pending_store::PersistedQuarantinedDag)>> {
+        self.inner.load_quarantined().await
+    }
+
+    async fn remove_quarantined(&self, root_cid: &Cid) -> crate::error::Result<()> {
+        self.inner.remove_quarantined(root_cid).await
+    }
+}
+
+#[tokio::test]
+async fn terminal_remove_and_quarantine_share_one_durable_metadata_writer() {
+    use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+    let manager = Arc::new(test_manager());
+    let root = test_cid(900);
+    let store = Arc::new(BlockingRemoveStore::new(PendingDagStore::new(Arc::new(
+        MemoryStore::new(),
+    ))));
+    store
+        .put(
+            &root,
+            &PersistedPendingDag {
+                doc_id: "doc".to_string(),
+                collection_id: "collection".to_string(),
+                head_priority: None,
+                creator: "creator".to_string(),
+                source_peer: Some("peer".to_string()),
+                alternate_providers: Vec::new(),
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            },
+        )
+        .await
+        .expect("seed pending record");
+    manager.install_pending_dag_store(store.clone()).await;
+
+    let first = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.remove_persisted_pending(&root).await }
+    });
+    store.first_remove_entered.notified().await;
+
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let second = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let second_started = Arc::clone(&second_started);
+        async move {
+            second_started.notify_one();
+            manager.remove_persisted_pending(&root).await;
+        }
+    });
+    second_started.notified().await;
+
+    let quarantine_started = Arc::new(tokio::sync::Notify::new());
+    let quarantine = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let quarantine_started = Arc::clone(&quarantine_started);
+        async move {
+            quarantine_started.notify_one();
+            manager
+                .quarantine_pending_dag(&root, "deterministic rejection")
+                .await;
+        }
+    });
+    quarantine_started.notified().await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        store.max_active_writers(),
+        1,
+        "same-root terminal observations must not enter concurrent store transactions"
+    );
+
+    store.release_first_remove.notify_one();
+    first.await.expect("first terminal task");
+    second.await.expect("second terminal task");
+    quarantine.await.expect("quarantine terminal task");
+    assert!(store.load_all().await.unwrap().is_empty());
+    assert!(store.is_quarantined(&root).await.unwrap());
+}
+
+#[tokio::test]
+async fn already_merged_reconciliation_retires_live_and_durable_obligation() {
+    use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+    use blockstore::Blockstore;
+
+    let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (manager, _events) =
+        SyncManager::new(Arc::clone(&blockstore), peer_state, SyncConfig::default());
+    let root = test_cid(901);
+    let store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    store
+        .put(
+            &root,
+            &PersistedPendingDag {
+                doc_id: "doc".to_string(),
+                collection_id: "collection".to_string(),
+                head_priority: None,
+                creator: "creator".to_string(),
+                source_peer: Some("peer".to_string()),
+                alternate_providers: Vec::new(),
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            },
+        )
+        .await
+        .expect("seed durable obligation");
+    manager.install_pending_dag_store(store.clone()).await;
+    assert!(manager.insert_pending_dag(root, pending_dag("doc", Instant::now())));
+
+    // Simulate the crash seam: the merge bit committed, but terminal pending
+    // cleanup did not run before this process observed the root again.
+    blockstore
+        .put(&root, b"cid-901")
+        .await
+        .expect("seed root block");
+    blockstore
+        .mark_as_merged(&root)
+        .await
+        .expect("seed durable merged bit");
+
+    assert!(manager
+        .reconcile_merged_pending(&root)
+        .await
+        .expect("reconcile merged root"));
+    assert_eq!(manager.pending_dag_count(), 0);
+    assert_eq!(manager.persisted_pending_count(), 0);
+    assert!(store.load_all().await.unwrap().is_empty());
+
+    // Repeated terminal observations share the same idempotent transition.
+    assert!(manager
+        .reconcile_merged_pending(&root)
+        .await
+        .expect("repeat reconciliation"));
+}
+
+#[test]
+fn newer_sender_scope_head_invalidates_the_old_fetch_lease() {
+    let manager = test_manager();
+    let old_root = test_cid(40);
+    let new_root = test_cid(41);
+    let mut old = pending_dag("doc", Instant::now());
+    old.head_priority = Some(1);
+    assert!(manager.insert_pending_dag(old_root, old));
+    let old_lease = manager.pending_dag_lease(old_root);
+    assert!(old_lease.is_current());
+
+    let mut new = pending_dag("doc", Instant::now());
+    new.head_priority = Some(2);
+    assert!(manager.insert_pending_dag(new_root, new));
+
+    assert!(!old_lease.is_current());
+    assert_eq!(manager.pending_dag_cids(), vec![new_root]);
+}
+
+#[test]
+fn terminal_removal_invalidates_the_fetch_lease() {
+    let manager = test_manager();
+    let root = test_cid(42);
+    assert!(manager.insert_pending_dag(root, pending_dag("doc", Instant::now())));
+    let lease = manager.pending_dag_lease(root);
+    assert!(lease.is_current());
+
+    assert!(manager.clear_pending_dag(&root));
+    assert!(
+        !lease.is_current(),
+        "terminal cleanup must release any fetch owner for this generation"
+    );
 }
 
 #[test]
@@ -280,19 +575,21 @@ async fn expedite_makes_entry_due_now_without_resetting_backoff() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn claim_due_returns_and_claims_only_due_entries_with_missing_blocks() {
+async fn claim_due_includes_complete_roots_awaiting_terminal_merge() {
     let manager = test_manager();
     let due = test_cid(1);
     let complete = test_cid(3);
     let mut dag = pending_dag("doc-due", Instant::now());
     dag.missing.insert(test_cid(2));
     assert!(manager.insert_pending_dag(due, dag));
-    // Entry with no missing blocks must never be dispatched.
+    // A complete entry remains owned until merge/mark reaches a terminal
+    // outcome, so the same clock can re-drive a transient merge failure.
     assert!(manager.insert_pending_dag(complete, pending_dag("doc-done", Instant::now())));
 
     let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].0, due);
+    assert_eq!(claimed.len(), 2);
+    assert!(claimed.iter().any(|(cid, _)| *cid == due));
+    assert!(claimed.iter().any(|(cid, _)| *cid == complete));
     // Claiming consumed due-ness.
     assert!(manager
         .claim_due_pending_dag_retries(tokio::time::Instant::now())
@@ -387,7 +684,12 @@ async fn block_arrival_updates_missing_incrementally_without_full_walks() {
         .expect("retry on grandchild arrival");
     assert_eq!(completed, vec![root_cid]);
     assert_eq!(manager.diagnostics.snapshot().missing_link_retries, 1);
-    assert_eq!(manager.pending_dag_count(), 0);
+    assert_eq!(
+        manager.pending_dag_count(),
+        1,
+        "DAG completion is not terminal until merge/mark succeeds"
+    );
+    assert!(manager.pending_dag_missing(&root_cid).is_empty());
 
     match events.try_recv().expect("DagReady event") {
         SyncEvent::DagReady {
@@ -414,8 +716,10 @@ async fn quarantine_pending_dag_moves_live_record_and_clears_in_memory_entry() {
             &PersistedPendingDag {
                 doc_id: "doc".to_string(),
                 collection_id: "collection".to_string(),
+                head_priority: None,
                 creator: "creator".to_string(),
                 source_peer: Some("peer".to_string()),
+                alternate_providers: Vec::new(),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
             },
@@ -481,8 +785,10 @@ async fn quarantine_pending_dag_dedupes_gauge_on_repeat_rejection() {
             &PersistedPendingDag {
                 doc_id: "doc".to_string(),
                 collection_id: "collection".to_string(),
+                head_priority: None,
                 creator: "creator".to_string(),
                 source_peer: Some("peer".to_string()),
+                alternate_providers: Vec::new(),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
             },
@@ -582,8 +888,10 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
     let record = PersistedPendingDag {
         doc_id: "doc".to_string(),
         collection_id: "collection".to_string(),
+        head_priority: None,
         creator: "creator".to_string(),
         source_peer: Some("peer".to_string()),
+        alternate_providers: Vec::new(),
         is_explicit_replicator: false,
         explicit_replay_authorization: None,
     };
@@ -643,7 +951,7 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn resync_restore_consumes_retry_clock_claim_before_dispatch() {
+async fn resync_restore_leaves_root_due_for_receiver_clock() {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
 
     let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
@@ -661,8 +969,10 @@ async fn resync_restore_consumes_retry_clock_claim_before_dispatch() {
             &PersistedPendingDag {
                 doc_id: "doc".to_string(),
                 collection_id: "collection".to_string(),
+                head_priority: None,
                 creator: "creator".to_string(),
                 source_peer: Some("peer".to_string()),
+                alternate_providers: Vec::new(),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
             },
@@ -675,26 +985,14 @@ async fn resync_restore_consumes_retry_clock_claim_before_dispatch() {
     let restored = manager.resync_persisted_pending_dags().await;
     assert_eq!(restored, 1);
 
-    match events
-        .try_recv()
-        .expect("DagNeedsFetch event from resync restore")
-    {
-        SyncEvent::DagNeedsFetch { root_cid, .. } => assert_eq!(root_cid, root),
-        other => panic!("expected DagNeedsFetch, got {:?}", other),
-    }
-
-    // The restore's direct DagNeedsFetch emission already consumed the
-    // immediate claim (mirrors the fresh-registration path in
-    // pushlog.rs) -- the retry clock must not also dispatch this root
-    // before the backoff rung elapses.
-    assert!(manager
-        .claim_due_pending_dag_retries(tokio::time::Instant::now())
-        .is_empty());
-
-    // Becomes due again only after the backoff rung reached by the
-    // restore's claim (dispatches=1 -> retry_backoff(1) = 4s).
-    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    assert!(
+        events.try_recv().is_err(),
+        "restart restore must not dispatch outside the receiver clock"
+    );
     let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].0, root);
+    assert!(manager
+        .claim_due_pending_dag_retries(tokio::time::Instant::now())
+        .is_empty());
 }

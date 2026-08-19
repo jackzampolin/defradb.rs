@@ -19,6 +19,7 @@ async fn test_config() -> IrohEndpointConfig {
         secret_key: load_or_generate_secret_key(None)
             .await
             .expect("generate iroh key"),
+        node_identity: None,
         relay_mode: IrohRelayModeConfig::Disabled,
         discovery: IrohDiscoveryConfig::Disabled,
         bind_port: None,

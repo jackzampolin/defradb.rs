@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use acp::DocumentACP;
 use bytes::Bytes;
-use cid::Cid;
 use p2p::message::PushLogRequest;
+use p2p::transport::PeerId;
+use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_common::load_latest_composite_head_cids;
 use crate::push_docs_creator::resolve_push_creator;
 use crate::push_docs_replay::{
     persist_replay_failures, ReplayDocumentFailure, ReplayPushConfig, ReplayPushGate,
@@ -49,63 +50,67 @@ async fn document_matches_filter<R: Reader + ?Sized>(
     Ok(matcher.matches("", filter, &document_json))
 }
 
-/// Push existing documents to a replicator peer.
-///
-/// Matches Go's `pushHeadsForAllDocs`: for each collection, iterate all docs,
-/// get composite heads from headstore, load blocks, send PushLog to peer.
-/// If an SE encryption key is provided, also generates and pushes SE artifacts
-/// for collections with encrypted indexes. The identity pubkey is threaded
-/// through SE artifact generation to ensure per-identity tag isolation.
+/// Push existing documents to a replicator peer through the configured transport.
 #[allow(clippy::too_many_arguments)]
-pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
-    handle: &p2p::P2PHostHandle,
+pub async fn push_existing_docs<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
     db: &DB<S>,
     document_acp: Option<&dyn DocumentACP>,
-    peer_id: libp2p::PeerId,
+    peer_id: &PeerId,
     collections: &[String],
     filters: &p2p::ReplicationFilters,
-    se_encryption_key: Option<&[u8]>,
-    se_identity_pubkey: Option<&[u8]>,
+    se_options: PushExistingDocsSeOptions<'_>,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
     push_existing_docs_with_config(
-        handle,
+        transport,
         db,
         document_acp,
         peer_id,
         collections,
         filters,
-        PushExistingDocsSeOptions {
-            encryption_key: se_encryption_key,
-            identity_pubkey: se_identity_pubkey,
-        },
+        se_options,
         ReplayPushConfig::default(),
         matcher,
+        car_authority,
     )
     .await
 }
 
-/// Push existing documents to a replicator peer with explicit replay limits.
+/// Push existing documents with explicit replay limits.
 #[allow(clippy::too_many_arguments)]
-pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>(
-    handle: &p2p::P2PHostHandle,
+pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
     db: &DB<S>,
     document_acp: Option<&dyn DocumentACP>,
-    peer_id: libp2p::PeerId,
+    peer_id: &PeerId,
     collections: &[String],
     filters: &p2p::ReplicationFilters,
     se_options: PushExistingDocsSeOptions<'_>,
     replay_config: ReplayPushConfig,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
-    // Wait for the connection to be fully established (dial is non-blocking).
-    // After a node restart, re-establishing connectivity can take longer than
-    // the initial connection, so we allow up to 15 seconds.
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
+    let mut logged_conn_error = false;
     loop {
-        let peers = handle.connected_peers().await.unwrap_or_default();
-        if peers.contains(&peer_id) {
+        let peers = match transport.connected_peers().await {
+            Ok(peers) => peers,
+            Err(e) => {
+                if !logged_conn_error {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "connected_peers check failed during replay wait"
+                    );
+                    logged_conn_error = true;
+                }
+                Vec::new()
+            }
+        };
+        if peers.iter().any(|p| p == peer_id) {
             break;
         }
         if conn_start.elapsed() > conn_timeout {
@@ -114,11 +119,19 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    let local_peer_id = handle
-        .local_peer_id()
+    let local_peer_id = transport.local_peer_id().to_string();
+    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let Some(retry_guard) = peerstore
+        .acquire_replicator_retry_guard(peer_id.as_str())
         .await
-        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
-    let local_peer_id_str = local_peer_id.to_string();
+        .map_err(|error| format!("failed to coordinate existing-document replay: {error}"))?
+    else {
+        tracing::debug!(peer_id = %peer_id, "Replicator removed before existing-document replay");
+        return Ok(());
+    };
+    // Serialize storage transitions, not the bounded network wait. A live
+    // update must be able to dirty the marker while initial replay is stalled.
+    drop(retry_guard);
 
     let txn = db
         .new_txn(true)
@@ -131,9 +144,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
     let blockstore_view = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
-    let encstore_view = txn
-        .encstore()
-        .map_err(|e| format!("failed to get encstore: {}", e))?;
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -141,10 +151,8 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         .systemstore()
         .map_err(|e| format!("failed to get systemstore: {}", e))?;
 
-    // Collect JoinHandles so we can await all pushes before signaling completion.
     let mut push_handles = Vec::new();
     let replay_gate = Arc::new(ReplayPushGate::new(replay_config));
-    let peer_key = p2p::transport::PeerId::from(peer_id);
     let mut skipped_creator_docs = 0usize;
 
     for col_name in collections {
@@ -156,9 +164,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             None => continue,
         };
 
-        // Iterate datastore keys-only to get doc IDs.
-        // Key format: /d/{collection_id}/{doc_id}
-        // Sub-keys like /d/{collection_id}/{doc_id}/v are filtered out.
         let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
         let doc_prefix_len = col_prefix.len();
         let opts = IterOptions::new()
@@ -195,12 +200,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             }
         }
 
-        // For each document, push its composite head block(s) and non-counter
-        // field blocks as PushLog heads; counter field blocks are dropped and
-        // DAG-fetched by the receiver instead (see the #1043 filter below). An
-        // encrypted LWW field must arrive as a head so the receiver's merge
-        // triggers the KMS DEK request.
-        for (doc_short_id, doc_id) in &doc_ids {
+        'documents: for (doc_short_id, doc_id) in &doc_ids {
             if let Some(filter) = filters.get(collection.collection_id()) {
                 if !document_matches_filter(
                     &datastore,
@@ -219,7 +219,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                 document_acp,
                 &collection,
                 doc_id,
-                &local_peer_id_str,
+                &local_peer_id,
             )
             .await
             {
@@ -236,7 +236,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     continue;
                 }
             };
-            // Collect phase: pre-load all DAG blocks before spawning tasks.
             let mut doc_blocks = Vec::new();
             for head_cid in
                 load_latest_composite_head_cids(&headstore, &blockstore_view, *doc_short_id).await
@@ -247,37 +246,44 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     _ => continue,
                 };
 
-                doc_blocks.extend(
-                    load_push_dag_blocks(&blockstore_view, &encstore_view, head_cid, block_data)
-                        .await,
-                );
+                doc_blocks.push((head_cid, block_data));
             }
 
-            // Send phase: build signed requests in DAG dependency order,
-            // then spawn a task to send them sequentially so ordering is preserved.
+            let mut replay_head_cids: Vec<_> = doc_blocks.iter().map(|(cid, _)| *cid).collect();
+            replay_head_cids.sort_unstable();
+
+            if doc_blocks.is_empty() {
+                continue;
+            }
+
+            // Conservation comes before the fallible serving capability. If
+            // the bounded selective-CAR table is full (or signing fails), the
+            // durable marker keeps this document and every later document in
+            // the replay eligible for the shared retry clock.
+            let Some(marker_guard) = peerstore
+                .acquire_replicator_retry_guard(peer_id.as_str())
+                .await
+                .map_err(|error| format!("failed to coordinate replay marker: {error}"))?
+            else {
+                return Ok(());
+            };
+            peerstore
+                .observe_push_head(peer_id.as_str(), doc_id, collection.collection_id())
+                .await
+                .map_err(|error| format!("failed to register replay marker: {error}"))?;
+            drop(marker_guard);
+
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
-                // #1043: do not push COUNTER field blocks as PushLog heads. A
-                // counter block pushed as its own head is merged as a standalone
-                // head by the receiver, whose merge then walks and re-applies the
-                // entire counter chain (double-apply against cross-impl peers).
-                // Counter field blocks are fetched by the receiver via DAG sync
-                // from the composite links instead, matching Go's SendUpdate.
-                //
-                // All other blocks (composite + non-counter field blocks, e.g.
-                // encrypted LWW) are still pushed as heads: an encrypted LWW field
-                // block must reach the receiver as a head so its merge triggers a
-                // KMS DEK request, which is how an unauthorized peer's denial fires
-                // (proofs/tests/behavioral/kms.rs). LWW is idempotent on re-walk,
-                // so it carries no double-apply hazard.
-                match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                    Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                        continue;
-                    }
-                }
+                let Some(grant) = car_authority.register(peer_id.clone(), block_cid) else {
+                    tracing::warn!(
+                        %peer_id,
+                        %doc_id,
+                        %block_cid,
+                        "Selective CAR authority full; retaining replay marker"
+                    );
+                    continue 'documents;
+                };
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -285,17 +291,18 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     creator.clone(),
                     Bytes::from(block_data),
                 );
-                if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
+                if let Err(e) = p2p::signing::sign_with_transport(transport, &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
                     continue;
                 }
-                requests.push(request);
+                requests.push((grant, request));
             }
 
             if !requests.is_empty() {
-                let push_h = handle.clone();
+                let t = transport.clone();
+                let pid = peer_id.clone();
                 let gate = replay_gate.clone();
-                let peer_key = peer_key.clone();
+                let peer_key = pid.clone();
                 let replay_doc_id = doc_id.clone();
                 let replay_collection_id = collection.collection_id().to_string();
                 let total_blocks = requests.len();
@@ -306,20 +313,20 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                 push_handles.push((
                     replay_doc_id,
                     replay_collection_id,
+                    *doc_short_id,
+                    replay_head_cids,
                     tokio::spawn(async move {
                         let _permit = permit;
                         let mut completed_blocks = 0usize;
-                        for req in requests {
+                        for (_car_grant, req) in requests {
                             let cid = req.cid.clone();
                             match gate
-                                .send_pushlog_with_rate_limit_retry(&peer_key, || {
-                                    push_h.send_two_stream_request(peer_id, req.clone())
-                                })
+                                .send_pushlog(&peer_key, t.send_two_stream_request(&pid, req))
                                 .await
                             {
                                 Ok(reply) if reply.err_message.is_some() => {
                                     tracing::warn!(
-                                        peer_id = %peer_id,
+                                        peer_id = %pid,
                                         completed_blocks,
                                         total_blocks,
                                         cid_len = cid.len(),
@@ -334,7 +341,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                                 Err(e) => {
                                     if e.is_connection_like() {
                                         tracing::debug!(
-                                            peer_id = %peer_id,
+                                            peer_id = %pid,
                                             completed_blocks,
                                             total_blocks,
                                             cid_len = cid.len(),
@@ -343,7 +350,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                                         );
                                     } else {
                                         tracing::warn!(
-                                            peer_id = %peer_id,
+                                            peer_id = %pid,
                                             completed_blocks,
                                             total_blocks,
                                             cid_len = cid.len(),
@@ -362,14 +369,41 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         }
     }
 
-    // Await all push tasks so ReplicatorCompleted isn't emitted prematurely.
-    // The Go test framework copies expected heads on ReplicatorCompleted, then
-    // waits for merge events -- if pushes haven't landed yet, we get timeouts.
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     let mut replay_failures = Vec::new();
-    for (doc_id, collection_id, jh) in push_handles {
+    for (doc_id, collection_id, doc_short_id, attempted_heads, jh) in push_handles {
         match jh.await {
-            Ok(true) => {}
+            Ok(true) => {
+                let Some(_completion_guard) = peerstore
+                    .acquire_replicator_retry_guard(peer_id.as_str())
+                    .await
+                    .map_err(|error| format!("failed to coordinate replay completion: {error}"))?
+                else {
+                    continue;
+                };
+                let verify_txn = db
+                    .new_txn(true)
+                    .await
+                    .map_err(|error| format!("replay head verification transaction: {error}"))?;
+                let verify_heads = verify_txn.headstore().map_err(|error| error.to_string())?;
+                let verify_blocks = verify_txn.blockstore().map_err(|error| error.to_string())?;
+                let mut current_heads =
+                    load_latest_composite_head_cids(&verify_heads, &verify_blocks, doc_short_id)
+                        .await;
+                current_heads.sort_unstable();
+                if current_heads != attempted_heads {
+                    tracing::debug!(%doc_id, "Document changed during replay; retaining dirty marker");
+                    replay_failures.push(ReplayDocumentFailure {
+                        doc_id,
+                        collection_id,
+                    });
+                    continue;
+                }
+                peerstore
+                    .complete_retry_scope(peer_id.as_str(), &doc_id, &collection_id, false)
+                    .await
+                    .map_err(|error| format!("failed to clear replay marker: {error}"))?;
+            }
             Ok(false) => replay_failures.push(ReplayDocumentFailure {
                 doc_id,
                 collection_id,
@@ -384,7 +418,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         }
     }
     tracing::debug!("all push tasks completed");
-    persist_replay_failures(db.store().clone(), &peer_key, &replay_failures).await?;
+    persist_replay_failures(db.store().clone(), peer_id, &replay_failures).await?;
 
     if skipped_creator_docs > 0 {
         return Err(format!(
@@ -392,7 +426,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         ));
     }
 
-    // Generate and push SE artifacts for collections with encrypted indexes.
     if let Some(se_key) = se_options.encryption_key {
         let coordinator = match se_options.identity_pubkey {
             Some(pubkey) => {
@@ -414,7 +447,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
 
             tracing::debug!(collection = %col_name, index_count = encrypted_indexes.len(), "generating SE artifacts");
 
-            // Iterate datastore to get doc IDs (same pattern as block push above)
             let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
             let doc_prefix_len = col_prefix.len();
             let opts = IterOptions::new()
@@ -451,7 +483,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                 }
             }
 
-            // For each document, load field values and generate artifacts.
             let mut all_artifacts = Vec::new();
             for (doc_short_id, doc_id) in &se_doc_ids {
                 if let Some(filter) = filters.get(collection.collection_id()) {
@@ -482,7 +513,6 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     }
                 };
 
-                // Extract field values as HashMap<String, NormalValue>
                 let field_values: std::collections::HashMap<String, document::NormalValue> = doc
                     .values()
                     .iter()
@@ -519,7 +549,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     all_artifacts,
                 );
 
-                if let Err(e) = handle.send_se_artifacts(peer_id, se_request).await {
+                if let Err(e) = transport.send_se_artifacts(peer_id, se_request).await {
                     tracing::warn!(
                         peer_id = %peer_id,
                         collection = %col_name,
@@ -535,26 +565,28 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
 }
 
 /// Retry pushing a single document's composite heads to a replicator peer.
-///
-/// Reads composite head CIDs from the headstore, loads block data
-/// (field blocks + composite block) from the blockstore, and sends
-/// signed PushLogRequests to the target peer.
 #[allow(clippy::too_many_arguments)]
-pub async fn retry_doc<S: Store + 'static>(
-    handle: &p2p::P2PHostHandle,
+pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
     db: &DB<S>,
     document_acp: Option<&dyn DocumentACP>,
-    peer_id: libp2p::PeerId,
+    peer_id: &PeerId,
     doc_id: &str,
     collection_id: &str,
     filters: &p2p::ReplicationFilters,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
-    let local_peer_id = handle
-        .local_peer_id()
-        .await
-        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
-    let local_peer_id_str = local_peer_id.to_string();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let resolved_collection;
+    let collection_id = if collection_id.is_empty() {
+        resolved_collection = crate::push_docs_common::resolve_collection_id_for_doc(db, doc_id)
+            .await?
+            .ok_or_else(|| format!("collection for document '{doc_id}' not found"))?;
+        resolved_collection.as_str()
+    } else {
+        collection_id
+    };
     let collection = db
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
@@ -572,10 +604,26 @@ pub async fn retry_doc<S: Store + 'static>(
             .map_err(|e| format!("doc-ID mapping lookup failed: {}", e))?
         {
             Some(doc_ref) => doc_ref.doc_short_id,
-            None => return Ok(()),
+            None => {
+                return crate::push_docs_common::complete_document_retry_if_absent(
+                    db,
+                    peer_id.as_str(),
+                    doc_id,
+                    collection_id,
+                )
+                .await;
+            }
         }
     };
     if let Some(filter) = filters.get(collection_id) {
+        let peerstore = storage::stores::Peerstore::new(db.store().clone());
+        let Some(filter_guard) = peerstore
+            .acquire_replicator_retry_guard(peer_id.as_str())
+            .await
+            .map_err(|error| format!("retry filter guard: {error}"))?
+        else {
+            return Ok(());
+        };
         let txn = db
             .new_txn(true)
             .await
@@ -586,10 +634,15 @@ pub async fn retry_doc<S: Store + 'static>(
         if !document_matches_filter(&datastore, collection_id, doc_short_id, filter, matcher)
             .await?
         {
+            peerstore
+                .complete_retry_scope(peer_id.as_str(), doc_id, collection_id, false)
+                .await
+                .map_err(|error| format!("failed to clear filtered retry marker: {error}"))?;
             return Ok(());
         }
+        drop(filter_guard);
     }
-    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str)
+    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -604,40 +657,21 @@ pub async fn retry_doc<S: Store + 'static>(
         .new_txn(true)
         .await
         .map_err(|e| format!("blockstore txn: {}", e))?;
-    let encstore_view = storage::stores::Blockstore::new_with_namespace(
-        db.store().clone(),
-        true,
-        storage::namespace::Namespace::Encstore,
-    );
-    let enc_txn = encstore_view
-        .new_txn(true)
-        .await
-        .map_err(|e| format!("encstore txn: {}", e))?;
-
+    let mut attempted_heads =
+        load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await;
+    attempted_heads.sort_unstable();
     let mut successful_blocks = 0usize;
-    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await {
+    for head_cid in attempted_heads.iter().copied() {
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
             _ => continue,
         };
 
-        for (block_cid, block_data) in
-            load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
         {
-            // #1043: do not push COUNTER field blocks as PushLog heads (see
-            // backfill above). Counter blocks pushed as heads cause double-apply
-            // on cross-impl peers; the receiver fetches them via DAG sync. Other
-            // blocks (composite + non-counter field blocks, e.g. encrypted LWW)
-            // are still pushed as heads so an encrypted LWW field reaches the
-            // receiver and its merge triggers the KMS DEK request.
-            match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
-                Ok(defra_core::CrdtDelta::Counter(_)) => continue,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
-                    continue;
-                }
-            }
+            let block_cid = head_cid;
+            let _car_grant = car_authority
+                .register(peer_id.clone(), head_cid)
+                .ok_or_else(|| format!("selective CAR authority full for retry head {head_cid}"))?;
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
                 Bytes::from(block_cid.to_bytes()),
@@ -646,13 +680,13 @@ pub async fn retry_doc<S: Store + 'static>(
                 Bytes::from(block_data),
             );
 
-            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+            if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
                 return Err(format!(
                     "failed to sign replay block after {successful_blocks} successful block(s)"
                 ));
             }
 
-            match handle.send_two_stream_request(peer_id, request).await {
+            match transport.send_two_stream_request(peer_id, request).await {
                 Ok(reply) if reply.err_message.is_some() => {
                     return Err(format!(
                         "peer rejected replay after {successful_blocks} successful block(s): {}",
@@ -662,7 +696,9 @@ pub async fn retry_doc<S: Store + 'static>(
                             .unwrap_or("unknown pushlog error")
                     ));
                 }
-                Ok(_) => successful_blocks += 1,
+                Ok(_) => {
+                    successful_blocks += 1;
+                }
                 Err(error) => {
                     let prefix = if error.is_connection_like() {
                         "transport became unavailable"
@@ -676,86 +712,82 @@ pub async fn retry_doc<S: Store + 'static>(
             }
         }
     }
-    Ok(())
+    drop(block_txn);
+    drop(head_txn);
+    crate::push_docs_common::complete_document_retry_if_current(
+        db,
+        peer_id.as_str(),
+        doc_id,
+        collection_id,
+        doc_short_id,
+        &attempted_heads,
+    )
+    .await
 }
 
-/// Replay a failed COLLECTION-COMMIT push by CID over a libp2p host handle
-/// (defradb#1113).
-///
-/// Collection commits are doc-less, so `retry_doc` cannot replay them: it
-/// resolves work from a document's composite heads and would find none, return
-/// `Ok(())`, and let the ledger delete the obligation — silently losing the
-/// block. A missing block is therefore an ERROR here, never a silent success.
-pub async fn retry_collection_commit<S: Store + 'static>(
-    handle: &p2p::P2PHostHandle,
+/// Rederive and announce every current collection head for a dirty collection
+/// scope. No CID is retained in durable sender state.
+pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
     db: &DB<S>,
-    peer_id: libp2p::PeerId,
+    peer_id: &PeerId,
     collection_id: &str,
-    cid: &Cid,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
-    let creator = handle
-        .local_peer_id()
-        .await
-        .map(|peer| peer.to_string())
-        .unwrap_or_default();
-
-    let blockstore_view = storage::stores::Blockstore::new(db.store().clone(), true);
-    let block_txn = blockstore_view
+    let creator = transport.local_peer_id().to_string();
+    let txn = db
         .new_txn(true)
         .await
-        .map_err(|e| format!("blockstore txn: {}", e))?;
-    let encstore_view = storage::stores::Blockstore::new_with_namespace(
-        db.store().clone(),
-        true,
-        storage::namespace::Namespace::Encstore,
-    );
-    let enc_txn = encstore_view
-        .new_txn(true)
-        .await
-        .map_err(|e| format!("encstore txn: {}", e))?;
-
-    let root_block = match block_txn.get(&cid.to_bytes()).await {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-            return Err(format!(
-                "collection-commit block {cid} is not in the local blockstore"
-            ))
-        }
-        Err(error) => return Err(format!("failed to load collection-commit block: {error}")),
-    };
-
-    let mut pushed = 0usize;
-    let mut any_failed = false;
-    for (block_cid, block_data) in
-        load_push_dag_blocks(&*block_txn, &*enc_txn, *cid, root_block).await
-    {
+        .map_err(|error| format!("collection retry txn: {error}"))?;
+    let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
+    let headstore = txn.headstore().map_err(|error| error.to_string())?;
+    let block_txn = txn.blockstore().map_err(|error| error.to_string())?;
+    let short_id =
+        db::collection::require_persisted_collection_short_id(&systemstore, collection_id)
+            .await
+            .map_err(|error| format!("collection retry short id: {error}"))?;
+    let mut heads =
+        crate::push_docs_common::load_collection_head_cids(&headstore, short_id).await?;
+    heads.sort_unstable();
+    for cid in heads.iter().copied() {
+        let block_data = block_txn
+            .get(&cid.to_bytes())
+            .await
+            .map_err(|error| format!("collection head read: {error}"))?
+            .ok_or_else(|| format!("current collection head {cid} is missing"))?;
+        let _car_grant = car_authority
+            .register(peer_id.clone(), cid)
+            .ok_or_else(|| format!("selective CAR authority full for collection head {cid}"))?;
         let mut request = PushLogRequest::new(
             String::new(),
-            Bytes::from(block_cid.to_bytes()),
+            Bytes::from(cid.to_bytes()),
             collection_id.to_string(),
             creator.clone(),
             Bytes::from(block_data),
         );
-
-        if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
-            any_failed = true;
-            continue;
+        if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
+            return Err(format!("failed to sign current collection head {cid}"));
         }
-
-        match handle.send_two_stream_request(peer_id, request).await {
-            Ok(reply) if reply.err_message.is_some() => any_failed = true,
-            Ok(_) => pushed += 1,
-            Err(_) => any_failed = true,
+        match transport.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => {
+                return Err(format!(
+                    "peer rejected current collection head {cid}: {}",
+                    reply
+                        .err_message
+                        .as_deref()
+                        .unwrap_or("unknown pushlog error")
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(format!("collection head {cid} push failed: {error}")),
         }
     }
-
-    if any_failed {
-        return Err("some collection-commit pushes failed".to_string());
-    }
-    if pushed == 0 {
-        return Err(format!(
-            "collection-commit replay for {cid} pushed no blocks"
-        ));
-    }
-    Ok(())
+    drop(txn);
+    crate::push_docs_common::complete_collection_retry_if_current(
+        db,
+        peer_id.as_str(),
+        collection_id,
+        &heads,
+    )
+    .await
 }

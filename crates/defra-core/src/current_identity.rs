@@ -70,10 +70,28 @@ pub fn try_get_scoped_identity() -> Option<String> {
     SCOPED_IDENTITY.try_with(|v| v.clone()).ok().flatten()
 }
 
+/// Resolve the current task scope when one exists, including an explicitly
+/// anonymous (`None`) scope. Fall back to the pinned-thread identity only when
+/// no task scope is active at all.
+///
+/// Unlike `try_get_scoped_identity().or_else(get_current_identity)`, this does
+/// not let stale thread state override an anonymous request scope.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_effective_identity() -> Option<String> {
+    SCOPED_IDENTITY
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| get_current_identity())
+}
+
 /// On wasm there is no multithreaded request task; no scope is ever active.
 #[cfg(target_arch = "wasm32")]
 pub fn try_get_scoped_identity() -> Option<String> {
     None
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn get_effective_identity() -> Option<String> {
+    get_current_identity()
 }
 
 /// Run `fut` with the request-scoped acting identity set. Used by the HTTP
@@ -145,5 +163,18 @@ mod tests {
         .await;
         assert_eq!(inside, Some("did:key:carol".to_string()));
         assert_eq!(try_get_scoped_identity(), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn anonymous_task_scope_masks_stale_thread_identity() {
+        set_current_identity(Some("did:key:stale-thread".to_string()));
+        let inside = with_scoped_identity(None, async { get_effective_identity() }).await;
+        assert_eq!(inside, None);
+        assert_eq!(
+            get_effective_identity().as_deref(),
+            Some("did:key:stale-thread")
+        );
+        set_current_identity(None);
     }
 }

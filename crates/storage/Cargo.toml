@@ -92,5 +92,9 @@ name = "transaction"
 harness = false
 required-features = ["redb"]
 
+[[bench]]
+name = "retry_markers"
+harness = false
+
 [lints]
 workspace = true

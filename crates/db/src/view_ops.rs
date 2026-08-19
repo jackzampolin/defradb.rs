@@ -79,7 +79,7 @@ impl RefreshViewsOptions {
     /// Go picks candidates by collection id only when neither a name nor a
     /// version already picked them, so those two take precedence over it.
     fn applies_collection_id(&self) -> bool {
-        self.version_id.is_none() && !(self.names.is_some() && !self.get_inactive)
+        (self.get_inactive || self.names.is_none()) && self.version_id.is_none()
     }
 }
 
@@ -138,20 +138,11 @@ impl<S: Store> crate::database::DB<S> {
     where
         S: 'static,
     {
-        // `build_view_cache` resolves the view's query against the *active*
-        // schemas and matches by name, so refreshing an inactive version would
-        // clear the shared cache and then rebuild it from the active definition
-        // instead of the one asked for. Refusing is the only honest answer until
-        // the builder can take a version.
-        if options.get_inactive {
-            return Err(Error::Other(
-                "refreshing inactive collection versions is not supported: the view cache is \
-                 rebuilt from the active schema, so it would not hold the requested version"
-                    .to_string(),
-            ));
-        }
-
-        let collections = self.get_all_active_collections_internal()?;
+        let collections = if options.needs_all_versions() {
+            self.get_all_collection_versions().await?
+        } else {
+            self.get_all_active_collections_internal()?
+        };
 
         // A selector that matches nothing is a caller mistake, not an empty
         // refresh. Go looks a version up directly and propagates not-found
@@ -179,6 +170,19 @@ impl<S: Store> crate::database::DB<S> {
             .filter(|col| is_refreshable_view(col))
             .filter(|col| options.selects(col))
             .collect();
+
+        // Go treats get_inactive as an inclusion selector. An active-only
+        // result must therefore remain a valid no-op/success. Rust still
+        // refuses an actually selected inactive view because build_view_cache
+        // resolves its query against active schemas and would rebuild the
+        // shared cache from the wrong definition.
+        if let Some(view) = views_to_refresh.iter().find(|view| !view.is_active) {
+            return Err(Error::Other(format!(
+                "refreshing inactive collection version {} is not supported: the view cache is \
+                 rebuilt from the active schema, so it would not hold the requested version",
+                view.version_id
+            )));
+        }
 
         for view in views_to_refresh {
             let action_execution = self

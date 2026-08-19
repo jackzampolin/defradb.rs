@@ -41,6 +41,11 @@ pub enum IrohCommand {
     NetworkChange {
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
+    ResolvePeerIdentity {
+        peer_id: PeerId,
+        request: crate::message::IdentityRequest,
+        reply: oneshot::Sender<crate::error::Result<crate::message::IdentityResponse>>,
+    },
 
     // PubSub
     Subscribe {

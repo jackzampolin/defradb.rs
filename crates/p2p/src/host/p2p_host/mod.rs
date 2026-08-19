@@ -243,6 +243,7 @@ pub struct P2PHost<S: Store> {
     pub(super) keypair: Keypair,
     pub(super) command_rx: mpsc::Receiver<HostCommand>,
     pub(super) event_tx: mpsc::Sender<HostEvent>,
+    shutdown_requested: bool,
     pub(super) pending_requests: HashMap<
         request_response::OutboundRequestId,
         tokio::sync::oneshot::Sender<Result<PushLogReply>>,
@@ -584,6 +585,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             keypair,
             command_rx,
             event_tx,
+            shutdown_requested: false,
             pending_requests: HashMap::new(),
             replicators: Arc::clone(&replicators),
             two_stream_handler,
@@ -614,6 +616,52 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         &self.keypair
     }
 
+    /// Forward an event without preventing the host loop from servicing the
+    /// response command needed by an already-admitted handler.
+    ///
+    /// Both channels are bounded. If the event channel is full, waiting only
+    /// on its capacity can deadlock with a coordinator handler waiting for a
+    /// command response from this same host. While backpressured, service host
+    /// commands until one event slot becomes available.
+    pub(super) async fn forward_event(&mut self, event: HostEvent) -> bool {
+        let mut event = Some(event);
+        loop {
+            let event_tx = self.event_tx.clone();
+            tokio::select! {
+                permit = event_tx.reserve_owned() => {
+                    let Ok(permit) = permit else {
+                        return false;
+                    };
+                    permit.send(event.take().expect("event is forwarded exactly once"));
+                    return true;
+                }
+                command = self.command_rx.recv() => {
+                    match command {
+                        Some(command) => {
+                            if !self.handle_command(command).await {
+                                self.shutdown_requested = true;
+                                return false;
+                            }
+                        }
+                        None => {
+                            self.shutdown_requested = true;
+                            return false;
+                        }
+                    }
+                }
+                result = self.spawned_tasks.join_next(), if !self.spawned_tasks.is_empty() => {
+                    Self::report_spawned_task(result);
+                }
+            }
+        }
+    }
+
+    fn report_spawned_task(result: Option<std::result::Result<(), tokio::task::JoinError>>) {
+        if let Some(Err(error)) = result {
+            tracing::warn!(%error, "P2P host task failed");
+        }
+    }
+
     /// Run the P2P host event loop.
     ///
     /// This method runs until shutdown is requested.
@@ -627,7 +675,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         connection_prune_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         connection_prune_interval.tick().await;
 
-        loop {
+        while !self.shutdown_requested {
             // Biased select: process swarm events before commands.
             // This ensures ConnectionEstablished events (which update peer_addrs)
             // are processed before PeerAddresses commands read them.
@@ -662,6 +710,9 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                             break;
                         }
                     }
+                }
+                result = self.spawned_tasks.join_next(), if !self.spawned_tasks.is_empty() => {
+                    Self::report_spawned_task(result);
                 }
                 _ = &mut bootstrap_deadline, if bootstrap_scheduler.is_pending() => {
                     bootstrap_scheduler.mark_fired();
@@ -783,6 +834,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::MockBitswapStore;
 
     #[test]
     fn default_config_enables_relay() {
@@ -860,5 +912,41 @@ mod tests {
             scheduler.schedule_initial(now + Duration::from_secs(31)),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn saturated_event_delivery_still_services_host_commands() {
+        let (mut host, handle, mut events, _) =
+            P2PHost::new(MockBitswapStore::new()).await.unwrap();
+        let expected_peer_id = host.local_peer_id();
+        let address: Multiaddr = "/memory/1".parse().unwrap();
+
+        let mut filled = 0;
+        loop {
+            match host
+                .event_tx
+                .try_send(HostEvent::Listening(address.clone()))
+            {
+                Ok(()) => filled += 1,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+                Err(error) => panic!("event receiver unexpectedly closed: {error}"),
+            }
+        }
+        assert_eq!(filled, 256, "test must saturate the real host channel");
+
+        let mut command = Box::pin(handle.local_peer_id());
+        let mut forward = Box::pin(host.forward_event(HostEvent::Listening(address)));
+        let resolved_peer_id = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut command => result.unwrap(),
+                _ = &mut forward => panic!("event forwarding cannot finish while the channel is full"),
+            }
+        })
+        .await
+        .expect("a full event channel must not block host command handling");
+        assert_eq!(resolved_peer_id, expected_peer_id);
+
+        events.recv().await.unwrap();
+        assert!(forward.await);
     }
 }

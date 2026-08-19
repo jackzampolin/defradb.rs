@@ -35,11 +35,9 @@ impl<S: Store> P2PHost<S> {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!(address = %address, "Created LibP2P host");
-                if self
-                    .event_tx
-                    .send(HostEvent::Listening(address.clone()))
+                if !self
+                    .forward_event(HostEvent::Listening(address.clone()))
                     .await
-                    .is_err()
                 {
                     warn!(address = %address, "Failed to send Listening event - receiver dropped");
                 }
@@ -123,12 +121,7 @@ impl<S: Store> P2PHost<S> {
                 );
                 debug!(peer_id = %peer_id, "Bitswap protocol pre-announce complete");
 
-                if self
-                    .event_tx
-                    .send(HostEvent::PeerConnected(peer_id))
-                    .await
-                    .is_err()
-                {
+                if !self.forward_event(HostEvent::PeerConnected(peer_id)).await {
                     warn!(peer_id = %peer_id, "Failed to send PeerConnected event - receiver dropped");
                 }
                 true
@@ -318,11 +311,9 @@ impl<S: Store> P2PHost<S> {
 
         info!(peer_id = %peer_id, "Peer disconnected");
         self.peer_addrs.remove(&peer_id);
-        if self
-            .event_tx
-            .send(HostEvent::PeerDisconnected(peer_id))
+        if !self
+            .forward_event(HostEvent::PeerDisconnected(peer_id))
             .await
-            .is_err()
         {
             warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
         }

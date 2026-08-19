@@ -64,7 +64,6 @@ pub fn encode_car(roots: &[Cid], blocks: &[(&Cid, &[u8])]) -> Result<Vec<u8>> {
 /// Any malformed input — unreadable varint, or declared header length
 /// exceeding the remaining bytes — reports `true` so the caller forwards
 /// the bytes and lets the coordinator surface the decode error.
-#[cfg(feature = "iroh-transport")]
 pub(crate) fn car_has_any_block(data: &[u8]) -> bool {
     let mut cursor = data;
     let Ok(header_len) = read_varint(&mut cursor) else {
@@ -122,20 +121,23 @@ pub fn decode_car(data: &[u8]) -> Result<CarContents> {
     Ok((roots, blocks))
 }
 
-/// Traverse DAG from root, collect all reachable blocks from blockstore.
+/// Traverse DAGs from a missing frontier, collecting reachable blocks.
 ///
 /// Collection is capped at [`CAR_MAX_BLOCKS`] blocks and [`CAR_MAX_BYTES`] total
 /// bytes.  If either limit is reached the function returns the blocks collected
 /// so far without error; the caller can detect truncation by checking whether
 /// the returned slice represents a complete DAG.
-pub async fn collect_dag_blocks<B: Blockstore>(
+/// All roots share the same visited set and response limits, so overlapping
+/// branches are sent once and a large frontier cannot multiply the bounded
+/// CAR response size.
+pub async fn collect_dag_blocks_from_roots<B: Blockstore>(
     blockstore: &B,
-    root_cid: &Cid,
+    roots: &[Cid],
 ) -> Result<CarCollectOutcome> {
     let mut outcome = CarCollectOutcome::default();
     let mut visited = HashSet::new();
     let mut total_bytes: usize = 0;
-    let mut queue = VecDeque::from([*root_cid]);
+    let mut queue: VecDeque<Cid> = roots.iter().copied().collect();
 
     while let Some(cid) = queue.pop_front() {
         if !visited.insert(cid) {
@@ -649,9 +651,42 @@ mod tests {
         }
 
         let root_cid = root_cid.expect("deep chain root");
-        let collected = collect_dag_blocks(&blockstore, &root_cid).await.unwrap();
+        let collected = collect_dag_blocks_from_roots(&blockstore, &[root_cid])
+            .await
+            .unwrap();
 
         assert_eq!(collected.blocks.len(), depth);
+        assert!(!collected.truncated());
+    }
+
+    #[tokio::test]
+    async fn collect_frontier_dags_dedupes_shared_descendants() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true);
+
+        let shared_data = encode_ipld(ipld!({ "kind": "shared" }));
+        let shared_cid = make_cid(&shared_data);
+        blockstore.put(&shared_cid, &shared_data).await.unwrap();
+
+        let left_data = encode_ipld(ipld!({ "next": shared_cid, "side": "left" }));
+        let left_cid = make_cid(&left_data);
+        blockstore.put(&left_cid, &left_data).await.unwrap();
+
+        let right_data = encode_ipld(ipld!({ "next": shared_cid, "side": "right" }));
+        let right_cid = make_cid(&right_data);
+        blockstore.put(&right_cid, &right_data).await.unwrap();
+
+        let collected =
+            collect_dag_blocks_from_roots(&blockstore, &[left_cid, right_cid, left_cid])
+                .await
+                .unwrap();
+        let collected_cids: HashSet<Cid> = collected.blocks.iter().map(|(cid, _)| *cid).collect();
+
+        assert_eq!(collected.blocks.len(), 3);
+        assert_eq!(
+            collected_cids,
+            HashSet::from([left_cid, right_cid, shared_cid])
+        );
         assert!(!collected.truncated());
     }
 

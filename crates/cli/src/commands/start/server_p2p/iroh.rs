@@ -5,7 +5,7 @@ use p2p::P2PTransport;
 use tracing::{error, info, warn};
 
 use super::super::node::{Node, P2PTasks};
-use super::{set_persisted_replicator_status, P2PSetup};
+use super::P2PSetup;
 use crate::config::Config;
 use crate::error::{Error, Result};
 
@@ -16,6 +16,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup> {
         info!("Initializing P2P network (iroh)");
@@ -28,9 +29,10 @@ impl Node {
             Arc::new(db_merge::create_head_provider(database.clone()));
 
         let iroh_secret_key = Self::iroh_secret_key(peer_keypair.as_ref())?;
-        let (command_tx, mut iroh_events, replicator_registry, host_task) =
+        let (command_tx, iroh_events, replicator_registry, host_task) =
             p2p::iroh::spawn_endpoint(p2p::iroh::IrohEndpointConfig {
                 secret_key: iroh_secret_key.clone(),
+                node_identity,
                 relay_mode: Self::iroh_relay_mode(config)?,
                 discovery: Self::iroh_discovery(config)?,
                 bind_port: config.net.iroh_bind_port,
@@ -154,8 +156,8 @@ impl Node {
                     continue_on_error: true,
                     rebroadcast_on_merge: false,
                     batch_size: 50,
-                    max_workers: 32,
                 },
+                |_| {},
             )
             .await;
             info!("Replication loop stopped (iroh)");
@@ -190,13 +192,32 @@ impl Node {
         let se_correlator_for_events = se_correlator.clone();
         let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-            while let Some(event) = iroh_events.recv().await {
+            let handler_coordinator = coordinator_for_events.clone();
+            coordinator_for_events.run_event_dispatcher(
+                iroh_events,
+                move |event, admission| {
+                let coordinator_for_events = handler_coordinator.clone();
+                let event_bus_for_handler = event_bus_for_handler.clone();
+                let se_store = se_store.clone();
+                let se_transport_serve = se_transport_serve.clone();
+                let se_correlator_for_events = se_correlator_for_events.clone();
+                let se_event_bus = se_event_bus.clone();
+                let manage_hooks_for_events = manage_hooks_for_events.clone();
+                async move {
                 // SE events: store inbound artifacts and serve/route SE queries
                 // over the iroh transport (mirrors the libp2p loop, #976). Rust
                 // -> Rust artifact push is fire-and-forget, so use the no-ack
                 // `handle_artifacts_received` (Go -> Rust over iroh, which
                 // expects a PushSEArtifactsReply ack, is a follow-up).
+                if admission == p2p::sync::DispatchAdmission::Saturated {
+                    if let Err(error) = coordinator_for_events
+                        .handle_transport_event_with_admission(event, admission)
+                        .await
+                    {
+                        tracing::debug!(%error, "rejected saturated CLI Iroh request");
+                    }
+                    return;
+                }
                 let event = match event {
                     p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
                         let doc_ids = db_merge::se::serve::handle_artifacts_received(
@@ -210,7 +231,7 @@ impl Node {
                                 events::SEArtifactReceivedData { doc_id },
                             ));
                         }
-                        continue;
+                        return;
                     }
                     p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
                         db_merge::se::serve::handle_query_request(
@@ -220,11 +241,11 @@ impl Node {
                             request,
                         )
                         .await;
-                        continue;
+                        return;
                     }
                     p2p::TransportEvent::SEQueryReply { reply, .. } => {
                         se_correlator_for_events.deliver(reply);
-                        continue;
+                        return;
                     }
                     p2p::TransportEvent::ManageRequest { peer_id, request } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
@@ -238,7 +259,7 @@ impl Node {
                         } else {
                             tracing::debug!(%peer_id, "manage request before hooks ready; dropping");
                         }
-                        continue;
+                        return;
                     }
                     p2p::TransportEvent::ManageQueryRequest { peer_id, request } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
@@ -252,25 +273,26 @@ impl Node {
                         } else {
                             tracing::debug!(%peer_id, "manage query request before hooks ready; dropping");
                         }
-                        continue;
+                        return;
                     }
                     p2p::TransportEvent::ManageReply { reply, .. } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
                             hooks.correlator.deliver(reply);
                         }
-                        continue;
+                        return;
                     }
                     p2p::TransportEvent::ManageQueryReply { reply, .. } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
                             hooks.query_correlator.deliver(reply);
                         }
-                        continue;
+                        return;
                     }
                     other => other,
                 };
                 match &event {
                     p2p::TransportEvent::PeerConnected(peer) => {
                         info!("Peer connected (iroh): {}", peer);
+                        defra_p2p_adapter::activate_retry_peer(se_store.clone(), peer).await;
                     }
                     p2p::TransportEvent::PeerDisconnected(peer) => {
                         info!("Peer disconnected (iroh): {}", peer);
@@ -304,22 +326,16 @@ impl Node {
                     _ => {}
                 }
 
-                if event.requires_inline_ordering() {
-                    if let Err(e) = coordinator_for_events.handle_transport_event(event).await {
-                        error!("Failed to handle iroh event: {}", e);
-                    }
-                    continue;
+                if let Err(e) = coordinator_for_events
+                    .handle_transport_event_with_admission(event, admission)
+                    .await
+                {
+                    error!("Failed to handle iroh event: {}", e);
                 }
-
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
-                let coord = coordinator_for_events.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = coord.handle_transport_event(event).await {
-                        error!("Failed to handle iroh event: {}", e);
-                    }
-                    drop(permit);
-                });
-            }
+                }
+                },
+            )
+            .await;
         }));
 
         let version_syncer: Arc<dyn crate::transport_version_syncer::TransportVersionSyncer> =
@@ -333,206 +349,19 @@ impl Node {
         let doc_pusher_impl = Arc::new(crate::transport_doc_pusher::DbTransportDocPusher::new(
             database.clone(),
             transport.clone(),
+            coordinator.head_hint_car_authority(),
         ));
         let doc_pusher_for_acp = doc_pusher_impl.clone();
         let doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> = doc_pusher_impl;
 
-        let recorder_store = store.clone();
-        let failure_recorder_task = tokio::spawn(async move {
-            let mut rx = failure_rx;
-            while let Some(failure) = rx.recv().await {
-                let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
-                let _retry_guard = match peerstore
-                    .acquire_replicator_retry_guard(&failure.peer_id)
-                    .await
-                {
-                    Ok(Some(guard)) => guard,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        warn!(error = %error, "Failed to coordinate push failure recording");
-                        continue;
-                    }
-                };
-                let result = if failure.create_retry {
-                    let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            warn!(error = %error, "Failed to serialize RetryInfo");
-                            continue;
-                        }
-                    };
-                    peerstore
-                        .record_push_failure(
-                            &failure.peer_id,
-                            &failure.doc_id,
-                            &failure.collection_id,
-                            &failure.cid,
-                            failure.head_priority,
-                            &info_bytes,
-                        )
-                        .await
-                } else {
-                    peerstore
-                        .observe_push_head(
-                            &failure.peer_id,
-                            &failure.doc_id,
-                            &failure.collection_id,
-                            &failure.cid,
-                            failure.head_priority,
-                        )
-                        .await
-                };
-                if let Err(e) = result {
-                    warn!(error = %e, "Failed to record push failure");
-                    continue;
-                }
-                if !failure.create_retry {
-                    continue;
-                }
-                if let Err(e) = set_persisted_replicator_status(
-                    &peerstore,
-                    &failure.peer_id,
-                    p2p::ReplicatorStatus::Inactive,
-                )
-                .await
-                {
-                    warn!(error = %e, "Failed to mark replicator inactive");
-                }
-            }
-        });
-
-        let retry_store = store.clone();
-        let retry_pusher = doc_pusher.clone();
-        let retry_loop_task = tokio::spawn(async move {
-            let peerstore = storage::stores::Peerstore::new(retry_store.clone());
-            if let Err(error) = peerstore.activate_dormant_push_retries().await {
-                warn!(error = %error, "Failed to reactivate push retries after restart");
-            }
-            loop {
-                tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
-                let peerstore = storage::stores::Peerstore::new(retry_store.clone());
-                let peers = match peerstore.get_replicator_retry_peers().await {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                for (peer_id_str, info_bytes) in peers {
-                    let _retry_guard =
-                        match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
-                            Ok(Some(guard)) => guard,
-                            Ok(None) | Err(_) => continue,
-                        };
-                    let _legacy_retry_info =
-                        match storage::stores::RetryInfo::from_bytes(&info_bytes) {
-                            Ok(i) => i,
-                            Err(_) => continue,
-                        };
-                    let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                    // Iroh request-response can reconnect on demand, so don't
-                    // gate retries on the peer-map snapshot.
-                    let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    };
-                    if docs.is_empty() {
-                        let _ = peerstore.clear_retry_peer(&peer_id_str).await;
-                        let _ = set_persisted_replicator_status(
-                            &peerstore,
-                            &peer_id_str,
-                            p2p::ReplicatorStatus::Active,
-                        )
-                        .await;
-                        continue;
-                    }
-                    let mut fast_failures = 0usize;
-                    for retry in &mut docs {
-                        if !retry.retry_info.is_due() {
-                            continue;
-                        }
-                        // Bound each send so a nonresponsive peer cannot
-                        // stall healthy peers' retries behind it (#1099). A
-                        // timeout ends the pass (the peer is unreachable); a
-                        // fast rejection only consumes a bounded budget so
-                        // one permanently rejected doc at the head of the
-                        // key order cannot starve the rest forever.
-                        // Collection commits are doc-less and replay by CID
-                        // (defradb#1113); the document executor would ack them
-                        // as a no-op and lose the block.
-                        let replay = async {
-                            if retry.is_collection_commit() {
-                                match retry.cid.parse::<cid::Cid>() {
-                                    Ok(cid) => {
-                                        retry_pusher
-                                            .retry_collection_commit(
-                                                &peer_id,
-                                                &retry.collection_id,
-                                                &cid,
-                                            )
-                                            .await
-                                    }
-                                    Err(error) => {
-                                        Err(defra_http::router::P2PError::InvalidInput(format!(
-                                            "unparseable collection-commit CID {}: {error}",
-                                            retry.cid
-                                        )))
-                                    }
-                                }
-                            } else {
-                                retry_pusher
-                                    .retry_doc(&peer_id, &retry.doc_id, &retry.collection_id)
-                                    .await
-                            }
-                        };
-                        match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await
-                        {
-                            Ok(Ok(())) => {
-                                let _ =
-                                    peerstore.complete_retry_document(&peer_id_str, retry).await;
-                            }
-                            Ok(Err(error)) => {
-                                p2p::sync::reschedule_persisted_push_retry(
-                                    &mut retry.retry_info,
-                                    &format!("{peer_id_str}:{}", retry.cid),
-                                    &error.to_string(),
-                                );
-                                let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
-                                fast_failures += 1;
-                                if fast_failures >= 3 {
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                retry
-                                    .retry_info
-                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
-                                let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
-                                break;
-                            }
-                        }
-                    }
-                    if peerstore
-                        .get_retry_documents(&peer_id_str)
-                        .await
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        let _ = peerstore.clear_retry_peer(&peer_id_str).await;
-                        let _ = set_persisted_replicator_status(
-                            &peerstore,
-                            &peer_id_str,
-                            p2p::ReplicatorStatus::Active,
-                        )
-                        .await;
-                    } else {
-                        let _ = set_persisted_replicator_status(
-                            &peerstore,
-                            &peer_id_str,
-                            p2p::ReplicatorStatus::Inactive,
-                        )
-                        .await;
-                    }
-                }
-            }
-        });
+        let failure_recorder_task =
+            defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
+        let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
+            store.clone(),
+            transport.clone(),
+            doc_pusher.clone(),
+            None,
+        );
 
         let restore_peerstore = storage::stores::Peerstore::new(store);
         match restore_peerstore.list_replicators().await {
@@ -612,7 +441,7 @@ impl Node {
             txn_broadcaster: Some(txn_broadcaster),
             wire_merge_acp: Some(Box::new(move |acp| {
                 serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
-                    resolver: Arc::new(p2p::AnonymousResolver),
+                    resolver: Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
                     gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
                         acp.clone(),
                         database_for_acp.node_did(),
