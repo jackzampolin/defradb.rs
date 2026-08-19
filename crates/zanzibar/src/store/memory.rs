@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::did::Did;
 
@@ -11,6 +12,7 @@ use crate::types::{ObjectRef, Policy, Relationship, Subject};
 pub struct MemoryZanzibarStore {
     policies: RwLock<HashMap<String, Policy>>,
     relationships: RwLock<HashMap<String, HashMap<String, Relationship>>>,
+    policy_counter: AtomicU64,
 }
 
 impl MemoryZanzibarStore {
@@ -18,6 +20,7 @@ impl MemoryZanzibarStore {
         Self {
             policies: RwLock::new(HashMap::new()),
             relationships: RwLock::new(HashMap::new()),
+            policy_counter: AtomicU64::new(0),
         }
     }
 }
@@ -40,6 +43,10 @@ impl ZanzibarStore for MemoryZanzibarStore {
 
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>> {
         Ok(self.policies.read().get(policy_id).cloned())
+    }
+
+    async fn next_policy_counter(&self) -> Result<u64> {
+        Ok(self.policy_counter.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     async fn list_policies(&self) -> Result<Vec<Policy>> {

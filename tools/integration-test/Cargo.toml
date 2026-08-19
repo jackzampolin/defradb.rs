@@ -106,8 +106,8 @@ name = "cursor"
 path = "tests/cursor.rs"
 
 [dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-07-port-conflict" }
+hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-14-restart-port-guard" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-14-restart-port-guard" }
 document = { path = "../../crates/document" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = [

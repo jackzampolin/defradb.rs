@@ -16,6 +16,7 @@ use zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
 /// Persistent Zanzibar store backed by any Store implementation.
 pub struct PersistentZanzibarStore<S: Store> {
     store: NamespacedStore<S>,
+    counter_lock: async_lock::Mutex<()>,
 }
 
 impl<S: Store> PersistentZanzibarStore<S> {
@@ -23,6 +24,7 @@ impl<S: Store> PersistentZanzibarStore<S> {
     pub fn from_store(store: Arc<S>) -> Self {
         Self {
             store: NamespacedStore::new(store, Namespace::Acpstore),
+            counter_lock: async_lock::Mutex::new(()),
         }
     }
 }
@@ -36,9 +38,15 @@ impl PersistentZanzibarStore<RedbStore> {
     }
 }
 
+/// Key holding the last issued policy-ID counter.
+const POLICY_COUNTER_KEY: &str = "/zanzibar/counter";
+
+const POLICY_PREFIX: &str = "/zanzibar/policy/";
+const MAX_COUNTER_CONFLICT_RETRIES: u32 = 16;
+
 impl<S: Store> PersistentZanzibarStore<S> {
     fn policy_key(policy_id: &str) -> String {
-        format!("/zanzibar/policy/{}", policy_id)
+        format!("{}{}", POLICY_PREFIX, policy_id)
     }
 
     fn relationship_key(policy_id: &str, rel: &Relationship) -> String {
@@ -109,8 +117,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             Error::Serialization(format!("list_policies: create transaction: {}", e))
         })?;
 
-        let prefix = "/zanzibar/policy/";
-        let iter_opts = IterOptions::new().with_prefix(prefix.as_bytes().to_vec());
+        let iter_opts = IterOptions::new().with_prefix(POLICY_PREFIX.as_bytes().to_vec());
 
         let mut iter = txn
             .iterator(iter_opts)
@@ -128,6 +135,74 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         }
 
         Ok(policies)
+    }
+
+    async fn next_policy_counter(&self) -> Result<u64> {
+        let _guard = self.counter_lock.lock().await;
+        let mut conflicts = 0;
+
+        loop {
+            let mut txn = self.store.new_txn(false).await.map_err(|e| {
+                Error::Serialization(format!("next_policy_counter: create transaction: {}", e))
+            })?;
+
+            let stored = txn
+                .get(POLICY_COUNTER_KEY.as_bytes())
+                .await
+                .map_err(|e| Error::Serialization(format!("next_policy_counter: get: {}", e)))?;
+
+            let last_issued = match stored {
+                Some(bytes) => {
+                    let value: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                        Error::Serialization(format!(
+                            "next_policy_counter: expected 8 bytes, found {}",
+                            bytes.len()
+                        ))
+                    })?;
+                    u64::from_be_bytes(value)
+                }
+                None => {
+                    let iter_opts =
+                        IterOptions::new().with_prefix(POLICY_PREFIX.as_bytes().to_vec());
+                    let mut iter = txn.iterator(iter_opts).await.map_err(|e| {
+                        Error::Serialization(format!("next_policy_counter: create iterator: {}", e))
+                    })?;
+
+                    let mut seeded = 0u64;
+                    while let Some(kv) = iter.next().await.map_err(|e| {
+                        Error::Serialization(format!("next_policy_counter: iterate: {}", e))
+                    })? {
+                        // NAC shares this key space but mints its id from a
+                        // constant, so it never consumed a counter value.
+                        if !kv.key.ends_with(crate::nac::NODE_POLICY_ID.as_bytes()) {
+                            seeded += 1;
+                        }
+                    }
+                    seeded
+                }
+            };
+
+            let next = last_issued + 1;
+
+            txn.set(POLICY_COUNTER_KEY.as_bytes(), &next.to_be_bytes())
+                .await
+                .map_err(|e| Error::Serialization(format!("next_policy_counter: set: {}", e)))?;
+
+            match txn.commit().await {
+                Ok(()) => return Ok(next),
+                Err(error)
+                    if error.is_txn_conflict() && conflicts < MAX_COUNTER_CONFLICT_RETRIES =>
+                {
+                    conflicts += 1;
+                }
+                Err(error) => {
+                    return Err(Error::Serialization(format!(
+                        "next_policy_counter: commit: {}",
+                        error
+                    )))
+                }
+            }
+        }
     }
 
     async fn delete_policy(&self, policy_id: &str) -> Result<bool> {

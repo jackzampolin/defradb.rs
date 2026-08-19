@@ -38,11 +38,10 @@ pub(super) fn normal_value_to_numeric(value: &NormalValue) -> Option<NumericValu
 }
 
 pub(super) fn normal_value_to_time(value: &NormalValue) -> Option<DateTime<FixedOffset>> {
-    value.as_time().cloned().or_else(|| {
-        value
-            .as_str()
-            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-    })
+    value
+        .as_time()
+        .cloned()
+        .or_else(|| value.as_str().and_then(document::parse_rfc3339))
 }
 
 fn decode_commit_delta_value(commit: &document::Document) -> Option<NormalValue> {
