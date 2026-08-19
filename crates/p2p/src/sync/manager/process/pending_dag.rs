@@ -351,7 +351,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     }
 
     /// Remove a pending DAG entry once another fetch path has completed it.
-    pub(super) fn clear_pending_dag(&self, root_cid: &Cid) -> bool {
+    pub fn clear_pending_dag(&self, root_cid: &Cid) -> bool {
         self.pending_dags.write().remove(root_cid).is_some()
     }
 

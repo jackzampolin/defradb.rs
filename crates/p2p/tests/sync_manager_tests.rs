@@ -393,15 +393,18 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
         .await
         .unwrap();
 
-    match events.try_recv().expect("pending DAG event") {
-        SyncEvent::DagNeedsFetch {
-            root_cid, missing, ..
-        } => {
-            assert_eq!(root_cid, composite_cid);
-            assert_eq!(missing, vec![field_cid]);
-        }
-        other => panic!("expected DagNeedsFetch event, got {:?}", other),
-    }
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    let pending = manager
+        .pending_dag_snapshot(&composite_cid)
+        .expect("pending DAG registration");
+    assert!(pending.is_recovery_registered);
+    assert_eq!(
+        pending.missing,
+        std::collections::HashSet::from([field_cid])
+    );
     assert_eq!(
         manager.pending_dag_count(),
         1,
@@ -438,9 +441,10 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
     );
     assert_eq!(
         manager.pending_dag_count(),
-        0,
-        "pending DAG should be cleared"
+        1,
+        "completed DAG remains owned until its merge reaches a terminal outcome"
     );
+    assert!(manager.pending_dag_missing(&composite_cid).is_empty());
     assert!(
         blockstore.has(&field_cid).await.unwrap(),
         "field block should be stored"
@@ -482,8 +486,12 @@ async fn test_diagnostics_counters_track_pending_dag_lifecycle() {
         .await
         .unwrap();
 
-    // Drain DagNeedsFetch so the channel isn't full.
-    let _ = events.try_recv().expect("DagNeedsFetch event");
+    // Registration only makes the root due; the coordinator clock is the
+    // sole DagNeedsFetch dispatcher.
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 
     // Three retry rounds while the field block is still missing.
     for _ in 0..3 {
@@ -557,8 +565,10 @@ async fn test_pending_dag_attempts_increment_per_retry() {
         .await
         .unwrap();
 
-    // drain the DagNeedsFetch event so the channel isn't blocked.
-    let _ = events.try_recv().expect("pending DAG event");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     assert_eq!(manager.pending_dag_count(), 1);
     assert_eq!(manager.pending_dag_attempts(&composite_cid), 0);
 
@@ -621,7 +631,10 @@ async fn test_process_pushlog_pending_capacity_returns_typed_error() {
         )
         .await
         .unwrap();
-    let _ = events.try_recv().expect("DagNeedsFetch for composite A");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     assert_eq!(manager.pending_dag_count(), 1);
 
     // Composite B overflows the single-slot pending map: the registration is
@@ -673,7 +686,10 @@ async fn test_max_pending_dags_zero_is_normalized_to_one() {
         )
         .await
         .expect("a single pending registration must be admitted even with cap 0");
-    let _ = events.try_recv().expect("DagNeedsFetch for composite");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     assert_eq!(manager.pending_dag_count(), 1);
 }
 
@@ -965,8 +981,10 @@ mod pending_persistence {
         assert_eq!(persisted[0].1.source_peer.as_deref(), Some("peer-1"));
         assert!(persisted[0].1.is_explicit_replicator);
 
-        // Drain the DagNeedsFetch event so the channel stays open.
-        let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
         // The missing field arrives: the DAG resolves (DagReady emitted) but
         // the durable record must survive — DagReady only queues the merge,
@@ -981,7 +999,19 @@ mod pending_persistence {
             )
             .await
             .expect("field block completes the pending DAG");
-        assert_eq!(manager.pending_dag_count(), 0);
+        let ready = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("DagReady event")
+            .expect("event channel open");
+        assert!(matches!(
+            ready,
+            SyncEvent::DagReady { root_cid, .. } if root_cid == comp_cid
+        ));
+        assert_eq!(
+            manager.pending_dag_count(),
+            1,
+            "ready root stays live until the terminal merge"
+        );
         assert_eq!(
             pending_store
                 .load_all()
@@ -1040,7 +1070,7 @@ mod pending_persistence {
     async fn restore_re_registers_and_re_drives_fetch() {
         let store = Arc::new(MemoryStore::new());
         let comp_cid = {
-            let (manager, mut events, _pending_store) = manager_with_store(store.clone()).await;
+            let (manager, _events, _pending_store) = manager_with_store(store.clone()).await;
             let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
             manager
                 .process_pushlog(
@@ -1051,43 +1081,26 @@ mod pending_persistence {
                 )
                 .await
                 .expect("composite with missing link registers pending");
-            let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
             comp_cid
             // manager dropped here: simulates the crash after the success ack
         };
 
         // "Restarted" manager over the same physical store.
-        let (manager, mut events, _pending_store) = manager_with_store(store).await;
+        let (manager, _events, _pending_store) = manager_with_store(store).await;
         assert_eq!(manager.pending_dag_count(), 0);
 
         let restored = manager.resync_persisted_pending_dags().await;
         assert_eq!(restored, 1);
         assert_eq!(manager.pending_dag_count(), 1);
 
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("restore must emit a fetch event")
-            .expect("event channel open");
-        match event {
-            SyncEvent::DagNeedsFetch {
-                root_cid,
-                missing,
-                providers,
-                doc_id,
-                is_explicit_replicator,
-                ..
-            } => {
-                assert_eq!(root_cid, comp_cid);
-                assert!(!missing.is_empty());
-                assert_eq!(doc_id, "doc123");
-                assert!(is_explicit_replicator);
-                assert!(
-                    providers.contains(&"peer-1".to_string()),
-                    "persisted source peer must be offered as a provider"
-                );
-            }
-            other => panic!("expected DagNeedsFetch, got {other:?}"),
-        }
+        let pending = manager
+            .pending_dag_snapshot(&comp_cid)
+            .expect("restored root must be registered for the receiver clock");
+        assert!(!pending.missing.is_empty());
+        assert_eq!(pending.doc_id, "doc123");
+        assert!(pending.is_explicit_replicator);
+        assert_eq!(pending.source_peer.as_deref(), Some("peer-1"));
+        assert!(pending.is_recovery_registered);
     }
 
     #[tokio::test]
@@ -1202,7 +1215,7 @@ mod pending_persistence {
     #[tokio::test]
     async fn resync_re_registers_cleared_records() {
         let store = Arc::new(MemoryStore::new());
-        let (manager, mut events, _pending_store) = manager_with_store(store).await;
+        let (manager, _events, _pending_store) = manager_with_store(store).await;
         let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
 
         manager
@@ -1214,21 +1227,17 @@ mod pending_persistence {
             )
             .await
             .expect("registers pending");
-        let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
         assert!(manager.clear_pending_dag(&comp_cid));
         assert_eq!(manager.pending_dag_count(), 0);
 
         let resynced = manager.resync_persisted_pending_dags().await;
         assert_eq!(resynced, 1);
         assert_eq!(manager.pending_dag_count(), 1);
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("resync must emit a fetch event")
-            .expect("event channel open");
-        assert!(matches!(
-            event,
-            SyncEvent::DagNeedsFetch { root_cid, .. } if root_cid == comp_cid
-        ));
+        let pending = manager
+            .pending_dag_snapshot(&comp_cid)
+            .expect("resync must register the root for the receiver clock");
+        assert!(pending.is_recovery_registered);
+        assert!(pending.next_retry_at <= tokio::time::Instant::now());
 
         // With the entry live in memory again, the sweep is a no-op.
         assert_eq!(manager.resync_persisted_pending_dags().await, 0);
@@ -1293,7 +1302,7 @@ mod pending_persistence {
     async fn resync_drains_records_skipped_at_capacity_once_slots_free() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
-        let (manager, mut events) = SyncManager::new(
+        let (manager, _events) = SyncManager::new(
             blockstore,
             test_peer_state(),
             SyncConfig {
@@ -1318,11 +1327,6 @@ mod pending_persistence {
             .process_pushlog(&pushlog_for(&comp_b, &bytes_b), Some("peer-2"), true, None)
             .await
             .expect("register B");
-        while tokio::time::timeout(Duration::from_millis(50), events.recv())
-            .await
-            .is_ok()
-        {}
-
         // Map full: the sweep must keep A's record and re-drive nothing.
         assert_eq!(manager.resync_persisted_pending_dags().await, 0);
         assert_eq!(manager.persisted_pending_count(), 2);
@@ -1332,11 +1336,10 @@ mod pending_persistence {
         manager.clear_pending_dag(&comp_b);
         assert_eq!(manager.resync_persisted_pending_dags().await, 1);
         assert!(manager.pending_dag_count() >= 1);
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("freed slot must produce a re-drive")
-            .expect("event channel open");
-        assert!(matches!(event, SyncEvent::DagNeedsFetch { .. }));
+        assert!(manager
+            .pending_dag_cids()
+            .into_iter()
+            .any(|cid| cid == comp_a || cid == comp_b));
     }
 
     /// Round-4 nit: an orphan record (in the store but missing from the

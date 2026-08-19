@@ -111,8 +111,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// 2. Claim one CID owner or nack/suppress a duplicate without waiting
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
-    /// 5. Emit BlockReceived only once the full reachable DAG is locally present,
-    ///    otherwise emit DagNeedsFetch for the missing descendants
+    /// 5. Emit BlockReceived only once the full reachable DAG is locally present;
+    ///    otherwise durably register the root for the receiver retry clock
     ///
     /// # Go Compatibility
     ///
