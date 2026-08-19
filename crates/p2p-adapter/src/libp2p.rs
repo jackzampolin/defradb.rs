@@ -1125,7 +1125,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 mod tests {
     use super::*;
     use blockstore::DefraBlockstore;
-    use p2p::testutil::MockBitswapStore;
+    use p2p::BitswapStoreAdapter;
     use storage::backends::MemoryStore;
 
     #[tokio::test]
@@ -1183,6 +1183,7 @@ mod tests {
 
     /// The adapter under test carries no sync coordinator, so the blockstore
     /// generic is never exercised; a do-nothing implementation satisfies it.
+    #[derive(Debug)]
     struct NoopBlockstore;
 
     #[async_trait]
@@ -1264,11 +1265,11 @@ mod tests {
     #[tokio::test]
     async fn doc_sync_with_unresponsive_peer_returns_ok() {
         let (host_a, handle_a, _events_a, _replicators_a) =
-            p2p::host::P2PHost::new(MockBitswapStore::new())
+            p2p::host::P2PHost::new(BitswapStoreAdapter::new(Arc::new(NoopBlockstore)))
                 .await
                 .expect("host a");
         let (host_b, handle_b, _events_b, _replicators_b) =
-            p2p::host::P2PHost::new(MockBitswapStore::new())
+            p2p::host::P2PHost::new(BitswapStoreAdapter::new(Arc::new(NoopBlockstore)))
                 .await
                 .expect("host b");
 
