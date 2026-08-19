@@ -126,7 +126,7 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
-        family: "Sync ownership transfer (Iroh relay recovery)",
+        family: "Sync ownership transfer (head hint / receiver pull)",
         name: "INV_FetchHasQualifiedProvider / LIVE_EventualCurrency — immutable origin plus durable same-root alternate",
         axis: Tla,
         anchor: "crates/p2p/src/sync/manager/process/pushlog.rs; crates/p2p/src/sync/pending_store.rs; crates/p2p/src/sync/coordinator/mod.rs",

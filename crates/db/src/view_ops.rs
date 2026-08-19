@@ -79,7 +79,7 @@ impl RefreshViewsOptions {
     /// Go picks candidates by collection id only when neither a name nor a
     /// version already picked them, so those two take precedence over it.
     fn applies_collection_id(&self) -> bool {
-        self.version_id.is_none() && !(self.names.is_some() && !self.get_inactive)
+        (self.get_inactive || self.names.is_none()) && self.version_id.is_none()
     }
 }
 
