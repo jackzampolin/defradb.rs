@@ -728,10 +728,12 @@ pub trait CollectionManagementOperations: Send + Sync {
     ///
     /// Creates a new schema version with the patched fields.
     /// The `patch` should be a JSON array of patch operations.
+    /// The optional migration is registered atomically with the new version.
     async fn patch_collection(
         &self,
         collection_name: &str,
         patch: &str,
+        migration: Option<lens::LensConfig>,
     ) -> Result<serde_json::Value, String>;
 
     /// Set the active collection version.

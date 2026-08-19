@@ -260,7 +260,7 @@ pub use mobile::{
     defra_mobile_add_replicator, defra_mobile_close_node, defra_mobile_connect,
     defra_mobile_disconnect, defra_mobile_ensure_schema, defra_mobile_execute, defra_mobile_init,
     defra_mobile_notify_network_change, defra_mobile_open_node, defra_mobile_peer_info,
-    defra_mobile_shareable_address, defra_mobile_sync_collection,
+    defra_mobile_shareable_address, defra_mobile_sync_collection, defra_mobile_sync_status,
 };
 pub use node::{new_node, node_close};
 pub use p2p::{
@@ -269,7 +269,7 @@ pub use p2p::{
     p2p_delete_documents, p2p_delete_replicator, p2p_disconnect, p2p_list_collections,
     p2p_list_documents, p2p_list_replicators, p2p_notify_network_change, p2p_peer_info,
     p2p_shareable_address, p2p_sync_branchable_collection, p2p_sync_collection_versions,
-    p2p_sync_documents,
+    p2p_sync_documents, p2p_sync_status,
 };
 pub use query::exec_request;
 pub use schema::{add_schema, add_schema_in_txn, get_collections, get_collections_in_txn};

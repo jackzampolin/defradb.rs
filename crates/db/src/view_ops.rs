@@ -377,7 +377,7 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// Get all active collections as CollectionVersion objects (internal helper).
-    fn get_all_active_collections_internal(&self) -> Result<Vec<CollectionVersion>> {
+    pub(crate) fn get_all_active_collections_internal(&self) -> Result<Vec<CollectionVersion>> {
         let cache = self
             .collections
             .read()
