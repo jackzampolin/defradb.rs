@@ -826,6 +826,14 @@ jobs:
           --test p2p_iroh
           -- --test-threads=1 connection::
 
+      - name: Run iroh sync ownership fences
+        if: matrix.suite == 'iroh'
+        run: |
+          cargo test --profile super-dev -p integration-test --test p2p_iroh \
+            peer::create::create_propagates_to_last_node_in_chain -- --test-threads=1
+          cargo test --profile super-dev -p integration-test --test p2p_iroh \
+            peer::create::head_hint_fanout_above_car_worker_bound_quiesces -- --test-threads=1
+
       # Every other studio job reports these; this matrix did not, which left
       # the fallback rebuild above as the one compile in CI with no visibility
       # into whether sccache was serving it.
