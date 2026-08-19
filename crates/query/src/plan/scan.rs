@@ -9,12 +9,12 @@ use schema::CollectionVersion;
 use tracing::debug;
 
 use crate::doc_stream::DocStream;
+use crate::document::{document_to_plan_doc_with_status, DocumentMapping};
+use crate::error::Result;
 use crate::fetcher::DocFetcher;
+use crate::mapper::Filter;
 use crate::planner::vector_routing::VectorRoute;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::{document_to_plan_doc_with_status, DocumentMapping};
-use query_types::error::Result;
-use query_types::mapper::Filter;
 
 /// ScanNode scans documents from a collection.
 ///
@@ -402,7 +402,7 @@ impl PlanNode for ScanNode {
             } else {
                 // No docs provided and no fetcher - this is a programming error.
                 // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
-                return Err(query_types::error::QueryError::internal(format!(
+                return Err(crate::error::QueryError::internal(format!(
                     "ScanNode for collection '{}' has no documents and no fetcher - \
                      this indicates a bug in query planning or test setup",
                     self.collection.name
@@ -424,7 +424,7 @@ impl PlanNode for ScanNode {
 
     async fn next(&mut self) -> Result<bool> {
         if !self.initialized {
-            return Err(query_types::error::QueryError::execution(
+            return Err(crate::error::QueryError::execution(
                 "ScanNode.next() called before init()",
             ));
         }
@@ -657,9 +657,9 @@ mod tests {
     use serde_json::json;
 
     use super::ScanNode;
+    use crate::document::DocumentMapping;
+    use crate::mapper::Filter;
     use crate::planner::{Doc, PlanNode};
-    use query_types::document::DocumentMapping;
-    use query_types::mapper::Filter;
 
     fn make_collection() -> CollectionVersion {
         CollectionVersion::new(

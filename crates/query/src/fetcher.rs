@@ -9,8 +9,8 @@ use identity::Did;
 use storage::corekv::MaybeSendSync;
 
 use crate::doc_stream::DocStream;
+use crate::error::Result;
 use crate::planner::index_selection::IndexScanParams;
-use query_types::error::Result;
 
 /// Result of fetching documents by ID, including information about missing documents.
 #[derive(Debug, Clone)]
@@ -225,7 +225,7 @@ pub trait DocFetcher: MaybeSendSync {
     /// collectionVersionId, links, heads, signature.
     async fn get_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
         let _ = options;
-        Err(query_types::error::QueryError::execution(
+        Err(crate::error::QueryError::execution(
             "_commits queries are not supported by this fetcher".to_string(),
         ))
     }
@@ -263,7 +263,7 @@ pub trait DocFetcher: MaybeSendSync {
         params: &IndexScanParams,
     ) -> Result<IndexScanResult> {
         let _ = (collection_name, params);
-        Err(query_types::error::QueryError::execution(
+        Err(crate::error::QueryError::execution(
             "Index-based queries are not supported by this fetcher".to_string(),
         ))
     }
@@ -295,7 +295,7 @@ pub trait DocFetcher: MaybeSendSync {
         effort: Option<usize>,
     ) -> Result<Vec<u64>> {
         let _ = (collection_name, index_id, query_vector, k, effort);
-        Err(query_types::error::QueryError::execution(
+        Err(crate::error::QueryError::execution(
             "Vector search is not supported by this fetcher".to_string(),
         ))
     }
@@ -332,7 +332,7 @@ pub trait DocFetcher: MaybeSendSync {
         caller_identity: Option<&Did>,
     ) -> Result<Document> {
         let _ = (cid, expected_doc_id, caller_identity);
-        Err(query_types::error::QueryError::execution(
+        Err(crate::error::QueryError::execution(
             "CID-based time-travel queries are not supported by this fetcher".to_string(),
         ))
     }
@@ -410,5 +410,4 @@ pub struct CommitsQueryOptions {
 /// Provides collection schemas on-demand.
 ///
 /// This trait abstracts collection resolution, allowing the QueryRunner to
-// CollectionProvider and StaticCollectionProvider extracted to query-types crate.
-pub use query_types::collection_provider::{CollectionProvider, StaticCollectionProvider};
+pub use crate::collection_provider::{CollectionProvider, StaticCollectionProvider};

@@ -6,11 +6,11 @@
 
 use std::collections::HashMap;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{Requestable, Select};
 use crate::plan::{lens_node::LensNode, view::ViewNode, SelectNode};
 use crate::planner::{PlanNode, PlanResult, Planner};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{Requestable, Select};
 
 impl Planner {
     /// Validate that all nested select fields exist in the target collection's schema.
@@ -106,7 +106,7 @@ impl Planner {
                             .fields
                             .push(Requestable::Select(Box::new(deep_select)));
                     } else {
-                        let field = query_types::mapper::Field::new(inner_field_name);
+                        let field = crate::mapper::Field::new(inner_field_name);
                         inner_select.fields.push(Requestable::Field(field));
                     }
                 }
@@ -115,9 +115,9 @@ impl Planner {
                     .push(Requestable::Select(Box::new(inner_select)));
             } else if field_json.get("Targets").is_some() {
                 // Aggregate field (e.g., _count, _sum)
-                let agg_type = query_types::mapper::AggregateType::parse(field_name)
-                    .unwrap_or(query_types::mapper::AggregateType::Count);
-                let mut agg = query_types::mapper::Aggregate {
+                let agg_type = crate::mapper::AggregateType::parse(field_name)
+                    .unwrap_or(crate::mapper::AggregateType::Count);
+                let mut agg = crate::mapper::Aggregate {
                     aggregate_type: agg_type,
                     targets: Vec::new(),
                     filter: None,
@@ -138,9 +138,9 @@ impl Planner {
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
                         let target = if let Some(fname) = field_name {
-                            query_types::mapper::AggregateTarget::with_field(host_name, fname)
+                            crate::mapper::AggregateTarget::with_field(host_name, fname)
                         } else {
-                            query_types::mapper::AggregateTarget::new(host_name)
+                            crate::mapper::AggregateTarget::new(host_name)
                         };
                         agg.targets.push(target);
                     }
@@ -153,9 +153,9 @@ impl Planner {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 let field = if let Some(a) = alias {
-                    query_types::mapper::Field::with_alias(field_name, a)
+                    crate::mapper::Field::with_alias(field_name, a)
                 } else {
-                    query_types::mapper::Field::new(field_name)
+                    crate::mapper::Field::new(field_name)
                 };
                 source_select.fields.push(Requestable::Field(field));
             }
@@ -167,9 +167,8 @@ impl Planner {
                 if let Some(conditions) = filter_json.get("Conditions").and_then(|c| c.as_object())
                 {
                     if !conditions.is_empty() {
-                        source_select.filter = Some(query_types::mapper::Filter::from_conditions(
-                            conditions.clone(),
-                        ));
+                        source_select.filter =
+                            Some(crate::mapper::Filter::from_conditions(conditions.clone()));
                     }
                 }
             }

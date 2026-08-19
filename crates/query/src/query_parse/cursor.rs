@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use graphql_parser::query::{Field, Selection, Value};
 use serde_json::Value as JsonValue;
 
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{CursorAliases, CursorPageInfoFields, CursorParams, Select};
+use crate::error::{QueryError, Result};
+use crate::mapper::{CursorAliases, CursorPageInfoFields, CursorParams, Select};
 
 use super::parser::{parse_field_to_select, FragmentMap};
 use super::values::{parse_int_value, resolve_string_value};

@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// BM25Node injects pre-computed BM25 scores into documents.
 ///

@@ -6,11 +6,11 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::plan::view_cache::unmarshal_view_item;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// CachedViewFetcher reads documents from a materialized view's cache.
 ///
@@ -95,7 +95,7 @@ impl PlanNode for CachedViewFetcher {
 
     async fn next(&mut self) -> Result<bool> {
         if !self.initialized {
-            return Err(query_types::error::QueryError::execution(
+            return Err(crate::error::QueryError::execution(
                 "CachedViewFetcher.next() called before init()",
             ));
         }

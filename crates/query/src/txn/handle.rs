@@ -3,7 +3,7 @@
 use std::fmt;
 use std::ops::Deref;
 
-use query_types::error::TransactionError;
+use crate::error::TransactionError;
 
 /// An opaque handle to an active transaction.
 ///

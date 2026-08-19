@@ -6,7 +6,7 @@
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 
-use query_types::mapper::{Filter, Select};
+use crate::mapper::{Filter, Select};
 
 /// Result of filter preparation: pre-processed filter components for plan construction.
 pub(in crate::planner) struct FilterParts {

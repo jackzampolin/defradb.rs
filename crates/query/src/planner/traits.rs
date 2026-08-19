@@ -4,15 +4,14 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use storage::corekv::MaybeSendSync;
 
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
+use crate::document::DocumentMapping;
+use crate::error::Result;
 
 use crate::plan::CursorPageInfo;
 use crate::planner::index_selection::CursorSeek;
 
-// Doc, DocStatus, DocFields extracted to query-types crate.
 // Re-exported from planner/mod.rs for backwards compatibility.
-use query_types::doc::Doc;
+use crate::doc::Doc;
 
 /// Volcano Iterator Model plan node trait.
 ///
@@ -256,7 +255,7 @@ impl ExecInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use query_types::doc::{Doc, DocStatus};
+    use crate::doc::{Doc, DocStatus};
     use serde_json::json;
 
     #[test]

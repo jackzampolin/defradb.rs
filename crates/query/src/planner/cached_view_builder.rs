@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 
+use crate::error::Result;
+use crate::mapper::Select;
 use crate::plan::{CachedViewFetcher, SelectNode};
 use crate::planner::{PlanNode, PlanResult, Planner};
-use query_types::error::Result;
-use query_types::mapper::Select;
 
 impl Planner {
     /// Build a plan for a materialized view.

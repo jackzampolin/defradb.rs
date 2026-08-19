@@ -10,8 +10,8 @@
 use cid::Cid;
 use std::sync::LazyLock;
 
+use crate::error::{QueryError, Result};
 use graphql_parser::schema::{Directive, Type};
-use query_types::error::{QueryError, Result};
 use regex::Regex;
 use schema::{CType, FieldDescription, FieldKind, ScalarKind};
 use sha2::{Digest, Sha256};

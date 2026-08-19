@@ -5,7 +5,7 @@ use schema::{FieldKind, IndexDescription};
 use serde_json::Map;
 use serde_json::Value as JsonValue;
 
-use query_types::mapper::{Filter, FilterOp, OrderBy, OrderDirection};
+use crate::mapper::{Filter, FilterOp, OrderBy, OrderDirection};
 
 use super::types::{ConditionValue, FieldCondition};
 

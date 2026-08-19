@@ -3,14 +3,14 @@
 //! Contains methods for adding aggregate nodes (count, sum, avg, min, max)
 //! and similarity nodes to query plans.
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{AggregateType, Requestable, Select};
 use crate::plan::{
     AverageNode, AvgSourceMeta, BM25Node, CountNode, CountSourceMeta, MaxNode, MaxSourceMeta,
     MinNode, MinSourceMeta, SimilarityNode, SumNode, SumSourceMeta,
 };
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{AggregateType, Requestable, Select};
 
 use super::builder::Planner;
 

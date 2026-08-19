@@ -2,8 +2,8 @@
 
 use schema::CollectionVersion;
 
-use query_types::document::DocumentMapping;
-use query_types::mapper::{Filter, Requestable, Select};
+use crate::document::DocumentMapping;
+use crate::mapper::{Filter, Requestable, Select};
 
 /// Enrich child_scan_mapping with fields needed by aggregates that target this relation.
 ///

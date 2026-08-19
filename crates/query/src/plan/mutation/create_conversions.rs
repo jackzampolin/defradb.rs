@@ -4,7 +4,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use schema::{FieldKind, ScalarArrayKind, ScalarKind};
 use serde_json::Value as JsonValue;
 
-use query_types::error::{QueryError, Result};
+use crate::error::{QueryError, Result};
 
 /// Convert a JSON value to a document NormalValue.
 pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> {

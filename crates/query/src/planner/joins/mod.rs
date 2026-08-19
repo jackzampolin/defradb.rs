@@ -32,10 +32,10 @@ use std::collections::HashMap;
 use schema::CollectionVersion;
 
 use super::builder::{Planner, MAX_NESTING_DEPTH};
+use crate::document::DocumentMapping;
+use crate::error::QueryError;
+use crate::mapper::Select;
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::QueryError;
-use query_types::mapper::Select;
 
 impl Planner {
     /// Apply join nodes for nested selects (relation fields)
@@ -54,7 +54,7 @@ impl Planner {
         mut mapping: DocumentMapping,
         depth: usize,
         ancestor_exhaustive: bool,
-        parent_filter: Option<&query_types::mapper::Filter>,
+        parent_filter: Option<&crate::mapper::Filter>,
         scope_path: &[String],
     ) -> JoinResult {
         // Internal keys for aggregate relation data when there's a collision with a relation selection.

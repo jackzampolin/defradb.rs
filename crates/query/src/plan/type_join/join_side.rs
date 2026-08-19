@@ -3,7 +3,7 @@
 use schema::{CollectionVersion, FieldDescription};
 use tracing::warn;
 
-use query_types::error::{QueryError, Result};
+use crate::error::{QueryError, Result};
 
 /// Represents one side of a join operation.
 ///

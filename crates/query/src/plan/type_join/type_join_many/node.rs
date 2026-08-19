@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
+use crate::mapper::{GroupBy, OrderBy};
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{GroupBy, OrderBy};
 
 use super::super::{JoinChildMetrics, JoinSide, RelationFilter};
 

@@ -1,8 +1,8 @@
 //! Pull-based document source for query execution.
 
+use crate::error::Result;
 use async_trait::async_trait;
 use document::Document;
-use query_types::error::Result;
 use storage::corekv::MaybeSendSync;
 
 /// A pull-based source of documents paired with their deletion status.

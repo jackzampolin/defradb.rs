@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// LimitNode applies limit and offset to query results.
 ///

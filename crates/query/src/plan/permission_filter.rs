@@ -12,10 +12,10 @@ use defra_core::thread_bounds::MaybeBoxFuture;
 use futures::{stream::FuturesOrdered, FutureExt, StreamExt};
 use identity::Did;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
 use crate::txn::check_doc_access_with_overlay;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 // Keep enough remote checks moving to hide latency without letting one query
 // exhaust the ACP provider's connection pool.

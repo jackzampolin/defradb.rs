@@ -1,5 +1,5 @@
+use crate::mapper::{AggregateType, Filter, Limit, OrderBy};
 use crate::planner::Doc;
-use query_types::mapper::{AggregateType, Filter, Limit, OrderBy};
 
 /// Definition of an inner aggregate to compute during nested group rendering.
 ///

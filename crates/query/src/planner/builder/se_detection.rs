@@ -6,15 +6,15 @@
 use schema::{CollectionVersion, EncryptedIndexDescription};
 use serde_json::Value as JsonValue;
 
+use crate::document::DocumentMapping;
 use crate::plan::SEFilterCondition;
-use query_types::document::DocumentMapping;
 
 /// Check if any filter conditions reference encrypted-indexed fields.
 ///
 /// Returns SE filter conditions for fields that have encrypted indexes
 /// and are used with equality operators in the filter.
 pub fn detect_se_filter_conditions(
-    filter: &query_types::mapper::Filter,
+    filter: &crate::mapper::Filter,
     collection: &CollectionVersion,
     mapping: &DocumentMapping,
 ) -> Vec<SEFilterCondition> {

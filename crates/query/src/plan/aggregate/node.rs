@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::marker::PhantomData;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{Filter, Limit};
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{Filter, Limit};
 
 /// Source metadata for aggregates that operate on numeric fields.
 /// Used by SUM, MAX, MIN, AVG.

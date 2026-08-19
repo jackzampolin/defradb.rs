@@ -1,4 +1,4 @@
-use query_types::limits::QueryLimits;
+use crate::limits::QueryLimits;
 
 use super::{parse_request_with_limits, ParsedOperation};
 

@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
 
 /// SimilarityNode computes the dot product between a document's vector field
 /// and a query vector, storing the result as a Float in the document.

@@ -9,11 +9,11 @@ use std::sync::Arc;
 use schema::CollectionVersion;
 use tracing::debug;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{Requestable, Select};
 use crate::plan::{JoinSide, ScanNode, TypeJoinOne};
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{Requestable, Select};
 
 use super::super::builder::Planner;
 

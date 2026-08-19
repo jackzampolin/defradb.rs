@@ -9,12 +9,12 @@ use async_trait::async_trait;
 use document::DocID;
 use tracing;
 
+use crate::document::{document_to_plan_doc, DocumentMapping};
+use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
+use crate::mapper::Filter;
 use crate::mutator::DocMutator;
 use crate::planner::{Doc, PlanNode};
-use query_types::document::{document_to_plan_doc, DocumentMapping};
-use query_types::error::{QueryError, Result};
-use query_types::mapper::Filter;
 
 /// DeleteNode deletes existing documents from a collection.
 ///

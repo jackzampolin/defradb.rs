@@ -4,12 +4,12 @@
 //! filter/order stack. Owns per-row cursor logic: skip-until-after,
 //! collect, probe-for-hasNext, encode startCursor/endCursor.
 
+use crate::doc::Doc;
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{CursorPageInfoFields, OrderCondition};
 use async_trait::async_trait;
 use cursor::Cursor;
-use query_types::doc::Doc;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{CursorPageInfoFields, OrderCondition};
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::planner::{ExecInfo, PlanNode};
@@ -468,11 +468,11 @@ impl PlanNode for CursorNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::Doc;
+    use crate::document::DocumentMapping;
+    use crate::error::Result;
+    use crate::mapper::CursorPageInfoFields;
     use async_trait::async_trait;
-    use query_types::doc::Doc;
-    use query_types::document::DocumentMapping;
-    use query_types::error::Result;
-    use query_types::mapper::CursorPageInfoFields;
     use std::collections::VecDeque;
 
     // --- FakePlan: a PlanNode that yields a preset sequence of Docs ---

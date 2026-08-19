@@ -4,10 +4,10 @@ use schema::{CollectionVersion, FieldDescription, FieldKind};
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
 use crate::planner::{Doc, IndexScanParams, IndexScanType, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 use super::super::JoinSide;
 use super::node::TypeJoinMany;

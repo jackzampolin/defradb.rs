@@ -7,14 +7,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::document::{documents_to_plan_docs, DocumentMapping};
+use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
+use crate::mapper::{Filter, OrderDirection};
 use crate::plan::IndexScanNode;
 use crate::plan::OrphanNode;
 use crate::planner::index_selection::{IndexScanParams, IndexScanType};
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::{documents_to_plan_docs, DocumentMapping};
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{Filter, OrderDirection};
 
 use super::{JoinChildMetrics, JoinDirection, JoinSide};
 
@@ -294,7 +294,7 @@ impl TypeJoinOne {
         parent_collection: schema::CollectionVersion,
         parent_scan_mapping: DocumentMapping,
         fetcher: Option<Arc<dyn DocFetcher>>,
-        sort_direction: query_types::mapper::OrderDirection,
+        sort_direction: crate::mapper::OrderDirection,
     ) -> Self {
         self.direction = JoinDirection::InvertedIndex {
             parent_fk_index_name: fk_index_name,
@@ -1229,10 +1229,10 @@ impl PlanNode for TypeJoinOne {
                 let orphan = serde_json::json!({ "orphanNode": {} });
                 let join_entry = type_join_one;
                 let children = match sort_direction {
-                    query_types::mapper::OrderDirection::Asc => {
+                    crate::mapper::OrderDirection::Asc => {
                         vec![orphan, join_entry]
                     }
-                    query_types::mapper::OrderDirection::Desc => {
+                    crate::mapper::OrderDirection::Desc => {
                         vec![join_entry, orphan]
                     }
                 };

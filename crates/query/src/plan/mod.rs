@@ -22,6 +22,7 @@ mod type_join;
 pub mod view;
 pub mod view_cache;
 
+use crate::mapper::Filter;
 pub use aggregate::{
     AverageNode, AvgSourceMeta, CountNode, CountSourceMeta, MaxNode, MaxSourceMeta, MinNode,
     MinSourceMeta, SumNode, SumSourceMeta,
@@ -41,7 +42,6 @@ pub use mutation::{
 pub use orderby::OrderByNode;
 pub use orphan::{OrphanNode, SharedYieldedIds};
 pub use permission_filter::PermissionFilterNode;
-use query_types::mapper::Filter;
 pub use scan::ScanNode;
 pub use se_filter::{SEFilterCondition, SEFilterNode};
 pub use select::SelectNode;

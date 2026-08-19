@@ -9,9 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 use lens::{LensDoc, TransformId, TransformStore};
 
@@ -127,7 +127,7 @@ impl PlanNode for LensNode {
                 Box::pin(futures::stream::iter(current_docs));
 
             let result_stream = self.lens_store.transform(tid, doc_stream).map_err(|e| {
-                query_types::error::QueryError::execution(format!("lens transform failed: {}", e))
+                crate::error::QueryError::execution(format!("lens transform failed: {}", e))
             })?;
 
             let results: Vec<_> = result_stream.collect().await;

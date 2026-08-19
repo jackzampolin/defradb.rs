@@ -10,12 +10,10 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::limits::QueryLimits;
-use query_types::mapper::{
-    AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select,
-};
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::limits::QueryLimits;
+use crate::mapper::{AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select};
 
 use super::aggregates::{parse_aggregate_field, parse_group_by_value, parse_top_level_aggregate};
 use super::explain::{
@@ -689,10 +687,7 @@ fn apply_limits_to_requestable(requestable: &mut Requestable, limits: QueryLimit
     Ok(())
 }
 
-fn apply_limit_to_filter(
-    filter: &mut query_types::mapper::Filter,
-    limits: QueryLimits,
-) -> Result<()> {
+fn apply_limit_to_filter(filter: &mut crate::mapper::Filter, limits: QueryLimits) -> Result<()> {
     filter.set_max_depth(limits.max_filter_depth);
     filter.validate_depth()
 }

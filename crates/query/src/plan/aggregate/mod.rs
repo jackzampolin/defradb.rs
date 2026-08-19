@@ -17,8 +17,8 @@ pub use min::{MinOp, MinSourceMeta};
 pub use node::{AggregateNode, AggregateOp, NumericSourceMeta};
 pub use sum::{SumOp, SumSourceMeta};
 
+use crate::document::DocumentMapping;
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
 
 /// Type aliases for aggregate nodes
 pub type CountNode = AggregateNode<CountOp>;

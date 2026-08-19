@@ -2,9 +2,9 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use crate::document::{DocumentMapping, RenderKey};
+use crate::mapper::{AggregateType, Filter, Limit, OrderBy, OrderDirection};
 use crate::planner::Doc;
-use query_types::document::{DocumentMapping, RenderKey};
-use query_types::mapper::{AggregateType, Filter, Limit, OrderBy, OrderDirection};
 
 use super::node::GroupByNode;
 use super::types::InnerAggregateDef;
@@ -570,7 +570,7 @@ impl GroupByNode {
     /// Render a list of documents to a JSON array using the given render keys.
     pub(super) fn render_docs_with_keys<'a>(
         docs: impl IntoIterator<Item = &'a Doc>,
-        render_keys: &[query_types::document::RenderKey],
+        render_keys: &[crate::document::RenderKey],
         type_name: Option<&str>,
     ) -> JsonValue {
         enum PreparedValueSource {

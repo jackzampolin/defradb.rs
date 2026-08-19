@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{Doc, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// ViewNode wraps a source plan node and converts documents between mappings.
 ///

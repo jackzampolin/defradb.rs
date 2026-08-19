@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // Mock executor for testing TransactionGuard
-use query_types::error::TransactionError;
+use crate::error::TransactionError;
 
 struct MockExecutor {
     txn_counter: AtomicU64,
@@ -71,7 +71,7 @@ impl crate::QueryExecutor for MockExecutor {
         Ok(())
     }
 
-    async fn schema(&self) -> query_types::error::Result<String> {
+    async fn schema(&self) -> crate::error::Result<String> {
         Ok("type Query { mock: String }".to_string())
     }
 }
@@ -126,7 +126,7 @@ impl crate::QueryExecutor for FailingCommitExecutor {
         Ok(())
     }
 
-    async fn schema(&self) -> query_types::error::Result<String> {
+    async fn schema(&self) -> crate::error::Result<String> {
         Ok("type Query { mock: String }".to_string())
     }
 }

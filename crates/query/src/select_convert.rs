@@ -2,12 +2,12 @@
 ///
 /// Go's `request.Select` uses PascalCase keys and `immutable.Option[T]` which
 /// serializes as `null` when empty or the bare value when present.
-pub fn select_to_go_json(select: &query_types::Select) -> serde_json::Value {
+pub fn select_to_go_json(select: &crate::Select) -> serde_json::Value {
     let fields: Vec<serde_json::Value> = select
         .fields
         .iter()
         .map(|f| match f {
-            query_types::mapper::Requestable::Field(field) => {
+            crate::mapper::Requestable::Field(field) => {
                 let mut m = serde_json::Map::new();
                 m.insert("Name".into(), serde_json::Value::String(field.name.clone()));
                 m.insert(
@@ -20,10 +20,10 @@ pub fn select_to_go_json(select: &query_types::Select) -> serde_json::Value {
                 );
                 serde_json::Value::Object(m)
             }
-            query_types::mapper::Requestable::Select(sub) => select_to_go_json(sub),
-            query_types::mapper::Requestable::Similarity(_) => serde_json::Value::Null,
-            query_types::mapper::Requestable::FullTextSearch(_) => serde_json::Value::Null,
-            query_types::mapper::Requestable::Aggregate(agg) => {
+            crate::mapper::Requestable::Select(sub) => select_to_go_json(sub),
+            crate::mapper::Requestable::Similarity(_) => serde_json::Value::Null,
+            crate::mapper::Requestable::FullTextSearch(_) => serde_json::Value::Null,
+            crate::mapper::Requestable::Aggregate(agg) => {
                 let mut m = serde_json::Map::new();
                 m.insert(
                     "Name".into(),

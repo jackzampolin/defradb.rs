@@ -5,9 +5,9 @@
 
 use schema::CollectionVersion;
 
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{OrderCondition, OrderDirection, Requestable, Select};
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{OrderCondition, OrderDirection, Requestable, Select};
 
 use super::Planner;
 

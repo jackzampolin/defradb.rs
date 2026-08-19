@@ -11,10 +11,10 @@ use document::Document;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::mutator::{CreateResult, DocMutator};
 use crate::planner::{Doc, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
 
 use super::create_conversions::{
     json_to_normal_value, json_to_normal_value_with_kind_and_time, normal_value_to_json,

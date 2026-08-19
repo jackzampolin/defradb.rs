@@ -2,7 +2,7 @@
 
 use serde_json::Value as JsonValue;
 
-use query_types::mapper::Filter;
+use crate::mapper::Filter;
 
 use super::AggregateOp;
 

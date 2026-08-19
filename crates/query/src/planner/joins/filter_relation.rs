@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use schema::CollectionVersion;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::plan::{JoinSide, ScanNode, TypeJoinMany, TypeJoinOne};
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
 
 use super::super::builder::Planner;
 

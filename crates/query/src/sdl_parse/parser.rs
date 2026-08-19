@@ -3,8 +3,8 @@
 //! Parses GraphQL Schema Definition Language (SDL) into DefraDB CollectionVersion schemas.
 //! Designed for compatibility with Go DefraDB's SDL parsing behavior.
 
+use crate::error::{QueryError, Result};
 use graphql_parser::schema::{Definition, Document, InterfaceType, ObjectType, TypeDefinition};
-use query_types::error::{QueryError, Result};
 use schema::CollectionVersion;
 use std::collections::HashMap;
 

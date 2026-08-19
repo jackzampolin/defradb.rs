@@ -20,10 +20,10 @@ mod traits;
 pub mod vector_routing;
 mod view_builder;
 
+pub use crate::doc::{Doc, DocFields, DocStatus};
 pub use builder::{PlanResult, Planner};
 pub use index_selection::{
     can_use_index, extract_field_conditions, filter_to_index_scan, select_best_index,
     ConditionValue, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter,
 };
-pub use query_types::doc::{Doc, DocFields, DocStatus};
 pub use traits::{ExecInfo, PlanNode};

@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use schema::CollectionVersion;
 
-use query_types::document::DocumentMapping;
-use query_types::mapper::{Field, Requestable, Select};
+use crate::document::DocumentMapping;
+use crate::mapper::{Field, Requestable, Select};
 
 use super::shared::SelectionJoinInfo;
 

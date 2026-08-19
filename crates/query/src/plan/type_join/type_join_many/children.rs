@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 use web_time::Instant;
 
+use crate::document::{documents_to_plan_docs, DocumentMapping};
+use crate::error::Result;
+use crate::mapper::{GroupBy, OrderDirection};
 use crate::planner::{Doc, IndexScanParams, IndexScanType};
 use document::NormalValue;
-use query_types::document::{documents_to_plan_docs, DocumentMapping};
-use query_types::error::Result;
-use query_types::mapper::{GroupBy, OrderDirection};
 
 use super::super::RelationFilter;
 use super::compare::{compare_json_values, resolve_nested_field};

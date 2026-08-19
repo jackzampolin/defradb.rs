@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use schema::CollectionVersion;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{Requestable, Select};
 use crate::plan::{IndexScanNode, JoinSide, RelationFilter, ScanNode, TypeJoinMany, TypeJoinOne};
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{Requestable, Select};
 
 use super::super::builder::Planner;
 
@@ -27,7 +27,7 @@ impl Planner {
         mapping: &mut DocumentMapping,
         select: &Select,
         parent_collection: &CollectionVersion,
-        parent_filter: Option<&query_types::mapper::Filter>,
+        parent_filter: Option<&crate::mapper::Filter>,
     ) -> Result<Box<dyn PlanNode>> {
         let filter = match parent_filter {
             Some(f) => f,
@@ -235,7 +235,7 @@ impl Planner {
                         parent_col,
                         parent_scan_mapping,
                         fetcher,
-                        query_types::mapper::OrderDirection::default(),
+                        crate::mapper::OrderDirection::default(),
                     );
                     if let Some(sf) = scalar_filter {
                         join = join.with_parent_residual_filter(sf);

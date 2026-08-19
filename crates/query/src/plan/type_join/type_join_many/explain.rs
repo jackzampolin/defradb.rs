@@ -1,8 +1,8 @@
 use serde_json::Value as JsonValue;
 
+use crate::mapper::OrderDirection;
 use crate::planner::index_selection::can_be_ordered_by_index;
 use crate::planner::ExecInfo;
-use query_types::mapper::OrderDirection;
 
 use super::node::TypeJoinMany;
 

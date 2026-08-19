@@ -1,6 +1,6 @@
 use super::*;
+use crate::mapper::{CursorParams, Field, Filter, OrderBy, OrderCondition, OrderDirection};
 use crate::planner::index_selection::IndexScanType;
-use query_types::mapper::{CursorParams, Field, Filter, OrderBy, OrderCondition, OrderDirection};
 use schema::{FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription};
 
 fn map<const N: usize>(

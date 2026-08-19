@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{Requestable, Select};
 use crate::plan::SelectNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{Requestable, Select};
 
 use super::super::builder::Planner;
 use super::child_plan::RelationChildPlan;

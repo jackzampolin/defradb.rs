@@ -5,9 +5,9 @@
 
 use async_trait::async_trait;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// AllDocsNode buffers all documents and yields them once as a single group.
 ///

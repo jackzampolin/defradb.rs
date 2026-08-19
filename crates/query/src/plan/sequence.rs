@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// Chains two child plan nodes, exhausting the first then the second.
 ///

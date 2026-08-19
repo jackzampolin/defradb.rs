@@ -3,9 +3,9 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 use web_time::Instant;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
 
 use super::node::TypeJoinMany;
 

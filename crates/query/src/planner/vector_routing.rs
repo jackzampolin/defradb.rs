@@ -10,7 +10,7 @@
 //! `exclude_doc_ids` into a filter on essentially every call, and under Go's
 //! rule it could never be routed at all.
 
-use query_types::mapper::{OrderDirection, Requestable, Select};
+use crate::mapper::{OrderDirection, Requestable, Select};
 use schema::{DistanceMetric, IndexDescription, VectorIndexDescription};
 
 /// What a routable query resolved to.

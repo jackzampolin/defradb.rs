@@ -15,12 +15,12 @@ use schema::CollectionVersion;
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::document::{documents_to_plan_docs, DocumentMapping};
+use crate::error::Result;
 use crate::fetcher::DocFetcher;
+use crate::mapper::Filter;
 use crate::planner::index_selection::{CursorSeek, IndexScanParams};
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::{documents_to_plan_docs, DocumentMapping};
-use query_types::error::Result;
-use query_types::mapper::Filter;
 
 /// IndexScanNode scans documents retrieved via index lookup.
 ///
@@ -178,7 +178,7 @@ impl PlanNode for IndexScanNode {
 
     async fn next(&mut self) -> Result<bool> {
         if !self.initialized {
-            return Err(query_types::error::QueryError::execution(
+            return Err(crate::error::QueryError::execution(
                 "IndexScanNode.next() called before init()",
             ));
         }
@@ -367,8 +367,8 @@ impl PlanNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::DocumentMapping;
     use crate::planner::index_selection::{CursorSeek, IndexScanParams, IndexScanType};
-    use query_types::document::DocumentMapping;
     use schema::CollectionVersion;
 
     fn make_index_scan_node(scan_type: IndexScanType) -> IndexScanNode {
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn set_cursor_fetch_limit_rejected_with_residual_filter() {
-        use query_types::mapper::Filter;
+        use crate::mapper::Filter;
         let mut node = make_index_scan_node(IndexScanType::PrefixScan {
             prefix_values: vec![],
             reverse: false,
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn set_cursor_seek_skips_fetch_limit_with_residual_filter() {
-        use query_types::mapper::Filter;
+        use crate::mapper::Filter;
         let mut node = make_index_scan_node(IndexScanType::RangeScan {
             prefix_values: vec![],
             lower: storage::index::Bound::Unbounded,

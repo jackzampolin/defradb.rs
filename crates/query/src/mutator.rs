@@ -9,7 +9,7 @@ use document::{DocID, Document};
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
-use query_types::error::Result;
+use crate::error::Result;
 
 /// Status of P2P broadcast after a mutation.
 ///

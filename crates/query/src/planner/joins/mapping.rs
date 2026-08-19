@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use schema::CollectionVersion;
 
-use query_types::document::DocumentMapping;
+use crate::document::DocumentMapping;
 
 use super::super::builder::Planner;
 

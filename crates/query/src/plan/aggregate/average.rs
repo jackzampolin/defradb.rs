@@ -7,10 +7,10 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{Filter, Limit};
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{Filter, Limit};
 
 use super::NumericSourceMeta;
 

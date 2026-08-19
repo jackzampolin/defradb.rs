@@ -6,11 +6,11 @@
 use schema::CollectionVersion;
 use tracing::{debug, warn};
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::{Filter, OrderDirection, Select};
 use crate::plan::{JoinSide, OrphanNode, RelationFilter, ScanNode, TypeJoinOne};
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::{Filter, OrderDirection, Select};
 
 use super::super::builder::Planner;
 use super::child_plan::RelationChildPlan;

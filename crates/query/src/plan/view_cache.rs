@@ -3,9 +3,9 @@
 //! Materialized views store query results in a cache. These utilities handle
 //! serializing and deserializing view items (Docs) to/from the cache format.
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::planner::Doc;
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
 use serde_json::Value as JsonValue;
 
 /// Serialize a Doc for view cache storage.

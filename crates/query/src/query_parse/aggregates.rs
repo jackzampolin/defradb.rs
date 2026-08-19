@@ -11,8 +11,8 @@ use graphql_parser::query::{Field, Value};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{
+use crate::error::{QueryError, Result};
+use crate::mapper::{
     Aggregate, AggregateTarget, AggregateType, Field as SelectField, Filter, GroupBy, Limit,
     OrderBy, OrderCondition, OrderDirection, Requestable, Select,
 };

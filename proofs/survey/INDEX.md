@@ -139,7 +139,6 @@ integration tests, Go FFI parity, or unit tests. One line each on why.
 - **p2p-adapter** — HTTP-facing adapter delegating to p2p/db/db-merge/acp; sync-completion loop is advisory-only; convergence proven downstream.
 - **pg-compat** — stateless SQL→GraphQL transpiler + pgwire IO; auth check is a one-line DID==username guard; translation pinned by integration tests.
 - **query** — deterministic single-node dataflow + trait-seam glue; every security/replication concern delegated to already-modeled crates.
-- **query-types** — query-engine type vocabulary; filter eval/split are local GraphQL semantics pinned by filter_tests + Go parity.
 - **schema** — pure deterministic definition logic; content-addressing core lives in defra-core; validation = "matches Go" via FFI parity.
 - **sourcehub** — on-chain ACP client plumbing; the security-critical cache state machine is already in the Acp slice; light-client trust is external.
 - **telemetry** — OpenTelemetry exporter glue; only a once-per-process latch + dedup string filter, covered by unit tests.

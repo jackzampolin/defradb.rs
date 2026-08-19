@@ -7,12 +7,12 @@
 
 use async_trait::async_trait;
 use query::doc_stream::DocStream;
+use query::document::DocumentMapping;
+use query::error::Result;
 use query::fetcher::DocFetcher;
 use query::plan::ScanNode;
 use query::planner::vector_routing::VectorRoute;
 use query::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -199,7 +199,7 @@ async fn a_single_batch_closes_its_stream() {
 async fn every_replaced_stream_is_closed() {
     let fetcher = Arc::new(WideningFetcher::default());
     // A filter nothing matches forces widening all the way to exhaustion.
-    let filter = query_types::mapper::Filter::from_conditions(
+    let filter = query::mapper::Filter::from_conditions(
         [(
             "title".to_string(),
             serde_json::json!({"_eq": "no such document"}),

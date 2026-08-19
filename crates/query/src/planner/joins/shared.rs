@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::Select;
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::Select;
 
 /// Result of applying joins: the updated plan node, document mapping, aggregate internal keys,
 /// and whether a child index scan provides the parent's ORDER BY.
@@ -24,7 +24,7 @@ pub(in crate::planner) struct SelectionJoinInfo {
 
 /// Check if a nested select is simple enough to use the direct indexed child cache.
 pub(in crate::planner) fn can_use_direct_indexed_child_cache(nested_select: &Select) -> bool {
-    use query_types::mapper::Requestable;
+    use crate::mapper::Requestable;
 
     nested_select.filter.is_none()
         && nested_select.doc_ids.is_none()

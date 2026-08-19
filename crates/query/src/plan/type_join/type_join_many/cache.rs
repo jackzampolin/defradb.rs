@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use crate::error::Result;
 use crate::planner::ExecInfo;
-use query_types::error::Result;
 
 use super::node::TypeJoinMany;
 

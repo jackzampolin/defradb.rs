@@ -9568,32 +9568,16 @@ dependencies = [
  "graphql-parser",
  "identity",
  "lens",
- "query-types",
  "regex",
  "schema",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "storage",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "query-types"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "chrono",
- "document",
- "schema",
- "serde",
- "serde_json",
- "storage",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "web-time",
 ]
 
 [[package]]

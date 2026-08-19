@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::OrderDirection;
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::OrderDirection;
 
 use super::node::GroupByNode;
 use super::types::DocumentGroup;

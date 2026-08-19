@@ -22,13 +22,13 @@ use identity::Did;
 use schema::CollectionVersion;
 use tracing::{debug, instrument};
 
+use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
+use crate::limits::QueryLimits;
+use crate::mapper::{Requestable, Select};
 use crate::plan::{IndexScanNode, PermissionFilterNode, SEFilterNode, ScanNode, SelectNode};
 use crate::planner::index_selection::IndexScanParams;
 use crate::planner::PlanNode;
-use query_types::error::{QueryError, Result};
-use query_types::limits::QueryLimits;
-use query_types::mapper::{Requestable, Select};
 
 /// Maximum allowed nesting depth for nested queries (0-indexed).
 /// A depth of 0 is the root query, depth 1 is the first nested level, etc.

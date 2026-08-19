@@ -7,9 +7,9 @@
 use async_trait::async_trait;
 use schema::EncryptedIndexDescription;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// Describes an SE filter condition extracted from a query filter.
 #[derive(Debug, Clone)]

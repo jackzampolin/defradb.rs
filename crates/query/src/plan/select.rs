@@ -2,10 +2,10 @@
 
 use async_trait::async_trait;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
+use crate::mapper::Filter;
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
-use query_types::mapper::Filter;
 
 /// SelectNode selects specific fields from documents.
 ///
@@ -446,10 +446,10 @@ mod tests {
     use serde_json::json;
 
     use super::SelectNode;
+    use crate::document::DocumentMapping;
+    use crate::error::Result;
+    use crate::mapper::Filter;
     use crate::planner::{Doc, PlanNode};
-    use query_types::document::DocumentMapping;
-    use query_types::error::Result;
-    use query_types::mapper::Filter;
 
     struct MockScanNode {
         mapping: DocumentMapping,

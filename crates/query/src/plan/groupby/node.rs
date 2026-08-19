@@ -2,10 +2,10 @@ use std::fmt::Write;
 
 use serde_json::Value as JsonValue;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{Filter, GroupBy, OrderBy};
 use crate::planner::{Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{Filter, GroupBy, OrderBy};
 
 use super::types::{ChildSelectMeta, DocumentGroup, GroupAlias, InnerAggregateDef};
 
@@ -162,7 +162,7 @@ impl GroupByNode {
     #[doc(hidden)]
     pub fn render_docs_for_bench(
         docs: &[Doc],
-        render_keys: &[query_types::document::RenderKey],
+        render_keys: &[crate::document::RenderKey],
         type_name: Option<&str>,
     ) -> JsonValue {
         Self::render_docs_with_keys(docs.iter(), render_keys, type_name)

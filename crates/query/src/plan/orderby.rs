@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{OrderBy, OrderCondition, OrderDirection};
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{OrderBy, OrderCondition, OrderDirection};
 
 /// OrderByNode sorts documents based on ORDER BY conditions.
 ///

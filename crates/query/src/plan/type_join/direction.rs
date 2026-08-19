@@ -1,6 +1,6 @@
 //! Join direction types for type joins
 
-use query_types::mapper::OrderDirection;
+use crate::mapper::OrderDirection;
 
 /// Represents the direction of a join operation.
 ///

@@ -2,14 +2,14 @@
 //!
 //! Applies the final plan nodes after joins: grouping, aggregation, ordering, and limits.
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, GroupAlias, GroupByNode, InnerAggregateDef, LimitNode, OrderByNode, SelectNode,
 };
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{AggregateType, Filter, Requestable, Select};
 
 impl super::Planner {
     /// Apply GroupBy/OrderBy/Limit nodes to the plan.

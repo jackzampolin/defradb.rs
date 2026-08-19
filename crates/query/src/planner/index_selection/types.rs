@@ -4,7 +4,7 @@ use document::{JsonPath, JsonScalarValue, NormalValue};
 use serde_json::Value as JsonValue;
 use storage::index::Bound;
 
-use query_types::mapper::FilterOp;
+use crate::mapper::FilterOp;
 
 use super::values::json_to_normal_value;
 
@@ -105,7 +105,7 @@ impl ScanValueFilter {
             (s.into(), pattern.into())
         };
 
-        use query_types::mapper::like_pattern_match;
+        use crate::mapper::like_pattern_match;
         let matches = like_pattern_match(&s_cmp, &p_cmp);
         if is_like {
             matches

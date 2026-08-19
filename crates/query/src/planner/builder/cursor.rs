@@ -3,12 +3,12 @@
 //! Mirrors Go's `expandCursorPlan` and `validateCursorIndex` from
 //! defradb's `internal/planner/planner.go` (PR #4617, branch pr-4617).
 
+use crate::error::{QueryError, Result};
+use crate::mapper::{OrderCondition, OrderDirection, Select};
 use crate::plan::{CursorDirection, CursorNode};
 use crate::planner::index_selection::CursorSeek;
 use crate::planner::PlanNode;
 use cursor::Cursor;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{OrderCondition, OrderDirection, Select};
 use schema::{CollectionVersion, IndexDescription};
 use storage::field_value::encode_field_value;
 use storage::keys::IndexDataStoreKey;

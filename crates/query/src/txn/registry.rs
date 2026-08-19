@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use storage::corekv::MaybeSendSync;
 
-use query_types::error::TransactionError;
+use crate::error::TransactionError;
 
 use super::handle::TransactionHandle;
 use super::result::GetTransactionResult;

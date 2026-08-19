@@ -13,17 +13,18 @@
 //!
 //! # Main Components
 //!
-//! - `document`: Document mapping and field positioning (in query-types crate)
-//! - `mapper`: Query types (Select, Filter, Order, Aggregate) (in query-types crate)
+//! - `document`: Document mapping and field positioning
+//! - `mapper`: Query types (Select, Filter, Order, Aggregate)
 //! - `planner`: Plan node trait and execution info
 //! - `plan`: Concrete plan node implementations
 
-// Types extracted to query-types crate.
-pub use query_types::document;
-pub use query_types::error;
-pub use query_types::json_convert;
-pub use query_types::limits;
-pub use query_types::mapper;
+pub(crate) mod collection_provider;
+pub(crate) mod doc;
+pub mod document;
+pub mod error;
+pub mod json_convert;
+pub mod limits;
+pub mod mapper;
 
 pub mod query_parse;
 pub mod schema_gen;

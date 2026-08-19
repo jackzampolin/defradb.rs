@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use query_types::error::TransactionError;
+use crate::error::TransactionError;
 
 use super::context::TransactionContext;
 

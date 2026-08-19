@@ -2,11 +2,11 @@
 
 use async_trait::async_trait;
 use query::doc_stream::{DocStream, VecStream};
+use query::document::DocumentMapping;
+use query::error::Result;
 use query::fetcher::DocFetcher;
 use query::plan::ScanNode;
 use query::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -11,7 +11,6 @@ repository.workspace = true
 web-time.workspace = true
 # Internal crates
 cursor = { path = "../cursor" }
-query-types = { path = "../query-types" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 storage = { path = "../storage" }
@@ -29,6 +28,9 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ciborium.workspace = true
+
+# Error handling
+thiserror.workspace = true
 
 base64.workspace = true
 

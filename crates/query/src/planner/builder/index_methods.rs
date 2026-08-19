@@ -4,11 +4,11 @@
 
 use schema::{CollectionVersion, IndexDescription};
 
+use crate::mapper::{Filter, OrderBy, Select};
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, or_filter_to_index_scan, select_best_index,
     IndexScanParams, IndexScanType,
 };
-use query_types::mapper::{Filter, OrderBy, Select};
 
 impl super::Planner {
     /// Try to select an index for the given query.

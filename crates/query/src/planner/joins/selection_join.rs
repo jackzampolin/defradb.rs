@@ -7,10 +7,10 @@ use std::collections::HashMap;
 
 use schema::CollectionVersion;
 
+use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
+use crate::mapper::{Filter, Select};
 use crate::planner::PlanNode;
-use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{Filter, Select};
 
 use super::super::builder::Planner;
 use super::child_mapping;

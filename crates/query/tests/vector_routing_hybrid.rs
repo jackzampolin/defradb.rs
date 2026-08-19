@@ -56,7 +56,7 @@ fn hybrid_query(filter: Option<&str>, order_alias: &str, limit: usize) -> String
     )
 }
 
-fn parse(query: &str) -> query_types::mapper::Select {
+fn parse(query: &str) -> query::mapper::Select {
     let mut selects = query::parse_query(query).expect("the hybrid query must parse");
     assert_eq!(selects.len(), 1, "one top-level field");
     selects.remove(0)

@@ -7,11 +7,11 @@ use async_lock::RwLock;
 use async_trait::async_trait;
 use document::NormalValue;
 
+use crate::document::DocumentMapping;
+use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
 use crate::planner::{IndexScanParams, IndexScanType};
-use query_types::document::DocumentMapping;
-use query_types::error::Result;
 
 /// Shared set of parent docIDs yielded by the main join.
 /// TypeJoinOne writes to this during iteration; OrphanNode reads it to skip non-orphans.

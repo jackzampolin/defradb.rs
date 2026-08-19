@@ -1,6 +1,6 @@
 //! Field kind resolution for SDL builder.
 
-use query_types::error::{QueryError, Result};
+use crate::error::{QueryError, Result};
 use schema::FieldKind;
 
 use super::helpers::graphql_to_scalar_kind;

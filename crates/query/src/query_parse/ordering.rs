@@ -9,8 +9,8 @@ use graphql_parser::query::Value;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{OrderBy, OrderCondition, OrderDirection};
+use crate::error::{QueryError, Result};
+use crate::mapper::{OrderBy, OrderCondition, OrderDirection};
 
 /// Parse order argument into OrderBy.
 /// Supports both single object `{field: ASC}` and array `[{field: ASC}, {other: DESC}]` formats.
