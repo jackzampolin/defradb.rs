@@ -6,6 +6,7 @@ use identity::Did;
 use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
 
+use crate::acp_ops::PolicyLookup;
 use crate::{BlockOps, SchemaOps};
 
 pub(crate) struct DbBlockOps<S: storage::corekv::Store + 'static> {
@@ -85,6 +86,7 @@ pub(crate) struct DbSchemaOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
     query_limits: query::QueryLimits,
     document_acp: Arc<dyn acp::DocumentACP>,
+    policy_lookup: PolicyLookup,
 }
 
 impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
@@ -92,12 +94,29 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
         database: Arc<db::DB<S>>,
         query_limits: query::QueryLimits,
         document_acp: Arc<dyn acp::DocumentACP>,
+        policy_lookup: PolicyLookup,
     ) -> Self {
         Self {
             database,
             query_limits,
             document_acp,
+            policy_lookup,
         }
+    }
+
+    /// Reject any `@policy` directive that does not resolve to a usable resource
+    /// in the policy store, so a permissioned collection is never created public.
+    /// Collections without a policy never touch the store.
+    async fn validate_policies(&self, collections: &[CollectionVersion]) -> anyhow::Result<()> {
+        for collection in collections {
+            let Some(policy) = &collection.policy else {
+                continue;
+            };
+            let stored = self.policy_lookup.get_policy(&policy.id).await?;
+            acp::validate_resource_interface(&policy.id, &policy.resource_name, stored.as_ref())
+                .map_err(|e| anyhow::anyhow!("schema policy validation error: {}", e))?;
+        }
+        Ok(())
     }
 
     /// Resolve the ambient identity into a creator DID. Returns `Ok(None)` when
@@ -132,6 +151,8 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
+
+        self.validate_policies(&collections).await?;
 
         self.database
             .create_collections_atomic_with_acp_registration(
@@ -192,6 +213,8 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
                 downsample_names.push(collection.name.clone());
             }
         }
+
+        self.validate_policies(&collections).await?;
 
         let creator = Self::current_identity()?;
         self.database

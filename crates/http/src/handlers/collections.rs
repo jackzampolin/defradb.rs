@@ -146,8 +146,8 @@ pub async fn get_collection_doc_ids(
 pub struct PatchCollectionRequest {
     #[serde(rename = "Patch", alias = "patch")]
     pub patch: serde_json::Value,
-    #[serde(rename = "Migration", default)]
-    pub migration: Option<serde_json::Value>,
+    #[serde(rename = "Migration", alias = "migration", default)]
+    pub migration: Option<lens::LensConfig>,
     #[serde(
         rename = "SetAsDefaultVersion",
         alias = "set_as_default_version",
@@ -187,8 +187,16 @@ pub async fn patch_collection(
 
     let name = extract_collection_name_from_patch(&patch_ops)?;
 
+    if !state.dev_mode {
+        if let Some(migration) = &body.migration {
+            migration
+                .validate_for_http()
+                .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+        }
+    }
+
     collection_mgmt
-        .patch_collection(&name, &patch_str)
+        .patch_collection(&name, &patch_str, body.migration)
         .await
         .map_err(http_error_from_backend_message)?;
 

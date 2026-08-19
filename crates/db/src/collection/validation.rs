@@ -120,8 +120,8 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
             // document that already holds a DateTime re-validates the stored value
             // as a String. Accept a String iff it parses as RFC3339 — a stored
             // `Time` always does, while genuinely-wrong strings still fail.
-            NormalValue::String(s) => chrono::DateTime::parse_from_rfc3339(s).is_ok(),
-            NormalValue::NillableString(Some(s)) => chrono::DateTime::parse_from_rfc3339(s).is_ok(),
+            NormalValue::String(s) => document::is_valid_rfc3339(s),
+            NormalValue::NillableString(Some(s)) => document::is_valid_rfc3339(s),
             _ => false,
         },
         ScalarKind::String => {

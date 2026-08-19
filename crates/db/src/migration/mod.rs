@@ -6,6 +6,7 @@
 
 mod doc_short_id;
 pub(crate) mod helpers;
+pub mod index_format;
 mod reindex;
 mod set_migration;
 
