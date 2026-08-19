@@ -948,9 +948,9 @@ pub trait ViewOperations: Send + Sync {
 
     /// Refresh materialized view caches.
     ///
-    /// If `names` is provided, only those views are refreshed. Otherwise all
-    /// materialized views are refreshed.
-    async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String>;
+    /// The options select which views to refresh, mirroring Go's collection
+    /// lookup. Default options refresh every materialized view.
+    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String>;
 
     /// Run manual downsample history GC.
     ///

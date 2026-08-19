@@ -94,7 +94,7 @@ pub struct DbTransactionRegistry<S: Store> {
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Create a new transaction registry without a P2P broadcaster.
     ///
-    /// Use [`with_broadcaster`] when running with the P2P stack so that
+    /// Use `with_broadcaster` when running with the P2P stack so that
     /// committed transactional writes are forwarded to peers.
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {

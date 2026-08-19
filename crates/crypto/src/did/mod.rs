@@ -51,7 +51,7 @@ pub fn create_did_key(key_type: KeyType, public_key: &[u8]) -> Result<String> {
 /// * `did` - A DID key string in the format `did:key:<multibase-encoded-key>`
 ///
 /// # Returns
-/// A tuple of (KeyType, Vec<u8>) containing the key type and raw public key bytes
+/// A tuple of `(KeyType, Vec<u8>)` containing the key type and raw public key bytes
 ///
 /// # Example
 /// ```ignore
