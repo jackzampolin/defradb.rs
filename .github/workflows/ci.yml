@@ -33,6 +33,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Cache-server communication failures should fall back to direct compilation.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
   # Two defradb.rs runner slots per studio host can now co-run jobs (plus
   # other repos' runners on the same hosts). Bound each Cargo process so two
   # simultaneous compiles fit inside a 32-core host with room for linking and
