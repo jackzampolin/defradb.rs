@@ -12,33 +12,72 @@ async fn main() -> Result<()> {
         Some("demo") => print_json(&pir_poc::demo::run().await?),
         Some("singlepass-demo") => print_json(&pir_poc::demo::run_single_pass().await?),
         Some("bench") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run(profile)?)
         }
         Some("bench-opt") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run_optimizations(profile)?)
         }
         Some("bench-singlepass") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run_single_pass(profile)?)
         }
+        Some("bench-warm-stateful") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_warm_stateful(profile)?)
+        }
         Some("bench-cold") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run_cold(profile)?)
         }
+        Some("bench-dense-batch") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_dense_batch(profile)?)
+        }
         Some("bench-endpoints") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run_endpoints(profile).await?)
         }
+        Some("bench-end-to-end") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_end_to_end(profile)?)
+        }
         Some("bench-fuse") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run_fuse(profile)?)
+        }
+        Some("bench-mphf") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_mphf(profile)?)
+        }
+        Some("bench-mphf-subset-xor") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_mphf_subset_xor(profile)?)
+        }
+        Some("bench-production-scale") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_production_scale(
+                profile,
+                &args[2..],
+            )?)
+        }
+        Some("bench-ribbon") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_ribbon(profile)?)
+        }
+        Some("bench-subset-xor") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::benchmark::run_subset_xor(profile)?)
         }
         Some("subscription-demo") => print_json(&pir_poc::subscription::demo().await?),
         Some("bench-subscriptions") => {
-            let profile = profile(args.get(1));
+            let profile = profile(args.get(1))?;
             print_json(&pir_poc::subscription::benchmark(profile)?)
+        }
+        Some("bench-subscription-batches") => {
+            let profile = profile(args.get(1))?;
+            print_json(&pir_poc::subscription::benchmark_batches(profile)?)
         }
         Some("build") => build(&args[1..]),
         Some("serve") => serve(&args[1..]).await,
@@ -129,10 +168,11 @@ async fn query(args: &[String]) -> Result<()> {
     print_json(&rendered)
 }
 
-fn profile(value: Option<&String>) -> Profile {
+fn profile(value: Option<&String>) -> Result<Profile> {
     match value.map(String::as_str) {
-        Some("full") => Profile::Full,
-        _ => Profile::Quick,
+        None | Some("quick") => Ok(Profile::Quick),
+        Some("full") => Ok(Profile::Full),
+        Some(value) => bail!("unknown benchmark profile {value:?}; expected quick or full"),
     }
 }
 
@@ -146,6 +186,22 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "pir-poc commands:\n  demo\n  singlepass-demo\n  subscription-demo\n  bench [quick|full]\n  bench-opt [quick|full]\n  bench-cold [quick|full]\n  bench-endpoints [quick|full]\n  bench-fuse [quick|full]\n  bench-singlepass [quick|full]\n  bench-subscriptions [quick|full]\n  build INPUT OUTPUT COLLECTION KEY_FIELD VALUE_FIELD\n  serve SNAPSHOT_OR_CATALOG_DIR BIND_ADDRESS\n  query KEY SERVER [SERVER ...]\n  query-window KEY WINDOW[,WINDOW...] SERVER [SERVER ...]"
+        "pir-poc commands:\n  demo\n  singlepass-demo\n  subscription-demo\n  bench [quick|full]\n  bench-opt [quick|full]\n  bench-cold [quick|full]\n  bench-dense-batch [quick|full]\n  bench-endpoints [quick|full]\n  bench-end-to-end [quick|full]\n  bench-fuse [quick|full]\n  bench-mphf [quick|full]\n  bench-mphf-subset-xor [quick|full]\n  bench-production-scale [quick|full] [preflight|execute] [PAGES] [ROW_BYTES_CSV] [MAX_BUILD_MIB] [MAX_TABLE_MIB] [MAX_TIMED_WORK_MIB]\n  bench-ribbon [quick|full]\n  bench-subset-xor [quick|full]\n  bench-singlepass [quick|full]\n  bench-warm-stateful [quick|full]\n  bench-subscriptions [quick|full]\n  bench-subscription-batches [quick|full]\n  build INPUT OUTPUT COLLECTION KEY_FIELD VALUE_FIELD\n  serve SNAPSHOT_OR_CATALOG_DIR BIND_ADDRESS\n  query KEY SERVER [SERVER ...]\n  query-window KEY WINDOW[,WINDOW...] SERVER [SERVER ...]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_profile_rejects_unknown_values() {
+        let quick = "quick".to_owned();
+        let full = "full".to_owned();
+        let typo = "typo".to_owned();
+        assert!(matches!(profile(None), Ok(Profile::Quick)));
+        assert!(matches!(profile(Some(&quick)), Ok(Profile::Quick)));
+        assert!(matches!(profile(Some(&full)), Ok(Profile::Full)));
+        assert!(profile(Some(&typo)).is_err());
+    }
 }

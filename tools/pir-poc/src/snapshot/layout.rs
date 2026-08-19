@@ -48,6 +48,12 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    pub fn generation_id(&self) -> Result<[u8; blake3::OUT_LEN]> {
+        let id = hex::decode(&self.snapshot_id).context("snapshot ID is not hexadecimal")?;
+        id.try_into()
+            .map_err(|_| anyhow::anyhow!("snapshot ID must be a BLAKE3 digest"))
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.format_version != FORMAT_VERSION {
             bail!(
@@ -85,10 +91,7 @@ impl Manifest {
         if self.record_count > capacity {
             bail!("manifest record count exceeds snapshot capacity");
         }
-        let id = hex::decode(&self.snapshot_id).context("snapshot ID is not hexadecimal")?;
-        if id.len() != blake3::OUT_LEN {
-            bail!("snapshot ID must be a BLAKE3 digest");
-        }
+        self.generation_id()?;
         Ok(())
     }
 

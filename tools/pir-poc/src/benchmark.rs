@@ -1,12 +1,22 @@
+pub mod accounting;
 mod cold;
 mod config;
+mod dense_batch;
+mod end_to_end;
 mod endpoints;
 mod fuse;
 mod kernels;
 mod local;
+mod mphf;
+mod mphf_subset_xor;
 mod optimization;
+mod perf_gate;
+mod production_scale;
 pub mod report;
+mod ribbon;
 mod single_pass;
+mod subset_xor;
+mod warm_stateful;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,17 +28,25 @@ pub use cold::run as run_cold;
 use config::{
     batch_sizes, dimensions, sample_count, LOAD_BUCKET_COUNT, LOAD_ROW_SIZE, TARGET_SERVER_COUNTS,
 };
+pub use dense_batch::run as run_dense_batch;
+pub use end_to_end::run as run_end_to_end;
 pub use endpoints::run as run_endpoints;
 pub use fuse::run as run_fuse;
 use local::LocalServerPool;
+pub use mphf::run as run_mphf;
+pub use mphf_subset_xor::run as run_mphf_subset_xor;
 pub use optimization::run as run_optimizations;
+pub use production_scale::{run_cli as run_production_scale, ProductionScaleReport};
 use rand::{rngs::StdRng, SeedableRng};
 pub use report::BenchmarkReport;
 use report::{
     excluded_protocols, methodology, BatchResult, DimensionResult, IsolatedServerResult,
     LoadResult, PublicQueryResult, TopologyResult,
 };
+pub use ribbon::run as run_ribbon;
 pub use single_pass::run as run_single_pass;
+pub use subset_xor::run as run_subset_xor;
+pub use warm_stateful::run as run_warm_stateful;
 
 const SERVER_WORKER_THREADS: usize = 2;
 

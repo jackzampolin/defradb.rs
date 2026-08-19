@@ -1,3 +1,5 @@
+mod batch_benchmark;
+mod batch_eval;
 mod benchmark;
 mod demo;
 
@@ -10,6 +12,11 @@ use fss_rs::prg::Aes128MatyasMeyerOseasPrg;
 use fss_rs::{Cw, PointFn, Share};
 use rand::{CryptoRng, RngCore};
 
+// This is a computational two-party DPF: privacy relies on the selected
+// construction and the AES-based PRG, in addition to non-collusion. It is not
+// an information-theoretic FSS implementation.
+
+pub use batch_benchmark::{run as benchmark_batches, LiveBatchBenchmarkReport};
 pub use benchmark::{run as benchmark, SubscriptionBenchmarkReport};
 pub use demo::{run as demo, SubscriptionDemoReport};
 
@@ -140,6 +147,9 @@ impl CompactSubscriptionServer {
     }
 
     pub fn register(&mut self, id: SubscriptionId, encoded_key: &[u8]) -> Result<()> {
+        if self.subscriptions.contains_key(&id) {
+            bail!("subscription ID is already registered");
+        }
         let key = decode_server_key(encoded_key, self.party, self.bucket_count)?;
         self.subscriptions
             .insert(id, CompactServerKey { inner: key });
@@ -405,6 +415,23 @@ mod tests {
         assert!(server
             .register(registration.id, &registration.server_keys[1])
             .is_err());
+    }
+
+    #[test]
+    fn compact_server_rejects_duplicate_ids_without_replacing_the_key() {
+        let first = compact_registration(9, 64, &mut StdRng::seed_from_u64(12)).unwrap();
+        let second = compact_registration(17, 64, &mut StdRng::seed_from_u64(13)).unwrap();
+        let mut server = CompactSubscriptionServer::new(0, 64).unwrap();
+        server.register(first.id, &first.server_keys[0]).unwrap();
+        let before = server.evaluate_one(first.id, 9).unwrap();
+
+        let error = server
+            .register(first.id, &second.server_keys[0])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already registered"));
+        assert_eq!(server.subscription_count(), 1);
+        assert_eq!(server.evaluate_one(first.id, 9).unwrap(), before);
     }
 
     #[test]

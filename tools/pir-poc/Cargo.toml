@@ -18,12 +18,15 @@ events = { path = "../../crates/events" }
 fss-rs = { version = "0.6", default-features = false, features = ["prg", "stable"] }
 hex.workspace = true
 memory-stats = "1.2"
+epserde = "0.13"
+ptr_hash = { version = "2.0.2", features = ["epserde"] }
 query = { path = "../../crates/query" }
 rand.workspace = true
 rayon = "1.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 

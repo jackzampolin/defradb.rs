@@ -6,6 +6,10 @@ use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
 use rayon::prelude::*;
 
+use super::accounting::{
+    direct_ratio, unavailable_hardware_counters, AggregateWorkReport, AmortizationHorizon,
+    ComparisonScope, LeakageScope, Metric, PhaseWork, SecurityLabels,
+};
 use super::report::{
     ColdPathBenchmarkReport, ColdPathWorkload, FiniteDifferencesResult, IndexedDecoyResult,
     LegacyPagedLayoutResult, PackedDenseResult,
@@ -45,7 +49,7 @@ pub fn run(profile: Profile) -> Result<ColdPathBenchmarkReport> {
     let target_tag = benchmark_tag(distinct_tag_count / 3);
     let packed_dense =
         benchmark_packed_dense(Arc::clone(&snapshot), &target_tag, profile, build_ms)?;
-    let indexed_decoys = benchmark_decoys(&snapshot, distinct_tag_count, profile)?;
+    let indexed_decoys = benchmark_decoys(&snapshot, distinct_tag_count, profile, build_ms)?;
     let finite_differences =
         benchmark_finite_differences(Arc::clone(&snapshot), &target_tag, profile, &packed_dense)?;
 
@@ -146,7 +150,19 @@ fn benchmark_packed_dense(
     ]);
 
     let expected_rows = CANDIDATE_BUCKETS * snapshot.manifest.bucket_count.div_ceil(2);
+    let aggregate_work = packed_dense_accounting(
+        &snapshot,
+        build_ms,
+        expected_rows * snapshot.manifest.row_size,
+        CANDIDATE_BUCKETS * dense::query_size(snapshot.manifest.bucket_count),
+        CANDIDATE_BUCKETS * snapshot.manifest.row_size,
+        micros(percentile(&query_generation, 50)),
+        millis(percentile(&wall, 50)),
+        millis(percentile(&server_elapsed, 50)),
+        micros(percentile(&reconstruction, 50)),
+    )?;
     Ok(PackedDenseResult {
+        aggregate_work,
         privacy: "exact tag privacy if the two Dense servers do not collude; both candidate buckets and both server answers are required",
         build_ms,
         distinct_tag_count: snapshot.manifest.distinct_tag_count,
@@ -267,14 +283,33 @@ fn benchmark_finite_differences(
             let storage = parameters.storage_bytes()?;
             let answer = parameters.answer_bytes()?;
             let measurement = measurements[index].as_ref();
+            let aggregate_work = finite_differences_accounting(
+                &snapshot,
+                packed_dense,
+                storage,
+                answer * CANDIDATE_BUCKETS,
+                parameters.query_bytes_per_server() * CANDIDATE_BUCKETS,
+                answer * CANDIDATE_BUCKETS,
+                measurement,
+            )?;
+            let storage_comparison = direct_ratio(
+                "finite-differences storage over packed Dense storage",
+                &packed_dense.aggregate_work,
+                &aggregate_work,
+                packed_dense.snapshot_bytes_per_server as f64,
+                storage as f64,
+            );
+            let storage_amplification_vs_packed_dense = storage_comparison
+                .candidate_over_baseline
+                .context("finite-differences and packed Dense scopes are not directly comparable")?;
             Ok(FiniteDifferencesResult {
+                aggregate_work,
                 privacy: "exact information-theoretic privacy against either single server; the two servers colluding can recover the target",
                 variables_m: parameters.variables_m,
                 total_degree_d: parameters.total_degree_d,
                 record_capacity: parameters.capacity,
                 encoded_storage_bytes_per_server: storage,
-                storage_amplification_vs_packed_dense: storage as f64
-                    / packed_dense.snapshot_bytes_per_server as f64,
+                storage_amplification_vs_packed_dense,
                 cloud_rows_per_server_per_candidate: parameters.cloud_count,
                 rows_processed_per_server_per_tag_page: parameters.cloud_count
                     * CANDIDATE_BUCKETS,
@@ -425,6 +460,7 @@ fn benchmark_decoys(
     snapshot: &TagPageSnapshot,
     distinct_tag_count: usize,
     profile: Profile,
+    build_ms: f64,
 ) -> Result<IndexedDecoyResult> {
     let target = distinct_tag_count / 3;
     let target_tag = benchmark_tag(target);
@@ -477,7 +513,15 @@ fn benchmark_decoys(
         selection.push(selection_started.elapsed());
     }
     sort_durations([&mut generation, &mut server, &mut selection]);
+    let aggregate_work = indexed_decoy_accounting(
+        snapshot,
+        build_ms,
+        micros(percentile(&generation, 50)),
+        millis(percentile(&server, 50)),
+        micros(percentile(&selection, 50)),
+    )?;
     Ok(IndexedDecoyResult {
+        aggregate_work,
         privacy: "weaker candidate-set privacy only: the server learns all 100 requested tags and knows the real tag is one of them",
         decoy_count: DECOY_COUNT,
         server_count: 1,
@@ -489,6 +533,384 @@ fn benchmark_decoys(
         client_select_p50_us: micros(percentile(&selection, 50)),
         note: "Repeated requests can be intersected. Sending different decoy sets to two servers exposes the real tag through their intersection; sending the same set adds availability but no privacy.",
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn packed_dense_accounting(
+    snapshot: &TagPageSnapshot,
+    build_ms: f64,
+    logical_bytes_per_server: usize,
+    query_bytes_per_server: usize,
+    response_bytes_per_server: usize,
+    query_generation_us: f64,
+    wall_ms: f64,
+    aggregate_server_ms: f64,
+    reconstruct_us: f64,
+) -> Result<AggregateWorkReport> {
+    let mut work = AggregateWorkReport::new(
+        "packed-cuckoo-dense-xor",
+        exact_tag_page_scope(),
+        two_server_exact_security("replicated Dense XOR shares"),
+    );
+    work.global_build.aggregate_server_time_ms =
+        Metric::measured(build_ms, "one packed cuckoo snapshot build");
+    work.global_build.server_scans =
+        Metric::not_measured("packed-layout construction passes were not instrumented");
+    work.global_build.peak_server_ram_bytes = Metric::estimated(
+        snapshot.build_metrics.peak_tracked_bytes,
+        "algorithm-owned peak; excludes allocator, runtime, and thread stacks",
+    );
+    work.global_build.network_rounds = Metric::not_applicable("build is server-local");
+    work.maintenance = PhaseWork::not_applicable(
+        "immutable snapshot lifetime",
+        "the packed table is rebuilt rather than incrementally maintained",
+    );
+    let physical_per_server = logical_bytes_per_server + query_bytes_per_server;
+    populate_symmetric_online(
+        &mut work,
+        "one first-page tag lookup",
+        logical_bytes_per_server,
+        physical_per_server,
+        CANDIDATE_BUCKETS,
+        aggregate_server_ms,
+        wall_ms,
+        "selector bytes plus expected XOR row payload; cache-line and DRAM traffic were not measured",
+    );
+    work.online.network_rounds =
+        Metric::deterministic(1, "both candidates are batched in one round");
+    work.online.useful_result_bytes = Metric::deterministic(
+        snapshot.manifest.values_per_page * snapshot.manifest.max_value_bytes,
+        "four fixed-width compact locators, excluding page framing",
+    );
+    work.client.online_cpu_p50_ms = Metric::estimated(
+        (query_generation_us + reconstruct_us) / 1_000.0,
+        "sum of separately measured share-generation and reconstruction medians",
+    );
+    work.client.persistent_state_bytes = Metric::deterministic(
+        snapshot.manifest.client_metadata_bytes(),
+        "constant public layout manifest; no mutable preload",
+    );
+    work.client.upload_bytes =
+        Metric::deterministic(query_bytes_per_server * SERVER_COUNT, "both server shares");
+    work.client.download_bytes = Metric::deterministic(
+        response_bytes_per_server * SERVER_COUNT,
+        "both candidate answer shares from both servers",
+    );
+    set_snapshot_storage(
+        &mut work,
+        snapshot.rows().len(),
+        snapshot.manifest.client_metadata_bytes(),
+    );
+    work.validate()?;
+    Ok(work)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finite_differences_accounting(
+    snapshot: &TagPageSnapshot,
+    packed_dense: &PackedDenseResult,
+    storage_per_server: usize,
+    logical_bytes_per_server: usize,
+    query_bytes_per_server: usize,
+    response_bytes_per_server: usize,
+    measurement: Option<&FiniteMeasurement>,
+) -> Result<AggregateWorkReport> {
+    let mut work = AggregateWorkReport::new(
+        "finite-differences-two-server-pir",
+        exact_tag_page_scope(),
+        two_server_exact_security("finite-differences information-theoretic preprocessing"),
+    );
+    work.global_build.aggregate_server_time_ms = match measurement {
+        Some(value) => Metric::estimated(
+            packed_dense.build_ms + value.preprocessing_ms,
+            "sum of separately measured packed-snapshot build and reusable finite-differences encoding; co-located replicas share the encoded allocation",
+        ),
+        None => Metric::not_measured(
+            "variant exceeded the benchmark memory limit, so preprocessing was not run",
+        ),
+    };
+    work.global_build.logical_selected_bytes = Metric::deterministic(
+        snapshot.rows().len(),
+        "all packed rows are encoded into the preprocessed truth table",
+    );
+    work.global_build.physical_or_scanned_bytes = Metric::not_measured(
+        "the zeta transform makes repeated passes; host memory traffic was not counted",
+    );
+    work.global_build.server_scans = Metric::not_measured(
+        "finite-differences encoding and zeta-transform passes were not counted",
+    );
+    work.global_build.network_rounds =
+        Metric::not_applicable("preprocessing is global and server-local");
+    work.maintenance = PhaseWork::not_applicable(
+        "immutable snapshot lifetime",
+        "updates require a new encoded snapshot in this POC",
+    );
+    let aggregate_server_ms = measurement.map(|value| value.sum_server_elapsed_p50_ms);
+    let wall_ms = measurement.map(|value| value.co_located_wall_p50_ms);
+    for server in &mut work.online.per_server {
+        server.server_time_p50_ms = aggregate_server_ms.map_or_else(
+            || Metric::not_measured("analytical variant was not executed"),
+            |value| {
+                Metric::estimated(
+                    value / SERVER_COUNT as f64,
+                    "aggregate p50 divided evenly; per-server samples were not retained",
+                )
+            },
+        );
+        server.logical_selected_bytes = Metric::deterministic(
+            logical_bytes_per_server,
+            "translated cloud rows returned for both cuckoo candidates",
+        );
+        server.physical_or_scanned_bytes = Metric::estimated(
+            logical_bytes_per_server + query_bytes_per_server,
+            "cloud row payload plus query words; cache-line and DRAM traffic were not measured",
+        );
+        server.scans = Metric::deterministic(
+            CANDIDATE_BUCKETS,
+            "two translated-cloud traversals, not full-table scans",
+        );
+    }
+    work.online.unit = "one first-page tag lookup";
+    work.online.aggregate_server_time_p50_ms = aggregate_server_ms.map_or_else(
+        || Metric::not_measured("analytical variant was not executed"),
+        |value| Metric::measured(value, "sum of both measured server elapsed times"),
+    );
+    work.online.max_server_time_p50_ms = wall_ms.map_or_else(
+        || Metric::not_measured("analytical variant was not executed"),
+        |value| {
+            Metric::estimated(
+                value,
+                "co-located wall p50 is an upper-envelope proxy including dispatch overhead",
+            )
+        },
+    );
+    work.online.aggregate_logical_selected_bytes = Metric::deterministic(
+        logical_bytes_per_server * SERVER_COUNT,
+        "sum across both servers",
+    );
+    work.online.aggregate_physical_or_scanned_bytes = Metric::estimated(
+        (logical_bytes_per_server + query_bytes_per_server) * SERVER_COUNT,
+        "sum of logical cloud reads and query words; no hardware counters",
+    );
+    work.online.server_scans = Metric::deterministic(
+        CANDIDATE_BUCKETS * SERVER_COUNT,
+        "two translated-cloud traversals per server, not full-table scans",
+    );
+    work.online.network_rounds = Metric::deterministic(1, "both candidates are batched");
+    work.online.useful_result_bytes = Metric::deterministic(
+        snapshot.manifest.values_per_page * snapshot.manifest.max_value_bytes,
+        "four fixed-width compact locators",
+    );
+    work.client.online_cpu_p50_ms = measurement.map_or_else(
+        || Metric::not_measured("analytical variant was not executed"),
+        |value| {
+            Metric::estimated(
+                value.client_query_generation_p50_us / 1_000.0 + value.client_reconstruct_p50_ms,
+                "sum of separately measured query-preparation and reconstruction medians",
+            )
+        },
+    );
+    work.client.persistent_state_bytes = Metric::deterministic(
+        snapshot.manifest.client_metadata_bytes(),
+        "constant packed-layout manifest; no per-client hint",
+    );
+    work.client.upload_bytes =
+        Metric::deterministic(query_bytes_per_server * SERVER_COUNT, "both server queries");
+    work.client.download_bytes = Metric::deterministic(
+        response_bytes_per_server * SERVER_COUNT,
+        "translated-cloud answers from both servers",
+    );
+    work.persisted_storage.server_bytes_per_server =
+        Metric::deterministic(storage_per_server, "one encoded truth table per server");
+    work.persisted_storage.aggregate_server_bytes = Metric::deterministic(
+        storage_per_server * SERVER_COUNT,
+        "sum across both replicas",
+    );
+    work.persisted_storage.client_bytes = Metric::deterministic(
+        snapshot.manifest.client_metadata_bytes(),
+        "constant public layout metadata",
+    );
+    work.validate()?;
+    Ok(work)
+}
+
+fn indexed_decoy_accounting(
+    snapshot: &TagPageSnapshot,
+    build_ms: f64,
+    generation_us: f64,
+    server_ms: f64,
+    selection_us: f64,
+) -> Result<AggregateWorkReport> {
+    let mut work = AggregateWorkReport::new(
+        "indexed-100-decoy-tag-lookups",
+        ComparisonScope {
+            workload: "one lookup over the identical populated packed tag snapshot",
+            result: "one first page containing four fixed-width compact locators",
+            public_partition: "global immutable snapshot",
+            leakage: LeakageScope::CandidateSet {
+                candidates: DECOY_COUNT,
+            },
+        },
+        SecurityLabels {
+            privacy: "candidate-set privacy only",
+            server_count: 1,
+            collusion_tolerance: 0,
+            required_answers: 1,
+            assumptions: "the real tag is hidden only among the submitted decoy set",
+            availability: "one server answer is required",
+            integrity: "ordinary unauthenticated public lookup",
+        },
+    );
+    work.global_build.aggregate_server_time_ms =
+        Metric::measured(build_ms, "packed tag index build");
+    work.global_build.server_scans =
+        Metric::not_measured("packed-layout construction passes were not instrumented");
+    work.global_build.network_rounds = Metric::not_applicable("build is server-local");
+    work.maintenance = PhaseWork::not_applicable(
+        "immutable snapshot lifetime",
+        "the packed table is rebuilt rather than incrementally maintained",
+    );
+    let logical = DECOY_COUNT * snapshot.manifest.page_size;
+    let physical_upper = DECOY_COUNT * CANDIDATE_BUCKETS * snapshot.manifest.row_size;
+    let server = &mut work.online.per_server[0];
+    server.server_time_p50_ms = Metric::measured(server_ms, "one server's 100-lookups p50");
+    server.logical_selected_bytes = Metric::estimated(
+        logical,
+        "one encoded page selected per public tag; framing included",
+    );
+    server.physical_or_scanned_bytes = Metric::estimated(
+        physical_upper,
+        "upper bound of two cuckoo rows inspected per tag; lookup may stop after the first candidate",
+    );
+    server.scans = Metric::deterministic(0, "indexed bucket reads, not a table scan");
+    work.online.unit = "one 100-candidate tag request";
+    work.online.aggregate_server_time_p50_ms =
+        Metric::measured(server_ms, "single-server lookup time");
+    work.online.max_server_time_p50_ms = Metric::measured(server_ms, "only one server");
+    work.online.aggregate_logical_selected_bytes = Metric::estimated(logical, "single server");
+    work.online.aggregate_physical_or_scanned_bytes = Metric::estimated(
+        physical_upper,
+        "worst-case indexed row bytes; no hardware counters",
+    );
+    work.online.server_scans = Metric::deterministic(0, "indexed reads only");
+    work.online.network_rounds = Metric::deterministic(1, "one padded request/response round");
+    work.online.useful_result_bytes = Metric::deterministic(
+        snapshot.manifest.values_per_page * snapshot.manifest.max_value_bytes,
+        "only the target's four compact locators are useful",
+    );
+    work.client.online_cpu_p50_ms = Metric::estimated(
+        (generation_us + selection_us) / 1_000.0,
+        "sum of separately measured candidate-generation and target-selection medians",
+    );
+    work.client.persistent_state_bytes = Metric::deterministic(
+        snapshot.manifest.client_metadata_bytes(),
+        "public packed-layout manifest",
+    );
+    work.client.upload_bytes =
+        Metric::deterministic(DECOY_COUNT * size_of::<u64>(), "100 public tag ordinals");
+    work.client.download_bytes = Metric::deterministic(
+        DECOY_COUNT * snapshot.manifest.page_size,
+        "one padded first page per candidate",
+    );
+    work.persisted_storage.server_bytes_per_server =
+        Metric::deterministic(snapshot.rows().len(), "one public indexed snapshot");
+    work.persisted_storage.aggregate_server_bytes =
+        Metric::deterministic(snapshot.rows().len(), "one server");
+    work.persisted_storage.client_bytes = Metric::deterministic(
+        snapshot.manifest.client_metadata_bytes(),
+        "constant public manifest",
+    );
+    work.validate()?;
+    Ok(work)
+}
+
+fn exact_tag_page_scope() -> ComparisonScope {
+    ComparisonScope {
+        workload: "one lookup over the identical populated packed tag snapshot",
+        result: "one first page containing four fixed-width compact locators",
+        public_partition: "global immutable snapshot",
+        leakage: LeakageScope::ExactQueryPrivacy,
+    }
+}
+
+fn two_server_exact_security(assumptions: &'static str) -> SecurityLabels {
+    SecurityLabels {
+        privacy: "exact information-theoretic tag privacy",
+        server_count: SERVER_COUNT,
+        collusion_tolerance: 1,
+        required_answers: SERVER_COUNT,
+        assumptions,
+        availability: "both server answers are required",
+        integrity: "fingerprint checks accidental corruption; no malicious-server proof",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_symmetric_online(
+    work: &mut AggregateWorkReport,
+    unit: &'static str,
+    logical_per_server: usize,
+    physical_per_server: usize,
+    scans_per_server: usize,
+    aggregate_server_ms: f64,
+    wall_ms: f64,
+    physical_note: &'static str,
+) {
+    let server_count = work.security.server_count;
+    for server in &mut work.online.per_server {
+        server.server_time_p50_ms = Metric::estimated(
+            aggregate_server_ms / server_count as f64,
+            "aggregate p50 divided evenly; per-server samples were not retained",
+        );
+        server.logical_selected_bytes = Metric::estimated(
+            logical_per_server,
+            "expected set selector bits times row bytes for a random query share",
+        );
+        server.physical_or_scanned_bytes = Metric::estimated(physical_per_server, physical_note);
+        server.scans = Metric::deterministic(scans_per_server, "selector traversals per server");
+    }
+    work.online.unit = unit;
+    work.online.aggregate_server_time_p50_ms =
+        Metric::measured(aggregate_server_ms, "sum of server elapsed times");
+    work.online.max_server_time_p50_ms = Metric::estimated(
+        wall_ms,
+        "co-located wall p50 is an upper-envelope proxy including dispatch overhead",
+    );
+    work.online.aggregate_logical_selected_bytes = Metric::estimated(
+        logical_per_server * server_count,
+        "sum of expected selected bytes across random server shares",
+    );
+    work.online.aggregate_physical_or_scanned_bytes = Metric::estimated(
+        physical_per_server * server_count,
+        "sum of estimated server bytes; no hardware counters",
+    );
+    work.online.server_scans =
+        Metric::deterministic(scans_per_server * server_count, "sum across servers");
+}
+
+fn set_snapshot_storage(
+    work: &mut AggregateWorkReport,
+    snapshot_bytes: usize,
+    client_bytes: usize,
+) {
+    work.persisted_storage.server_bytes_per_server =
+        Metric::deterministic(snapshot_bytes, "one replicated snapshot per server");
+    work.persisted_storage.aggregate_server_bytes = Metric::deterministic(
+        snapshot_bytes * work.security.server_count,
+        "sum across logical replicas",
+    );
+    work.persisted_storage.client_bytes =
+        Metric::deterministic(client_bytes, "constant public metadata");
+    work.amortization = AmortizationHorizon {
+        global_build: "all clients and lookups using one immutable snapshot",
+        per_client_setup: "not applicable beyond downloading constant public metadata",
+        maintenance: "snapshot lifetime",
+        assumed_global_queries: None,
+        assumed_queries_per_client_setup: None,
+        assumed_online_events_per_maintenance: None,
+        note: "Build is not folded into online work; provide deployment query volume before amortizing it.",
+    };
+    work.hardware_counters = unavailable_hardware_counters();
 }
 
 fn sample_count(profile: Profile) -> usize {

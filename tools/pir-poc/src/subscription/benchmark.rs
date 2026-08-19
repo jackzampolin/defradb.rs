@@ -10,11 +10,17 @@ use super::{
     combine_compact, compact_registration, dense_registration, evaluate_dense,
     CompactSubscriptionServer, OUTPUT_BYTES,
 };
+use crate::benchmark::accounting::{
+    direct_ratio, unavailable_hardware_counters, AggregateWorkReport, AmortizationHorizon,
+    ComparisonScope, DirectComparison, LeakageScope, Metric, PhaseWork, SecurityLabels,
+};
 use crate::benchmark::Profile;
 
 const CANDIDATE_TAGS_PER_SUBSCRIPTION: usize = 100;
 const DECOY_WIRE_BUCKET_BYTES: usize = size_of::<u32>();
 const INDEX_EVENT_STREAM_BUCKETS: usize = 65_536;
+const SUBSCRIPTION_ID_BYTES: usize = 16;
+const COMPACT_NOTIFICATION_SHARE_BYTES: usize = SUBSCRIPTION_ID_BYTES + OUTPUT_BYTES;
 
 #[derive(Debug, Serialize)]
 pub struct SubscriptionBenchmarkReport {
@@ -42,10 +48,12 @@ pub struct SubscriptionDimension {
     pub dense_three_server_client_keygen_ms: f64,
     pub dense_three_server_response_bytes_per_server_per_event: usize,
     pub dense_three_server_hot_eval_p50_ns: Vec<f64>,
+    pub dense_three_server_aggregate_work: AggregateWorkReport,
 }
 
 #[derive(Debug, Serialize)]
 pub struct FanoutResult {
+    pub aggregate_work: AggregateWorkReport,
     pub subscriptions: usize,
     pub server_eval_p50_ms: Vec<f64>,
     pub subscriptions_evaluated_per_second: Vec<f64>,
@@ -56,6 +64,7 @@ pub struct FanoutResult {
 
 #[derive(Debug, Serialize)]
 pub struct IndexedDecoyFanoutResult {
+    pub aggregate_work: AggregateWorkReport,
     pub privacy: &'static str,
     pub candidate_tags_per_subscription: usize,
     pub registration_bytes_per_subscription: usize,
@@ -71,7 +80,7 @@ pub struct IndexedDecoyFanoutResult {
     pub missing_events_per_second: f64,
     pub expected_notifications_per_uniform_event: f64,
     pub compact_dpf_sum_server_work_p50_ms: f64,
-    pub compact_dpf_to_decoy_server_work_ratio: f64,
+    pub server_work_comparison: DirectComparison,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +203,8 @@ fn benchmark_dimension(bucket_count: usize, profile: Profile) -> Result<Subscrip
         times.sort_unstable();
     }
     combine_times.sort_unstable();
+    let compact_keygen_p50_us = micros(percentile(&keygen, 50));
+    let compact_combine_p50_us = micros(percentile(&combine_times, 50));
 
     let fanout_counts: &[usize] = match profile {
         Profile::Quick => &[1, 100, 1_000],
@@ -201,7 +212,17 @@ fn benchmark_dimension(bucket_count: usize, profile: Profile) -> Result<Subscrip
     };
     let fanout = fanout_counts
         .iter()
-        .map(|&count| benchmark_fanout(bucket_count, target, count, profile))
+        .map(|&count| {
+            benchmark_fanout(
+                bucket_count,
+                target,
+                count,
+                compact_key_bytes,
+                compact_keygen_p50_us,
+                compact_combine_p50_us,
+                profile,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let dense_keygen_started = Instant::now();
@@ -212,13 +233,18 @@ fn benchmark_dimension(bucket_count: usize, profile: Profile) -> Result<Subscrip
         .iter()
         .map(|key| benchmark_dense_evaluation(key, bucket_count, profile))
         .collect::<Result<Vec<_>>>()?;
+    let dense_three_server_aggregate_work = dense_live_accounting(
+        dense.server_keys[0].len(),
+        dense_keygen_ms,
+        &dense_ns_per_eval,
+    )?;
 
     Ok(SubscriptionDimension {
         bucket_count,
         compact_dpf_key_bytes_per_server: compact_key_bytes,
         compact_dpf_total_registration_bytes: compact_key_bytes * 2,
-        compact_dpf_response_bytes_per_server_per_event: 16,
-        compact_dpf_client_keygen_p50_us: micros(percentile(&keygen, 50)),
+        compact_dpf_response_bytes_per_server_per_event: COMPACT_NOTIFICATION_SHARE_BYTES,
+        compact_dpf_client_keygen_p50_us: compact_keygen_p50_us,
         compact_dpf_match_eval_p50_us: match_times
             .iter()
             .map(|times| micros(percentile(times, 50)))
@@ -227,13 +253,14 @@ fn benchmark_dimension(bucket_count: usize, profile: Profile) -> Result<Subscrip
             .iter()
             .map(|times| micros(percentile(times, 50)))
             .collect(),
-        compact_dpf_client_combine_p50_us: micros(percentile(&combine_times, 50)),
+        compact_dpf_client_combine_p50_us: compact_combine_p50_us,
         compact_dpf_fanout: fanout,
         dense_three_server_key_bytes_per_server: dense.server_keys[0].len(),
         dense_three_server_total_registration_bytes: dense.server_keys[0].len() * 3,
         dense_three_server_client_keygen_ms: dense_keygen_ms,
         dense_three_server_response_bytes_per_server_per_event: 1,
         dense_three_server_hot_eval_p50_ns: dense_ns_per_eval,
+        dense_three_server_aggregate_work,
     })
 }
 
@@ -264,6 +291,9 @@ fn benchmark_fanout(
     bucket_count: usize,
     event_bucket: usize,
     subscriptions: usize,
+    compact_key_bytes: usize,
+    compact_keygen_p50_us: f64,
+    compact_combine_p50_us: f64,
     profile: Profile,
 ) -> Result<FanoutResult> {
     let mut rng = StdRng::seed_from_u64(bucket_count as u64 ^ subscriptions as u64 ^ 0xfa40);
@@ -296,17 +326,31 @@ fn benchmark_fanout(
         .iter()
         .map(|times| percentile(times, 50))
         .collect::<Vec<_>>();
-    let indexed_decoys =
-        benchmark_indexed_decoys(bucket_count, event_bucket, subscriptions, profile, &medians)?;
+    let aggregate_work = compact_dpf_live_accounting(
+        subscriptions,
+        compact_key_bytes,
+        compact_keygen_p50_us,
+        compact_combine_p50_us,
+        &medians,
+    )?;
+    let indexed_decoys = benchmark_indexed_decoys(
+        bucket_count,
+        event_bucket,
+        subscriptions,
+        profile,
+        &medians,
+        &aggregate_work,
+    )?;
     Ok(FanoutResult {
+        aggregate_work,
         subscriptions,
         server_eval_p50_ms: medians.iter().copied().map(millis).collect(),
         subscriptions_evaluated_per_second: medians
             .iter()
             .map(|duration| subscriptions as f64 / duration.as_secs_f64())
             .collect(),
-        response_bytes_per_server_per_event: subscriptions * OUTPUT_BYTES,
-        total_response_bytes_per_event: subscriptions * OUTPUT_BYTES * 2,
+        response_bytes_per_server_per_event: subscriptions * COMPACT_NOTIFICATION_SHARE_BYTES,
+        total_response_bytes_per_event: subscriptions * COMPACT_NOTIFICATION_SHARE_BYTES * 2,
         indexed_decoys,
     })
 }
@@ -359,6 +403,7 @@ fn benchmark_indexed_decoys(
     subscriptions: usize,
     profile: Profile,
     compact_medians: &[Duration],
+    compact_work: &AggregateWorkReport,
 ) -> Result<IndexedDecoyFanoutResult> {
     let memberships = subscriptions * CANDIDATE_TAGS_PER_SUBSCRIPTION;
     if memberships >= bucket_count {
@@ -404,9 +449,24 @@ fn benchmark_indexed_decoys(
     let matching_median = benchmark_indexed_events(&server, &matching_buckets, profile);
     let missing_median = benchmark_indexed_events(&server, &missing_buckets, profile);
     let compact_sum = compact_medians.iter().sum::<Duration>();
-    let compact_to_decoy_ratio = compact_sum.as_secs_f64() / matching_median.as_secs_f64();
+    let aggregate_work = indexed_decoy_live_accounting(
+        subscriptions,
+        memberships,
+        server.estimated_index_bytes(),
+        index_build_ms,
+        matching_notifications,
+        matching_median,
+    )?;
+    let server_work_comparison = direct_ratio(
+        "indexed-decoy server work over compact-DPF server work",
+        compact_work,
+        &aggregate_work,
+        millis(compact_sum),
+        millis(matching_median),
+    );
 
     Ok(IndexedDecoyFanoutResult {
+        aggregate_work,
         privacy: "candidate-set privacy only: the server sees all 100 buckets and which candidate generated each notification",
         candidate_tags_per_subscription: CANDIDATE_TAGS_PER_SUBSCRIPTION,
         registration_bytes_per_subscription: CANDIDATE_TAGS_PER_SUBSCRIPTION
@@ -423,8 +483,350 @@ fn benchmark_indexed_decoys(
         missing_events_per_second: 1.0 / missing_median.as_secs_f64(),
         expected_notifications_per_uniform_event: memberships as f64 / bucket_count as f64,
         compact_dpf_sum_server_work_p50_ms: millis(compact_sum),
-        compact_dpf_to_decoy_server_work_ratio: compact_to_decoy_ratio,
+        server_work_comparison,
     })
+}
+
+fn live_result_scope(leakage: LeakageScope) -> ComparisonScope {
+    ComparisonScope {
+        workload: "one event evaluated against the identical registered subscription set",
+        result: "the set of matching internal subscription identifiers",
+        public_partition: "one public event bucket",
+        leakage,
+    }
+}
+
+fn compact_dpf_live_accounting(
+    subscriptions: usize,
+    key_bytes_per_server: usize,
+    keygen_p50_us: f64,
+    combine_p50_us: f64,
+    server_medians: &[Duration],
+) -> Result<AggregateWorkReport> {
+    let server_count = server_medians.len();
+    let mut work = AggregateWorkReport::new(
+        "compact-dpf-live-subscriptions",
+        live_result_scope(LeakageScope::ExactQueryPrivacy),
+        SecurityLabels {
+            privacy: "exact subscription-point privacy under the DPF security assumption",
+            server_count,
+            collusion_tolerance: 1,
+            required_answers: server_count,
+            assumptions: "the two DPF servers do not collude and the PRG remains secure",
+            availability: "both output shares are required",
+            integrity: "no malicious-server verification",
+        },
+    );
+    work.global_build = PhaseWork::not_applicable(
+        "global database build",
+        "live DPF evaluates registered keys and has no snapshot-wide build",
+    );
+    work.per_client_setup = PhaseWork::unmeasured(
+        "registration of the benchmark subscription set",
+        "registration insertion time and peak RAM were not measured",
+    );
+    work.per_client_setup.client_time_ms = Metric::estimated(
+        keygen_p50_us * subscriptions as f64 / 1_000.0,
+        "one measured median key generation multiplied by subscription count",
+    );
+    work.per_client_setup.logical_selected_bytes = Metric::deterministic(
+        key_bytes_per_server * server_count * subscriptions,
+        "all generated server key shares",
+    );
+    work.per_client_setup.client_upload_bytes = Metric::deterministic(
+        key_bytes_per_server * server_count * subscriptions,
+        "registration key shares uploaded once",
+    );
+    work.per_client_setup.client_download_bytes =
+        Metric::deterministic(0, "registration has no measured response payload");
+    work.per_client_setup.server_scans = Metric::deterministic(
+        0,
+        "registration appends keys; it does not scan subscriptions",
+    );
+    work.per_client_setup.network_rounds = Metric::deterministic(1, "one registration round");
+    work.maintenance = PhaseWork::unmeasured(
+        "subscription change",
+        "deregistration and key replacement were not benchmarked",
+    );
+    let mut aggregate_ms = 0.0;
+    let mut max_ms = 0.0f64;
+    for (server, median) in work.online.per_server.iter_mut().zip(server_medians) {
+        let elapsed_ms = millis(*median);
+        aggregate_ms += elapsed_ms;
+        max_ms = max_ms.max(elapsed_ms);
+        let logical = key_bytes_per_server * subscriptions;
+        server.server_time_p50_ms =
+            Metric::measured(elapsed_ms, "one server's full event-pass median");
+        server.logical_selected_bytes =
+            Metric::deterministic(logical, "registered DPF key bytes evaluated for the event");
+        server.physical_or_scanned_bytes = Metric::not_measured(
+            "DPF evaluation includes HashMap traversal, PRG expansion, and output allocation; physical bytes require hardware counters",
+        );
+        server.scans =
+            Metric::deterministic(1, "one sequential pass over all registered subscriptions");
+    }
+    let logical_aggregate = key_bytes_per_server * subscriptions * server_count;
+    work.online.unit = "one event against the registered subscription set";
+    work.online.aggregate_server_time_p50_ms = Metric::estimated(
+        aggregate_ms,
+        "sum of separately measured per-server medians, not a joint-sample median",
+    );
+    work.online.max_server_time_p50_ms =
+        Metric::estimated(max_ms, "maximum of separately measured per-server medians");
+    work.online.aggregate_logical_selected_bytes =
+        Metric::deterministic(logical_aggregate, "sum of DPF key bytes across servers");
+    work.online.aggregate_physical_or_scanned_bytes = Metric::not_measured(
+        "DPF HashMap, PRG, allocator, cache-line, and DRAM traffic require hardware counters",
+    );
+    work.online.server_scans =
+        Metric::deterministic(server_count, "one subscription pass per server");
+    work.online.network_rounds =
+        Metric::deterministic(1, "one server-originated notification delivery round");
+    work.online.useful_result_bytes = Metric::deterministic(
+        SUBSCRIPTION_ID_BYTES,
+        "the constructed fanout workload has exactly one matching subscription identifier",
+    );
+    work.client.online_cpu_p50_ms = Metric::estimated(
+        combine_p50_us * subscriptions as f64 / 1_000.0,
+        "one measured share-combine median multiplied by subscription count; identifier correlation and transport decoding were not measured",
+    );
+    work.client.persistent_state_bytes =
+        Metric::not_measured("client subscription bookkeeping was not instrumented");
+    work.client.upload_bytes = Metric::deterministic(0, "events originate at servers");
+    work.client.download_bytes = Metric::estimated(
+        subscriptions * COMPACT_NOTIFICATION_SHARE_BYTES * server_count,
+        "one 16-byte subscription identifier and 16-byte output share per subscription and server; framing is not implemented",
+    );
+    work.persisted_storage.server_bytes_per_server = Metric::deterministic(
+        key_bytes_per_server * subscriptions,
+        "registered DPF key shares",
+    );
+    work.persisted_storage.aggregate_server_bytes = Metric::deterministic(
+        key_bytes_per_server * subscriptions * server_count,
+        "sum of DPF key shares across servers",
+    );
+    work.persisted_storage.client_bytes =
+        Metric::not_measured("client subscription bookkeeping was not instrumented");
+    work.amortization = AmortizationHorizon {
+        global_build: "not applicable",
+        per_client_setup: "events delivered during the registered subscription lifetime",
+        maintenance: "events between subscription changes",
+        assumed_global_queries: None,
+        assumed_queries_per_client_setup: None,
+        assumed_online_events_per_maintenance: None,
+        note: "Registration is separated from per-event work; choose an expected event lifetime before amortizing it.",
+    };
+    work.hardware_counters = unavailable_hardware_counters();
+    work.validate()?;
+    Ok(work)
+}
+
+fn indexed_decoy_live_accounting(
+    subscriptions: usize,
+    memberships: usize,
+    index_bytes: usize,
+    index_build_ms: f64,
+    matching_notifications: usize,
+    matching_median: Duration,
+) -> Result<AggregateWorkReport> {
+    let mut work = AggregateWorkReport::new(
+        "indexed-100-decoy-live-subscriptions",
+        live_result_scope(LeakageScope::CandidateSet {
+            candidates: CANDIDATE_TAGS_PER_SUBSCRIPTION,
+        }),
+        SecurityLabels {
+            privacy: "candidate-set privacy only",
+            server_count: 1,
+            collusion_tolerance: 0,
+            required_answers: 1,
+            assumptions: "each target is hidden only among its registered public candidates",
+            availability: "one index server answer is required",
+            integrity: "ordinary unauthenticated index notification",
+        },
+    );
+    work.global_build = PhaseWork::not_applicable(
+        "global database build",
+        "the live inverted index is populated by registrations",
+    );
+    work.per_client_setup = PhaseWork::unmeasured(
+        "registration of the benchmark subscription set",
+        "only aggregate index build time and deterministic registration bytes were recorded",
+    );
+    work.per_client_setup.aggregate_server_time_ms =
+        Metric::measured(index_build_ms, "build all benchmark index memberships");
+    work.per_client_setup.logical_selected_bytes = Metric::deterministic(
+        memberships * DECOY_WIRE_BUCKET_BYTES,
+        "all public candidate bucket memberships",
+    );
+    work.per_client_setup.client_upload_bytes = Metric::deterministic(
+        subscriptions * CANDIDATE_TAGS_PER_SUBSCRIPTION * DECOY_WIRE_BUCKET_BYTES,
+        "100 public bucket candidates per subscription",
+    );
+    work.per_client_setup.client_download_bytes =
+        Metric::deterministic(0, "registration has no measured response payload");
+    work.per_client_setup.server_scans =
+        Metric::deterministic(0, "hash-index insertions, not a table scan");
+    work.per_client_setup.network_rounds = Metric::deterministic(1, "one registration round");
+    work.maintenance = PhaseWork::unmeasured(
+        "subscription change",
+        "membership removal and replacement were not benchmarked",
+    );
+    let online_ms = millis(matching_median);
+    let logical = matching_notifications * size_of::<u32>();
+    let server = &mut work.online.per_server[0];
+    server.server_time_p50_ms = Metric::measured(online_ms, "matching hash-index event median");
+    server.logical_selected_bytes =
+        Metric::deterministic(logical, "matching internal subscription handles");
+    server.physical_or_scanned_bytes = Metric::not_measured(
+        "HashMap probes and allocator/cache traffic require hardware counters",
+    );
+    server.scans = Metric::deterministic(0, "one indexed hash lookup, not a scan");
+    work.online.unit = "one matching event against the registered subscription set";
+    work.online.aggregate_server_time_p50_ms = Metric::measured(online_ms, "single index server");
+    work.online.max_server_time_p50_ms = Metric::measured(online_ms, "single index server");
+    work.online.aggregate_logical_selected_bytes =
+        Metric::deterministic(logical, "matching handles returned by the index");
+    work.online.aggregate_physical_or_scanned_bytes =
+        Metric::not_measured("no perf counter was available for HashMap and allocator traffic");
+    work.online.server_scans = Metric::deterministic(0, "indexed lookup only");
+    work.online.network_rounds =
+        Metric::deterministic(1, "one server-originated notification delivery round");
+    work.online.useful_result_bytes =
+        Metric::deterministic(logical, "matching internal subscription identifiers");
+    work.client.online_cpu_p50_ms =
+        Metric::not_measured("client notification handling was excluded");
+    work.client.persistent_state_bytes =
+        Metric::not_measured("client subscription bookkeeping was excluded");
+    work.client.upload_bytes = Metric::deterministic(0, "events originate at the server");
+    work.client.download_bytes =
+        Metric::deterministic(logical, "matching internal subscription identifiers");
+    work.persisted_storage.server_bytes_per_server = Metric::estimated(
+        index_bytes,
+        "HashMap slots and vector capacity; allocator metadata excluded",
+    );
+    work.persisted_storage.aggregate_server_bytes =
+        Metric::estimated(index_bytes, "single index server");
+    work.persisted_storage.client_bytes =
+        Metric::not_measured("client subscription bookkeeping was excluded");
+    work.amortization = AmortizationHorizon {
+        global_build: "not applicable",
+        per_client_setup: "events delivered during the registered subscription lifetime",
+        maintenance: "events between subscription changes",
+        assumed_global_queries: None,
+        assumed_queries_per_client_setup: None,
+        assumed_online_events_per_maintenance: None,
+        note: "Registration/index build is not folded into per-event work.",
+    };
+    work.hardware_counters = unavailable_hardware_counters();
+    work.validate()?;
+    Ok(work)
+}
+
+fn dense_live_accounting(
+    key_bytes_per_server: usize,
+    keygen_ms: f64,
+    server_p50_ns: &[f64],
+) -> Result<AggregateWorkReport> {
+    let server_count = server_p50_ns.len();
+    let mut work = AggregateWorkReport::new(
+        "dense-xor-live-subscription-key",
+        ComparisonScope {
+            workload: "one event evaluated against one registered subscription",
+            result: "one logical match boolean",
+            public_partition: "one public event bucket",
+            leakage: LeakageScope::ExactQueryPrivacy,
+        },
+        SecurityLabels {
+            privacy: "exact information-theoretic subscription-point privacy",
+            server_count,
+            collusion_tolerance: server_count - 1,
+            required_answers: server_count,
+            assumptions: "at least one server does not collude",
+            availability: "all output shares are required",
+            integrity: "no malicious-server verification",
+        },
+    );
+    work.global_build = PhaseWork::not_applicable(
+        "global database build",
+        "live Dense evaluates registered selector shares",
+    );
+    work.per_client_setup = PhaseWork::unmeasured(
+        "one subscription registration",
+        "registration insertion and transient RAM were not measured",
+    );
+    work.per_client_setup.client_time_ms =
+        Metric::measured(keygen_ms, "generate all Dense selector shares");
+    work.per_client_setup.logical_selected_bytes =
+        Metric::deterministic(key_bytes_per_server * server_count, "all selector shares");
+    work.per_client_setup.client_upload_bytes = Metric::deterministic(
+        key_bytes_per_server * server_count,
+        "one full selector share per server",
+    );
+    work.per_client_setup.client_download_bytes =
+        Metric::deterministic(0, "registration has no measured response payload");
+    work.per_client_setup.server_scans = Metric::deterministic(0, "key registration only");
+    work.per_client_setup.network_rounds = Metric::deterministic(1, "one registration round");
+    work.maintenance = PhaseWork::unmeasured(
+        "subscription change",
+        "selector removal and replacement were not benchmarked",
+    );
+    let mut aggregate_ms = 0.0;
+    let mut max_ms = 0.0f64;
+    for (server, nanoseconds) in work.online.per_server.iter_mut().zip(server_p50_ns) {
+        let milliseconds = nanoseconds / 1_000_000.0;
+        aggregate_ms += milliseconds;
+        max_ms = max_ms.max(milliseconds);
+        server.server_time_p50_ms =
+            Metric::measured(milliseconds, "one indexed selector-bit read median");
+        server.logical_selected_bytes = Metric::deterministic(1, "one packed selector byte read");
+        server.physical_or_scanned_bytes = Metric::estimated(
+            1,
+            "logical byte read only; actual cache-line and working-set traffic was not measured",
+        );
+        server.scans = Metric::deterministic(0, "one indexed bit test, not a selector scan");
+    }
+    work.online.unit = "one event against one registered subscription";
+    work.online.aggregate_server_time_p50_ms = Metric::estimated(
+        aggregate_ms,
+        "sum of separately measured per-server medians, not a joint-sample median",
+    );
+    work.online.max_server_time_p50_ms =
+        Metric::estimated(max_ms, "maximum of separately measured per-server medians");
+    work.online.aggregate_logical_selected_bytes =
+        Metric::deterministic(server_count, "one selector byte per server");
+    work.online.aggregate_physical_or_scanned_bytes = Metric::estimated(
+        server_count,
+        "logical byte reads only; no cache-line or hardware-counter measurement",
+    );
+    work.online.server_scans = Metric::deterministic(0, "indexed reads only");
+    work.online.network_rounds =
+        Metric::deterministic(1, "one server-originated notification delivery round");
+    work.online.useful_result_bytes = Metric::deterministic(1, "one match boolean");
+    work.client.online_cpu_p50_ms =
+        Metric::not_measured("three-share client combine was not benchmarked in this baseline");
+    work.client.persistent_state_bytes = Metric::deterministic(0, "no mutable client PIR state");
+    work.client.upload_bytes = Metric::deterministic(0, "events originate at servers");
+    work.client.download_bytes =
+        Metric::deterministic(server_count, "one output byte share per server");
+    work.persisted_storage.server_bytes_per_server =
+        Metric::deterministic(key_bytes_per_server, "one Dense selector share");
+    work.persisted_storage.aggregate_server_bytes = Metric::deterministic(
+        key_bytes_per_server * server_count,
+        "sum of selector shares across servers",
+    );
+    work.persisted_storage.client_bytes = Metric::deterministic(0, "no mutable PIR state");
+    work.amortization = AmortizationHorizon {
+        global_build: "not applicable",
+        per_client_setup: "events delivered during one subscription lifetime",
+        maintenance: "events between subscription changes",
+        assumed_global_queries: None,
+        assumed_queries_per_client_setup: None,
+        assumed_online_events_per_maintenance: None,
+        note: "Registration upload and stored selector scale with the public bucket domain; online is one indexed bit read.",
+    };
+    work.hardware_counters = unavailable_hardware_counters();
+    work.validate()?;
+    Ok(work)
 }
 
 fn non_event_bucket(event_bucket: usize, ordinal: usize, bucket_count: usize) -> usize {
@@ -499,5 +901,31 @@ mod tests {
         buckets.sort_unstable();
 
         assert_eq!(buckets, vec![0, 1, 2, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn compact_accounting_includes_identifiers_needed_to_correlate_shares() {
+        let work = compact_dpf_live_accounting(
+            2,
+            100,
+            1.0,
+            1.0,
+            &[Duration::from_micros(10), Duration::from_micros(12)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            work.client.download_bytes.value,
+            Some(2 * COMPACT_NOTIFICATION_SHARE_BYTES * 2)
+        );
+        assert_eq!(
+            work.client.download_bytes.evidence,
+            crate::benchmark::accounting::Evidence::Estimated
+        );
+        assert_eq!(
+            work.online.useful_result_bytes.value,
+            Some(SUBSCRIPTION_ID_BYTES)
+        );
+        serde_json::to_string(&work).unwrap();
     }
 }

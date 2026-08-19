@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use super::accounting::AggregateWorkReport;
+
 #[derive(Debug, Serialize)]
 pub struct OptimizationReport {
     pub profile: String,
@@ -181,6 +183,7 @@ pub struct SinglePassDimensionResult {
 
 #[derive(Debug, Serialize)]
 pub struct DenseComparisonResult {
+    pub aggregate_work: AggregateWorkReport,
     pub samples: usize,
     pub expected_rows_read_per_server: usize,
     pub expected_data_bytes_read_per_server: usize,
@@ -195,6 +198,7 @@ pub struct DenseComparisonResult {
 
 #[derive(Debug, Serialize)]
 pub struct SinglePassVariantResult {
+    pub aggregate_work: AggregateWorkReport,
     pub partition_count_q: usize,
     pub samples: usize,
     pub setup_ms: f64,
@@ -255,6 +259,7 @@ pub struct LegacyPagedLayoutResult {
 
 #[derive(Debug, Serialize)]
 pub struct PackedDenseResult {
+    pub aggregate_work: AggregateWorkReport,
     pub privacy: &'static str,
     pub build_ms: f64,
     pub distinct_tag_count: usize,
@@ -280,6 +285,7 @@ pub struct PackedDenseResult {
 
 #[derive(Debug, Serialize)]
 pub struct FiniteDifferencesResult {
+    pub aggregate_work: AggregateWorkReport,
     pub privacy: &'static str,
     pub variables_m: usize,
     pub total_degree_d: usize,
@@ -303,6 +309,7 @@ pub struct FiniteDifferencesResult {
 
 #[derive(Debug, Serialize)]
 pub struct IndexedDecoyResult {
+    pub aggregate_work: AggregateWorkReport,
     pub privacy: &'static str,
     pub decoy_count: usize,
     pub server_count: usize,
@@ -358,6 +365,7 @@ pub struct FuseLayoutResult {
 
 #[derive(Debug, Serialize)]
 pub struct FuseTopologyResult {
+    pub aggregate_work: AggregateWorkReport,
     pub server_count: usize,
     pub privacy_collusion_tolerance: usize,
     pub required_answers: usize,

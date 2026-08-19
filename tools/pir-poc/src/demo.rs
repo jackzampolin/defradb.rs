@@ -118,7 +118,8 @@ pub async fn run_single_pass() -> Result<SinglePassDemoReport> {
     let (node, snapshot, document_count) = build_demo_snapshot().await?;
     let mut rng = rand::rngs::OsRng;
     let setup_started = Instant::now();
-    let mut state = ClientState::setup(snapshot.view(), PARTITION_COUNT, &mut rng)?;
+    let generation = snapshot.manifest.generation_id()?;
+    let mut state = ClientState::setup(snapshot.view(), generation, PARTITION_COUNT, &mut rng)?;
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1_000.0;
     let client_state_bytes = state.payload_bytes();
 
@@ -128,13 +129,13 @@ pub async fn run_single_pass() -> Result<SinglePassDemoReport> {
     let mut values = Vec::new();
     for lookup_key in &lookup_keys {
         let bucket = bucket_for_key(lookup_key, snapshot.manifest.bucket_count);
-        let prepared = state.prepare_query(bucket, &mut rng)?;
+        let prepared = state.prepare_query(generation, bucket, &mut rng)?;
         let answers = prepared
             .server_queries()
             .iter()
-            .map(|query| single_pass::answer(snapshot.view(), query))
+            .map(|query| single_pass::answer(snapshot.view(), generation, query))
             .collect::<Result<Vec<_>>>()?;
-        let row = state.complete_query(prepared, &answers)?;
+        let row = state.complete_query(generation, prepared, &answers)?;
         values.extend(snapshot.manifest.values_from_row(&row, lookup_key)?);
     }
     let private_query_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -149,8 +150,10 @@ pub async fn run_single_pass() -> Result<SinglePassDemoReport> {
     }
     node.shutdown().await;
 
-    let query_bytes_per_server = PARTITION_COUNT * size_of::<u32>();
-    let answer_bytes_per_server = PARTITION_COUNT * snapshot.manifest.row_size;
+    let query_bytes_per_server =
+        single_pass::GENERATION_ID_BYTES + PARTITION_COUNT * size_of::<u32>();
+    let answer_bytes_per_server =
+        single_pass::GENERATION_ID_BYTES + PARTITION_COUNT * snapshot.manifest.row_size;
     Ok(SinglePassDemoReport {
         defradb_documents: document_count,
         snapshot_id: snapshot.manifest.snapshot_id.clone(),

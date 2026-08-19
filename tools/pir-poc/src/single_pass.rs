@@ -4,6 +4,8 @@ use rand::{seq::SliceRandom, CryptoRng, Rng, RngCore};
 use crate::snapshot::SnapshotView;
 
 pub const SERVER_COUNT: usize = 2;
+pub type GenerationId = [u8; 32];
+pub const GENERATION_ID_BYTES: usize = size_of::<GenerationId>();
 
 /// The database indices sent to one SinglePass server.
 ///
@@ -11,16 +13,42 @@ pub const SERVER_COUNT: usize = 2;
 /// this POC uses one little-endian `u32` per index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerQuery {
+    generation: GenerationId,
     indices: Vec<u32>,
 }
 
 impl ServerQuery {
+    pub fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
     pub fn indices(&self) -> &[u32] {
         &self.indices
     }
 
     pub fn wire_bytes(&self) -> usize {
-        self.indices.len() * size_of::<u32>()
+        GENERATION_ID_BYTES + self.indices.len() * size_of::<u32>()
+    }
+}
+
+/// One SinglePass server's response, bound to the immutable generation it read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerAnswer {
+    generation: GenerationId,
+    bytes: Vec<u8>,
+}
+
+impl ServerAnswer {
+    pub fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn wire_bytes(&self) -> usize {
+        GENERATION_ID_BYTES + self.bytes.len()
     }
 }
 
@@ -32,6 +60,7 @@ impl ServerQuery {
 /// recover the state instead of rolling it back and reusing it.
 #[derive(Debug)]
 pub struct PreparedQuery {
+    generation: GenerationId,
     id: u64,
     target_partition: usize,
     hint_index: usize,
@@ -40,6 +69,10 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    pub fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
     pub fn server_queries(&self) -> &[ServerQuery; SERVER_COUNT] {
         &self.server_queries
     }
@@ -93,6 +126,7 @@ impl Permutation {
 /// parity hints. Online queries read only `partition_count` rows per server.
 #[derive(Debug)]
 pub struct ClientState {
+    generation: GenerationId,
     bucket_count: usize,
     row_size: usize,
     partition_count: usize,
@@ -106,6 +140,7 @@ pub struct ClientState {
 impl ClientState {
     pub fn setup<R: RngCore + CryptoRng>(
         snapshot: SnapshotView<'_>,
+        generation: GenerationId,
         partition_count: usize,
         rng: &mut R,
     ) -> Result<Self> {
@@ -147,6 +182,7 @@ impl ClientState {
         }
 
         Ok(Self {
+            generation,
             bucket_count: snapshot.bucket_count,
             row_size: snapshot.row_size,
             partition_count,
@@ -162,13 +198,18 @@ impl ClientState {
         self.partition_count
     }
 
+    pub fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
     pub fn partition_len(&self) -> usize {
         self.partition_len
     }
 
     /// Persistent payload bytes, excluding small `Vec` and struct headers.
     pub fn payload_bytes(&self) -> usize {
-        self.hints.len()
+        GENERATION_ID_BYTES
+            + self.hints.len()
             + self
                 .permutations
                 .iter()
@@ -189,9 +230,11 @@ impl ClientState {
 
     pub fn prepare_query<R: Rng + CryptoRng>(
         &mut self,
+        generation: GenerationId,
         bucket_index: usize,
         rng: &mut R,
     ) -> Result<PreparedQuery> {
+        self.ensure_generation(generation)?;
         if bucket_index >= self.bucket_count {
             bail!("SinglePass bucket index is outside the database");
         }
@@ -239,15 +282,18 @@ impl ClientState {
         self.next_query_id = next_query_id;
         self.in_flight = Some(id);
         Ok(PreparedQuery {
+            generation,
             id,
             target_partition,
             hint_index,
             refresh_hint_indices,
             server_queries: [
                 ServerQuery {
+                    generation,
                     indices: refresh_indices,
                 },
                 ServerQuery {
+                    generation,
                     indices: punctured_indices,
                 },
             ],
@@ -256,9 +302,14 @@ impl ClientState {
 
     pub fn complete_query(
         &mut self,
+        generation: GenerationId,
         prepared: PreparedQuery,
-        server_answers: &[Vec<u8>],
+        server_answers: &[ServerAnswer],
     ) -> Result<Vec<u8>> {
+        self.ensure_generation(generation)?;
+        if prepared.generation != generation {
+            bail!("SinglePass prepared query belongs to a different immutable generation");
+        }
         if self.in_flight != Some(prepared.id) {
             bail!("SinglePass prepared query does not match the in-flight state");
         }
@@ -270,10 +321,13 @@ impl ClientState {
             .checked_mul(self.row_size)
             .context("SinglePass answer size overflow")?;
         for answer in server_answers {
-            if answer.len() != expected_answer_bytes {
+            if answer.generation != generation {
+                bail!("SinglePass server answer belongs to a different immutable generation");
+            }
+            if answer.bytes.len() != expected_answer_bytes {
                 bail!(
                     "SinglePass answer has {} bytes, expected {expected_answer_bytes}",
-                    answer.len()
+                    answer.bytes.len()
                 );
             }
         }
@@ -285,7 +339,7 @@ impl ClientState {
                 let answer_start = partition * self.row_size;
                 xor_in_place(
                     &mut recovered,
-                    &server_answers[1][answer_start..answer_start + self.row_size],
+                    &server_answers[1].bytes[answer_start..answer_start + self.row_size],
                 );
             }
         }
@@ -301,8 +355,8 @@ impl ClientState {
             let answer_start = partition * self.row_size;
             let refresh_hint_start = refresh_hint_index * self.row_size;
             for byte_index in 0..self.row_size {
-                let delta = server_answers[0][answer_start + byte_index]
-                    ^ server_answers[1][answer_start + byte_index];
+                let delta = server_answers[0].bytes[answer_start + byte_index]
+                    ^ server_answers[1].bytes[answer_start + byte_index];
                 self.hints[hint_start + byte_index] ^= delta;
                 self.hints[refresh_hint_start + byte_index] ^= delta;
             }
@@ -311,9 +365,23 @@ impl ClientState {
         self.in_flight = None;
         Ok(recovered)
     }
+
+    fn ensure_generation(&self, generation: GenerationId) -> Result<()> {
+        if self.generation != generation {
+            bail!("SinglePass client state belongs to a different immutable generation");
+        }
+        Ok(())
+    }
 }
 
-pub fn answer(snapshot: SnapshotView<'_>, query: &ServerQuery) -> Result<Vec<u8>> {
+pub fn answer(
+    snapshot: SnapshotView<'_>,
+    generation: GenerationId,
+    query: &ServerQuery,
+) -> Result<ServerAnswer> {
+    if query.generation != generation {
+        bail!("SinglePass server query belongs to a different immutable generation");
+    }
     let partition_count = query.indices.len();
     if partition_count < 2 {
         bail!("SinglePass server query needs at least two partitions");
@@ -335,7 +403,10 @@ pub fn answer(snapshot: SnapshotView<'_>, query: &ServerQuery) -> Result<Vec<u8>
                 .copy_from_slice(row_unchecked(snapshot, global_index));
         }
     }
-    Ok(answer)
+    Ok(ServerAnswer {
+        generation,
+        bytes: answer,
+    })
 }
 
 fn row_unchecked(snapshot: SnapshotView<'_>, index: usize) -> &[u8] {
@@ -363,20 +434,27 @@ mod tests {
         bucket: usize,
         rng: &mut StdRng,
     ) -> Result<Vec<u8>> {
-        let prepared = state.prepare_query(bucket, rng)?;
+        let generation = snapshot.manifest.generation_id()?;
+        let prepared = state.prepare_query(generation, bucket, rng)?;
         let answers = prepared
             .server_queries()
             .iter()
-            .map(|query| answer(snapshot.view(), query))
+            .map(|query| answer(snapshot.view(), generation, query))
             .collect::<Result<Vec<_>>>()?;
-        state.complete_query(prepared, &answers)
+        state.complete_query(generation, prepared, &answers)
     }
 
     #[test]
     fn repeated_queries_recover_rows_and_update_state() {
         let snapshot = Snapshot::benchmark(64, 37, 7).unwrap();
         let mut rng = StdRng::seed_from_u64(11);
-        let mut state = ClientState::setup(snapshot.view(), 8, &mut rng).unwrap();
+        let mut state = ClientState::setup(
+            snapshot.view(),
+            snapshot.manifest.generation_id().unwrap(),
+            8,
+            &mut rng,
+        )
+        .unwrap();
         for bucket in (0..64).chain([7, 7, 31, 0, 63]) {
             assert_eq!(
                 private_read(&snapshot, &mut state, bucket, &mut rng).unwrap(),
@@ -389,7 +467,13 @@ mod tests {
     fn padding_supports_non_divisible_database_sizes() {
         let snapshot = Snapshot::benchmark(32, 19, 9).unwrap();
         let mut rng = StdRng::seed_from_u64(13);
-        let mut state = ClientState::setup(snapshot.view(), 6, &mut rng).unwrap();
+        let mut state = ClientState::setup(
+            snapshot.view(),
+            snapshot.manifest.generation_id().unwrap(),
+            6,
+            &mut rng,
+        )
+        .unwrap();
         assert_eq!(state.partition_len(), 6);
         for bucket in 0..32 {
             assert_eq!(
@@ -403,39 +487,95 @@ mod tests {
     fn client_state_allows_only_one_in_flight_query() {
         let snapshot = Snapshot::benchmark(32, 32, 3).unwrap();
         let mut rng = StdRng::seed_from_u64(17);
-        let mut state = ClientState::setup(snapshot.view(), 4, &mut rng).unwrap();
-        let prepared = state.prepare_query(3, &mut rng).unwrap();
-        assert!(state.prepare_query(4, &mut rng).is_err());
+        let generation = snapshot.manifest.generation_id().unwrap();
+        let mut state = ClientState::setup(snapshot.view(), generation, 4, &mut rng).unwrap();
+        let prepared = state.prepare_query(generation, 3, &mut rng).unwrap();
+        assert!(state.prepare_query(generation, 4, &mut rng).is_err());
         let answers = prepared
             .server_queries()
             .iter()
-            .map(|query| answer(snapshot.view(), query).unwrap())
+            .map(|query| answer(snapshot.view(), generation, query).unwrap())
             .collect::<Vec<_>>();
-        state.complete_query(prepared, &answers).unwrap();
-        assert!(state.prepare_query(4, &mut rng).is_ok());
+        state
+            .complete_query(generation, prepared, &answers)
+            .unwrap();
+        assert!(state.prepare_query(generation, 4, &mut rng).is_ok());
     }
 
     #[test]
     fn reports_client_state_payload() {
         let snapshot = Snapshot::benchmark(64, 32, 5).unwrap();
         let mut rng = StdRng::seed_from_u64(19);
-        let state = ClientState::setup(snapshot.view(), 8, &mut rng).unwrap();
+        let state = ClientState::setup(
+            snapshot.view(),
+            snapshot.manifest.generation_id().unwrap(),
+            8,
+            &mut rng,
+        )
+        .unwrap();
         assert_eq!(state.hint_bytes(), 8 * 32);
         assert_eq!(state.permutation_bytes(), 64 * 2 * size_of::<u32>());
-        assert_eq!(state.payload_bytes(), 8 * 32 + 64 * 8);
+        assert_eq!(state.payload_bytes(), GENERATION_ID_BYTES + 8 * 32 + 64 * 8);
     }
 
     #[test]
     fn rejects_malformed_queries_and_answers() {
         let snapshot = Snapshot::benchmark(32, 32, 3).unwrap();
         let invalid_query = ServerQuery {
+            generation: snapshot.manifest.generation_id().unwrap(),
             indices: vec![0, 99],
         };
-        assert!(answer(snapshot.view(), &invalid_query).is_err());
+        assert!(answer(
+            snapshot.view(),
+            snapshot.manifest.generation_id().unwrap(),
+            &invalid_query
+        )
+        .is_err());
 
         let mut rng = StdRng::seed_from_u64(23);
-        let mut state = ClientState::setup(snapshot.view(), 4, &mut rng).unwrap();
-        let prepared = state.prepare_query(2, &mut rng).unwrap();
-        assert!(state.complete_query(prepared, &[vec![0; 4 * 32]]).is_err());
+        let generation = snapshot.manifest.generation_id().unwrap();
+        let mut state = ClientState::setup(snapshot.view(), generation, 4, &mut rng).unwrap();
+        let prepared = state.prepare_query(generation, 2, &mut rng).unwrap();
+        assert!(state
+            .complete_query(
+                generation,
+                prepared,
+                &[ServerAnswer {
+                    generation,
+                    bytes: vec![0; 4 * 32],
+                }],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn generation_mismatches_are_rejected_before_client_mutation() {
+        let snapshot = Snapshot::benchmark(32, 32, 3).unwrap();
+        let generation = snapshot.manifest.generation_id().unwrap();
+        let mut stale_generation = generation;
+        stale_generation[0] ^= 1;
+        let mut rng = StdRng::seed_from_u64(29);
+        let mut state = ClientState::setup(snapshot.view(), generation, 4, &mut rng).unwrap();
+
+        assert!(state.prepare_query(stale_generation, 2, &mut rng).is_err());
+        let prepared = state.prepare_query(generation, 2, &mut rng).unwrap();
+        assert!(answer(
+            snapshot.view(),
+            stale_generation,
+            &prepared.server_queries()[0]
+        )
+        .is_err());
+
+        let mut answers = prepared
+            .server_queries()
+            .iter()
+            .map(|query| answer(snapshot.view(), generation, query).unwrap())
+            .collect::<Vec<_>>();
+        answers[0].generation = stale_generation;
+        let hints_after_prepare = state.hints.clone();
+        assert!(state
+            .complete_query(generation, prepared, &answers)
+            .is_err());
+        assert_eq!(state.hints, hints_after_prepare);
     }
 }

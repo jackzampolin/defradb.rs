@@ -371,6 +371,27 @@ pub fn benchmark_value(tag_index: usize, value_index: usize, size: usize) -> Vec
     value
 }
 
+/// Materialize the same deterministic, unplaced page corpus consumed by the
+/// cuckoo, Fuse, and MPHF benchmarks.
+///
+/// This is intentionally a layout-neutral export: every consecutive
+/// `config.page_size()` bytes is one useful encoded page, before any PIR- or
+/// placement-specific padding. External artifact adapters use it to avoid
+/// comparing against a different synthetic database.
+pub fn benchmark_raw_pages(
+    document_count: usize,
+    distinct_tag_count: usize,
+    config: &TagPageConfig,
+) -> Result<Vec<u8>> {
+    let page_set = benchmark_page_set(document_count, distinct_tag_count, config)?;
+    let page_size = config.page_size()?;
+    let mut raw = Vec::with_capacity(page_set.pages.len() * page_size);
+    for page in page_set.pages {
+        raw.extend_from_slice(&page.bytes);
+    }
+    Ok(raw)
+}
+
 fn validate_config(config: &TagPageConfig) -> Result<()> {
     if config.bucket_capacity == 0 || config.values_per_page == 0 || config.max_value_bytes == 0 {
         bail!("tag page capacities and value size must be non-zero");
@@ -384,7 +405,7 @@ fn validate_config(config: &TagPageConfig) -> Result<()> {
     Ok(())
 }
 
-fn encode_page(
+pub(crate) fn encode_page(
     key: &[u8],
     total_pages: usize,
     values: &[Vec<u8>],

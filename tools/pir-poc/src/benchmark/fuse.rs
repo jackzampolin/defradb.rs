@@ -3,6 +3,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use rand::{rngs::StdRng, SeedableRng};
 
+use super::accounting::{
+    unavailable_hardware_counters, AggregateWorkReport, AmortizationHorizon, ComparisonScope,
+    LeakageScope, Metric, PhaseWork, SecurityLabels,
+};
 use super::{
     report::{
         FuseComparisonReport, FuseComparisonWorkload, FuseLayoutResult, FuseTopologyResult,
@@ -51,6 +55,7 @@ pub fn run(profile: Profile) -> Result<FuseComparisonReport> {
         profile,
         encoded_payload_bytes,
         cuckoo_build_ms,
+        encoded_corpus_build_ms + cuckoo_build_ms,
     )?];
     drop(cuckoo);
 
@@ -64,6 +69,7 @@ pub fn run(profile: Profile) -> Result<FuseComparisonReport> {
             profile,
             encoded_payload_bytes,
             build_ms,
+            encoded_corpus_build_ms + build_ms,
             arity,
         )?);
     }
@@ -135,12 +141,20 @@ fn benchmark_cuckoo(
     profile: Profile,
     encoded_payload_bytes: usize,
     build_ms: f64,
+    global_build_ms: f64,
 ) -> Result<FuseLayoutResult> {
     let buckets = snapshot.candidate_buckets(target_tag, 0)?;
     let topologies = SERVER_COUNTS
         .into_iter()
         .map(|server_count| {
-            benchmark_cuckoo_topology(snapshot, target_tag, buckets, server_count, profile)
+            benchmark_cuckoo_topology(
+                snapshot,
+                target_tag,
+                buckets,
+                server_count,
+                profile,
+                global_build_ms,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(FuseLayoutResult {
@@ -166,13 +180,21 @@ fn benchmark_fuse(
     profile: Profile,
     encoded_payload_bytes: usize,
     build_ms: f64,
+    global_build_ms: f64,
     arity: FuseArity,
 ) -> Result<FuseLayoutResult> {
     let cells = snapshot.cells(target_tag, 0)?;
     let topologies = SERVER_COUNTS
         .into_iter()
         .map(|server_count| {
-            benchmark_fuse_topology(snapshot, target_tag, &cells, server_count, profile)
+            benchmark_fuse_topology(
+                snapshot,
+                target_tag,
+                &cells,
+                server_count,
+                profile,
+                global_build_ms,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(FuseLayoutResult {
@@ -198,6 +220,7 @@ fn benchmark_cuckoo_topology(
     buckets: [usize; 2],
     server_count: usize,
     profile: Profile,
+    build_ms: f64,
 ) -> Result<FuseTopologyResult> {
     let evaluators = evaluators(server_count)?;
     let mut rng = StdRng::seed_from_u64(0xc0c0_0000 ^ server_count as u64);
@@ -250,6 +273,9 @@ fn benchmark_cuckoo_topology(
         snapshot.manifest.row_size,
         CUCKOO_CANDIDATES * dense::query_size(snapshot.manifest.bucket_count),
         CUCKOO_CANDIDATES * snapshot.manifest.row_size,
+        build_ms,
+        snapshot.manifest.client_metadata_bytes(),
+        snapshot.manifest.values_per_page * snapshot.manifest.max_value_bytes,
         query_generation,
         wall,
         server_elapsed,
@@ -263,6 +289,7 @@ fn benchmark_fuse_topology(
     cells: &[usize],
     server_count: usize,
     profile: Profile,
+    build_ms: f64,
 ) -> Result<FuseTopologyResult> {
     let evaluators = evaluators(server_count)?;
     let mut rng = StdRng::seed_from_u64(0xf053_0000 ^ server_count as u64);
@@ -305,6 +332,9 @@ fn benchmark_fuse_topology(
         snapshot.manifest.page_size,
         dense::query_size(snapshot.manifest.cell_count),
         snapshot.manifest.page_size,
+        build_ms,
+        snapshot.manifest.client_metadata_bytes(),
+        snapshot.manifest.values_per_page * snapshot.manifest.max_value_bytes,
         query_generation,
         wall,
         server_elapsed,
@@ -433,6 +463,9 @@ fn topology_result(
     row_size: usize,
     query_bytes_per_server: usize,
     response_bytes_per_server: usize,
+    build_ms: f64,
+    client_metadata_bytes: usize,
+    useful_result_bytes: usize,
     mut query_generation: Vec<Duration>,
     mut wall: Vec<Duration>,
     mut server_elapsed: Vec<Duration>,
@@ -447,7 +480,23 @@ fn topology_result(
         samples.sort_unstable();
     }
     let expected_rows = evaluations * row_count.div_ceil(2);
+    let aggregate_work = fuse_topology_accounting(
+        server_count,
+        row_count * row_size,
+        build_ms,
+        client_metadata_bytes,
+        evaluations,
+        expected_rows * row_size,
+        query_bytes_per_server,
+        response_bytes_per_server,
+        useful_result_bytes,
+        micros(percentile(&query_generation, 50)),
+        millis(percentile(&wall, 50)),
+        millis(percentile(&server_elapsed, 50)),
+        micros(percentile(&reconstruct, 50)),
+    )?;
     Ok(FuseTopologyResult {
+        aggregate_work,
         server_count,
         privacy_collusion_tolerance: server_count - 1,
         required_answers: server_count,
@@ -464,6 +513,126 @@ fn topology_result(
         sum_server_elapsed_p50_ms: millis(percentile(&server_elapsed, 50)),
         client_reconstruct_p50_us: micros(percentile(&reconstruct, 50)),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fuse_topology_accounting(
+    server_count: usize,
+    table_bytes_per_server: usize,
+    build_ms: f64,
+    client_metadata_bytes: usize,
+    evaluations_per_server: usize,
+    logical_bytes_per_server: usize,
+    query_bytes_per_server: usize,
+    response_bytes_per_server: usize,
+    useful_result_bytes: usize,
+    query_generation_us: f64,
+    wall_ms: f64,
+    aggregate_server_ms: f64,
+    reconstruct_us: f64,
+) -> Result<AggregateWorkReport> {
+    let mut work = AggregateWorkReport::new(
+        "static-layout-over-replicated-dense-xor",
+        ComparisonScope {
+            workload: "one lookup over the identical populated immutable tag-page corpus",
+            result: "one first page containing four fixed-width compact locators",
+            public_partition: "global immutable snapshot",
+            leakage: LeakageScope::ExactQueryPrivacy,
+        },
+        SecurityLabels {
+            privacy: "exact information-theoretic tag privacy",
+            server_count,
+            collusion_tolerance: server_count - 1,
+            required_answers: server_count,
+            assumptions: "at least one replicated Dense XOR server does not collude",
+            availability: "all answer shares are required",
+            integrity: "page fingerprint checks corruption; no malicious-server proof",
+        },
+    );
+    work.global_build.aggregate_server_time_ms = Metric::measured(
+        build_ms,
+        "static layout build over the shared encoded corpus",
+    );
+    work.global_build.server_scans =
+        Metric::not_measured("static-layout construction passes were not instrumented");
+    work.global_build.network_rounds = Metric::not_applicable("build is server-local");
+    work.maintenance = PhaseWork::not_applicable(
+        "immutable snapshot lifetime",
+        "the static layout is rebuilt for a new snapshot",
+    );
+    let physical_per_server = logical_bytes_per_server + query_bytes_per_server;
+    for server in &mut work.online.per_server {
+        server.server_time_p50_ms = Metric::estimated(
+            aggregate_server_ms / server_count as f64,
+            "aggregate p50 divided evenly; per-server samples were not retained",
+        );
+        server.logical_selected_bytes = Metric::estimated(
+            logical_bytes_per_server,
+            "expected set selector bits times row bytes for a random query share",
+        );
+        server.physical_or_scanned_bytes = Metric::estimated(
+            physical_per_server,
+            "selector scan plus expected XOR row payload; cache-line and DRAM traffic were not measured",
+        );
+        server.scans = Metric::deterministic(
+            evaluations_per_server,
+            "Dense selector traversals performed by this server",
+        );
+    }
+    work.online.unit = "one first-page tag lookup";
+    work.online.aggregate_server_time_p50_ms =
+        Metric::measured(aggregate_server_ms, "sum of measured server elapsed times");
+    work.online.max_server_time_p50_ms = Metric::estimated(
+        wall_ms,
+        "co-located wall p50 is an upper-envelope proxy including dispatch overhead",
+    );
+    work.online.aggregate_logical_selected_bytes = Metric::estimated(
+        logical_bytes_per_server * server_count,
+        "sum of expected selected bytes across random server shares",
+    );
+    work.online.aggregate_physical_or_scanned_bytes = Metric::estimated(
+        physical_per_server * server_count,
+        "sum of estimated selector and payload bytes; no hardware counter",
+    );
+    work.online.server_scans = Metric::deterministic(
+        evaluations_per_server * server_count,
+        "sum of Dense selector traversals",
+    );
+    work.online.network_rounds = Metric::deterministic(1, "all shares are batched in one round");
+    work.online.useful_result_bytes =
+        Metric::deterministic(useful_result_bytes, "four fixed-width compact locators");
+    work.client.online_cpu_p50_ms = Metric::estimated(
+        (query_generation_us + reconstruct_us) / 1_000.0,
+        "sum of separately measured share-generation and reconstruction medians",
+    );
+    work.client.persistent_state_bytes =
+        Metric::deterministic(client_metadata_bytes, "constant public layout metadata");
+    work.client.upload_bytes =
+        Metric::deterministic(query_bytes_per_server * server_count, "all query shares");
+    work.client.download_bytes = Metric::deterministic(
+        response_bytes_per_server * server_count,
+        "all answer shares",
+    );
+    work.persisted_storage.server_bytes_per_server =
+        Metric::deterministic(table_bytes_per_server, "one static table replica");
+    work.persisted_storage.aggregate_server_bytes = Metric::deterministic(
+        table_bytes_per_server * server_count,
+        "sum across replicated servers",
+    );
+    work.persisted_storage.client_bytes =
+        Metric::deterministic(client_metadata_bytes, "constant public layout metadata");
+    work.amortization = AmortizationHorizon {
+        global_build: "all clients and lookups using one immutable layout",
+        per_client_setup: "not applicable beyond constant public metadata",
+        maintenance: "layout lifetime",
+        assumed_global_queries: None,
+        assumed_queries_per_client_setup: None,
+        assumed_online_events_per_maintenance: None,
+        note: "Layout build is reported separately and is not folded into online work.",
+    };
+    work.hardware_counters = unavailable_hardware_counters();
+    work.validate()?;
+    Ok(work)
 }
 
 fn evaluators(server_count: usize) -> Result<Vec<ParallelEvaluator>> {

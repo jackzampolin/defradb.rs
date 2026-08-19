@@ -1,11 +1,16 @@
 pub mod benchmark;
 pub mod demo;
 pub mod dense;
+pub mod dense_batch;
 pub mod finite_differences;
 pub mod fuse_pages;
 pub mod http;
+pub mod mphf_pages;
+pub mod portable_gates;
+pub mod ribbon_pages;
 pub mod service;
 pub mod single_pass;
 pub mod snapshot;
 pub mod subscription;
+pub mod subset_xor;
 pub mod tag_pages;
