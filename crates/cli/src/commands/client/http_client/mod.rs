@@ -404,7 +404,12 @@ impl HttpClient {
         Ok(response.json().await?)
     }
 
-    async fn request_void(&self, method: &str, url: &str, body: Option<&str>) -> Result<()> {
+    pub(crate) async fn request_void(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+    ) -> Result<()> {
         let response = self.send_with_retry(method, url, body).await?;
         if !response.status().is_success() {
             return Err(Self::extract_error(response).await);

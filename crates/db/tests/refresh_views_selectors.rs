@@ -58,19 +58,6 @@ fn a_version_id_selects_only_that_version() {
 }
 
 /// Go exempts a requested version from the inactive drop, so asking for a
-/// version by id reaches it whether or not it is the active one.
-#[test]
-fn a_version_id_reaches_an_inactive_version_without_get_inactive() {
-    let options = RefreshViewsOptions {
-        version_id: Some("v1".to_string()),
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&inactive("Orders", "v1", "c1")));
-    assert!(
-        options.needs_all_versions(),
-        "an inactive version cannot be found in the active-only listing"
-    );
-}
 
 #[test]
 fn a_collection_id_selects_that_collections_views() {
@@ -80,21 +67,6 @@ fn a_collection_id_selects_that_collections_views() {
     };
     assert!(options.selects(&view("Orders", "v1", "c1")));
     assert!(!options.selects(&view("Invoices", "v2", "c2")));
-}
-
-/// Go's stage 1 takes the by-name case only when `get_inactive` is false. With
-/// it set, selection falls through to the full listing and the name filter
-/// narrows it, which is how an inactive version is reached by name.
-#[test]
-fn a_name_with_get_inactive_reaches_an_inactive_version() {
-    let options = RefreshViewsOptions {
-        names: Some(vec!["Orders".to_string()]),
-        get_inactive: true,
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&inactive("Orders", "v1", "c1")));
-    assert!(!options.selects(&inactive("Invoices", "v2", "c2")));
-    assert!(options.needs_all_versions());
 }
 
 /// `collection_id` picks candidates in Go rather than filtering them, so a
@@ -120,44 +92,6 @@ fn a_version_id_wins_over_a_disagreeing_collection_id() {
         ..RefreshViewsOptions::all()
     };
     assert!(options.selects(&view("Orders", "v1", "c1")));
-}
-
-/// With `get_inactive`, the by-name case does not fire, so a collection id is
-/// back in play alongside the name.
-#[test]
-fn a_collection_id_applies_alongside_a_name_when_inactive_are_included() {
-    let options = RefreshViewsOptions {
-        names: Some(vec!["Orders".to_string()]),
-        collection_id: Some("c1".to_string()),
-        get_inactive: true,
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&view("Orders", "v1", "c1")));
-    assert!(!options.selects(&view("Orders", "v2", "other")));
-}
-
-#[test]
-fn get_inactive_selects_inactive_versions() {
-    let options = RefreshViewsOptions {
-        get_inactive: true,
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&inactive("Orders", "v1", "c1")));
-    assert!(options.selects(&view("Orders", "v2", "c1")));
-    assert!(options.needs_all_versions());
-}
-
-/// The active-only listing is the cheaper of the two, so it stays the default
-/// for every selection that cannot match an inactive version.
-#[test]
-fn only_inactive_reaching_selections_need_the_full_listing() {
-    assert!(!RefreshViewsOptions::all().needs_all_versions());
-    assert!(!RefreshViewsOptions::with_names(vec!["Orders".to_string()]).needs_all_versions());
-    assert!(!RefreshViewsOptions {
-        collection_id: Some("c1".to_string()),
-        ..RefreshViewsOptions::all()
-    }
-    .needs_all_versions());
 }
 
 /// Eligibility is separate from selection: a version has to be a materialized,
@@ -190,5 +124,70 @@ fn an_embedded_only_view_is_never_refreshed() {
     assert!(
         RefreshViewsOptions::with_names(vec!["OrdersView".to_string()]).selects(&embedded),
         "the selector still matches it; eligibility is what excludes it"
+    );
+}
+
+/// A selector that matches nothing is a caller mistake, not an empty refresh.
+///
+/// Go looks a version up directly and propagates not-found
+/// (`internal/db/collection.go:211`), so a typo must not read as success. The
+/// filter alone returned `Ok(())` over an empty list.
+#[tokio::test]
+async fn an_unknown_version_id_is_an_error_not_a_silent_success() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+
+    let error = db
+        .refresh_views(RefreshViewsOptions {
+            version_id: Some("bae-does-not-exist".to_string()),
+            ..RefreshViewsOptions::all()
+        })
+        .await
+        .expect_err("an unknown version must be reported");
+
+    assert!(
+        error.to_string().contains("bae-does-not-exist"),
+        "the error must name the version: {error}"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_collection_id_is_an_error() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+
+    let error = db
+        .refresh_views(RefreshViewsOptions {
+            collection_id: Some("no-such-collection".to_string()),
+            ..RefreshViewsOptions::all()
+        })
+        .await
+        .expect_err("an unknown collection must be reported");
+
+    assert!(error.to_string().contains("no-such-collection"), "{error}");
+}
+
+/// Refusing beats corrupting. `build_view_cache` resolves against the active
+/// schemas and matches by name, so refreshing an inactive version would clear
+/// the shared cache and rebuild it from the active definition instead.
+#[tokio::test]
+async fn refreshing_inactive_versions_is_refused() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+
+    let error = db
+        .refresh_views(RefreshViewsOptions {
+            get_inactive: true,
+            ..RefreshViewsOptions::all()
+        })
+        .await
+        .expect_err("inactive selection must be refused, not silently wrong");
+
+    assert!(
+        error.to_string().contains("not supported"),
+        "the refusal must say why: {error}"
     );
 }

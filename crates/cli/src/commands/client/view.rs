@@ -142,8 +142,7 @@ impl ViewRefreshArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let result = client.view_refresh(&self.selectors()).await?;
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        client.view_refresh(&self.selectors()).await?;
         Ok(())
     }
 }

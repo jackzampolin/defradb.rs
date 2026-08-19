@@ -214,3 +214,17 @@ fn an_absent_transform_is_omitted() {
 
     assert!(json.get("TransformCID").is_none(), "{json}");
 }
+
+/// Go's refresh answers `200` with no body (`http/handler_store.go:450`) and its
+/// own client uses the non-JSON request path. Deserializing a response here made
+/// a successful refresh against a Go node report a parse error, so the call must
+/// not yield a parsed body at all.
+#[test]
+fn view_refresh_parses_no_response_body() {
+    // Compiles only while `view_refresh` yields `Result<()>`. A body-parsing
+    // signature returns `Result<JsonValue>` and fails to unify here.
+    fn _typecheck(client: &HttpClient, selectors: &ViewRefreshSelectors) {
+        let call = client.view_refresh(selectors);
+        let _: &dyn std::future::Future<Output = cli::error::Result<()>> = &call;
+    }
+}

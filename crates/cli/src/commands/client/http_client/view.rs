@@ -76,9 +76,15 @@ impl HttpClient {
         self.post_json(&url, &body).await
     }
 
-    pub async fn view_refresh(&self, selectors: &ViewRefreshSelectors) -> Result<JsonValue> {
+    /// Refresh views.
+    ///
+    /// Go answers with a bare `200` and no body (`http/handler_store.go:450`),
+    /// so this must not try to deserialize one: against a Go node the refresh
+    /// would succeed and the CLI would then report a parse error. Rust's `{}`
+    /// is equally accepted because neither is read.
+    pub async fn view_refresh(&self, selectors: &ViewRefreshSelectors) -> Result<()> {
         let url = format!("{}{}", self.view_refresh_url(), selectors.query_string());
-        self.post_json(&url, &serde_json::json!({})).await
+        self.request_void("POST", &url, None).await
     }
 
     pub async fn view_gc(&self, names: Option<Vec<String>>) -> Result<JsonValue> {

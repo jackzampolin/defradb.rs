@@ -138,11 +138,41 @@ impl<S: Store> crate::database::DB<S> {
     where
         S: 'static,
     {
-        let collections = if options.needs_all_versions() {
-            self.get_all_collection_versions().await?
-        } else {
-            self.get_all_active_collections_internal()?
-        };
+        // `build_view_cache` resolves the view's query against the *active*
+        // schemas and matches by name, so refreshing an inactive version would
+        // clear the shared cache and then rebuild it from the active definition
+        // instead of the one asked for. Refusing is the only honest answer until
+        // the builder can take a version.
+        if options.get_inactive {
+            return Err(Error::Other(
+                "refreshing inactive collection versions is not supported: the view cache is \
+                 rebuilt from the active schema, so it would not hold the requested version"
+                    .to_string(),
+            ));
+        }
+
+        let collections = self.get_all_active_collections_internal()?;
+
+        // A selector that matches nothing is a caller mistake, not an empty
+        // refresh. Go looks a version up directly and propagates not-found
+        // (`internal/db/collection.go:211`), so a typo must not read as success.
+        if let Some(version_id) = &options.version_id {
+            if !collections.iter().any(|col| &col.version_id == version_id) {
+                return Err(Error::Other(format!(
+                    "no active collection version {version_id}"
+                )));
+            }
+        }
+        if let Some(collection_id) = &options.collection_id {
+            if !collections
+                .iter()
+                .any(|col| &col.collection_id == collection_id)
+            {
+                return Err(Error::Other(format!(
+                    "no active collection {collection_id}"
+                )));
+            }
+        }
 
         let views_to_refresh: Vec<_> = collections
             .iter()
