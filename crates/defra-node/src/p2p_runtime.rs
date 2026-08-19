@@ -162,6 +162,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     database: Arc<db::DB<S>>,
     event_bus: Arc<dyn events::Bus>,
     config: &P2PConfig,
+    node_identity: Option<Arc<identity::RawIdentity>>,
 ) -> anyhow::Result<P2PSetupResult> {
     // 1. Load or generate secret key for stable node identity
     let secret_key =
@@ -170,6 +171,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     // 2. Configure and spawn IROH endpoint with pinned port + optional bind address
     let iroh_config = p2p::iroh::IrohEndpointConfig {
         secret_key: secret_key.clone(),
+        node_identity: node_identity.clone(),
         relay_mode: config.relay_mode.clone(),
         discovery: config.discovery.clone(),
         bind_port: Some(config.port),
@@ -221,7 +223,8 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
 
     // Failure channel (required by replication loop)
     let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
-    let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
+    let failure_recorder_task =
+        defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
 
     let coordinator = Arc::new(coordinator);
     coordinator
@@ -261,10 +264,9 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         .await;
     });
 
-    // Re-drive pending-DAG registrations persisted before the last
-    // shutdown/crash, then keep sweeping periodically as the bounded
-    // drain for records skipped at capacity or TTL-evicted (#1099).
-    // Spawned so the sync-event channel already has its consumer above.
+    // Restore pending-DAG registrations persisted before the last
+    // shutdown/crash as due receiver-clock work, then keep sweeping
+    // periodically for records skipped at capacity or TTL-evicted (#1099).
     // Spawned through the coordinator so shutdown drains them before the
     // coordinator (and through it the store) is dropped; a bare tokio::spawn
     // here outlives shutdown and keeps the data path locked (#1309).
@@ -290,13 +292,6 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     let event_handler_task = tokio::spawn(async move {
         run_event_handler(iroh_events, coord_for_events, store_for_events).await;
     });
-    let retry_loop_task = spawn_iroh_retry_loop(
-        store.clone(),
-        database.clone(),
-        transport.clone(),
-        coordinator.head_hint_car_authority(),
-    );
-
     let doc_pusher_impl = Arc::new(defra_p2p_adapter::DbTransportDocPusher::new(
         database.clone(),
         transport.clone(),
@@ -304,6 +299,12 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
     let doc_pusher: Arc<dyn defra_p2p_adapter::TransportDocPusher> = doc_pusher_impl;
+    let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
+        store.clone(),
+        transport.clone(),
+        doc_pusher.clone(),
+        None,
+    );
     let version_syncer = Some(defra_p2p_adapter::DbTransportVersionSyncer::new_arc(
         sync_blockstore,
         replication.merge_handler_inner.clone(),
@@ -329,6 +330,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let ops: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
+    let peer_identity_resolver = p2p::IrohPeerIdentityResolver::new(transport.clone());
 
     Ok(P2PSetupResult {
         ops,
@@ -344,7 +346,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         mutator,
         wire_document_acp: Some(Box::new(move |acp, strict| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
-                resolver: Arc::new(p2p::AnonymousResolver),
+                resolver: Arc::new(peer_identity_resolver),
                 gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
                     acp.clone(),
                     database_for_acp.node_did(),
@@ -360,38 +362,26 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
 }
 
 async fn run_event_handler<B: blockstore::Blockstore + Send + Sync + 'static>(
-    mut events: tokio::sync::mpsc::Receiver<
+    events: tokio::sync::mpsc::Receiver<
         p2p::TransportEvent<<p2p::iroh::IrohTransport as P2PTransport>::ResponseToken>,
     >,
     coordinator: Arc<p2p::sync::SyncCoordinator<B, p2p::iroh::IrohTransport>>,
     store: Arc<impl storage::corekv::Store + 'static>,
 ) {
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-    while let Some(event) = events.recv().await {
-        let event_kind = event.kind();
-        if let p2p::TransportEvent::PeerConnected(peer_id) = &event {
-            let peerstore = storage::stores::Peerstore::new(store.clone());
-            if let Err(error) = peerstore.activate_retry_peer(peer_id.as_str()).await {
-                tracing::warn!(target: "defra_node", %peer_id, %error, "failed to activate durable push markers after peer reconnect");
+    let handler_coordinator = coordinator.clone();
+    coordinator.run_event_dispatcher(events, move |event, admission| {
+        let coordinator = handler_coordinator.clone();
+        let store = store.clone();
+        async move {
+            let event_kind = event.kind();
+            if let p2p::TransportEvent::PeerConnected(peer_id) = &event {
+                defra_p2p_adapter::activate_retry_peer(store, peer_id).await;
             }
-        }
-        if event.requires_inline_ordering() {
-            if let Err(e) = coordinator.handle_transport_event(event).await {
-                if e.is_rate_limited() {
-                    tracing::debug!(target: "defra_node", event_kind, error = %e, "P2P rate-limited");
-                } else if e.is_retriable() {
-                    tracing::warn!(target: "defra_node", event_kind, error = %e, "P2P transport event failed after retries");
-                } else {
-                    tracing::error!(target: "defra_node", event_kind, error = %e, "P2P event handler error");
-                }
-            }
-            continue;
-        }
 
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let coord = coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coord.handle_transport_event(event).await {
+            if let Err(e) = coordinator
+                .handle_transport_event_with_admission(event, admission)
+                .await
+            {
                 if e.is_rate_limited() {
                     tracing::debug!(target: "defra_node", event_kind, error = %e, "P2P rate-limited");
                 } else if e.is_retriable() {
@@ -400,9 +390,9 @@ async fn run_event_handler<B: blockstore::Blockstore + Send + Sync + 'static>(
                     tracing::error!(target: "defra_node", event_kind, error = %e, "P2P event handler error");
                 }
             }
-            drop(permit);
-        });
-    }
+        }
+    })
+    .await;
 }
 
 async fn restore_iroh_p2p_state<S, B>(
@@ -471,285 +461,4 @@ where
     }
 
     restored_doc_ids
-}
-
-fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
-    store: Arc<S>,
-    mut failure_rx: tokio::sync::mpsc::Receiver<p2p::sync::PushFailure>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ack_fence = p2p::sync::HeadAckFence::default();
-        while let Some(mut failure) = failure_rx.recv().await {
-            let durable_tx = failure.durable_tx.take();
-            if failure.acknowledged && !ack_fence.ack_is_current(&failure) {
-                tracing::debug!(target: "defra_node",
-                    peer_id = %failure.peer_id,
-                    doc_id = %failure.doc_id,
-                    collection_id = %failure.collection_id,
-                    "Ignoring stale head acknowledgement"
-                );
-                let _ = durable_tx.map(|tx| tx.send(false));
-                continue;
-            }
-            if failure.create_retry {
-                tracing::warn!(target: "defra_node",
-                    peer_id = %failure.peer_id,
-                    doc_id = %failure.doc_id,
-                    collection_id = %failure.collection_id,
-                    "P2P push to replicator failed"
-                );
-            }
-
-            let peerstore = storage::stores::Peerstore::new(store.clone());
-            let _retry_guard = match peerstore
-                .acquire_replicator_retry_guard(&failure.peer_id)
-                .await
-            {
-                Ok(Some(guard)) => guard,
-                Ok(None) => {
-                    let _ = durable_tx.map(|tx| tx.send(false));
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(target: "defra_node", error = %error, "failed to coordinate push failure recording");
-                    let _ = durable_tx.map(|tx| tx.send(false));
-                    continue;
-                }
-            };
-            let result = if failure.acknowledged {
-                peerstore
-                    .complete_retry_scope(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        failure.doc_id.is_empty(),
-                    )
-                    .await
-            } else if failure.create_retry {
-                let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        tracing::warn!(target: "defra_node", error = %error, "failed to serialize retry info");
-                        let _ = durable_tx.map(|tx| tx.send(false));
-                        continue;
-                    }
-                };
-                peerstore
-                    .record_push_failure(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        &info_bytes,
-                    )
-                    .await
-            } else {
-                peerstore
-                    .observe_push_head(&failure.peer_id, &failure.doc_id, &failure.collection_id)
-                    .await
-            };
-            if let Err(error) = result {
-                tracing::warn!(target: "defra_node", error = %error, "failed to record push failure");
-                let _ = durable_tx.map(|tx| tx.send(false));
-                continue;
-            }
-            if !failure.create_retry && !failure.acknowledged {
-                ack_fence.observe_durable(&failure);
-            }
-            let _ = durable_tx.map(|tx| tx.send(true));
-            if failure.acknowledged {
-                ack_fence.clear_current_ack(&failure);
-                let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
-                continue;
-            }
-            if !failure.create_retry {
-                continue;
-            }
-            if let Err(error) = defra_p2p_adapter::set_persisted_replicator_status(
-                &peerstore,
-                &failure.peer_id.to_string(),
-                p2p::ReplicatorStatus::Inactive,
-            )
-            .await
-            {
-                tracing::warn!(target: "defra_node", error = %error, "failed to mark replicator inactive");
-            }
-        }
-    })
-}
-
-fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
-    store: Arc<S>,
-    database: Arc<db::DB<S>>,
-    transport: p2p::iroh::IrohTransport,
-    car_authority: p2p::sync::HeadHintCarAuthority,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let peerstore = storage::stores::Peerstore::new(store.clone());
-        if let Err(error) = peerstore.migrate_legacy_push_retries().await {
-            tracing::warn!(target: "defra_node", error = %error, "failed to migrate legacy push retries after restart");
-        }
-        loop {
-            tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
-            let peerstore = storage::stores::Peerstore::new(store.clone());
-            let peers = match peerstore.get_replicator_retry_peers().await {
-                Ok(peers) => peers,
-                Err(error) => {
-                    tracing::debug!(target: "defra_node", error = %error, "failed to load retry peers");
-                    continue;
-                }
-            };
-
-            for (peer_id_str, info_bytes) in peers {
-                let retry_guard = match peerstore.acquire_replicator_retry_guard(&peer_id_str).await
-                {
-                    Ok(Some(guard)) => guard,
-                    Ok(None) | Err(_) => continue,
-                };
-                // Never hold the marker writer across a network timeout.
-                drop(retry_guard);
-                let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
-                    Ok(info) => info,
-                    Err(error) => {
-                        tracing::warn!(target: "defra_node", peer_id = %peer_id_str, error = %error, "invalid retry info");
-                        continue;
-                    }
-                };
-                let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                // Iroh request-response can reconnect on demand, so don't
-                // suppress retries based on the peer-map's current
-                // connected_peers snapshot.
-
-                let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
-                    Ok(docs) => docs,
-                    Err(error) => {
-                        tracing::debug!(target: "defra_node", peer_id = %peer_id_str, error = %error, "failed to load retry docs");
-                        continue;
-                    }
-                };
-                if docs.is_empty() {
-                    let _ = peerstore.clear_retry_peer(&peer_id_str).await;
-                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
-                        &peerstore,
-                        &peer_id_str,
-                        p2p::ReplicatorStatus::Active,
-                    )
-                    .await;
-                    continue;
-                }
-
-                let retry_filters = match peerstore.get_replicator(&peer_id_str).await {
-                    Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
-                        .map(|info| info.filters)
-                        .unwrap_or_default(),
-                    _ => p2p::ReplicationFilters::new(),
-                };
-                let mut fast_failures = 0usize;
-                for retry in &mut docs {
-                    if !retry.retry_info.is_due() {
-                        continue;
-                    }
-                    // Bound each send so a nonresponsive peer cannot stall
-                    // healthy peers' retries behind it (#1099). A timeout
-                    // ends the pass (the peer is unreachable); a fast
-                    // rejection only consumes a bounded budget so one
-                    // permanently rejected doc at the head of the key order
-                    // cannot starve the rest forever.
-                    // Collection commits are doc-less, so their scope marker
-                    // rederives the collection's current heads. The
-                    // document executor resolves work from a document's
-                    // composite heads and would silently ack a commit as a
-                    // no-op, deleting the scope marker and losing the work
-                    // (defradb#1113).
-                    let replay = async {
-                        if retry.is_collection_commit() {
-                            db_merge::retry_collection_commit_via_transport(
-                                &transport,
-                                database.as_ref(),
-                                &peer_id,
-                                &retry.collection_id,
-                                &car_authority,
-                            )
-                            .await
-                        } else {
-                            db_merge::retry_doc_via_transport(
-                                &transport,
-                                database.as_ref(),
-                                None,
-                                &peer_id,
-                                &retry.doc_id,
-                                &retry.collection_id,
-                                &retry_filters,
-                                &replication_filter::QueryReplicationFilterMatcher::new(),
-                                &car_authority,
-                            )
-                            .await
-                        }
-                    };
-                    let replay_result =
-                        tokio::time::timeout(std::time::Duration::from_secs(15), replay).await;
-                    let _transition_guard =
-                        match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
-                            Ok(Some(guard)) => guard,
-                            Ok(None) | Err(_) => break,
-                        };
-                    match replay_result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            tracing::warn!(target: "defra_node",
-                                doc_id = %retry.doc_id,
-                                peer_id = %peer_id,
-                                error = %error,
-                                "retry push failed"
-                            );
-                            p2p::sync::reschedule_persisted_push_retry(
-                                &mut retry.retry_info,
-                                &error,
-                            );
-                            let _ = peerstore
-                                .update_retry_document(&peer_id_str, &retry.retry_info)
-                                .await;
-                            fast_failures += 1;
-                            if fast_failures >= 3 {
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            tracing::warn!(target: "defra_node",
-                                doc_id = %retry.doc_id,
-                                peer_id = %peer_id,
-                                "retry push timed out"
-                            );
-                            retry.retry_info.bump();
-                            let _ = peerstore
-                                .update_retry_document(&peer_id_str, &retry.retry_info)
-                                .await;
-                            break;
-                        }
-                    }
-                }
-
-                if peerstore
-                    .get_retry_documents(&peer_id_str)
-                    .await
-                    .unwrap_or_default()
-                    .is_empty()
-                {
-                    let _ = peerstore.clear_retry_peer(&peer_id_str).await;
-                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
-                        &peerstore,
-                        &peer_id_str,
-                        p2p::ReplicatorStatus::Active,
-                    )
-                    .await;
-                } else {
-                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
-                        &peerstore,
-                        &peer_id_str,
-                        p2p::ReplicatorStatus::Inactive,
-                    )
-                    .await;
-                }
-            }
-        }
-    })
 }

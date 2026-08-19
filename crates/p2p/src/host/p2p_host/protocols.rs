@@ -76,15 +76,13 @@ impl<S: Store> P2PHost<S> {
                     request, channel, ..
                 } => {
                     debug!("Received PushLog request from {}", peer);
-                    if self
-                        .event_tx
-                        .send(HostEvent::PushLogRequest {
+                    if !self
+                        .forward_event(HostEvent::PushLogRequest {
                             peer_id: peer,
                             request,
                             channel: ResponseChannel::new(channel),
                         })
                         .await
-                        .is_err()
                     {
                         error!(peer_id = %peer, "Failed to send PushLogRequest event - receiver dropped, request will not be processed");
                     }
@@ -154,16 +152,14 @@ impl<S: Store> P2PHost<S> {
                             .iter()
                             .any(|base| topic.starts_with(&format!("{base}/"))))
                 {
-                    if self
-                        .event_tx
-                        .send(HostEvent::GossipRawMessage {
+                    if !self
+                        .forward_event(HostEvent::GossipRawMessage {
                             propagation_source,
                             message_id: message_id.clone(),
                             topic: topic.clone(),
                             data: message.data,
                         })
                         .await
-                        .is_err()
                     {
                         error!(
                             peer_id = %propagation_source,
@@ -198,16 +194,14 @@ impl<S: Store> P2PHost<S> {
                                 "Decoded libp2p gossip payload via compatibility fallback"
                             );
                         }
-                        if self
-                            .event_tx
-                            .send(HostEvent::GossipMessage {
+                        if !self
+                            .forward_event(HostEvent::GossipMessage {
                                 propagation_source,
                                 message_id: message_id.clone(),
                                 topic: topic.clone(),
                                 message: broadcast,
                             })
                             .await
-                            .is_err()
                         {
                             error!(
                                 peer_id = %propagation_source,
@@ -265,14 +259,12 @@ impl<S: Store> P2PHost<S> {
 
             gossipsub::Event::Subscribed { peer_id, topic } => {
                 debug!("Peer {} subscribed to {}", peer_id, topic);
-                if self
-                    .event_tx
-                    .send(HostEvent::PeerSubscribed {
+                if !self
+                    .forward_event(HostEvent::PeerSubscribed {
                         peer_id,
                         topic: topic.to_string(),
                     })
                     .await
-                    .is_err()
                 {
                     warn!(peer_id = %peer_id, topic = %topic, "Failed to send PeerSubscribed event - receiver dropped");
                 }
@@ -280,14 +272,12 @@ impl<S: Store> P2PHost<S> {
 
             gossipsub::Event::Unsubscribed { peer_id, topic } => {
                 debug!("Peer {} unsubscribed from {}", peer_id, topic);
-                if self
-                    .event_tx
-                    .send(HostEvent::PeerUnsubscribed {
+                if !self
+                    .forward_event(HostEvent::PeerUnsubscribed {
                         peer_id,
                         topic: topic.to_string(),
                     })
                     .await
-                    .is_err()
                 {
                     warn!(peer_id = %peer_id, topic = %topic, "Failed to send PeerUnsubscribed event - receiver dropped");
                 }

@@ -112,6 +112,8 @@ pub use host::{
 pub use message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 #[cfg(feature = "libp2p-transport")]
 pub use peer_identity::HandlePeerIdentityResolver;
+#[cfg(feature = "iroh-transport")]
+pub use peer_identity::IrohPeerIdentityResolver;
 pub use peer_identity::{AnonymousResolver, PeerIdentityResolver};
 pub use protocol::{
     BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,

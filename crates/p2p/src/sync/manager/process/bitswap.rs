@@ -10,14 +10,90 @@ use crate::QueryId;
 
 use super::SyncManager;
 
+/// Terminal observation for one transport fetch query.
+///
+/// `Deferred` is local receiver contention: the provider returned a useful
+/// CAR, but another storage owner currently owns one of its CIDs. It releases
+/// the fetch lease without consuming provider-failure attempts; the durable
+/// per-root clock remains the only redrive owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FetchCompletion {
+    Success,
+    Failure,
+    Deferred,
+}
+
+impl FetchCompletion {
+    fn from_success(success: bool) -> Self {
+        if success {
+            Self::Success
+        } else {
+            Self::Failure
+        }
+    }
+}
+
 /// Completion signal for poll-owned exact-CID queries. Transport completion
 /// already exists; this tracker lets the same fetch owner stop its blockstore
 /// poll immediately when a provider failed instead of burning the full window.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BlockSyncCompletionTracker {
-    waiters: std::sync::Arc<
-        parking_lot::Mutex<std::collections::HashMap<QueryId, tokio::sync::oneshot::Sender<bool>>>,
-    >,
+    state: std::sync::Arc<parking_lot::Mutex<BlockSyncCompletionState>>,
+}
+
+#[derive(Debug)]
+struct BlockSyncCompletionState {
+    waiters: std::collections::HashMap<QueryId, tokio::sync::oneshot::Sender<FetchCompletion>>,
+    early: std::collections::HashMap<QueryId, FetchCompletion>,
+    early_order: std::collections::VecDeque<QueryId>,
+    capacity: usize,
+}
+
+impl Default for BlockSyncCompletionState {
+    fn default() -> Self {
+        Self::new(crate::sync::manager::config::DEFAULT_MAX_PENDING_DAGS)
+    }
+}
+
+impl BlockSyncCompletionState {
+    fn new(capacity: usize) -> Self {
+        Self {
+            waiters: std::collections::HashMap::new(),
+            early: std::collections::HashMap::new(),
+            early_order: std::collections::VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn remove_early(&mut self, query_id: QueryId) -> Option<FetchCompletion> {
+        let result = self.early.remove(&query_id);
+        if result.is_some() {
+            self.early_order.retain(|candidate| *candidate != query_id);
+        }
+        result
+    }
+
+    fn latch(&mut self, query_id: QueryId, completion: FetchCompletion) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = self.early.entry(query_id) {
+            entry.insert(completion);
+            return;
+        }
+        while self.early.len() >= self.capacity {
+            let Some(oldest) = self.early_order.pop_front() else {
+                break;
+            };
+            if self.early.remove(&oldest).is_some() {
+                tracing::warn!(
+                    query_id = oldest.0,
+                    capacity = self.capacity,
+                    "Evicting unclaimed block-sync completion at bounded capacity"
+                );
+                break;
+            }
+        }
+        self.early.insert(query_id, completion);
+        self.early_order.push_back(query_id);
+    }
 }
 
 /// Completion signal for libp2p's two-stream rooted CAR protocol.  Request
@@ -26,22 +102,35 @@ pub(crate) struct BlockSyncCompletionTracker {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RootedCarCompletionTracker {
     waiters: std::sync::Arc<
-        parking_lot::Mutex<std::collections::HashMap<Cid, tokio::sync::oneshot::Sender<bool>>>,
+        parking_lot::Mutex<
+            std::collections::HashMap<Cid, tokio::sync::oneshot::Sender<FetchCompletion>>,
+        >,
     >,
 }
 
 impl RootedCarCompletionTracker {
-    pub(crate) fn register(&self, root_cid: Cid) -> tokio::sync::oneshot::Receiver<bool> {
+    pub(crate) fn register(
+        &self,
+        root_cid: Cid,
+    ) -> tokio::sync::oneshot::Receiver<FetchCompletion> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiters.lock().insert(root_cid, tx);
         rx
     }
 
     pub(crate) fn complete(&self, root_cid: Cid, success: bool) -> bool {
+        self.complete_with(root_cid, FetchCompletion::from_success(success))
+    }
+
+    pub(crate) fn defer(&self, root_cid: Cid) -> bool {
+        self.complete_with(root_cid, FetchCompletion::Deferred)
+    }
+
+    fn complete_with(&self, root_cid: Cid, completion: FetchCompletion) -> bool {
         let Some(waiter) = self.waiters.lock().remove(&root_cid) else {
             return false;
         };
-        let _ = waiter.send(success);
+        let _ = waiter.send(completion);
         true
     }
 
@@ -51,22 +140,59 @@ impl RootedCarCompletionTracker {
 }
 
 impl BlockSyncCompletionTracker {
-    pub(crate) fn register(&self, query_id: QueryId) -> tokio::sync::oneshot::Receiver<bool> {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            state: std::sync::Arc::new(parking_lot::Mutex::new(BlockSyncCompletionState::new(
+                capacity,
+            ))),
+        }
+    }
+
+    pub(crate) fn register(
+        &self,
+        query_id: QueryId,
+    ) -> tokio::sync::oneshot::Receiver<FetchCompletion> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiters.lock().insert(query_id, tx);
+        let mut state = self.state.lock();
+        if let Some(success) = state.remove_early(query_id) {
+            let _ = tx.send(success);
+        } else {
+            state.waiters.insert(query_id, tx);
+        }
         rx
     }
 
     pub(crate) fn complete(&self, query_id: QueryId, success: bool) -> bool {
-        let Some(waiter) = self.waiters.lock().remove(&query_id) else {
-            return false;
-        };
-        let _ = waiter.send(success);
-        true
+        self.complete_with(query_id, FetchCompletion::from_success(success))
+    }
+
+    pub(crate) fn defer(&self, query_id: QueryId) -> bool {
+        self.complete_with(query_id, FetchCompletion::Deferred)
+    }
+
+    fn complete_with(&self, query_id: QueryId, completion: FetchCompletion) -> bool {
+        let mut state = self.state.lock();
+        if let Some(waiter) = state.waiters.remove(&query_id) {
+            let _ = waiter.send(completion);
+            true
+        } else {
+            // Iroh allocates and dispatches the transport query before
+            // sync_blocks returns its ID. A fast failure can therefore arrive
+            // before the poll owner installs its waiter. Latch the terminal
+            // result so registration observes state, not a lossy edge.
+            state.latch(query_id, completion);
+            false
+        }
     }
 
     pub(crate) fn cancel(&self, query_id: QueryId) {
-        self.waiters.lock().remove(&query_id);
+        let mut state = self.state.lock();
+        state.waiters.remove(&query_id);
+        state.remove_early(query_id);
+    }
+
+    pub(crate) fn take_early(&self, query_id: QueryId) -> Option<FetchCompletion> {
+        self.state.lock().remove_early(query_id)
     }
 }
 
@@ -82,8 +208,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// This maps the QueryId to the root CID so we can identify
     /// which DAG a completion event belongs to.
-    pub fn register_query(&self, query_id: QueryId, root_cid: Cid) {
+    pub(crate) fn register_query(
+        &self,
+        query_id: QueryId,
+        root_cid: Cid,
+    ) -> Option<FetchCompletion> {
         self.query_to_root.write().insert(query_id, root_cid);
+        self.block_sync_completions.take_early(query_id)
     }
 
     /// Remove and return the root CID associated with a Bitswap query.
@@ -194,15 +325,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Returns `true` if the block was stored (not a duplicate).
     pub async fn store_bitswap_block(&self, cid: &Cid, data: &[u8]) -> Result<bool> {
         // PushLog, CAR, Bitswap and merge all mutate the same per-CID merge
-        // marker. Keep one storage owner instead of relying on retries to
-        // resolve competing writers.
-        let _storage_owner = loop {
-            match self.process_queue.try_acquire(cid).await {
-                Ok(guard) => break guard,
-                Err(waiter) => {
-                    let _ = waiter.await;
-                }
-            }
+        // marker. Keep one storage owner, but never retain the transport's
+        // state-bearing block event while waiting for it: the current owner or
+        // the receiver clock will re-check the pending frontier.
+        let Some(_storage_owner) = self.process_queue.try_acquire_nowait(cid) else {
+            self.diagnostics.record_single_flight_suppressed();
+            tracing::debug!(
+                cid = %cid,
+                "Coalescing Bitswap block behind the current storage owner"
+            );
+            return Ok(false);
         };
 
         // Check if we already have the block
@@ -269,8 +401,39 @@ mod completion_tracker_tests {
         let receiver = tracker.register(query_id);
 
         assert!(tracker.complete(query_id, false));
-        assert!(!receiver.await.expect("completion sender alive"));
+        assert_eq!(
+            receiver.await.expect("completion sender alive"),
+            FetchCompletion::Failure
+        );
         assert!(!tracker.complete(query_id, true));
+    }
+
+    #[tokio::test]
+    async fn completion_before_waiter_registration_is_latched() {
+        let tracker = BlockSyncCompletionTracker::with_capacity(1);
+        let query_id = QueryId(44);
+
+        assert!(!tracker.complete(query_id, false));
+        let receiver = tracker.register(query_id);
+
+        assert_eq!(
+            receiver.await.expect("latched completion sender alive"),
+            FetchCompletion::Failure
+        );
+        assert!(tracker.take_early(query_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn unclaimed_completion_latch_is_bounded() {
+        let tracker = BlockSyncCompletionTracker::with_capacity(1);
+        let first = QueryId(45);
+        let second = QueryId(46);
+
+        assert!(!tracker.complete(first, false));
+        assert!(!tracker.complete(second, true));
+
+        assert!(tracker.take_early(first).is_none());
+        assert_eq!(tracker.take_early(second), Some(FetchCompletion::Success));
     }
 
     #[tokio::test]
@@ -282,5 +445,18 @@ mod completion_tracker_tests {
 
         assert!(receiver.await.is_err());
         assert!(!tracker.complete(query_id, false));
+    }
+
+    #[tokio::test]
+    async fn contended_ingest_has_a_distinct_deferred_completion() {
+        let tracker = BlockSyncCompletionTracker::default();
+        let query_id = QueryId(47);
+        let receiver = tracker.register(query_id);
+
+        assert!(tracker.defer(query_id));
+        assert_eq!(
+            receiver.await.expect("completion sender alive"),
+            FetchCompletion::Deferred
+        );
     }
 }

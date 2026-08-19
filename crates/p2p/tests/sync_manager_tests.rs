@@ -1004,6 +1004,38 @@ mod pending_persistence {
             .is_empty());
     }
 
+    /// The same root can complete through a second arrival path while an
+    /// older missing-DAG entry is still live.  A terminal merge discharges
+    /// both receiver representations; leaving the old entry behind causes
+    /// pointless fetches and prevents quiescence even though durability was
+    /// already cleared.
+    #[tokio::test]
+    async fn terminal_merge_clears_a_live_pending_entry_for_the_same_root() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut _events, pending_store) = manager_with_store(store).await;
+        let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("register");
+        assert_eq!(manager.pending_dag_count(), 1);
+
+        manager
+            .mark_as_merged(&comp_cid)
+            .await
+            .expect("terminal merge");
+
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(manager.persisted_pending_count(), 0);
+        assert!(pending_store.load_all().await.expect("load").is_empty());
+    }
+
     #[tokio::test]
     async fn restore_re_registers_and_re_drives_fetch() {
         let store = Arc::new(MemoryStore::new());
@@ -1393,6 +1425,41 @@ mod pending_persistence {
             }
         }
         panic!("stale accounting entry never pruned");
+    }
+
+    /// A terminal durable delete can race a resync snapshot while the old
+    /// in-memory pending entry is still live.  The store is authoritative:
+    /// reconciliation must not preserve (or recreate) accounting merely
+    /// because that process-local entry has not been cleared yet.
+    #[tokio::test]
+    async fn sweep_prunes_deleted_record_even_while_pending_entry_is_live() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut _events, pending_store) = manager_with_store(store).await;
+        let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("register");
+        assert_eq!(manager.pending_dag_count(), 1);
+        assert_eq!(manager.persisted_pending_count(), 1);
+
+        // Model the observed fleet state after the durable terminal delete
+        // committed but a stale resync snapshot re-added the accounting bit.
+        // The old pending entry deliberately remains live.
+        pending_store.remove(&comp_cid).await.expect("drop record");
+        assert!(pending_store.load_all().await.expect("load").is_empty());
+
+        manager.resync_persisted_pending_dags().await;
+        assert_eq!(
+            manager.persisted_pending_count(),
+            0,
+            "durable accounting must exactly follow the authoritative store"
+        );
     }
 
     /// Round-4 nit: the durable cap must be hard from the first PushLog

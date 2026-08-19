@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
-use crate::message::{PushLogBroadcast, PushLogReply};
+use crate::message::PushLogBroadcast;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
@@ -19,12 +19,13 @@ use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
 use super::endpoint::{
     peer_direct_addr, snapshot_subscription_senders, track_task, ActiveSync, EndpointResources,
-    SpawnedTasks, SubscriptionSenders, TopicSubscription,
+    PendingPushLogReplies, SpawnedTasks, SubscriptionSenders, TopicSubscription,
 };
 use super::endpoint_rpc::{
     close_peer_connections, handle_block_sync, handle_car_request_response, handle_fire_and_forget,
     handle_request_response, handle_send_only, handle_two_stream_request, BlockSyncResources,
 };
+use super::endpoint_streams::ConnectionStreamContext;
 use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
@@ -85,9 +86,7 @@ fn authenticate_pushlog_origin(
 pub(super) async fn handle_command(
     cmd: IrohCommand,
     resources: &EndpointResources,
-    pending_pushlog_replies: &Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
+    pending_pushlog_replies: &PendingPushLogReplies,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     raw_topics: &Arc<parking_lot::Mutex<HashSet<String>>>,
     replicators: &Arc<ReplicatorRegistry>,
@@ -159,6 +158,28 @@ pub(super) async fn handle_command(
         IrohCommand::NetworkChange { reply } => {
             endpoint.network_change().await;
             let _ = reply.send(Ok(()));
+        }
+        IrohCommand::ResolvePeerIdentity {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_request_response(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_IDENTITY,
+                    &request,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::Subscribe { topic, reply } => {
             let result =
@@ -721,8 +742,7 @@ pub(super) async fn handle_command(
 /// snapshot (the only previously-borrowed field).
 struct DialContext {
     resources: EndpointResources,
-    pending_pushlog_replies:
-        Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: PendingPushLogReplies,
     subscription_senders: SubscriptionSenders,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 }
@@ -790,19 +810,17 @@ async fn handle_dial(
     }
 
     // Keep connection alive by spawning a handler for incoming streams.
-    let event_tx = ctx.event_tx.clone();
-    let peer_map = Arc::clone(&ctx.resources.peer_map);
-    let pending_pushlog_replies = Arc::clone(&ctx.pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(&ctx.resources.spawned_tasks);
+    let stream_context = ConnectionStreamContext::new(
+        &ctx.resources,
+        Arc::clone(&ctx.pending_pushlog_replies),
+        ctx.event_tx.clone(),
+    );
     let task = tokio::spawn(async move {
-        super::endpoint_streams::handle_connection_streams_from_dial(
+        super::endpoint_streams::handle_connection_streams(
             connection,
             endpoint_id,
             conn_alpn,
-            event_tx,
-            peer_map,
-            pending_pushlog_replies,
-            &spawned_tasks_for_connection,
+            stream_context,
         )
         .await;
     });

@@ -201,6 +201,9 @@ pub enum TransportEvent<ResponseToken> {
         token: Option<ResponseToken>,
     },
     CarFetchResponse {
+        /// Query correlation for transport-owned selective CAR recovery.
+        /// Direct and legacy rooted CAR responses have no query ID.
+        query_id: Option<QueryId>,
         peer_id: PeerId,
         root_cid: Cid,
         car_data: Vec<u8>,
@@ -268,16 +271,28 @@ impl<ResponseToken> TransportEvent<ResponseToken> {
         }
     }
 
-    /// Returns true when this event mutates peer/subscription state that must
-    /// be observed before later data-plane events from the same transport.
-    pub fn requires_inline_ordering(&self) -> bool {
-        matches!(
-            self,
-            Self::PeerConnected(_)
-                | Self::PeerDisconnected(_)
-                | Self::PeerSubscribed { .. }
-                | Self::PeerUnsubscribed { .. }
-        )
+    /// Assign every transport event to the shared bounded scheduler.
+    pub fn dispatch_class(&self) -> crate::sync::DispatchClass {
+        use crate::sync::DispatchClass;
+
+        match self {
+            // Recovery serving retains an independent bounded reserve. Slow
+            // ownership registration must not prevent a provider from serving
+            // a receiver-owned CAR obligation.
+            Self::CarFetchRequest { .. } => DispatchClass::Recovery,
+            Self::GossipRawMessage { .. }
+            | Self::BitswapComplete { .. }
+            | Self::BitswapBlockReceived { .. }
+            | Self::DocSyncReply { .. }
+            | Self::BranchableSyncReply { .. }
+            | Self::CarFetchResponse { .. } => DispatchClass::Completion,
+            Self::PushLogRequest { .. }
+            | Self::GossipMessage { .. }
+            | Self::TwoStreamRequest { .. }
+            | Self::DocSyncRequest { .. }
+            | Self::BranchableSyncRequest { .. } => DispatchClass::Admission,
+            _ => DispatchClass::Inline,
+        }
     }
 }
 
@@ -530,65 +545,4 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     // ---- Lifecycle ----
 
     async fn shutdown(&self) -> Result<()>;
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-    use cid::Cid;
-
-    use super::{MessageId, PeerId, TransportEvent};
-    use crate::message::PushLogBroadcast;
-    use crate::QueryId;
-
-    #[test]
-    fn control_plane_events_require_inline_ordering() {
-        let peer = PeerId::new("peer".to_string());
-        let topic = "topic".to_string();
-
-        assert!(TransportEvent::<()>::PeerConnected(peer.clone()).requires_inline_ordering());
-        assert!(TransportEvent::<()>::PeerDisconnected(peer.clone()).requires_inline_ordering());
-        assert!(TransportEvent::<()>::PeerSubscribed {
-            peer_id: peer.clone(),
-            topic: topic.clone(),
-        }
-        .requires_inline_ordering());
-        assert!(TransportEvent::<()>::PeerUnsubscribed {
-            peer_id: peer,
-            topic,
-        }
-        .requires_inline_ordering());
-    }
-
-    #[test]
-    fn data_plane_events_do_not_require_inline_ordering() {
-        let peer = PeerId::new("peer".to_string());
-        let cid =
-            Cid::try_from("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
-        let message = PushLogBroadcast {
-            doc_id: "doc".to_string(),
-            cid: cid.to_bytes().into(),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            block: Bytes::from_static(b"block"),
-            source_peer_id: None,
-            origin_signature: None,
-            authenticated_source_peer_id: None,
-            authenticated_origin_peer_id: None,
-        };
-
-        assert!(!TransportEvent::<()>::GossipMessage {
-            propagation_source: peer.clone(),
-            message_id: MessageId::new("msg".to_string()),
-            topic: "topic".to_string(),
-            message,
-        }
-        .requires_inline_ordering());
-        assert!(!TransportEvent::<()>::BitswapBlockReceived {
-            query_id: QueryId(1),
-            cid,
-            data: vec![1, 2, 3],
-        }
-        .requires_inline_ordering());
-    }
 }

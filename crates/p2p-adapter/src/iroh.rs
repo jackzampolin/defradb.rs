@@ -534,6 +534,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 let push_peer = peer_id;
                 let push_options = self.replicator_push_options.load();
                 let push_se_key = push_options.se_encryption_key;
+                let push_identity = push_options.se_identity_pubkey;
                 let push_filters = replication_filters.clone();
 
                 tracing::info!(
@@ -549,6 +550,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                             &new_collection_names,
                             &push_filters,
                             push_se_key.as_ref().map(|key| key.as_slice()),
+                            push_identity.as_deref(),
                         )
                         .await
                     {
@@ -977,6 +979,7 @@ mod tests {
     fn test_endpoint_config(secret_key: iroh::SecretKey) -> IrohEndpointConfig {
         IrohEndpointConfig {
             secret_key,
+            node_identity: None,
             relay_mode: IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,

@@ -16,7 +16,7 @@ mod bitswap;
 mod pending_dag;
 mod pushlog;
 
-pub(crate) use bitswap::{BlockSyncCompletionTracker, RootedCarCompletionTracker};
+pub(crate) use bitswap::{BlockSyncCompletionTracker, FetchCompletion, RootedCarCompletionTracker};
 pub(crate) use pending_dag::PendingDagLease;
 
 use crate::QueryId;
@@ -289,7 +289,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             peer_state,
             pending_dags: Arc::new(RwLock::new(PendingDagRegistry::default())),
             query_to_root: Arc::new(RwLock::new(HashMap::new())),
-            block_sync_completions: BlockSyncCompletionTracker::default(),
+            block_sync_completions: BlockSyncCompletionTracker::with_capacity(
+                config.max_pending_dags.max(1),
+            ),
             rooted_car_completions: RootedCarCompletionTracker::default(),
             diagnostics: Arc::new(SyncDiagnostics::default()),
             // A zero cap would reject every missing-link push forever
@@ -328,12 +330,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .mark_as_merged(cid)
             .await
             .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
-        if self.persisted_roots.read().contains(cid) {
-            self.remove_persisted_pending(cid).await;
-            if !self.persisted_roots.read().contains(cid) {
-                self.diagnostics.record_pending_dag_terminal_merged();
-            }
-        }
+        let _metadata_writer = self.pending_metadata_writer.lock().await;
+        self.reconcile_merged_pending_inner(cid).await;
         Ok(())
     }
 
@@ -343,20 +341,44 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .mark_batch_as_merged(cids)
             .await
             .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
-        let persisted: Vec<Cid> = {
-            let roots = self.persisted_roots.read();
-            cids.iter()
-                .filter(|cid| roots.contains(cid))
-                .copied()
-                .collect()
-        };
-        for cid in &persisted {
-            self.remove_persisted_pending(cid).await;
+        let _metadata_writer = self.pending_metadata_writer.lock().await;
+        for cid in cids {
+            self.reconcile_merged_pending_inner(cid).await;
+        }
+        Ok(())
+    }
+
+    /// Reconcile an already-merged root through the same terminal cleanup
+    /// path used by a newly completed merge.
+    ///
+    /// This closes the crash/retry seam where callers observe the durable
+    /// merged bit but a stale live or persisted receiver obligation remains.
+    /// The merged bit is checked again behind the metadata writer so a stale
+    /// PushLog cannot race this cleanup and recreate the obligation.
+    pub async fn reconcile_merged_pending(&self, cid: &Cid) -> crate::error::Result<bool> {
+        if !self.is_merged(cid).await? {
+            return Ok(false);
+        }
+
+        let _metadata_writer = self.pending_metadata_writer.lock().await;
+        if !self.is_merged(cid).await? {
+            return Ok(false);
+        }
+        self.reconcile_merged_pending_inner(cid).await;
+        Ok(true)
+    }
+
+    /// Sole successful-merge cleanup transition. The caller must hold
+    /// `pending_metadata_writer` and must already have established the durable
+    /// merged bit.
+    async fn reconcile_merged_pending_inner(&self, cid: &Cid) {
+        self.clear_pending_dag(cid);
+        if self.persisted_roots.read().contains(cid) {
+            self.remove_persisted_pending_inner(cid).await;
             if !self.persisted_roots.read().contains(cid) {
                 self.diagnostics.record_pending_dag_terminal_merged();
             }
         }
-        Ok(())
     }
 
     /// Get the process queue used to serialize work for the same CID.
@@ -364,7 +386,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.process_queue.clone()
     }
 
-    /// Acquire the shared ingest/merge owners for a rooted block batch.
+    /// Try to acquire the shared ingest/merge owners for a rooted block batch.
     ///
     /// The root is included even when an exact selective-CAR response only
     /// carries descendants. This keeps response storage ordered with the
@@ -372,14 +394,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// root-owned ingest path. Each contained CID is included as well because
     /// Rust's SSI store conflict-checks the mutable `ToMergeIndexKey`; shared
     /// child blocks from different roots must therefore also have one writer.
-    pub(crate) async fn acquire_car_storage_owners(
+    pub(crate) fn try_acquire_car_storage_owners(
         &self,
         root_cid: Cid,
         block_cids: Vec<Cid>,
-    ) -> Vec<crate::sync::queue::ProcessGuard> {
+    ) -> Result<Vec<crate::sync::queue::ProcessGuard>, Cid> {
         self.process_queue
-            .acquire_all(std::iter::once(root_cid).chain(block_cids))
-            .await
+            .try_acquire_all_nowait(std::iter::once(root_cid).chain(block_cids))
     }
 
     /// Get all unmerged block CIDs.
@@ -493,6 +514,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     pub(super) async fn remove_persisted_pending(&self, root_cid: &Cid) {
         let _metadata_writer = self.pending_metadata_writer.lock().await;
+        self.remove_persisted_pending_inner(root_cid).await;
+    }
+
+    async fn remove_persisted_pending_inner(&self, root_cid: &Cid) {
         if let Some(store) = self.pending_store() {
             match store.remove(root_cid).await {
                 Ok(()) => {

@@ -71,6 +71,33 @@ impl IrohTransport {
         self.send_command(|reply| IrohCommand::NetworkChange { reply })
             .await
     }
+
+    /// Resolve a peer's Defra identity over its authenticated QUIC endpoint.
+    ///
+    /// The returned token is signed by the remote DID and audience-bound to
+    /// this endpoint ID, matching Go's block-serving identity challenge.
+    pub async fn get_peer_identity(&self, peer_id: &PeerId) -> Result<Option<identity::Did>> {
+        let request = crate::message::IdentityRequest::new(self.local_peer_id.to_string());
+        let response = self
+            .send_command(|reply| IrohCommand::ResolvePeerIdentity {
+                peer_id: peer_id.clone(),
+                request,
+                reply,
+            })
+            .await?;
+        if let Some(error) = response.err_message.as_deref() {
+            tracing::debug!(peer_id = %peer_id, error, "Iroh peer has no resolvable Defra identity");
+            return Ok(None);
+        }
+        let token_identity = identity::from_token(&response.identity_token)
+            .map_err(|error| Error::Transport(format!("invalid peer identity token: {error}")))?;
+        identity::verify_auth_token(&token_identity, self.local_peer_id.as_str()).map_err(
+            |error| Error::Transport(format!("peer identity token verification failed: {error}")),
+        )?;
+        let did = identity::Identity::did(&token_identity)
+            .map_err(|error| Error::Transport(format!("peer identity DID failed: {error}")))?;
+        Ok(Some(did))
+    }
 }
 
 #[async_trait]
@@ -507,8 +534,10 @@ impl P2PTransport for IrohTransport {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use identity::Identity as _;
     use tokio::time::timeout;
 
     use crate::iroh::{spawn_endpoint, IrohDiscoveryConfig, IrohEndpointConfig};
@@ -524,6 +553,7 @@ mod tests {
     fn test_config(secret_key: SecretKey) -> IrohEndpointConfig {
         IrohEndpointConfig {
             secret_key,
+            node_identity: None,
             relay_mode: crate::iroh::IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,
@@ -531,6 +561,50 @@ mod tests {
             max_concurrent_multipath_paths: None,
             gossip_heal: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn peer_identity_is_bound_to_authenticated_iroh_endpoint() {
+        let requester_key = SecretKey::generate();
+        let server_key = SecretKey::generate();
+        let server_identity = Arc::new(
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap(),
+        );
+        let expected_did = server_identity.did().unwrap();
+
+        let (requester_tx, _requester_events, _requester_replicators, requester_task) =
+            spawn_endpoint(test_config(requester_key.clone()))
+                .await
+                .unwrap();
+        let mut server_config = test_config(server_key.clone());
+        server_config.node_identity = Some(server_identity);
+        let (server_tx, _server_events, _server_replicators, server_task) =
+            spawn_endpoint(server_config).await.unwrap();
+        let requester = IrohTransport::new(requester_tx, requester_key);
+        let server = IrohTransport::new(server_tx, server_key);
+
+        requester
+            .dial(
+                server.local_peer_id(),
+                server.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        requester
+            .poll_until_connected(server.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let resolved = requester
+            .get_peer_identity(server.local_peer_id())
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(expected_did));
+
+        requester.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+        requester_task.await.unwrap();
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

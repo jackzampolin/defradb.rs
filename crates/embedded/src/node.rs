@@ -31,9 +31,7 @@ pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Sen
 /// identity string is present yet malformed — never silently degrading a
 /// permissioned collection to public.
 fn resolve_creator_identity() -> Result<Option<identity::Did>> {
-    match defra_core::current_identity::try_get_scoped_identity()
-        .or_else(defra_core::current_identity::get_current_identity)
-    {
+    match defra_core::current_identity::get_effective_identity() {
         Some(raw) => {
             Ok(Some(identity::Did::new(raw).map_err(|error| {
                 anyhow!("malformed ambient identity: {error}")
@@ -496,9 +494,10 @@ where
     let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
     let (raw_identity, node_identity_did) = create_node_identity(&config.signing)?;
+    let raw_identity = raw_identity.map(Arc::new);
     let mut db_options = db::DbOptions::default();
-    if let Some(identity) = raw_identity {
-        db_options = db_options.with_node_identity(identity);
+    if let Some(identity) = raw_identity.as_ref() {
+        db_options = db_options.with_node_identity_arc(identity.clone());
     }
 
     let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
@@ -549,6 +548,7 @@ where
                 event_bus.clone(),
                 iroh,
                 sync_config.clone(),
+                raw_identity.clone(),
             )
             .await?,
         ),

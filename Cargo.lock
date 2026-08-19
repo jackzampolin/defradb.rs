@@ -8559,6 +8559,7 @@ dependencies = [
  "kms",
  "libp2p",
  "libp2p-stream",
+ "lru 0.16.4",
  "multiaddr",
  "multihash-codetable",
  "noq",

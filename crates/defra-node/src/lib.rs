@@ -819,6 +819,8 @@ struct StoreBuildArgs {
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
     node_identity_did: Option<String>,
+    #[cfg(feature = "p2p")]
+    node_p2p_identity: Option<Arc<RawIdentity>>,
     node_acp_enabled: bool,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
@@ -835,6 +837,8 @@ struct PersistentStoreBuildArgs {
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
     node_identity_did: Option<String>,
+    #[cfg(feature = "p2p")]
+    node_p2p_identity: Option<Arc<RawIdentity>>,
     node_acp_enabled: bool,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
@@ -1002,6 +1006,13 @@ impl NodeBuilder {
             .as_deref()
             .map(resolve_registered_node_identity)
             .transpose()?;
+        let node_p2p_identity = match (node_identity_did.as_deref(), node_identity_config.as_ref())
+        {
+            (Some(did), Some(config)) => {
+                local_raw_identity_from_registered_config(did, config)?.map(Arc::new)
+            }
+            _ => None,
+        };
 
         // 1. Event bus
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
@@ -1020,12 +1031,8 @@ impl NodeBuilder {
             if let Some(retries) = self.max_txn_retries {
                 options = options.with_max_txn_retries(retries);
             }
-            if let (Some(did), Some(config)) =
-                (node_identity_did.as_deref(), node_identity_config.as_ref())
-            {
-                if let Some(identity) = local_raw_identity_from_registered_config(did, config)? {
-                    options = options.with_node_identity(identity);
-                }
+            if let Some(identity) = node_p2p_identity.as_ref() {
+                options = options.with_node_identity_arc(identity.clone());
             }
             options
         };
@@ -1077,6 +1084,8 @@ impl NodeBuilder {
                 db_options: db_options.clone(),
                 event_bus,
                 node_identity_did: node_identity_did.clone(),
+                #[cfg(feature = "p2p")]
+                node_p2p_identity: node_p2p_identity.clone(),
                 node_acp_enabled,
                 query_timeout,
                 query_limits,
@@ -1189,6 +1198,8 @@ impl NodeBuilder {
                     db_options,
                     event_bus,
                     node_identity_did: node_identity_did.clone(),
+                    #[cfg(feature = "p2p")]
+                    node_p2p_identity,
                     node_acp_enabled,
                     query_timeout,
                     query_limits,
@@ -1295,6 +1306,8 @@ impl NodeBuilder {
             db_options,
             event_bus,
             node_identity_did,
+            #[cfg(feature = "p2p")]
+            node_p2p_identity,
             node_acp_enabled,
             query_timeout,
             query_limits,
@@ -1314,6 +1327,8 @@ impl NodeBuilder {
                 db_options,
                 event_bus,
                 node_identity_did,
+                #[cfg(feature = "p2p")]
+                node_p2p_identity,
                 node_acp_enabled,
                 query_timeout,
                 query_limits,
@@ -1338,6 +1353,8 @@ impl NodeBuilder {
             db_options,
             event_bus,
             node_identity_did,
+            #[cfg(feature = "p2p")]
+            node_p2p_identity,
             node_acp_enabled,
             query_timeout,
             query_limits,
@@ -1418,6 +1435,7 @@ impl NodeBuilder {
                     database.clone(),
                     event_bus.clone(),
                     &p2p_cfg,
+                    node_p2p_identity,
                 )
                 .await?,
             )

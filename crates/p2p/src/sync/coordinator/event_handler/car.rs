@@ -7,11 +7,22 @@ use cid::Cid;
 use crate::bitswap::BlockClass;
 use crate::error::Result;
 use crate::message::CarFetchRequest;
-use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, encode_car};
+use crate::sync::car::{
+    collect_dag_blocks_from_roots, collect_exact_blocks, decode_car, encode_car,
+};
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
 use super::super::authorizer::AccessAuthorizer;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CarIngestDisposition {
+    Completed,
+    /// A root or shared descendant already has a storage owner. Wake this
+    /// fetch with a non-success terminal result so its sole paced retry/provider
+    /// rotation can re-offer the response after the owner completes.
+    Busy,
+}
 
 fn sample_cids(cids: &[Cid]) -> Vec<String> {
     cids.iter().take(4).map(ToString::to_string).collect()
@@ -59,7 +70,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
         let response_roots = request.response_roots();
         let collected = if request.recursive {
-            collect_dag_blocks(self.manager.blockstore().as_ref(), &request.root_cid).await?
+            collect_dag_blocks_from_roots(self.manager.blockstore().as_ref(), &response_roots)
+                .await?
         } else {
             collect_exact_blocks(self.manager.blockstore().as_ref(), &request.wanted_cids).await?
         };
@@ -265,11 +277,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// has restarted or its in-memory grant cache has expired.
     ///
     /// The DB-backed classifier binds the requested root to its collection and
-    /// document IDs. Replicator configuration is durable and binds the peer to
-    /// that collection. Filter predicates select which roots are announced;
-    /// they are not a block-read security boundary (ACP/encryption remains the
-    /// security boundary). Consequently the exact requested root reconstructs
-    /// the rooted CAR capability without CID-valued sender delivery state.
+    /// document IDs. The authenticated CAR requester is checked against the
+    /// same durable replicator/ACP policies as Go's Bitswap serving boundary.
+    /// Filter predicates select which roots are announced; they are not a
+    /// block-read security boundary. Consequently the exact requested root
+    /// reconstructs the rooted CAR capability without CID-valued sender
+    /// delivery state or an eventually observed gossip-neighbor event.
     async fn has_restart_safe_root_authority(&self, peer_id: &PeerId, root_cid: &Cid) -> bool {
         let Ok(Some(root_data)) = self.manager.blockstore().get(root_cid).await else {
             return false;
@@ -286,38 +299,50 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .authorizer
             .peer_authorized_for_collection(peer_id.as_str(), &meta.collection_id)
             .await;
-        // Gossip ingress accepts a locally subscribed collection even when
-        // the source has no outbound replicator record for that receiver.
-        // After a sender restart the receiver advertises that configured
-        // subscription again. Treat the observed, exact collection topic as
-        // the second restart-reconstructible serving policy; otherwise a
-        // success-acked gossip root becomes permanently unserviceable as soon
-        // as its process-local SelectiveCarAccess grant expires.
-        let configured_subscriber = self
-            .access
-            .peer_state
-            .peer_subscribed_to_collection(peer_id.as_str(), &meta.collection_id);
-        let authorized = configured_replicator || configured_subscriber;
-        if authorized {
+        // Match Go's block-serving filter: a durable replicator grant is a
+        // complete authorization decision. Do not delay a CAR response behind
+        // the optional reverse identity challenge when this branch already
+        // permits the authenticated transport peer.
+        if configured_replicator {
             tracing::debug!(
                 peer_id = %peer_id,
                 root_cid = %root_cid,
                 collection_id = %meta.collection_id,
-                configured_replicator,
-                configured_subscriber,
-                "Re-derived rooted CAR authority from replication scope"
+                "Re-derived rooted CAR authority from durable replicator policy"
+            );
+            return true;
+        }
+        // Gossip ingress can transfer receiver ownership without creating an
+        // outbound replicator record on the origin. Requiring a separate
+        // PeerSubscribed observation races Iroh's CAR request against its
+        // gossip neighbor event. Instead, authenticate the requester at the
+        // durable ACP boundary using the root's document/collection metadata,
+        // exactly as Go's per-block serving filter does.
+        let acp_authorized = if let Some(serve) = self.serve_acp.get() {
+            let identity = match serve.resolver.resolve(peer_id).await {
+                Some(did) => acp::Identity::Authenticated(did),
+                None => acp::Identity::Anonymous,
+            };
+            serve.gate.may_read(&identity, &meta).await
+        } else {
+            false
+        };
+        if acp_authorized {
+            tracing::debug!(
+                peer_id = %peer_id,
+                root_cid = %root_cid,
+                collection_id = %meta.collection_id,
+                "Re-derived rooted CAR authority from durable ACP policy"
             );
         } else {
             tracing::debug!(
                 peer_id = %peer_id,
                 root_cid = %root_cid,
                 collection_id = %meta.collection_id,
-                configured_replicator,
-                configured_subscriber,
-                "Could not re-derive rooted CAR authority from replication scope"
+                "Could not re-derive rooted CAR authority from durable serving policy"
             );
         }
-        authorized
+        acp_authorized
     }
 
     /// Handle an inbound CAR fetch response: decode and store blocks.
@@ -326,14 +351,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id: PeerId,
         root_cid: Cid,
         car_data: Vec<u8>,
-    ) -> Result<()> {
-        let result = self
-            .handle_car_fetch_response_inner(peer_id, root_cid, car_data)
-            .await;
-        self.manager
-            .rooted_car_completion_tracker()
-            .complete(root_cid, result.is_ok());
-        result
+    ) -> Result<CarIngestDisposition> {
+        self.handle_car_fetch_response_inner(peer_id, root_cid, car_data)
+            .await
     }
 
     async fn handle_car_fetch_response_inner(
@@ -341,7 +361,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id: PeerId,
         root_cid: Cid,
         car_data: Vec<u8>,
-    ) -> Result<()> {
+    ) -> Result<CarIngestDisposition> {
         // Raw-empty: transport received zero bytes (peer had nothing for
         // this root, e.g. the serving side's handle_car_fetch_request
         // returned without writing a body). Count and skip decode.
@@ -352,7 +372,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 peer_id = %peer_id,
                 "Received empty CAR response (raw bytes)"
             );
-            return Ok(());
+            return Ok(CarIngestDisposition::Completed);
         }
 
         let (_roots, blocks) = decode_car(&car_data)?;
@@ -368,7 +388,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 peer_id = %peer_id,
                 "Received empty CAR response (decoded 0 blocks)"
             );
-            return Ok(());
+            return Ok(CarIngestDisposition::Completed);
         }
 
         // Verify all block CIDs before storing (finding 03-35).
@@ -390,18 +410,34 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // merge. Go holds its root sync owner across CAR ingest and merge;
         // Rust additionally owns every contained CID because overlapping DAGs
         // can share a mutable `ToMergeIndexKey` and SSI correctly treats two
-        // unsynchronised writers as a conflict.
-        let _storage_owners = self
+        // unsynchronised writers as a conflict. Alternate arrivals coalesce
+        // instead of waiting here: a waiter would retain one of the bounded
+        // transport task slots needed to serve the owner's recovery request.
+        let _storage_owners = match self
             .manager
-            .acquire_car_storage_owners(root_cid, blocks.iter().map(|(cid, _)| *cid).collect())
-            .await;
+            .try_acquire_car_storage_owners(root_cid, blocks.iter().map(|(cid, _)| *cid).collect())
+        {
+            Ok(owners) => owners,
+            Err(conflicting_cid) => {
+                self.manager.diagnostics.record_single_flight_suppressed();
+                let same_root = conflicting_cid == root_cid;
+                tracing::debug!(
+                    root_cid = %root_cid,
+                    conflicting_cid = %conflicting_cid,
+                    peer_id = %peer_id,
+                    same_root,
+                    "Coalescing CAR response behind the current storage owner"
+                );
+                return Ok(CarIngestDisposition::Busy);
+            }
+        };
         let block_refs: Vec<(&Cid, &[u8])> = blocks.iter().map(|(c, d)| (c, d.as_ref())).collect();
         self.manager
             .blockstore()
             .as_ref()
             .put_many(&block_refs)
             .await
-            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            .map_err(crate::error::Error::from_blockstore)?;
 
         tracing::debug!(
             root_cid = %root_cid,
@@ -411,6 +447,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Stored blocks from CAR response"
         );
 
-        Ok(())
+        Ok(CarIngestDisposition::Completed)
     }
 }

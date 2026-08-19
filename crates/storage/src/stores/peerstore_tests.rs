@@ -194,6 +194,46 @@ async fn same_peer_retry_transitions_have_one_storage_owner() {
 }
 
 #[tokio::test]
+async fn reconnect_activation_uses_the_same_peer_retry_writer() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store.clone());
+    let peer_id = "peer";
+    peerstore
+        .create_replicator(peer_id, b"replicator")
+        .await
+        .unwrap();
+    peerstore
+        .observe_push_head(peer_id, "doc", "collection")
+        .await
+        .unwrap();
+
+    let writer = peerstore
+        .acquire_replicator_retry_guard(peer_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let activation_store = Peerstore::new(store);
+    let mut activation =
+        tokio::spawn(async move { activation_store.activate_retry_peer(peer_id).await });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut activation)
+            .await
+            .is_err(),
+        "reconnect activation bypassed the peer retry writer"
+    );
+
+    drop(writer);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), activation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn delete_replicator_clears_orphaned_retry_state() {
     let store = Arc::new(MemoryStore::new());
     let peerstore = Peerstore::new(store);
@@ -492,7 +532,7 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     for cid in ["commit-a", "commit-b"] {
         txn.set(
-            &ReplicatorRetryCommitKey::new("peer", "collection", cid).bytes(),
+            &legacy_retry_commit_key("peer", "collection", cid),
             b"legacy-payload",
         )
         .await
@@ -509,7 +549,7 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
     let txn = peerstore.store.new_txn(true).await.unwrap();
     for cid in ["commit-a", "commit-b"] {
         assert!(txn
-            .get(&ReplicatorRetryCommitKey::new("peer", "collection", cid).bytes())
+            .get(&legacy_retry_commit_key("peer", "collection", cid))
             .await
             .unwrap()
             .is_none());

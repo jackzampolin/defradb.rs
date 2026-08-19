@@ -51,9 +51,9 @@ pub(crate) struct ReplayDocumentFailure {
 }
 
 /// Persist documents that did not finish their initial replay so the normal
-/// retry sweep owns them after the bounded attempt. The caller holds the
-/// peer's retry guard across registration, sends, acknowledgements, and this
-/// failure handoff.
+/// retry sweep owns them after the bounded attempt. Replay intentionally does
+/// not hold the peer writer across network waits, so the failure handoff must
+/// reacquire it before mutating the shared peer schedule.
 pub(crate) async fn persist_replay_failures<S: storage::corekv::Store>(
     store: Arc<S>,
     peer_id: &PeerId,
@@ -64,6 +64,15 @@ pub(crate) async fn persist_replay_failures<S: storage::corekv::Store>(
     }
 
     let peerstore = storage::stores::Peerstore::new(store);
+    let Some(_retry_guard) = peerstore
+        .acquire_replicator_retry_guard(peer_id.as_str())
+        .await
+        .map_err(|error| format!("failed to coordinate replay failure persistence: {error}"))?
+    else {
+        // Forget won the race with the completed network attempt.  The removed
+        // replicator no longer owns a durable delivery obligation.
+        return Ok(());
+    };
     let retry_info = storage::stores::RetryInfo::new_initial()
         .to_bytes()
         .map_err(|error| format!("failed to serialize replay retry state: {error}"))?;
@@ -408,5 +417,55 @@ mod rate_limit_retry_tests {
             .unwrap();
         let saved = p2p::ReplicatorInfo::from_bytes(&saved).unwrap();
         assert_eq!(saved.status, p2p::ReplicatorStatus::Inactive);
+    }
+
+    #[tokio::test]
+    async fn unfinished_replay_uses_the_peer_retry_writer() {
+        use storage::backends::MemoryStore;
+
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        let peer = PeerId::new("peer-durable".to_string());
+        let info = p2p::ReplicatorInfo::from_raw(
+            peer.to_string(),
+            vec!["collection".to_string()],
+            Vec::new(),
+        );
+        peerstore
+            .create_replicator(peer.as_str(), &info.to_bytes().unwrap())
+            .await
+            .unwrap();
+
+        let writer = peerstore
+            .acquire_replicator_retry_guard(peer.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        let persistence_peer = peer.clone();
+        let mut persistence = tokio::spawn(async move {
+            persist_replay_failures(
+                store,
+                &persistence_peer,
+                &[ReplayDocumentFailure {
+                    doc_id: "doc-1".to_string(),
+                    collection_id: "collection".to_string(),
+                }],
+            )
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut persistence)
+                .await
+                .is_err(),
+            "replay failure persistence bypassed the peer retry writer"
+        );
+
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(1), persistence)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

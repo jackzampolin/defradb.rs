@@ -217,7 +217,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         let failure_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<super::PushFailure>>>> =
             Arc::new(parking_lot::Mutex::new(None));
-        let shutdown = super::SyncShutdownHandle::new();
+        let shutdown = super::SyncShutdownHandle::new(max_dag_fetches);
         super::push_worker::spawn_push_workers(
             Arc::new(super::push_worker::PushWorkerContext {
                 transport: transport.clone(),
@@ -251,6 +251,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     )),
                     max_doc_sync_request_doc_ids,
                     shutdown,
+                    dispatch_diagnostics: Arc::new(crate::sync::DispatchDiagnostics::default()),
                     filter_matcher,
                 },
                 manager,

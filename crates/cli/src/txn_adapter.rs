@@ -92,9 +92,7 @@ impl<S: Store + 'static> TransactionOperations for TxnRegistryAdapter<S> {
         let document_acp = self.document_acp.clone();
         // Fail closed: a present-but-malformed ambient identity must error, not
         // silently degrade a permissioned collection to public (unregistered).
-        let creator = match defra_core::current_identity::try_get_scoped_identity()
-            .or_else(defra_core::current_identity::get_current_identity)
-        {
+        let creator = match defra_core::current_identity::get_effective_identity() {
             Some(raw) => {
                 Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
             }

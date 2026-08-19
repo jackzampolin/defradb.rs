@@ -80,7 +80,7 @@ async fn slow_peer_does_not_starve_healthy_peers() {
         Arc::clone(&backlog),
         Duration::from_secs(60),
     );
-    let shutdown = SyncShutdownHandle::new();
+    let shutdown = SyncShutdownHandle::new(4);
     spawn_push_workers(context, &shutdown);
 
     backlog.try_enqueue(job("slow", b"slow-1"));
@@ -119,7 +119,7 @@ async fn stalled_send_times_out_and_reports_push_failure() {
     let transport = TestTransport::new(Vec::new()).with_stalled_peer("slow");
     let (context, mut failure_rx) =
         test_context(transport, Arc::clone(&backlog), Duration::from_millis(50));
-    let shutdown = SyncShutdownHandle::new();
+    let shutdown = SyncShutdownHandle::new(4);
     spawn_push_workers(context, &shutdown);
 
     backlog.try_enqueue(job("slow", b"slow-1"));
@@ -417,7 +417,7 @@ async fn superseded_active_failure_never_enters_persisted_retry() {
         Arc::clone(&backlog),
         Duration::from_secs(1),
     );
-    let shutdown = SyncShutdownHandle::new();
+    let shutdown = SyncShutdownHandle::new(4);
     spawn_push_workers(context, &shutdown);
 
     backlog.try_enqueue(versioned_job("peer", 1));
@@ -545,7 +545,7 @@ async fn workers_exit_on_close() {
     let transport = TestTransport::new(Vec::new());
     let (context, _failure_rx) =
         test_context(transport, Arc::clone(&backlog), Duration::from_secs(1));
-    let shutdown = SyncShutdownHandle::new();
+    let shutdown = SyncShutdownHandle::new(4);
     spawn_push_workers(context, &shutdown);
     assert_eq!(shutdown.retained_task_count(), 3);
 

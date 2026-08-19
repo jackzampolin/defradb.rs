@@ -205,57 +205,6 @@ async fn create_with_p2p_collection() {
     );
 }
 
-/// Port: TestP2PCreate_WithP2PCollectionWithNodeChain_ShouldSucceed
-/// Doc created on node0 propagates through 3-node chain: 0→1→2.
-#[tokio::test]
-#[serial]
-async fn create_with_node_chain() {
-    let cluster = integration_test::setup_three_node_chain(SCHEMA, &["Users"]).await;
-
-    // Create doc on node0
-    cluster
-        .client(0)
-        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
-        .expect("create user on node0");
-
-    // Verify doc reaches node1 (direct replicator target)
-    let node1 = cluster.client(1);
-    let node1_ref = &node1;
-    poll_until(
-        || {
-            let result = node1_ref
-                .query("query { Users { name age } }")
-                .unwrap_or_default();
-            result["Users"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter().any(|u| {
-                        u["name"].as_str() == Some("John") && u["age"].as_i64() == Some(21)
-                    })
-                })
-                .unwrap_or(false)
-        },
-        Duration::from_secs(15),
-        Duration::from_millis(300),
-        "doc did not propagate to node1",
-    )
-    .await;
-
-    // Check if multi-hop relay to node2 works (known gap: may not propagate yet)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    let node2_result = cluster
-        .client(2)
-        .query("query { Users { name age } }")
-        .unwrap_or_default();
-    let node2_has_doc = node2_result["Users"]
-        .as_array()
-        .map(|arr| arr.iter().any(|u| u["name"].as_str() == Some("John")))
-        .unwrap_or(false);
-    if !node2_has_doc {
-        eprintln!("KNOWN GAP: multi-hop chain relay (0→1→2) not yet functional for iroh transport");
-    }
-}
-
 /// A three-node Iroh chain must converge through a provider that owns the
 /// complete linked DAG. A relayed root-only hint may not become C's durable
 /// recovery source; after B merges, its normal B→C head hint is serviceable.
@@ -375,6 +324,98 @@ async fn create_propagates_to_last_node_in_chain() {
     assert_eq!(status["persisted_pending_dags"].as_u64(), Some(0));
     assert_eq!(status["pending_dag_fetch_exhausted"].as_u64(), Some(0));
     assert_eq!(status["provider_rotations"].as_u64(), Some(0));
+}
+
+/// One serviceable origin must drain a head-hint fan-out larger than the
+/// provider's fixed CAR worker reserve. Excess first-wave requests may be
+/// nacked, but every receiver keeps its durable obligation and re-enters the
+/// same paced recovery path until merge and terminal cleanup complete.
+#[tokio::test]
+#[serial]
+async fn head_hint_fanout_above_car_worker_bound_quiesces() {
+    const NODE_COUNT: usize = 10;
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(NODE_COUNT)
+        .with_iroh_transport()
+        .build()
+        .await
+        .expect("fan-out cluster");
+
+    for node in 0..NODE_COUNT {
+        cluster
+            .wait_for_log(node, "p2p_listening", P2P_TIMEOUT)
+            .await
+            .unwrap_or_else(|_| panic!("node{node} P2P listener did not start"));
+        cluster
+            .client(node)
+            .schema_add(SCHEMA)
+            .unwrap_or_else(|_| panic!("add schema node{node}"));
+    }
+
+    let source = cluster.client(0);
+    for receiver in 1..NODE_COUNT {
+        let address = integration_test::extract_p2p_addr(&cluster, receiver);
+        source
+            .p2p_connect(&[&address])
+            .unwrap_or_else(|_| panic!("connect source to node{receiver}"));
+        source
+            .p2p_replicator_set(&["Users"], &address)
+            .unwrap_or_else(|_| panic!("set node{receiver} as replicator"));
+    }
+
+    source
+        .query(r#"mutation { add_Users(input: {name: "fanout", age: 21}) { _docID } }"#)
+        .expect("create fan-out document");
+
+    poll_until(
+        || {
+            (1..NODE_COUNT).all(|node| {
+                cluster
+                    .client(node)
+                    .query("query { Users { name age } }")
+                    .ok()
+                    .and_then(|result| result["Users"].as_array().cloned())
+                    .is_some_and(|users| {
+                        users.iter().any(|user| {
+                            user["name"].as_str() == Some("fanout")
+                                && user["age"].as_i64() == Some(21)
+                        })
+                    })
+            })
+        },
+        Duration::from_secs(45),
+        Duration::from_millis(300),
+        "head-hint fan-out did not converge",
+    )
+    .await;
+
+    for receiver in 1..NODE_COUNT {
+        let status: serde_json::Value = reqwest::get(format!(
+            "{}/api/v0/p2p/sync/status",
+            cluster.api_url(receiver)
+        ))
+        .await
+        .unwrap_or_else(|_| panic!("node{receiver} sync status request"))
+        .json()
+        .await
+        .unwrap_or_else(|_| panic!("node{receiver} sync status json"));
+        assert_eq!(
+            status["pending_dags"].as_u64(),
+            Some(0),
+            "node{receiver} retained a live receiver obligation: {status}"
+        );
+        assert_eq!(
+            status["persisted_pending_dags"].as_u64(),
+            Some(0),
+            "node{receiver} retained a durable receiver obligation: {status}"
+        );
+        assert_eq!(
+            status["pending_dag_fetch_exhausted"].as_u64(),
+            Some(0),
+            "node{receiver} exhausted recovery: {status}"
+        );
+    }
 }
 
 /// Port: TestP2PCreate_WithP2PCollectionAndSubscription_ShouldSucceed

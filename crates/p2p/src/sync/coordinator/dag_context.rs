@@ -151,7 +151,7 @@ impl DagFetchContext {
     pub(crate) fn track_block_sync(
         &self,
         query_id: crate::QueryId,
-    ) -> Option<tokio::sync::oneshot::Receiver<bool>> {
+    ) -> Option<tokio::sync::oneshot::Receiver<crate::sync::manager::FetchCompletion>> {
         self.block_sync_completions
             .as_ref()
             .map(|tracker| tracker.register(query_id))
@@ -166,7 +166,7 @@ impl DagFetchContext {
     pub(crate) fn track_rooted_car(
         &self,
         root_cid: Cid,
-    ) -> Option<tokio::sync::oneshot::Receiver<bool>> {
+    ) -> Option<tokio::sync::oneshot::Receiver<crate::sync::manager::FetchCompletion>> {
         self.rooted_car_completions
             .as_ref()
             .map(|tracker| tracker.register(root_cid))

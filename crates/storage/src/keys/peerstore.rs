@@ -189,66 +189,6 @@ impl Key for ReplicatorRetryCollectionKey {
     }
 }
 
-/// Legacy CID-valued collection retry key, retained only for migration.
-///
-/// Structure: /rep/retry/commit/[PeerID]/[CollectionID]/[CID]
-///
-/// New writes use `ReplicatorRetryCollectionKey`, whose marker causes the retry
-/// sweep to rederive current collection heads. Existing records are converted
-/// one-way and then deleted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplicatorRetryCommitKey {
-    /// Peer network identifier
-    pub peer_id: String,
-    /// Collection identifier
-    pub collection_id: String,
-    /// Root CID of the collection commit
-    pub cid: String,
-}
-
-impl ReplicatorRetryCommitKey {
-    /// Create a new ReplicatorRetryCommitKey
-    pub fn new(
-        peer_id: impl Into<String>,
-        collection_id: impl Into<String>,
-        cid: impl Into<String>,
-    ) -> Self {
-        Self {
-            peer_id: peer_id.into(),
-            collection_id: collection_id.into(),
-            cid: cid.into(),
-        }
-    }
-
-    /// Prefix for all collection-commit retry entries
-    pub fn retry_commit_prefix() -> Vec<u8> {
-        b"/rep/retry/commit/".to_vec()
-    }
-
-    /// Prefix for a specific peer's collection-commit retries
-    pub fn peer_prefix(peer_id: impl Into<String>) -> Vec<u8> {
-        let peer_id = peer_id.into();
-        format!("/rep/retry/commit/{}/", peer_id).into_bytes()
-    }
-}
-
-impl Key for ReplicatorRetryCommitKey {
-    fn bytes(&self) -> Vec<u8> {
-        format!(
-            "/rep/retry/commit/{}/{}/{}",
-            self.peer_id, self.collection_id, self.cid
-        )
-        .into_bytes()
-    }
-
-    fn to_string(&self) -> String {
-        format!(
-            "/rep/retry/commit/{}/{}/{}",
-            self.peer_id, self.collection_id, self.cid
-        )
-    }
-}
-
 /// PeerstoreSERetry: Tracks search engine indexing failures on peer
 ///
 /// Structure: /se-retry/[PeerID]/[CollectionID]/[DocID]

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 
-use crate::libp2p_doc_pusher::DocPusher;
+use crate::transport_doc_pusher::TransportDocPusher;
 use crate::{
     ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
     P2pDocumentInfo, P2pDocumentRequest, ReplicationFilters, ReplicatorInfo, ReplicatorPushOptions,
@@ -35,7 +35,7 @@ pub trait VersionSyncer: Send + Sync {
 pub struct P2PAdapter<B: Blockstore + 'static> {
     handle: P2PHostHandle,
     sync_coordinator: Option<Arc<Libp2pSyncCoordinator<B>>>,
-    doc_pusher: Option<Arc<dyn DocPusher>>,
+    doc_pusher: Option<Arc<dyn TransportDocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     version_syncer: Option<Arc<dyn VersionSyncer>>,
     replicator_push_options: ReplicatorPushOptionsState,
@@ -125,7 +125,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     pub fn with_full_context(
         handle: P2PHostHandle,
         coordinator: Arc<Libp2pSyncCoordinator<B>>,
-        doc_pusher: Arc<dyn DocPusher>,
+        doc_pusher: Arc<dyn TransportDocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
         nac_checker: Arc<dyn db::NodeAccessChecker>,
@@ -203,7 +203,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     pub fn with_full_context_arc(
         handle: P2PHostHandle,
         coordinator: Arc<Libp2pSyncCoordinator<B>>,
-        doc_pusher: Arc<dyn DocPusher>,
+        doc_pusher: Arc<dyn TransportDocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
         nac_checker: Arc<dyn db::NodeAccessChecker>,
@@ -593,7 +593,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         if !collection_names_requiring_replay.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
-                let push_handle = self.handle.clone();
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
                 let push_options = self.replicator_push_options.load();
@@ -610,8 +609,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 tokio::spawn(async move {
                     if let Err(error) = push_pusher
                         .push_existing_docs(
-                            &push_handle,
-                            peer_id,
+                            &p2p::transport::PeerId::from(peer_id),
                             &collection_names_requiring_replay,
                             &push_filters,
                             push_se_key.as_ref().map(|key| key.as_slice()),
@@ -1287,7 +1285,7 @@ mod tests {
         let adapter = P2PAdapter::<NoopBlockstore> {
             handle: handle_a.clone(),
             sync_coordinator: None,
-            doc_pusher: Some(crate::doc_sync::test_support::StubPusher::arc_doc_pusher()),
+            doc_pusher: Some(crate::doc_sync::test_support::StubPusher::arc()),
             event_bus: Some(Arc::new(events::ChannelBus::default())),
             version_syncer: None,
             replicator_push_options: ReplicatorPushOptionsState::default(),

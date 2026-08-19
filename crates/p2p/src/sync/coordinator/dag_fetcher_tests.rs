@@ -48,10 +48,13 @@ struct TestTransport {
     dead_providers: Arc<Mutex<HashSet<String>>>,
     skip_serving_syncs: Arc<AtomicUsize>,
     fail_connected_peers: Arc<AtomicBool>,
+    connected_peers: Arc<Mutex<Vec<PeerId>>>,
     cancelled_queries: Arc<Mutex<Vec<u64>>>,
     hang_car_requests: Arc<AtomicBool>,
     streamed_rooted_blocks: Arc<Mutex<Option<Vec<(Cid, Vec<u8>)>>>>,
     stream_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
+    early_failure_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
+    early_deferred_completion: Arc<Mutex<Option<crate::sync::manager::BlockSyncCompletionTracker>>>,
     stream_block_delay: Arc<Mutex<Duration>>,
     stream_completed: Arc<AtomicBool>,
     cancelled_before_stream_complete: Arc<AtomicBool>,
@@ -79,10 +82,18 @@ impl TestTransport {
             dead_providers: Arc::new(Mutex::new(HashSet::new())),
             skip_serving_syncs: Arc::new(AtomicUsize::new(0)),
             fail_connected_peers: Arc::new(AtomicBool::new(false)),
+            connected_peers: Arc::new(Mutex::new(vec![
+                PeerId::new("remote-peer".to_string()),
+                PeerId::new("dead-peer".to_string()),
+                PeerId::new("alt-peer".to_string()),
+                PeerId::new("other-peer".to_string()),
+            ])),
             cancelled_queries: Arc::new(Mutex::new(Vec::new())),
             hang_car_requests: Arc::new(AtomicBool::new(false)),
             streamed_rooted_blocks: Arc::new(Mutex::new(None)),
             stream_completion: Arc::new(Mutex::new(None)),
+            early_failure_completion: Arc::new(Mutex::new(None)),
+            early_deferred_completion: Arc::new(Mutex::new(None)),
             stream_block_delay: Arc::new(Mutex::new(Duration::from_millis(10))),
             stream_completed: Arc::new(AtomicBool::new(false)),
             cancelled_before_stream_complete: Arc::new(AtomicBool::new(false)),
@@ -113,6 +124,10 @@ impl TestTransport {
         self.fail_connected_peers.store(true, Ordering::SeqCst);
     }
 
+    fn set_connected_peers(&self, peers: Vec<PeerId>) {
+        *self.connected_peers.lock().unwrap() = peers;
+    }
+
     fn cancelled_queries(&self) -> Vec<u64> {
         self.cancelled_queries.lock().unwrap().clone()
     }
@@ -128,6 +143,20 @@ impl TestTransport {
     ) {
         *self.streamed_rooted_blocks.lock().unwrap() = Some(blocks);
         *self.stream_completion.lock().unwrap() = Some(completion);
+    }
+
+    fn set_early_failure_completion(
+        &self,
+        completion: crate::sync::manager::BlockSyncCompletionTracker,
+    ) {
+        *self.early_failure_completion.lock().unwrap() = Some(completion);
+    }
+
+    fn set_early_deferred_completion(
+        &self,
+        completion: crate::sync::manager::BlockSyncCompletionTracker,
+    ) {
+        *self.early_deferred_completion.lock().unwrap() = Some(completion);
     }
 
     fn cancelled_before_stream_complete(&self) -> bool {
@@ -177,7 +206,7 @@ impl P2PTransport for TestTransport {
                 "peer listing unavailable".to_string(),
             ));
         }
-        Ok(Vec::new())
+        Ok(self.connected_peers.lock().unwrap().clone())
     }
 
     async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
@@ -336,6 +365,14 @@ impl P2PTransport for TestTransport {
             .unwrap()
             .extend(providers.iter().map(|peer| peer.to_string()));
         let query_id = QueryId(call_index as u64 + 1);
+        if let Some(completion) = self.early_failure_completion.lock().unwrap().clone() {
+            completion.complete(query_id, false);
+            return Ok(query_id);
+        }
+        if let Some(completion) = self.early_deferred_completion.lock().unwrap().clone() {
+            completion.defer(query_id);
+            return Ok(query_id);
+        }
         let streamed_blocks = self.streamed_rooted_blocks.lock().unwrap().take();
         if let Some(streamed_blocks) = streamed_blocks {
             let blockstore = Arc::clone(&self.blockstore);
@@ -601,6 +638,137 @@ async fn rooted_selective_response_drains_before_query_is_reaped() {
         transport.sync_batches(),
         vec![vec![child_cid], vec![leaf_cid]]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn exact_selective_batch_does_not_wait_for_a_lost_completion_signal() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let child_data = encode_ipld(ipld!({ "value": 1 }));
+    let child_cid = make_cid(&child_data);
+    let root_data = encode_ipld(ipld!({ "child": child_cid }));
+    let root_cid = make_cid(&root_data);
+    let transport = TestTransport::new(
+        blockstore.clone(),
+        root_cid,
+        root_data,
+        HashMap::new(),
+        HashMap::from([(child_cid, child_data)]),
+    );
+    let completion = crate::sync::manager::BlockSyncCompletionTracker::default();
+    let context = DagFetchContext::new(
+        "doc-id".to_string(),
+        "collection-id".to_string(),
+        "creator-id".to_string(),
+        PeerId::new("remote-peer".to_string()),
+    )
+    .with_block_sync_completions(completion);
+    let started = tokio::time::Instant::now();
+
+    let outcome = poll_fetch_blocks(
+        &root_cid,
+        &[child_cid],
+        &transport,
+        &blockstore,
+        &PeerId::new("remote-peer".to_string()),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome, ProviderWindowOutcome::Complete);
+    assert_eq!(tokio::time::Instant::now(), started);
+    assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn exact_selective_failure_before_waiter_registration_is_observed_immediately() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let child_data = encode_ipld(ipld!({ "value": 1 }));
+    let child_cid = make_cid(&child_data);
+    let root_data = encode_ipld(ipld!({ "child": child_cid }));
+    let root_cid = make_cid(&root_data);
+    let transport = TestTransport::new(
+        blockstore.clone(),
+        root_cid,
+        root_data,
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let completion = crate::sync::manager::BlockSyncCompletionTracker::default();
+    transport.set_early_failure_completion(completion.clone());
+    let context = DagFetchContext::new(
+        "doc-id".to_string(),
+        "collection-id".to_string(),
+        "creator-id".to_string(),
+        PeerId::new("remote-peer".to_string()),
+    )
+    .with_block_sync_completions(completion);
+    let started = tokio::time::Instant::now();
+
+    let outcome = poll_fetch_blocks(
+        &root_cid,
+        &[child_cid],
+        &transport,
+        &blockstore,
+        &PeerId::new("remote-peer".to_string()),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome, ProviderWindowOutcome::Stalled);
+    assert_eq!(
+        tokio::time::Instant::now(),
+        started,
+        "an early terminal result must not burn the 30-second watchdog"
+    );
+    assert_eq!(transport.cancelled_queries(), vec![1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn contended_car_ingest_defers_to_root_clock_without_fetch_exhaustion() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    let transport = TestTransport::new(
+        blockstore.clone(),
+        root_cid,
+        root_data,
+        HashMap::new(),
+        HashMap::from([(child_cid, child_data)]),
+    );
+    let completion = crate::sync::manager::BlockSyncCompletionTracker::default();
+    transport.set_early_deferred_completion(completion.clone());
+    let diagnostics = diagnostics();
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+
+    poll_fetch_dag(
+        transport.clone(),
+        blockstore.clone(),
+        event_tx,
+        root_cid,
+        DagFetchContext::new(
+            "doc-id".to_string(),
+            "collection-id".to_string(),
+            "creator-id".to_string(),
+            PeerId::new("remote-peer".to_string()),
+        )
+        .with_block_sync_completions(completion),
+        DagFetchLimiter::new(2),
+        diagnostics.clone(),
+    )
+    .await;
+
+    assert!(event_rx.recv().await.is_none());
+    assert_eq!(transport.sync_batches().len(), 1);
+    assert_eq!(transport.cancelled_queries(), vec![1]);
+    let snapshot = diagnostics.snapshot();
+    assert_eq!(snapshot.pending_dag_fetch_deferred_contention, 1);
+    assert_eq!(snapshot.pending_dag_fetch_exhausted, 0);
 }
 
 #[tokio::test]
@@ -887,6 +1055,74 @@ async fn poll_fetch_dag_exhausted_retries_do_not_emit_dag_ready() {
     // remaining attempts retry the exact missing-CID frontier.
     assert_eq!(transport.car_request_count(), 1);
     assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
+}
+
+/// A success-acked durable root can outlive its provider's live connection.
+/// That interval belongs to the existing per-root retry clock: it must not
+/// burn the inner fetch budget or be reported as terminal exhaustion. Once
+/// the same qualified provider reconnects, a later clock dispatch completes.
+#[tokio::test(start_paused = true)]
+async fn disconnected_provider_defers_until_reconnect_without_exhaustion() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    let transport = TestTransport::new(
+        blockstore.clone(),
+        root_cid,
+        root_data,
+        HashMap::new(),
+        HashMap::from([(child_cid, child_data)]),
+    );
+    transport.set_connected_peers(Vec::new());
+    let diagnostics = diagnostics();
+    let context = DagFetchContext::new(
+        "doc-id".to_string(),
+        "collection-id".to_string(),
+        "creator-id".to_string(),
+        PeerId::new("remote-peer".to_string()),
+    );
+
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    poll_fetch_dag(
+        transport.clone(),
+        blockstore.clone(),
+        event_tx,
+        root_cid,
+        context.clone(),
+        DagFetchLimiter::new(2),
+        diagnostics.clone(),
+    )
+    .await;
+
+    assert!(event_rx.recv().await.is_none());
+    assert!(transport.sync_batches().is_empty());
+    let deferred = diagnostics.snapshot();
+    assert_eq!(deferred.pending_dag_fetch_deferred_unavailable, 1);
+    assert_eq!(deferred.pending_dag_fetch_exhausted, 0);
+
+    transport.set_connected_peers(vec![PeerId::new("remote-peer".to_string())]);
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    poll_fetch_dag(
+        transport.clone(),
+        blockstore.clone(),
+        event_tx,
+        root_cid,
+        context,
+        DagFetchLimiter::new(2),
+        diagnostics.clone(),
+    )
+    .await;
+
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+    ));
+    assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+    let completed = diagnostics.snapshot();
+    assert_eq!(completed.pending_dag_fetch_deferred_unavailable, 1);
+    assert_eq!(completed.pending_dag_fetch_exhausted, 0);
 }
 
 /// Every issued block-sync query must be reaped via `cancel_sync` at the

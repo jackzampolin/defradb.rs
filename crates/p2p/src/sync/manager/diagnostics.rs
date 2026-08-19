@@ -135,6 +135,8 @@ pub struct SyncDiagnostics {
     pending_dag_capacity_shed: AtomicU64,
     pending_dag_retry_dispatched: AtomicU64,
     pending_dag_retry_suppressed: AtomicU64,
+    pending_dag_fetch_deferred_unavailable: AtomicU64,
+    pending_dag_fetch_deferred_contention: AtomicU64,
     pending_dag_fetch_exhausted: AtomicU64,
     pending_dag_terminal_merged: AtomicU64,
     pending_dag_terminal_quarantined: AtomicU64,
@@ -160,6 +162,8 @@ pub struct SyncDiagnosticsSnapshot {
     pub pending_dag_capacity_shed: u64,
     pub pending_dag_retry_dispatched: u64,
     pub pending_dag_retry_suppressed: u64,
+    pub pending_dag_fetch_deferred_unavailable: u64,
+    pub pending_dag_fetch_deferred_contention: u64,
     pub pending_dag_fetch_exhausted: u64,
     pub pending_dag_terminal_merged: u64,
     /// Pending-DAG registrations moved to quarantine after a deterministic
@@ -195,6 +199,12 @@ impl SyncDiagnostics {
             pending_dag_capacity_shed: self.pending_dag_capacity_shed.load(Ordering::Relaxed),
             pending_dag_retry_dispatched: self.pending_dag_retry_dispatched.load(Ordering::Relaxed),
             pending_dag_retry_suppressed: self.pending_dag_retry_suppressed.load(Ordering::Relaxed),
+            pending_dag_fetch_deferred_unavailable: self
+                .pending_dag_fetch_deferred_unavailable
+                .load(Ordering::Relaxed),
+            pending_dag_fetch_deferred_contention: self
+                .pending_dag_fetch_deferred_contention
+                .load(Ordering::Relaxed),
             pending_dag_fetch_exhausted: self.pending_dag_fetch_exhausted.load(Ordering::Relaxed),
             pending_dag_terminal_merged: self.pending_dag_terminal_merged.load(Ordering::Relaxed),
             pending_dag_terminal_quarantined: self
@@ -289,6 +299,16 @@ impl SyncDiagnostics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_pending_dag_fetch_deferred_unavailable(&self) {
+        self.pending_dag_fetch_deferred_unavailable
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_pending_dag_fetch_deferred_contention(&self) {
+        self.pending_dag_fetch_deferred_contention
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_pending_dag_fetch_exhausted(&self) {
         self.pending_dag_fetch_exhausted
             .fetch_add(1, Ordering::Relaxed);
@@ -327,6 +347,8 @@ mod tests {
         assert_eq!(snap.pending_dag_capacity_shed, 0);
         assert_eq!(snap.pending_dag_retry_dispatched, 0);
         assert_eq!(snap.pending_dag_retry_suppressed, 0);
+        assert_eq!(snap.pending_dag_fetch_deferred_unavailable, 0);
+        assert_eq!(snap.pending_dag_fetch_deferred_contention, 0);
         assert_eq!(snap.pending_dag_fetch_exhausted, 0);
         assert_eq!(snap.pending_dag_terminal_merged, 0);
         assert_eq!(snap.pending_dag_terminal_quarantined, 0);
@@ -351,6 +373,8 @@ mod tests {
         diag.record_pending_dag_capacity_shed();
         diag.record_pending_dag_retry_dispatched();
         diag.record_pending_dag_retry_suppressed();
+        diag.record_pending_dag_fetch_deferred_unavailable();
+        diag.record_pending_dag_fetch_deferred_contention();
         diag.record_pending_dag_fetch_exhausted();
         diag.record_pending_dag_terminal_merged();
         diag.record_pending_dag_terminal_quarantined();
@@ -370,6 +394,8 @@ mod tests {
         assert_eq!(snap.pending_dag_capacity_shed, 1);
         assert_eq!(snap.pending_dag_retry_dispatched, 1);
         assert_eq!(snap.pending_dag_retry_suppressed, 1);
+        assert_eq!(snap.pending_dag_fetch_deferred_unavailable, 1);
+        assert_eq!(snap.pending_dag_fetch_deferred_contention, 1);
         assert_eq!(snap.pending_dag_fetch_exhausted, 1);
         assert_eq!(snap.pending_dag_terminal_merged, 1);
         assert_eq!(snap.pending_dag_terminal_quarantined, 1);

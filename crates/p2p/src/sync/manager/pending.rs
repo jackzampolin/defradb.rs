@@ -161,10 +161,6 @@ impl PendingDagRegistry {
         self.roots.get_mut(root_cid)
     }
 
-    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (&Cid, &mut PendingDag)> {
-        self.roots.iter_mut()
-    }
-
     pub(super) fn insert(&mut self, root_cid: Cid, dag: PendingDag) -> Option<PendingDag> {
         let previous = self.remove(&root_cid);
         for missing_cid in &dag.missing {

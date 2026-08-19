@@ -4,8 +4,7 @@
 /// retry tracking, and search engine retry tracking for P2P operations.
 use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
 use crate::keys::peerstore::{
-    ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryCommitKey, ReplicatorRetryDocIDKey,
-    ReplicatorRetryIDKey,
+    ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
 };
 use crate::namespace::{Namespace, NamespacedStore};
 use async_lock::{RwLock, RwLockWriteGuardArc};
@@ -16,6 +15,19 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracing;
 
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
+const LEGACY_RETRY_COMMIT_PREFIX: &str = "/rep/retry/commit/";
+
+fn legacy_retry_commit_prefix(peer_id: Option<&str>) -> Vec<u8> {
+    match peer_id {
+        Some(peer_id) => format!("{LEGACY_RETRY_COMMIT_PREFIX}{peer_id}/").into_bytes(),
+        None => LEGACY_RETRY_COMMIT_PREFIX.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(test)]
+fn legacy_retry_commit_key(peer_id: &str, collection_id: &str, cid: &str) -> Vec<u8> {
+    format!("{LEGACY_RETRY_COMMIT_PREFIX}{peer_id}/{collection_id}/{cid}").into_bytes()
+}
 
 type RetryPeerLock = RwLock<()>;
 
@@ -138,7 +150,7 @@ impl<S: Store> Peerstore<S> {
         for prefix in [
             ReplicatorRetryDocIDKey::peer_prefix(peer_id),
             ReplicatorRetryCollectionKey::peer_prefix(peer_id),
-            ReplicatorRetryCommitKey::peer_prefix(peer_id),
+            legacy_retry_commit_prefix(Some(peer_id)),
         ] {
             let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
             while let Some(pair) = iter.next().await? {
@@ -328,16 +340,14 @@ impl<S: Store> Peerstore<S> {
                 migrated += 1;
             }
 
-            let commit_prefix = only_peer
-                .map(ReplicatorRetryCommitKey::peer_prefix)
-                .unwrap_or_else(ReplicatorRetryCommitKey::retry_commit_prefix);
+            let commit_prefix = legacy_retry_commit_prefix(only_peer);
             let mut commits = txn
                 .iterator(IterOptions::new().with_prefix(commit_prefix))
                 .await?;
             let mut legacy = Vec::new();
             while let Some(pair) = commits.next().await? {
                 let key = String::from_utf8_lossy(&pair.key);
-                let Some(rest) = key.strip_prefix("/rep/retry/commit/") else {
+                let Some(rest) = key.strip_prefix(LEGACY_RETRY_COMMIT_PREFIX) else {
                     continue;
                 };
                 let mut parts = rest.split('/');
@@ -544,6 +554,13 @@ impl<S: Store> Peerstore<S> {
     /// delivery evidence: retaining an old connection-failure deadline after
     /// that event can leave otherwise actionable scope markers dormant.
     pub async fn activate_retry_peer(&self, peer_id: &str) -> Result<bool> {
+        // Connection events, live head registration, retry completion, and
+        // replicator removal all touch the same per-peer schedule.  Keep this
+        // transition behind the same writer used by those other entrypoints;
+        // otherwise an Iroh reconnect can repeatedly conflict with marker
+        // registration and leave an admitted head without a durable sender
+        // obligation.
+        let _retry_guard = retry_peer_lock(peer_id).write_arc().await;
         retry_push_txn_conflicts(|| async {
             let mut txn = self.store.new_txn(false).await?;
             let key = ReplicatorRetryIDKey::new(peer_id).bytes();

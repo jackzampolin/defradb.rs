@@ -65,6 +65,7 @@ unsigned-varint = "0.8"
 
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }
+lru = { workspace = true, optional = true }
 
 # Iroh transport (optional)
 iroh = { workspace = true, optional = true }
@@ -88,7 +89,7 @@ libp2p-transport = [
     "dep:rlimit",
     "dep:sysinfo",
 ]
-iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
+iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3", "dep:lru"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

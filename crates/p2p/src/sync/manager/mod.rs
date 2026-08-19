@@ -37,4 +37,4 @@ pub use events::SyncEvent;
 pub(crate) use pending::PendingDag;
 pub(crate) use process::PendingDagLease;
 pub use process::SyncManager;
-pub(crate) use process::{BlockSyncCompletionTracker, RootedCarCompletionTracker};
+pub(crate) use process::{BlockSyncCompletionTracker, FetchCompletion, RootedCarCompletionTracker};

@@ -108,7 +108,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// # Flow
     ///
     /// 1. Parse CID from the message
-    /// 2. Serialize authorized replay or cheaply suppress an ordinary duplicate
+    /// 2. Claim one CID owner or nack/suppress a duplicate without waiting
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
     /// 5. Emit BlockReceived only once the full reachable DAG is locally present,
@@ -136,50 +136,40 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Processing pushlog"
         );
 
-        let _guard = if explicit_replay_authorization.is_some() {
-            loop {
-                match self.process_queue.try_acquire(&cid).await {
-                    Ok(guard) => break guard,
-                    Err(waiter) => {
-                        let _ = waiter.await;
-                    }
-                }
-            }
-        } else {
-            match self.process_queue.try_acquire_nowait(&cid) {
-                Some(guard) => guard,
-                None => {
-                    self.diagnostics.record_single_flight_suppressed();
-                    tracing::debug!(
-                        cid = %cid,
-                        sender_peer = ?sender_peer,
-                        "Suppressing PushLog while the same CID is already being processed"
-                    );
+        let _guard = match self.process_queue.try_acquire_nowait(&cid) {
+            Some(guard) => guard,
+            None => {
+                self.diagnostics.record_single_flight_suppressed();
+                tracing::debug!(
+                    cid = %cid,
+                    sender_peer = ?sender_peer,
+                    explicit_replay = explicit_replay_authorization.is_some(),
+                    "Suppressing PushLog while the same CID is already being processed"
+                );
 
-                    if self.is_pending_dag_recovery_registered(&cid) {
+                if self.is_pending_dag_recovery_registered(&cid) {
+                    return Ok(());
+                }
+
+                match self
+                    .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
+                        self.blockstore
+                            .is_merged(&cid)
+                            .await
+                            .map_err(Error::from_blockstore)
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        self.diagnostics.record_already_merged_fast_path();
                         return Ok(());
                     }
-
-                    match self
-                        .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
-                            self.blockstore
-                                .is_merged(&cid)
-                                .await
-                                .map_err(Error::from_blockstore)
-                        })
-                        .await
-                    {
-                        Ok(true) => {
-                            self.diagnostics.record_already_merged_fast_path();
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            return Err(Error::PushLogInFlight {
-                                cid: cid.to_string(),
-                            });
-                        }
-                        Err(error) => return Err(error),
+                    Ok(false) => {
+                        return Err(Error::PushLogInFlight {
+                            cid: cid.to_string(),
+                        });
                     }
+                    Err(error) => return Err(error),
                 }
             }
         };
@@ -397,6 +387,21 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // durable replacement decision. Otherwise concurrent heartbeats
             // can both observe the old head and recreate a per-root ledger.
             let _metadata_writer = self.pending_metadata_writer.lock().await;
+            // The root may have completed through another arrival after the
+            // initial is_merged check but before this durable registration.
+            // Terminal merge uses this same writer for pending cleanup, so a
+            // second check here prevents recreating an already-discharged
+            // receiver obligation from a stale PushLog traversal.
+            if self.is_merged(cid).await? {
+                self.reconcile_merged_pending_inner(cid).await;
+                tracing::debug!(
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    collection_id = %msg.collection_id,
+                    "Head merged while awaiting durable pending registration"
+                );
+                return Ok(());
+            }
             let durable_superseded_root = match self.persisted_scope_decision(
                 *cid,
                 sender_peer,
@@ -609,52 +614,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 false
             };
 
-            // A fresh registration is immediately due (`insert_pending_dag`
-            // leaves `next_retry_at = now`); claim it only after durable
-            // replacement succeeds so the fetch owner cannot race rollback.
-            if !self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now()) {
-                tracing::debug!(
-                    cid = %cid,
-                    doc_id = %msg.doc_id,
-                    collection_id = %msg.collection_id,
-                    "Pending DAG fetch was already claimed; leaving redrive to the receiver clock"
-                );
-                return Ok(());
-            }
-
-            // Get providers for the missing blocks
-            let providers = self.get_providers_for_cids(&missing);
-
-            // Emit event to request Bitswap fetch
-            if self
-                .event_tx
-                .send(SyncEvent::DagNeedsFetch {
-                    root_cid: *cid,
-                    missing: missing.clone(),
-                    providers,
-                    doc_id: msg.doc_id.clone(),
-                    collection_id: msg.collection_id.clone(),
-                    creator: msg.creator.clone(),
-                    sender_peer: sender_peer.map(str::to_owned),
-                    is_explicit_replicator,
-                    explicit_replay_authorization,
-                })
-                .await
-                .is_err()
-            {
-                tracing::error!(
-                    ?cid,
-                    "Failed to send DagNeedsFetch event - receiver dropped"
-                );
-                // Clean up the in-memory entry since we can't request the
-                // fetch; the durable record stays and is re-driven by the
-                // resync sweep (the pusher was nacked, so it also retries).
-                self.pending_dags.write().remove(cid);
-                return Err(Error::ChannelSend);
-            }
             if !has_durable_registration {
                 self.mark_pending_dag_recovery_registered(cid, inserted_at);
             }
+
+            // Registration ends after the durable obligation is made due.
+            // The #1123 per-root clock is the sole fetch dispatcher: waiting
+            // here to enqueue a DagNeedsFetch event retains the transport
+            // reply and the pending-state writer behind merge/fetch work. A
+            // successful reply is already honest because the durable record,
+            // not an in-flight fetch task, owns completion from this point.
+            tracing::debug!(
+                cid = %cid,
+                doc_id = %msg.doc_id,
+                collection_id = %msg.collection_id,
+                "Pending DAG durably registered and left due for receiver clock"
+            );
         }
 
         Ok(())
@@ -848,29 +823,20 @@ mod tests {
             .await
             .expect("process pushlog");
 
-        match events.try_recv().expect("DagNeedsFetch event") {
-            SyncEvent::DagNeedsFetch {
-                root_cid,
-                missing,
-                doc_id,
-                collection_id,
-                sender_peer,
-                ..
-            } => {
-                assert_eq!(root_cid, collection_cid);
-                assert_eq!(missing, vec![field_cid]);
-                assert_eq!(doc_id, "doc123");
-                assert_eq!(collection_id, "collection1");
-                assert_eq!(sender_peer.as_deref(), Some("peer-1"));
-            }
-            other => panic!("expected DagNeedsFetch, got {:?}", other),
-        }
+        assert!(
+            events.try_recv().is_err(),
+            "registration must not dispatch outside the receiver clock"
+        );
 
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(
             manager.pending_dag_missing(&collection_cid),
             vec![field_cid]
         );
+        let due = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, collection_cid);
+        assert_eq!(due[0].1.missing, [field_cid].into_iter().collect());
     }
 
     #[tokio::test]
@@ -963,10 +929,9 @@ mod tests {
         let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
         assert_eq!(
             claimed.len(),
-            1,
-            "the receiver clock should win the fetch claim"
+            0,
+            "the receiver clock must not claim before durable registration"
         );
-        assert_eq!(claimed[0].0, root_cid);
         pending_store.replace_release.notify_one();
 
         process
@@ -975,12 +940,15 @@ mod tests {
             .expect("durable registration should still succeed");
         assert!(
             events.try_recv().is_err(),
-            "the PushLog path must not emit after another receiver path claims the root"
+            "the PushLog path must not emit outside the receiver clock"
         );
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, root_cid);
     }
 
     #[tokio::test]
-    async fn process_pushlog_clears_pending_dag_when_fetch_event_receiver_is_dropped() {
+    async fn durable_registration_does_not_depend_on_fetch_event_receiver() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
@@ -1007,8 +975,14 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(Error::ChannelSend)));
-        assert_eq!(manager.pending_dag_count(), 0);
+        result.expect("durable registration should own recovery without an event receiver");
+        assert_eq!(manager.pending_dag_count(), 1);
+        assert_eq!(
+            manager
+                .claim_due_pending_dag_retries(tokio::time::Instant::now())
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1016,13 +990,17 @@ mod tests {
         const ANNOUNCEMENT_COUNT: usize = 8;
 
         let store = Arc::new(MemoryStore::new());
-        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let config = SyncConfig {
             event_buffer_size: 1,
             ..SyncConfig::default()
         };
         let (manager, mut events) = SyncManager::new(blockstore, peer_state, config);
+        let pending_store = Arc::new(BlockingPendingDagStore::new(store));
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
         let manager = Arc::new(manager);
 
         let (field_cid, _field_block) = create_lww_block("name");
@@ -1034,15 +1012,6 @@ mod tests {
             "collection1",
         ));
 
-        manager
-            .event_tx
-            .send(SyncEvent::SyncError {
-                cid: root_cid,
-                error: "hold event channel full".to_string(),
-            })
-            .await
-            .expect("prefill event channel");
-
         let owner_manager = Arc::clone(&manager);
         let owner_message = Arc::clone(&message);
         let owner = tokio::spawn(async move {
@@ -1051,13 +1020,8 @@ mod tests {
                 .await
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while manager.pending_dag_count() != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("owner should register the pending DAG");
+        pending_store.replace_entered.notified().await;
+        assert_eq!(manager.pending_dag_count(), 1);
 
         let mut suppressed = Vec::new();
         for peer in 1..ANNOUNCEMENT_COUNT {
@@ -1093,19 +1057,16 @@ mod tests {
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(manager.process_queue.active_count(), 1);
 
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::SyncError { .. })
-        ));
+        pending_store.replace_release.notify_one();
         owner
             .await
             .expect("owner task should not panic")
             .expect("owner should complete");
 
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::DagNeedsFetch { root_cid: cid, .. }) if cid == root_cid
-        ));
+        assert!(events.try_recv().is_err());
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, root_cid);
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(manager.process_queue.active_count(), 0);
 
@@ -1120,7 +1081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_replay_waits_for_in_flight_announcement() {
+    async fn explicit_replay_nacks_in_flight_then_succeeds_after_owner_completes() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
@@ -1171,19 +1132,16 @@ mod tests {
         .await
         .expect("ordinary announcement should store the block");
 
-        let replay_manager = Arc::clone(&manager);
-        let replay_message = Arc::clone(&message);
-        let replay_authorization = authorization.clone();
-        let replay = tokio::spawn(async move {
-            replay_manager
-                .process_pushlog(
-                    &replay_message,
-                    Some("peer-1"),
-                    true,
-                    Some(replay_authorization),
-                )
-                .await
-        });
+        let replay_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.process_pushlog(&message, Some("peer-1"), true, Some(authorization.clone())),
+        )
+        .await
+        .expect("explicit replay must not retain a transport task behind the owner");
+        assert!(matches!(
+            replay_result,
+            Err(Error::PushLogInFlight { cid: ref busy_cid }) if busy_cid == &cid.to_string()
+        ));
 
         assert!(matches!(
             events.recv().await,
@@ -1198,7 +1156,10 @@ mod tests {
                 ..
             })
         ));
-        replay.await.unwrap().unwrap();
+        manager
+            .process_pushlog(&message, Some("peer-1"), true, Some(authorization.clone()))
+            .await
+            .expect("durable sender retry should succeed after the owner completes");
 
         assert!(matches!(
             events.recv().await,
@@ -1261,10 +1222,7 @@ mod tests {
             )
             .await
             .expect("fill pending DAG registry");
-        assert!(matches!(
-            events.try_recv(),
-            Ok(SyncEvent::DagNeedsFetch { root_cid, .. }) if root_cid == first_cid
-        ));
+        assert!(events.try_recv().is_err());
 
         let (rejected_cid, _rejected_block) = create_lww_block("rejected");
         let allocation_heavy_garbage = vec![0xff; 4 * 1024 * 1024];
@@ -1307,6 +1265,10 @@ mod tests {
             .has(&missing_cid)
             .await
             .expect("check missing dependency"));
-        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(
+            manager.pending_dag_count(),
+            1,
+            "receiving the final dependency is not terminal before merge/mark"
+        );
     }
 }

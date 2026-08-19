@@ -113,6 +113,8 @@ struct NoopTransport {
     peer_id: PeerId,
     pubkey: Vec<u8>,
     publish_calls: Arc<AtomicUsize>,
+    replicators: Arc<parking_lot::Mutex<Vec<ReplicatorInfo>>>,
+    pushlog_requests: Arc<parking_lot::Mutex<Vec<(PeerId, PushLogRequest)>>>,
 }
 
 impl NoopTransport {
@@ -121,11 +123,21 @@ impl NoopTransport {
             peer_id: PeerId::new("local-peer".to_string()),
             pubkey: vec![1, 2, 3],
             publish_calls: Arc::new(AtomicUsize::new(0)),
+            replicators: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pushlog_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
     fn publish_calls(&self) -> usize {
         self.publish_calls.load(Ordering::SeqCst)
+    }
+
+    fn set_replicators(&self, replicators: Vec<ReplicatorInfo>) {
+        *self.replicators.lock() = replicators;
+    }
+
+    fn pushlog_requests(&self) -> Vec<(PeerId, PushLogRequest)> {
+        self.pushlog_requests.lock().clone()
     }
 }
 
@@ -300,7 +312,9 @@ impl P2PTransport for PollFetchTransport {
     }
 
     async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
-        Ok(Vec::new())
+        // This transport's fetch methods synchronously serve requests from the
+        // fixed source used by the tests, so model that source as connected.
+        Ok(vec![PeerId::new("source-peer".to_string())])
     }
 
     async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
@@ -392,7 +406,8 @@ impl P2PTransport for PollFetchTransport {
         self.car_requested_cids.fetch_add(1, Ordering::SeqCst);
         if let Some(source) = &self.source_blockstore {
             let collected =
-                crate::sync::car::collect_dag_blocks(source.as_ref(), &root_cid).await?;
+                crate::sync::car::collect_dag_blocks_from_roots(source.as_ref(), &[root_cid])
+                    .await?;
             let block_refs: Vec<_> = collected
                 .blocks
                 .iter()
@@ -468,7 +483,8 @@ impl P2PTransport for PollFetchTransport {
         if missing.is_empty() {
             if let Some(source) = &self.source_blockstore {
                 let collected =
-                    crate::sync::car::collect_dag_blocks(source.as_ref(), &root).await?;
+                    crate::sync::car::collect_dag_blocks_from_roots(source.as_ref(), &[root])
+                        .await?;
                 for (cid, data) in collected.blocks {
                     self.sync_present_blocks.fetch_add(1, Ordering::SeqCst);
                     self.blockstore
@@ -629,9 +645,10 @@ impl P2PTransport for NoopTransport {
 
     async fn send_two_stream_request(
         &self,
-        _peer_id: &PeerId,
-        _req: PushLogRequest,
+        peer_id: &PeerId,
+        req: PushLogRequest,
     ) -> P2PResult<PushLogReply> {
+        self.pushlog_requests.lock().push((peer_id.clone(), req));
         Ok(PushLogReply::success("noop"))
     }
 
@@ -741,7 +758,7 @@ impl P2PTransport for NoopTransport {
     }
 
     async fn list_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
-        Ok(Vec::new())
+        Ok(self.replicators.lock().clone())
     }
 
     async fn get_replicator(&self, _peer_id: &PeerId) -> P2PResult<Option<ReplicatorInfo>> {
@@ -1383,6 +1400,97 @@ async fn test_transient_merge_error_stays_failed_and_does_not_quarantine() {
     );
 }
 
+fn dag_ready_event(cid: Cid) -> SyncEvent {
+    SyncEvent::DagReady {
+        root_cid: cid,
+        doc_id: "doc1".to_string(),
+        collection_id: "col1".to_string(),
+        creator: "peer1".to_string(),
+        sender_peer: Some("sender1".to_string()),
+        is_explicit_replicator: true,
+        explicit_replay_authorization: None,
+    }
+}
+
+#[tokio::test]
+async fn dag_ready_merge_failure_retains_receiver_obligation() {
+    use crate::sync::pending_store::PendingDagStorage;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = test_cid();
+    blockstore.put(&cid, b"test data").await.unwrap();
+    let (coordinator, pending_store) =
+        coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+
+    assert_eq!(
+        coordinator.manager().resync_persisted_pending_dags().await,
+        1
+    );
+    assert_eq!(coordinator.pending_dag_count(), 1);
+    let result = process_event(
+        &coordinator,
+        dag_ready_event(cid),
+        &TestMergeHandler::new(false, false),
+        &ReplicationConfig::default(),
+    )
+    .await;
+
+    assert!(matches!(result, ReplicationResult::Failed { .. }));
+    assert_eq!(
+        coordinator.pending_dag_count(),
+        1,
+        "a transient merge failure must remain owned by the receiver clock"
+    );
+    assert_eq!(pending_store.load_all().await.unwrap().len(), 1);
+    assert!(!blockstore.is_merged(&cid).await.unwrap());
+    assert!(
+        coordinator
+            .manager()
+            .claim_due_pending_dag_retries(tokio::time::Instant::now())
+            .iter()
+            .any(|(due_cid, _)| *due_cid == cid),
+        "the receiver clock must own merge re-drive after a transient failure"
+    );
+}
+
+#[tokio::test]
+async fn batched_dag_ready_merge_failure_retains_receiver_obligation() {
+    use crate::sync::pending_store::PendingDagStorage;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = test_cid();
+    blockstore.put(&cid, b"test data").await.unwrap();
+    let (coordinator, pending_store) =
+        coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+
+    assert_eq!(
+        coordinator.manager().resync_persisted_pending_dags().await,
+        1
+    );
+    assert_eq!(coordinator.pending_dag_count(), 1);
+    let results = process_merge_batch(
+        &coordinator,
+        vec![dag_ready_event(cid)],
+        &BatchTestHandler::with_failure_at(0),
+        &ReplicationConfig::default(),
+    )
+    .await;
+
+    assert!(matches!(
+        results.as_slice(),
+        [ReplicationResult::Failed { .. }]
+    ));
+    assert_eq!(
+        coordinator.pending_dag_count(),
+        1,
+        "batching must not create a second terminal-cleanup owner"
+    );
+    assert_eq!(pending_store.load_all().await.unwrap().len(), 1);
+    assert!(!blockstore.is_merged(&cid).await.unwrap());
+}
+
 #[tokio::test]
 async fn test_batch_rejected_block_not_marked_merged_while_sibling_merges() {
     let store = Arc::new(MemoryStore::new());
@@ -1659,6 +1767,11 @@ async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
         .await
         .unwrap();
 
+    assert_eq!(
+        coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now()),
+        1
+    );
+
     let dag_needs_fetch = tokio::time::timeout(Duration::from_secs(1), events.recv())
         .await
         .expect("DagNeedsFetch should arrive")
@@ -1880,6 +1993,10 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
             .handle_transport_event(request("doc", composite_cid, composite_data.clone()))
             .await
             .unwrap();
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now()),
+            1
+        );
         tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("composite pending event should arrive")
@@ -1891,6 +2008,10 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
             .handle_transport_event(request("", root_cid, root_data.clone()))
             .await
             .unwrap();
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now()),
+            1
+        );
         tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("root pending event should arrive")
@@ -1945,6 +2066,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
             .handle_transport_event(request("", root_cid, root_data.clone()))
             .await
             .expect("sender retry should re-offer the nacked logical head");
+        let _ = coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now());
         let retry_pending = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("retried root pending event should arrive")
@@ -2377,6 +2499,82 @@ async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
         2,
         "document and collection topics should be rebroadcast"
     );
+}
+
+#[tokio::test]
+async fn merged_head_forwards_to_configured_replicator_without_gossip_rebroadcast() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = make_cid(b"forward-merged-head");
+    let block = b"forward-merged-head";
+    blockstore.put(&cid, block).await.unwrap();
+
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let downstream = PeerId::new("downstream-peer".to_string());
+    transport_handle.set_replicators(vec![ReplicatorInfo::from_raw(
+        downstream.to_string(),
+        vec!["col1".to_string()],
+        Vec::new(),
+    )]);
+    let (mut coordinator, _events) =
+        crate::sync::coordinator::SyncCoordinator::with_access_control(
+            transport,
+            blockstore,
+            crate::sync::SyncConfig::default(),
+            AccessMode::Open,
+            Arc::new(crate::ReplicatorRegistry::new()),
+            Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            Arc::new(EqOnlyFilterMatcher),
+        )
+        .await
+        .unwrap();
+    let (failure_tx, mut failure_rx) = tokio::sync::mpsc::channel(8);
+    coordinator.set_failure_channel(failure_tx);
+    tokio::spawn(async move {
+        while let Some(mut event) = failure_rx.recv().await {
+            if let Some(durable_tx) = event.durable_tx.take() {
+                let _ = durable_tx.send(true);
+            }
+        }
+    });
+
+    let events = vec![SyncEvent::BlockReceived {
+        cid,
+        doc_id: "doc1".to_string(),
+        collection_id: "col1".to_string(),
+        creator: "did:key:creator".to_string(),
+        sender_peer: Some("upstream-peer".to_string()),
+        is_explicit_replicator: true,
+        explicit_replay_authorization: None,
+    }];
+    let results = process_merge_batch(
+        &coordinator,
+        events,
+        &BatchTestHandler::new(),
+        &ReplicationConfig::default(),
+    )
+    .await;
+
+    assert!(matches!(
+        results.as_slice(),
+        [ReplicationResult::Merged { cid: merged_cid, .. }] if *merged_cid == cid
+    ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while transport_handle.pushlog_requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("merged head should be forwarded to the configured downstream replicator");
+
+    let requests = transport_handle.pushlog_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, downstream);
+    assert_eq!(requests[0].1.cid.as_ref(), cid.to_bytes());
+    assert_eq!(requests[0].1.block.as_ref(), block);
+    assert_eq!(requests[0].1.creator, "did:key:creator");
+    assert_eq!(transport_handle.publish_calls(), 0);
 }
 
 #[tokio::test]

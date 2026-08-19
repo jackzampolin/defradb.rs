@@ -149,9 +149,7 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
     /// identity string is present yet malformed, so a permissioned collection is
     /// never silently created unregistered.
     fn current_identity() -> anyhow::Result<Option<Did>> {
-        match defra_core::current_identity::try_get_scoped_identity()
-            .or_else(defra_core::current_identity::get_current_identity)
-        {
+        match defra_core::current_identity::get_effective_identity() {
             Some(raw) => {
                 Ok(Some(Did::new(raw).map_err(|e| {
                     anyhow::anyhow!("malformed ambient identity: {}", e)
