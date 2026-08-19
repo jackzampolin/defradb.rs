@@ -91,8 +91,7 @@ libp2p-transport = [
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-p2p = { path = ".", features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [package.metadata.cargo-machete]
 ignored = ["multiaddr", "noq", "rand"]

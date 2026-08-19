@@ -312,7 +312,9 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         classifier: Arc::new(crate::bitswap::DefaultBlockClassifier),
         serve_acp: Arc::new(crate::bitswap::LateBoundServeAcp::new()),
         document_acp: std::sync::OnceLock::new(),
+        #[cfg(feature = "libp2p-transport")]
         kms_transport: std::sync::OnceLock::new(),
+        #[cfg(feature = "libp2p-transport")]
         pubsub_services: None,
     };
 
@@ -770,8 +772,11 @@ fn branchable_sync_reply_event(
 }
 
 fn random_peer_id() -> PeerId {
-    let libp2p_peer = libp2p::PeerId::random();
-    PeerId::from(libp2p_peer)
+    static NEXT_PEER_ID: AtomicUsize = AtomicUsize::new(0);
+    PeerId::new(format!(
+        "test-peer-{}",
+        NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn cid_for(data: &[u8]) -> Cid {

@@ -1,6 +1,7 @@
 //! Tests for DAG synchronization.
 
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +21,8 @@ fn test_cid3() -> Cid {
 }
 
 fn random_peer_str() -> String {
-    p2p::PeerId::random().to_string()
+    static NEXT_PEER_ID: AtomicU64 = AtomicU64::new(0);
+    format!("test-peer-{}", NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 #[tokio::test]

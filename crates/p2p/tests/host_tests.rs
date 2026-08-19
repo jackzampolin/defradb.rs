@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 //! Tests for P2P host functionality.
 
 use bytes::Bytes;
