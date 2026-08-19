@@ -15,5 +15,3 @@ pub use join_side::JoinSide;
 pub use metrics::JoinChildMetrics;
 pub use type_join_many::{compare_json_values, resolve_nested_field, TypeJoinMany};
 pub use type_join_one::{RelationFilter, TypeJoinOne};
-
-// Tests extracted to crates/query/tests/type_join_tests.rs

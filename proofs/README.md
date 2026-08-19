@@ -40,7 +40,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Document materialization status convergence | TLA+ & Lean | db-merge, crdt, db |
 | JWT issuer / algorithm binding | TLA+ | identity |
 | CID content-addressing determinism + Block canonicalization | Lean | defra-core |
-| Deferred-ACP overlay consistency | TLA+ | query-plan |
+| Deferred-ACP overlay consistency | TLA+ | query |
 | Order-preserving key encoding | Lean | storage |
 | Index-maintenance consistency | Lean + TLA+ | db-index, db-merge |
 

@@ -35,8 +35,8 @@ use super::values::{
 ///
 /// For array fields with `_any`, `_all` operators, the scan type is determined
 /// by the inner operator. For example:
-/// - `{numbers: {_any: {_eq: 30}}}` → ExactMatch{values: [30]}
-/// - `{tags: {_any: {_in: ["red", "blue"]}}}` → InScan{values: ["red", "blue"]}
+/// - `{numbers: {_any: {_eq: 30}}}` → `ExactMatch{values: [30]}`
+/// - `{tags: {_any: {_in: ["red", "blue"]}}}` → `InScan{values: ["red", "blue"]}`
 pub fn filter_to_index_scan(
     filter: &Filter,
     index: &IndexDescription,

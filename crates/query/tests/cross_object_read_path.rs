@@ -19,7 +19,7 @@ use acp::{
     MemoryZanzibarStore, Subject, ZanzibarDocumentACP, ZanzibarStore, READER_RELATION,
 };
 use identity::Did;
-use query_plan::txn::{check_doc_access_with_overlay, OverlayChecker};
+use query::txn::{check_doc_access_with_overlay, OverlayChecker};
 
 const FS_POLICY: &str = r#"
 name: filesystem

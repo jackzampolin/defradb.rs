@@ -9559,14 +9559,16 @@ dependencies = [
  "bm25",
  "chrono",
  "ciborium",
+ "cid",
  "criterion 0.6.0",
+ "cursor",
  "defra-core",
  "document",
+ "futures",
  "graphql-parser",
  "identity",
  "lens",
  "query-parse",
- "query-plan",
  "query-types",
  "schema",
  "serde",
@@ -9591,31 +9593,6 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "query-plan"
-version = "0.5.0"
-dependencies = [
- "acp",
- "async-lock",
- "async-trait",
- "chrono",
- "cid",
- "cursor",
- "defra-core",
- "document",
- "futures",
- "identity",
- "lens",
- "query-parse",
- "query-types",
- "schema",
- "serde_json",
- "storage",
- "tokio",
- "tracing",
- "web-time",
 ]
 
 [[package]]

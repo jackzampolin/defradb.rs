@@ -6,11 +6,11 @@
 //! leaks a transaction and silently discards those writes.
 
 use async_trait::async_trait;
-use query_plan::doc_stream::DocStream;
-use query_plan::fetcher::DocFetcher;
-use query_plan::plan::ScanNode;
-use query_plan::planner::vector_routing::VectorRoute;
-use query_plan::planner::PlanNode;
+use query::doc_stream::DocStream;
+use query::fetcher::DocFetcher;
+use query::plan::ScanNode;
+use query::planner::vector_routing::VectorRoute;
+use query::planner::PlanNode;
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
@@ -81,7 +81,7 @@ impl DocFetcher for WideningFetcher {
         &self,
         _collection: &str,
         _doc_ids: &[String],
-    ) -> Result<query_plan::fetcher::FetchByIdsResult> {
+    ) -> Result<query::fetcher::FetchByIdsResult> {
         unreachable!("this test never fetches by document id")
     }
 

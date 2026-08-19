@@ -10,9 +10,9 @@ repository.workspace = true
 [dependencies]
 web-time.workspace = true
 # Internal crates
+cursor = { path = "../cursor" }
 query-types = { path = "../query-types" }
 query-parse = { path = "../query-parse" }
-query-plan = { path = "../query-plan" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 storage = { path = "../storage" }
@@ -23,6 +23,8 @@ lens = { path = "../lens", default-features = false }
 
 # Async runtime
 async-trait.workspace = true
+async-lock.workspace = true
+futures.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -30,6 +32,9 @@ serde_json.workspace = true
 ciborium.workspace = true
 
 base64.workspace = true
+
+# Content addressing
+cid.workspace = true
 
 # Logging
 tracing.workspace = true
@@ -51,7 +56,6 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.35", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
-async-lock.workspace = true
 criterion.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 

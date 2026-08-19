@@ -40,11 +40,11 @@ pub mod subscription;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use query_plan::{doc_stream, fetcher, mutator, plan, planner};
-
-// `txn` is split: plan-layer primitives live in `query_plan::txn`, while
-// `TransactionGuard` stays in this crate because it is generic over
-// `QueryExecutor`. The local `txn` module re-exports both.
+pub mod doc_stream;
+pub mod fetcher;
+pub mod mutator;
+pub mod plan;
+pub mod planner;
 pub mod txn;
 
 // Re-exports for convenience

@@ -1,10 +1,10 @@
 //! Restricting a scan to known documents by short id.
 
 use async_trait::async_trait;
-use query_plan::doc_stream::{DocStream, VecStream};
-use query_plan::fetcher::DocFetcher;
-use query_plan::plan::ScanNode;
-use query_plan::planner::PlanNode;
+use query::doc_stream::{DocStream, VecStream};
+use query::fetcher::DocFetcher;
+use query::plan::ScanNode;
+use query::planner::PlanNode;
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
@@ -44,7 +44,7 @@ impl DocFetcher for RecordingFetcher {
         &self,
         _collection: &str,
         _doc_ids: &[String],
-    ) -> Result<query_plan::fetcher::FetchByIdsResult> {
+    ) -> Result<query::fetcher::FetchByIdsResult> {
         unreachable!("this test never fetches by document id")
     }
 

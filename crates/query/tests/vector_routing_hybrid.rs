@@ -1,7 +1,7 @@
 //! The hybrid retrieval query `db-search` emits, driven through the real
 //! parser and the real extraction.
 
-use query_plan::planner::vector_routing::{route, similarity_query, NotRouted};
+use query::planner::vector_routing::{route, similarity_query, NotRouted};
 use schema::{
     DistanceMetric, HnswParams, IndexDescription, IndexedFieldDescription, VectorAlgorithm,
     VectorIndexDescription,
@@ -62,7 +62,7 @@ fn parse(query: &str) -> query_types::mapper::Select {
     selects.remove(0)
 }
 
-fn route_query(query: &str) -> Result<query_plan::planner::vector_routing::VectorRoute, NotRouted> {
+fn route_query(query: &str) -> Result<query::planner::vector_routing::VectorRoute, NotRouted> {
     route(&similarity_query(&parse(query)), &vector_index())
 }
 

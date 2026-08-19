@@ -1,6 +1,6 @@
 //! When a query can be answered by a vector index, and when it cannot.
 
-use query_plan::planner::vector_routing::{
+use query::planner::vector_routing::{
     route, NotRouted, OrderKey, SimilarityField, SimilarityQuery,
 };
 use schema::{

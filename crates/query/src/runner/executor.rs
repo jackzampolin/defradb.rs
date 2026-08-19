@@ -284,9 +284,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
-        // Look up the transaction in the registry. `GetTransactionResult` is
-        // `#[non_exhaustive]` (defined in the `query-plan` crate), so matches
-        // from this crate require a wildcard arm.
         let txn_ctx = match self.registry.get(handle) {
             GetTransactionResult::Found(ctx) => ctx,
             GetTransactionResult::NotFound => {
@@ -298,12 +295,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             GetTransactionResult::LockPoisoned => {
                 return QueryResponse::error(format!(
                     "transaction registry lock poisoned - system may be in corrupted state (transaction '{}')",
-                    handle
-                ));
-            }
-            _ => {
-                return QueryResponse::error(format!(
-                    "unknown transaction registry result for '{}'",
                     handle
                 ));
             }
