@@ -60,7 +60,7 @@ single-active-version invariant, blockstore cache↔storage coherence. (Full row
 
 ### Out of scope — 28 crates
 Plumbing/glue with no novel modelable invariant; one-line rationale per crate in
-`survey/INDEX.md` §3 (cli, ffi, wasm, http-transport, storage-encoding-glue, query-parse, …).
+`survey/INDEX.md` §3 (cli, ffi, wasm, http-transport, storage-encoding-glue, …).
 
 ## Build / run everything
 

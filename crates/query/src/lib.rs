@@ -25,13 +25,10 @@ pub use query_types::json_convert;
 pub use query_types::limits;
 pub use query_types::mapper;
 
-// Parsing extracted to query-parse crate.
-// Re-export as module aliases so `use crate::query_parse::` etc. still work.
-extern crate query_parse as query_parse_ext;
-pub use query_parse_ext::query_parse;
-pub use query_parse_ext::schema_gen;
-pub use query_parse_ext::sdl_parse;
-pub use query_parse_ext::select_convert;
+pub mod query_parse;
+pub mod schema_gen;
+pub mod sdl_parse;
+pub mod select_convert;
 
 pub mod executor;
 pub mod rest;

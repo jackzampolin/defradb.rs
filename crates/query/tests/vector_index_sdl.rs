@@ -1,7 +1,7 @@
 //! `@vectorIndex` in SDL. The argument names are Go's, because the SDL is the
 //! surface users and parity tests see.
 
-use query_parse::parse_sdl;
+use query::parse_sdl;
 use schema::{DistanceMetric, IndexKind, VectorAlgorithm};
 
 fn collections(sdl: &str) -> Vec<schema::CollectionVersion> {

@@ -12,7 +12,6 @@ web-time.workspace = true
 # Internal crates
 cursor = { path = "../cursor" }
 query-types = { path = "../query-types" }
-query-parse = { path = "../query-parse" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 storage = { path = "../storage" }
@@ -35,6 +34,7 @@ base64.workspace = true
 
 # Content addressing
 cid.workspace = true
+sha2.workspace = true
 
 # Logging
 tracing.workspace = true
@@ -44,6 +44,9 @@ bm25.workspace = true
 
 # GraphQL parsing
 graphql-parser.workspace = true
+
+# Regex (SDL preprocessing)
+regex = "1"
 
 # GraphQL introspection execution
 async-graphql = "7"

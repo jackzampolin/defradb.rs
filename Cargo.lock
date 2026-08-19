@@ -9568,31 +9568,16 @@ dependencies = [
  "graphql-parser",
  "identity",
  "lens",
- "query-parse",
  "query-types",
+ "regex",
  "schema",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "storage",
  "tokio",
  "tracing",
  "web-time",
-]
-
-[[package]]
-name = "query-parse"
-version = "0.5.0"
-dependencies = [
- "chrono",
- "cid",
- "graphql-parser",
- "query-types",
- "regex",
- "schema",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
 ]
 
 [[package]]
