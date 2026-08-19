@@ -169,14 +169,33 @@ async fn an_unknown_collection_id_is_an_error() {
     assert!(error.to_string().contains("no-such-collection"), "{error}");
 }
 
-/// Refusing beats corrupting. `build_view_cache` resolves against the active
-/// schemas and matches by name, so refreshing an inactive version would clear
-/// the shared cache and rebuild it from the active definition instead.
 #[tokio::test]
-async fn refreshing_inactive_versions_is_refused() {
+async fn get_inactive_is_allowed_when_no_inactive_view_is_selected() {
     let db = db::DB::open(storage::backends::MemoryStore::new())
         .await
         .expect("open");
+
+    db.refresh_views(RefreshViewsOptions {
+        get_inactive: true,
+        ..RefreshViewsOptions::all()
+    })
+    .await
+    .expect("including inactive candidates must not fail an active-only selection");
+}
+
+/// Refusing beats corrupting. `build_view_cache` resolves against the active
+/// schemas and matches by name, so refreshing an actually inactive version
+/// would clear the shared cache and rebuild it from the active definition.
+#[tokio::test]
+async fn refreshing_a_selected_inactive_view_is_refused() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+    let mut inactive_view = materialized("InactiveView");
+    inactive_view.is_active = false;
+    db.create_collection(inactive_view)
+        .await
+        .expect("store inactive view");
 
     let error = db
         .refresh_views(RefreshViewsOptions {
