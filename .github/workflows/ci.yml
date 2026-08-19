@@ -230,7 +230,21 @@ jobs:
           GECKODRIVER_VERSION: "0.37.1"
         run: |
           set -euo pipefail
-          CACHE="$HOME/.cache/defra-wasm-browser/${FIREFOX_VERSION}-${GECKODRIVER_VERSION}"
+          case "$(uname -m)" in
+            x86_64)
+              FIREFOX_PLATFORM="linux-x86_64"
+              GECKODRIVER_PLATFORM="linux64"
+              ;;
+            aarch64|arm64)
+              FIREFOX_PLATFORM="linux-aarch64"
+              GECKODRIVER_PLATFORM="linux-aarch64"
+              ;;
+            *)
+              echo "::error::unsupported browser host architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          CACHE="$HOME/.cache/defra-wasm-browser/${FIREFOX_VERSION}-${GECKODRIVER_VERSION}-${FIREFOX_PLATFORM}"
           echo "BROWSER_CACHE=$CACHE" >> "$GITHUB_ENV"
           if [ -x "$CACHE/firefox/firefox" ] && [ -x "$CACHE/geckodriver" ]; then
             echo "Browser cache hit — $CACHE"
@@ -241,18 +255,18 @@ jobs:
           rm -rf "$CACHE"; mkdir -p "$CACHE"
           TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-          FF_URL="https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/linux-aarch64/en-US/firefox-${FIREFOX_VERSION}.tar.xz"
+          FF_URL="https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/${FIREFOX_PLATFORM}/en-US/firefox-${FIREFOX_VERSION}.tar.xz"
           curl -fsSL -o "$TMP/firefox.tar.xz" "$FF_URL"
           # Mozilla publishes a digest per release; verify rather than trust.
           WANT="$(curl -fsSL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/SHA256SUMS" \
-                  | awk -v p="linux-aarch64/en-US/firefox-${FIREFOX_VERSION}.tar.xz" '$2 == p {print $1}')"
+                  | awk -v p="${FIREFOX_PLATFORM}/en-US/firefox-${FIREFOX_VERSION}.tar.xz" '$2 == p {print $1}')"
           GOT="$(sha256sum "$TMP/firefox.tar.xz" | awk '{print $1}')"
           if [ "$WANT" != "$GOT" ]; then
             echo "::error::Firefox checksum mismatch (expected $WANT, got $GOT)"; exit 1
           fi
           tar -C "$CACHE" -xJf "$TMP/firefox.tar.xz"
 
-          GD_URL="https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-linux-aarch64.tar.gz"
+          GD_URL="https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-${GECKODRIVER_PLATFORM}.tar.gz"
           curl -fsSL -o "$TMP/gd.tar.gz" "$GD_URL"
           tar -C "$CACHE" -xzf "$TMP/gd.tar.gz"
           "$CACHE/firefox/firefox" --version
@@ -832,7 +846,7 @@ jobs:
     needs: ci-scope
     if: needs.ci-scope.outputs.full == 'true'
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       # The workflow-level PROTOC points at a macOS Homebrew path; override it
       # with the apt-installed protoc for this Linux job.
