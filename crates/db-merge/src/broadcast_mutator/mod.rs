@@ -31,9 +31,9 @@ use zeroize::Zeroizing;
 
 use self::batch::BroadcastBatchMutator;
 use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
-use db::auto_commit_mutator::AutoCommitMutator;
 use db::block_reader::read_latest_composite_block;
 use db::database::DB;
+use db::write::autocommit::AutoCommitMutator;
 use db_blocks::{build_blocks_from_document, BlockResult};
 
 fn capture_marker_error(slot: &mut Option<String>, result: p2p::error::Result<()>) {

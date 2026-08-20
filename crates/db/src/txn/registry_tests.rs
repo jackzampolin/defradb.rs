@@ -36,7 +36,7 @@ async fn seed_user_in_txn(
 ) -> (crate::txn::DbTxn<MemoryStore>, document::DocID) {
     use query::mutator::DocMutator;
 
-    let mutator = crate::doc_mutator::DbDocMutator::new(db.clone(), txn);
+    let mutator = crate::write::doc::DbDocMutator::new(db.clone(), txn);
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_string()));
     if let Some(age) = age {

@@ -441,7 +441,7 @@ async fn rust_storm_cluster(nodes: usize) -> TestCluster {
 /// the commit DAG still converged (identical `_commits`, divergent value). Fixed by
 /// the Go-parity single store (local writes + merges RMW the authoritative store by
 /// delta; reconcile init-if-absent / PCounter migrate-via-max) serialized per-doc
-/// (`crates/db/src/doc_write_queue.rs`). Modeled by `proofs/tla/TwoStoreCounter` +
+/// (`crates/db/src/write/queue.rs`). Modeled by `proofs/tla/TwoStoreCounter` +
 /// `DefraConvergence.CounterReconcile`. Driver: `support::run_counter_storm` (the
 /// cluster-agnostic harness shared with the Go-parity storm in `parity.rs`).
 #[tokio::test]

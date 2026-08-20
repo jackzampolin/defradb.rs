@@ -12,7 +12,7 @@ lifetime.
 > bounded commit-time finalize — is the #1044 redesign, now landed: the commit-time finalize
 > lives in `crates/db/src/txn/registry/lifecycle.rs::finalize_and_commit` (the sole commit path),
 > which calls `apply_counter_ops_at_finalize`; pending deltas are recorded during the txn in
-> `crates/db/src/doc_mutator.rs` (`DbDocMutator::create`/`update` via `record_counter_op`,
+> `crates/db/src/write/doc.rs` (`DbDocMutator::create`/`update` via `record_counter_op`,
 > with the deferred blob writes). The RED config reproduces the #1041 lifecycle.
 
 ## Mechanism (corrected)
@@ -62,12 +62,12 @@ These are the **#1044 IMPLEMENTED** symbols, anchored to the landed code.
 
 | Symbol in model | Rust source | What it abstracts |
 |---|---|---|
-| interactive actor, `iPhase`, `IGoIdle`/`IGoActive`/`IBeginFinalize`/`IFinalizeCommit` | `crates/db/src/doc_mutator.rs` (`DbDocMutator::create`/`update`) | the explicit-txn mutator; it records pending counter deltas during the txn (`record_counter_op`) holding NO guard over the user lifetime, deferring guard acquisition + RMW to the commit-time finalize |
-| pending counter deltas recorded during the txn (no guard yet) | `crates/db/src/doc_mutator.rs` (`DbDocMutator::create`/`update` → `record_counter_op`) + `crates/db/src/txn/mod.rs` (`DbTxn::record_counter_op`, `pending_counter_ops`) | "during the txn: record deltas, take no guard"; the `iHeld`/finalize split |
+| interactive actor, `iPhase`, `IGoIdle`/`IGoActive`/`IBeginFinalize`/`IFinalizeCommit` | `crates/db/src/write/doc.rs` (`DbDocMutator::create`/`update`) | the explicit-txn mutator; it records pending counter deltas during the txn (`record_counter_op`) holding NO guard over the user lifetime, deferring guard acquisition + RMW to the commit-time finalize |
+| pending counter deltas recorded during the txn (no guard yet) | `crates/db/src/write/doc.rs` (`DbDocMutator::create`/`update` → `record_counter_op`) + `crates/db/src/txn/mod.rs` (`DbTxn::record_counter_op`, `pending_counter_ops`) | "during the txn: record deltas, take no guard"; the `iHeld`/finalize split |
 | commit-time finalize (gate + sorted guards + RMW + release) | `crates/db/src/txn/registry/lifecycle.rs::finalize_and_commit` (the sole commit path) → `apply_counter_ops_at_finalize` — sorted acquire of touched-counter-doc guards at commit, RMW under them, release on durable commit | `IBeginFinalize` -> `IAcquire` (sorted) -> `IFinalizeCommit` -> `IExitCrit` |
-| process-wide `batch_gate` (`gate`), `acquire_batch_gate` / `try_acquire_batch_gate` | `crates/db/src/doc_write_queue.rs:82` `acquire_batch_gate`, `:91` `try_acquire_batch_gate` | the single process-wide mutex serializing the guard-acquisition phase of multi-doc acquirers |
-| per-doc guard (`lockOwner`), `acquire` | `crates/db/src/doc_write_queue.rs:61` `DocWriteQueue::acquire` | per-doc `OwnedMutexGuard`; same key blocks, different keys parallel |
-| arbitrary-order incremental acquire (batch actor `BAcquire`) | `crates/db/src/auto_commit_mutator/batch.rs` (`BatchMutator`, `ensure_doc_guard` per mutation) | the irreducibly-incremental multi-doc acquirer the **gate** protects against: it discovers docs one mutation at a time so it **cannot** pre-sort — modeled as arbitrary-order acquire. NOTE: `try_batch_merge` (`merge_handler/batch.rs`, `sort()`+`dedup()` before acquire) and `create_many` (`auto_commit_mutator/create_many.rs`, sorted upfront) are **sorted** acquirers protected by the same gate — they are NOT what `BAcquire` models |
+| process-wide `batch_gate` (`gate`), `acquire_batch_gate` / `try_acquire_batch_gate` | `crates/db/src/write/queue.rs:82` `acquire_batch_gate`, `:91` `try_acquire_batch_gate` | the single process-wide mutex serializing the guard-acquisition phase of multi-doc acquirers |
+| per-doc guard (`lockOwner`), `acquire` | `crates/db/src/write/queue.rs:61` `DocWriteQueue::acquire` | per-doc `OwnedMutexGuard`; same key blocks, different keys parallel |
+| arbitrary-order incremental acquire (batch actor `BAcquire`) | `crates/db/src/write/autocommit/batch.rs` (`BatchMutator`, `ensure_doc_guard` per mutation) | the irreducibly-incremental multi-doc acquirer the **gate** protects against: it discovers docs one mutation at a time so it **cannot** pre-sort — modeled as arbitrary-order acquire. NOTE: `try_batch_merge` (`merge_handler/batch.rs`, `sort()`+`dedup()` before acquire) and `create_many` (`write/autocommit/create.rs`, sorted upfront) are **sorted** acquirers protected by the same gate — they are NOT what `BAcquire` models |
 | idle reaper bound (~600s) the RED hold is exposed to | `crates/db/src/txn/registry/mod.rs:48` `DEFAULT_TRANSACTION_IDLE_TIMEOUT = 600s`, `crates/db/src/txn/registry/cleanup.rs:20` cleanup | why an across-lifetime gate hold is a node-wide stall: it can persist for the whole idle window |
 | single-doc merge (`mPhase`, `MAcquire`/`MRelease`) | `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta`, `self.merge_queue.acquire(&doc_id_str)`) | a same-doc merge contending on the per-doc guard (no gate) |
 

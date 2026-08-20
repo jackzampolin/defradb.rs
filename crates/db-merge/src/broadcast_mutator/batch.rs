@@ -13,8 +13,8 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::{error, warn};
 
-use db::auto_commit_mutator::BatchMutator;
 use db::database::DB;
+use db::write::autocommit::BatchMutator;
 use db_blocks::BlockResult;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {

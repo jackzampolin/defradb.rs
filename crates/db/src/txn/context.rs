@@ -12,9 +12,9 @@ use web_time::Instant;
 
 use crate::collection::provider::TxnCollectionProvider;
 use crate::database::DB;
-use crate::doc_mutator::DbDocMutator;
 use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn::DbTxn;
+use crate::write::doc::DbDocMutator;
 use crate::LensedAutoCommitFetcher;
 
 /// Transaction context for query execution.

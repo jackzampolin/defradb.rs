@@ -95,8 +95,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         systemstore: &datastore::NamespaceView,
         ops: &[crate::txn::PendingCounterOp],
     ) -> query::error::Result<()> {
-        use crate::auto_commit_mutator::helpers::apply_pending_counter_op;
         use crate::collection::loader::load_collection_from_systemstore;
+        use crate::write::autocommit::helpers::apply_pending_counter_op;
         use std::collections::HashMap;
 
         // Load each touched collection once (keyed by name) and build its index manager.

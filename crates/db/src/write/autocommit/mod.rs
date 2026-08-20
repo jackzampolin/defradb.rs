@@ -7,10 +7,8 @@
 
 pub mod batch;
 mod create;
-mod create_many;
 mod delete;
-mod delete_many;
-pub(super) mod helpers;
+pub(crate) mod helpers;
 mod read;
 mod update;
 

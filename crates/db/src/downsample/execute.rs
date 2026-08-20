@@ -263,7 +263,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         target_doc_id: Option<&DocID>,
         aggregate: &WindowAggregate,
     ) -> Result<DocID> {
-        let mutator = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
+        let mutator = crate::write::autocommit::AutoCommitMutator::new(self.clone());
         let maybe_existing = match target_doc_id {
             Some(id) => mutator
                 .get_for_update(&plan.target.name, id)
@@ -452,7 +452,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
         let doc_id = DocID::from_string(doc_id)
             .map_err(|e| Error::Other(format!("invalid doc_id '{}': {}", doc_id, e)))?;
-        let fetcher = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
+        let fetcher = crate::write::autocommit::AutoCommitMutator::new(self.clone());
         let source_doc = match fetcher
             .get_for_update(collection.name(), &doc_id)
             .await

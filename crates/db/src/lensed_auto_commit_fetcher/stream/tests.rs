@@ -14,8 +14,8 @@ use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::backends::MemoryStore;
 
 use super::LensedAutoCommitDocStream;
-use crate::doc_mutator::DbDocMutator;
 use crate::lensed_auto_commit_fetcher::migration::MigrationWriteBack;
+use crate::write::doc::DbDocMutator;
 use crate::{Collection, LensedAutoCommitFetcher, DB};
 
 fn test_schema() -> CollectionVersion {

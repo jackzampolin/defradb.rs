@@ -8,13 +8,13 @@ use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
 
-use crate::auto_commit_mutator::helpers::write_branchable_collection_block;
 use crate::block_builder::{write_delete_block, write_document_blocks};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
+use crate::write::autocommit::helpers::write_branchable_collection_block;
 use db_blocks::DocStorageIdentity;
 use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
@@ -248,7 +248,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 ))
             })?;
 
-            let doc_id = crate::auto_commit_mutator::helpers::register_created_doc(
+            let doc_id = crate::write::autocommit::helpers::register_created_doc(
                 &systemstore,
                 &datastore,
                 &collection,
@@ -276,7 +276,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         // counter-store seeding (and its per-doc guard) is deferred to the
         // commit-time finalize so an interactive txn holds no gate over its
         // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-        crate::auto_commit_mutator::helpers::write_local_create_deferred(
+        crate::write::autocommit::helpers::write_local_create_deferred(
             &datastore,
             &collection,
             &doc,
@@ -423,7 +423,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             }
         }
 
-        crate::auto_commit_mutator::helpers::write_local_update_deferred(
+        crate::write::autocommit::helpers::write_local_update_deferred(
             &datastore,
             &collection,
             &doc,
@@ -479,7 +479,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 ))
             })?;
 
-            crate::auto_commit_mutator::helpers::register_block_doc_id_mappings(
+            crate::write::autocommit::helpers::register_block_doc_id_mappings(
                 &systemstore,
                 &block_result,
                 &canonical_doc_id.to_string(),
@@ -651,5 +651,5 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 }
 
 #[cfg(test)]
-#[path = "doc_mutator_tests.rs"]
+#[path = "doc_tests.rs"]
 mod tests;

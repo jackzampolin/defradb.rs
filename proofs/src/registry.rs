@@ -247,7 +247,7 @@ pub const PROPERTIES: &[Property] = &[
         // stale whole-document commit hazard RED/GREEN.
         // This found and fixed #1021's residual two-store counter race — local writes and merges both
         // RMW the authoritative accumulation store, serialized per-doc by
-        // `crates/db/src/doc_write_queue.rs` (shared by the local-write and merge
+        // `crates/db/src/write/queue.rs` (shared by the local-write and merge
         // paths). The internal `INV_SameDocSerialized` "≤1 worker in the critical
         // section" + the txn-registry sweep remain a structural Boundary.
         // `MC_TwoStoreCounter` proves BOTH counter hazards RED-then-GREEN: the
@@ -257,7 +257,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Transaction & merge-queue concurrency",
         name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,
-        anchor: "crates/db/src/doc_write_queue.rs (per-doc write lock, shared with crates/db-merge merge handler); crates/db txn registry",
+        anchor: "crates/db/src/write/queue.rs (per-doc write lock, shared with crates/db-merge merge handler); crates/db txn registry",
         model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
         tiers: &[Behavioral, Boundary],
     },

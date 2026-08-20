@@ -281,7 +281,7 @@ mod tests {
 
     use crate::database::DB;
     use crate::doc_fetcher::DbDocFetcher;
-    use crate::doc_mutator::DbDocMutator;
+    use crate::write::doc::DbDocMutator;
 
     fn test_schema() -> CollectionVersion {
         CollectionVersion::new(

@@ -36,7 +36,7 @@
 \*
 \* HOW THE FIX REALIZES GREEN (#1021): the GREEN "Unified" mode here abstracts the
 \* conflict-free RMW as a re-check-and-retry. The implementation achieves the SAME
-\* no-lost-update invariant via a per-doc write lock (crates/db/src/doc_write_queue.rs,
+\* no-lost-update invariant via a per-doc write lock (crates/db/src/write/queue.rs,
 \* shared by the local-write and merge paths; see MergeQueue.tla) PLUS reconcile being
 \* init-if-absent (PCounter migrate-via-max), so a local write and a merge on one doc
 \* never interleave their store RMW. The conflict-retry and the lock are two

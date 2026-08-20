@@ -215,7 +215,7 @@ pub struct DB<S: Store> {
     /// Per-document write serialization queue. Shared with the merge handler so
     /// local writes and P2P merges that touch the same document never interleave
     /// their CRDT read-modify-write (#1021 counter convergence).
-    doc_write_queue: Arc<crate::doc_write_queue::DocWriteQueue>,
+    doc_write_queue: Arc<crate::write::queue::DocWriteQueue>,
     /// Process-local document short-ID range allocator.
     doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator<S>,
     /// Process-local claims for collection-wide actions.
@@ -261,7 +261,7 @@ impl<S: Store> DB<S> {
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
-            doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
+            doc_write_queue: Arc::new(crate::write::queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
             collection_locks: Mutex::new(HashMap::new()),
         })
@@ -323,7 +323,7 @@ impl<S: Store> DB<S> {
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
-            doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
+            doc_write_queue: Arc::new(crate::write::queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
             collection_locks: Mutex::new(HashMap::new()),
         })
@@ -381,7 +381,7 @@ impl<S: Store> DB<S> {
     /// Get the shared per-document write serialization queue. The merge handler
     /// acquires this same queue so local writes and merges that touch the same
     /// document are mutually serialized (#1021).
-    pub fn doc_write_queue(&self) -> Arc<crate::doc_write_queue::DocWriteQueue> {
+    pub fn doc_write_queue(&self) -> Arc<crate::write::queue::DocWriteQueue> {
         self.doc_write_queue.clone()
     }
 

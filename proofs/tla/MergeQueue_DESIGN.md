@@ -25,7 +25,7 @@ user-write that only drives the txn-conflict retry loop), used by the other conf
 
 | Symbol in model | Rust source | What it abstracts |
 |---|---|---|
-| merge owner + per-doc mutex / `lockOwner`, `CanAcquire`, `Acquire` | `crates/p2p/src/sync/replication/loop_runner.rs` canonical ordered batch loop; `crates/db/src/doc_write_queue.rs`; `crates/db-merge/src/merge_handler/batch.rs` | one production loop owns merge dispatch; an ordered batch holds distinct document guards and commits through one transaction |
+| merge owner + per-doc mutex / `lockOwner`, `CanAcquire`, `Acquire` | `crates/p2p/src/sync/replication/loop_runner.rs` canonical ordered batch loop; `crates/db/src/write/queue.rs`; `crates/db-merge/src/merge_handler/batch.rs` | one production loop owns merge dispatch; an ordered batch holds distinct document guards and commits through one transaction |
 | acquire-before-apply | individual path: `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta`, `self.merge_queue.acquire(&doc_id_str)`); batch path: `crates/db-merge/src/merge_handler/batch.rs` (`try_batch_merge` — all distinct docs acquired in sorted order under `acquire_batch_gate`) | the per-doc guard is held while the delta is applied and committed |
 | `MaxRetries = 5`, retry loop, `Retry`/`Exhaust` | `crates/db-merge/src/merge_handler/batch.rs:29` `const MAX_MERGE_RETRIES: usize = 5;` and `batch.rs:57-89` | `for attempt in 0..MAX_MERGE_RETRIES { … Err(e) if e.is_txn_conflict() => continue; … }` |
 | `NoConflict` / txn conflict | `crates/db-merge/src/merge_handler/error.rs:56-67` (`is_txn_conflict`) | the retry trigger: storage SSI `ErrTxnConflict` |

@@ -158,7 +158,7 @@ mod tests {
     use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
     use storage::backends::MemoryStore;
 
-    use crate::doc_mutator::DbDocMutator;
+    use crate::write::doc::DbDocMutator;
 
     fn test_collection_with_policy() -> CollectionVersion {
         CollectionVersion::new(

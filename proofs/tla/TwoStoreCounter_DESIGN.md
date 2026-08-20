@@ -92,7 +92,7 @@ one directional invariant their bug violates.
 
 **Landed (#1021).** Rust's counter value behaves as one store under concurrency: local
 increments and merges serialize on the shared per-doc write guard
-(`crates/db/src/doc_write_queue.rs`, taken by BOTH the local-write path and the db-merge
+(`crates/db/src/write/queue.rs`, taken by BOTH the local-write path and the db-merge
 merge handler — see `MergeQueue.tla`), and reconcile is init-if-absent (PCounter
 migrate-via-max), so a local write and a same-doc merge never interleave their store RMW.
 Validated by the asserting in-suite test

@@ -5,7 +5,7 @@ use schema::{CollectionVersion, FieldDescription, FieldKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage::backends::MemoryStore;
 
-use crate::doc_mutator::DbDocMutator;
+use crate::write::doc::DbDocMutator;
 
 fn test_schema() -> CollectionVersion {
     CollectionVersion::new(

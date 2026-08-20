@@ -124,7 +124,7 @@ instance (`DefraConvergence/MixedField.lean`):
    and supply the field's own convergence predicate (a last-writer-wins assertion,
    componentwise equality, etc.) in place of the numeric exact-sum oracle.
 6. **Code plug-point.** The new field's local-write handling plugs into
-   `crates/db/src/auto_commit_mutator/helpers.rs` — `apply_local_counter_deltas`
+   `crates/db/src/write/autocommit/helpers.rs` — `apply_local_counter_deltas`
    (update path) and `init_counter_stores_on_create` (create path) are the counter
    exemplars — reached through the single `write_local_update` / `write_local_create`
    chokepoint that ALL local-write mutators (auto-commit, batch, explicit-txn) call.

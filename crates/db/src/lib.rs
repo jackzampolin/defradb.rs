@@ -43,7 +43,6 @@
 /// txn.commit().await?;
 /// ```
 pub(crate) mod auto_commit_fetcher;
-pub mod auto_commit_mutator;
 // Backup extracted to standalone db-backup crate (#789). Callers now
 // import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
@@ -64,8 +63,6 @@ pub mod database;
 pub use db_search as dense_search;
 pub(crate) mod doc_fetcher;
 pub mod doc_id_map;
-pub(crate) mod doc_mutator;
-pub mod doc_write_queue;
 pub mod downsample;
 pub mod error;
 pub mod event;
@@ -94,10 +91,10 @@ pub mod txn;
 pub(crate) mod vector_search;
 pub(crate) mod versioned_fetcher;
 pub(crate) mod view;
+pub mod write;
 
 // Re-export commonly used types
 pub use auto_commit_fetcher::AutoCommitFetcher;
-pub use auto_commit_mutator::AutoCommitMutator;
 pub use block_builder::{build_blocks_from_document, BlockResult};
 pub use collection::acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
@@ -118,14 +115,14 @@ pub use database::{
 };
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use defra_core::{Action, ActionExecution, ActionStatus};
-pub use doc_write_queue::DocWriteQueue;
+pub use write::autocommit::AutoCommitMutator;
+pub use write::queue::DocWriteQueue;
 // dense_search items re-exported transparently from db-search
 pub use db_search::{
     embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,
     DenseHybridSearchRequest, DenseHybridSearchResponse,
 };
 pub use doc_fetcher::DbDocFetcher;
-pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
@@ -147,6 +144,7 @@ pub use txn::registry::{
 pub use txn::DbTxn;
 pub use versioned_fetcher::VersionedFetcher;
 pub use view::ops::{is_refreshable_view, RefreshViewsOptions};
+pub use write::doc::DbDocMutator;
 
 // P2P merge/sync extracted to standalone db-merge crate.
 // Consumer crates (cli, embedded, defra-node, ffi) should depend on db-merge directly.
