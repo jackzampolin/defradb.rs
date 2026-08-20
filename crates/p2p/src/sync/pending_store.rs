@@ -28,6 +28,50 @@ use storage::stores::Systemstore;
 use crate::error::{Error, Result};
 use crate::ExplicitReplayAuthorization;
 
+const PENDING_STORE_TXN_MAX_ATTEMPTS: usize = 3;
+
+/// Maximum number of same-root announcers retained in addition to the
+/// immutable origin provider. Each unavailable provider consumes a bounded
+/// selective-CAR attempt, so this durable list must remain bounded too.
+pub(crate) const MAX_PENDING_DAG_ALTERNATE_PROVIDERS: usize = 3;
+
+async fn retry_pending_store_conflicts<T, F, Fut>(
+    operation: &'static str,
+    mut attempt: F,
+) -> storage::corekv::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = storage::corekv::Result<T>>,
+{
+    for attempt_number in 1..=PENDING_STORE_TXN_MAX_ATTEMPTS {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.is_txn_conflict() && attempt_number < PENDING_STORE_TXN_MAX_ATTEMPTS =>
+            {
+                tracing::debug!(
+                    operation,
+                    attempt = attempt_number,
+                    max_attempts = PENDING_STORE_TXN_MAX_ATTEMPTS,
+                    "Retrying idempotent pending-DAG transaction conflict"
+                );
+            }
+            Err(error) => {
+                if error.is_txn_conflict() {
+                    tracing::warn!(
+                        operation,
+                        attempt = attempt_number,
+                        max_attempts = PENDING_STORE_TXN_MAX_ATTEMPTS,
+                        "Pending-DAG transaction conflict exhausted"
+                    );
+                }
+                return Err(error);
+            }
+        }
+    }
+    unreachable!("bounded pending-store retry loop always returns")
+}
+
 /// Verified explicit-replay authorization carried by a persisted registration.
 /// The original proof is retained so a restored replay can authenticate a
 /// reverse KMS request without trusting the request's claimed DID.
@@ -73,8 +117,15 @@ impl From<PersistedReplayAuthorization> for ExplicitReplayAuthorization {
 pub struct PersistedPendingDag {
     pub doc_id: String,
     pub collection_id: String,
+    #[serde(default)]
+    pub head_priority: Option<u64>,
     pub creator: String,
     pub source_peer: Option<String>,
+    /// Additional authenticated peers that announced this exact root.
+    /// The original source remains immutable; alternates only extend the
+    /// recovery rotation and therefore cannot hijack ownership.
+    #[serde(default)]
+    pub alternate_providers: Vec<String>,
     pub is_explicit_replicator: bool,
     pub explicit_replay_authorization: Option<PersistedReplayAuthorization>,
 }
@@ -121,6 +172,15 @@ impl PersistedQuarantinedDag {
 #[async_trait]
 pub trait PendingDagStorage: Send + Sync {
     async fn put(&self, root_cid: &Cid, record: &PersistedPendingDag) -> Result<()>;
+    /// Atomically install `root_cid` and retire an older head from the same
+    /// sender/scope. A crash must observe either the old obligation or the new
+    /// one, never neither and never an ever-growing per-root ledger.
+    async fn replace_scope_head(
+        &self,
+        superseded_root: Option<&Cid>,
+        root_cid: &Cid,
+        record: &PersistedPendingDag,
+    ) -> Result<()>;
     async fn remove(&self, root_cid: &Cid) -> Result<()>;
     async fn load_all(&self) -> Result<Vec<(Cid, PersistedPendingDag)>>;
 
@@ -145,6 +205,24 @@ impl<S: Store> PendingDagStore<S> {
             systemstore: Systemstore::new(store),
         }
     }
+
+    async fn write_value(
+        &self,
+        operation: &'static str,
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<()> {
+        retry_pending_store_conflicts(operation, || async {
+            let mut txn = self.systemstore.new_txn(false).await?;
+            match value {
+                Some(value) => txn.set(key, value).await?,
+                None => txn.delete(key).await?,
+            }
+            txn.commit().await
+        })
+        .await
+        .map_err(|error| Error::Storage(error.to_string()))
+    }
 }
 
 #[async_trait]
@@ -152,32 +230,37 @@ impl<S: Store + 'static> PendingDagStorage for PendingDagStore<S> {
     async fn put(&self, root_cid: &Cid, record: &PersistedPendingDag) -> Result<()> {
         let key = P2PPendingDagKey::new(root_cid.to_string());
         let value = record.to_bytes()?;
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
+        self.write_value("pending_store.put", &key.bytes(), Some(&value))
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.set(&key.bytes(), &value)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    async fn replace_scope_head(
+        &self,
+        superseded_root: Option<&Cid>,
+        root_cid: &Cid,
+        record: &PersistedPendingDag,
+    ) -> Result<()> {
+        let new_key = P2PPendingDagKey::new(root_cid.to_string()).bytes();
+        let old_key = superseded_root
+            .filter(|old| *old != root_cid)
+            .map(|old| P2PPendingDagKey::new(old.to_string()).bytes());
+        let value = record.to_bytes()?;
+        retry_pending_store_conflicts("pending_store.replace_scope_head", || async {
+            let mut txn = self.systemstore.new_txn(false).await?;
+            txn.set(&new_key, &value).await?;
+            if let Some(old_key) = old_key.as_ref() {
+                txn.delete(old_key).await?;
+            }
+            txn.commit().await
+        })
+        .await
+        .map_err(|error| Error::Storage(error.to_string()))
     }
 
     async fn remove(&self, root_cid: &Cid) -> Result<()> {
         let key = P2PPendingDagKey::new(root_cid.to_string());
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
+        self.write_value("pending_store.remove", &key.bytes(), None)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.delete(&key.bytes())
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     async fn load_all(&self) -> Result<Vec<(Cid, PersistedPendingDag)>> {
@@ -226,17 +309,8 @@ impl<S: Store + 'static> PendingDagStorage for PendingDagStore<S> {
     async fn quarantine(&self, root_cid: &Cid, entry: &PersistedQuarantinedDag) -> Result<()> {
         let key = P2PQuarantinedDagKey::new(root_cid.to_string());
         let value = entry.to_bytes()?;
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
+        self.write_value("pending_store.quarantine", &key.bytes(), Some(&value))
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.set(&key.bytes(), &value)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     async fn is_quarantined(&self, root_cid: &Cid) -> Result<bool> {
@@ -299,22 +373,15 @@ impl<S: Store + 'static> PendingDagStorage for PendingDagStore<S> {
 
     async fn remove_quarantined(&self, root_cid: &Cid) -> Result<()> {
         let key = P2PQuarantinedDagKey::new(root_cid.to_string());
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
+        self.write_value("pending_store.remove_quarantined", &key.bytes(), None)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.delete(&key.bytes())
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use multihash_codetable::{Code, MultihashDigest};
     use storage::backends::MemoryStore;
@@ -323,8 +390,10 @@ mod tests {
         PersistedPendingDag {
             doc_id: doc.to_string(),
             collection_id: "collection".to_string(),
+            head_priority: None,
             creator: "creator".to_string(),
             source_peer: Some("peer-1".to_string()),
+            alternate_providers: Vec::new(),
             is_explicit_replicator: true,
             explicit_replay_authorization: Some(PersistedReplayAuthorization {
                 source_peer_id: "peer-1".to_string(),
@@ -339,6 +408,66 @@ mod tests {
 
     fn cid(seed: &[u8]) -> Cid {
         Cid::new_v1(0x55, Code::Sha2_256.digest(seed))
+    }
+
+    #[test]
+    fn legacy_pending_record_decodes_with_no_alternate_providers() {
+        #[derive(Serialize)]
+        struct LegacyPendingDag {
+            doc_id: String,
+            collection_id: String,
+            head_priority: Option<u64>,
+            creator: String,
+            source_peer: Option<String>,
+            is_explicit_replicator: bool,
+            explicit_replay_authorization: Option<PersistedReplayAuthorization>,
+        }
+
+        let bytes = defra_core::cbor::to_vec(&LegacyPendingDag {
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            head_priority: Some(1),
+            creator: "creator".to_string(),
+            source_peer: Some("origin".to_string()),
+            is_explicit_replicator: true,
+            explicit_replay_authorization: None,
+        })
+        .expect("encode legacy record");
+
+        let decoded = PersistedPendingDag::from_bytes(&bytes).expect("decode legacy record");
+        assert_eq!(decoded.source_peer.as_deref(), Some("origin"));
+        assert!(decoded.alternate_providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_store_conflicts_retry_to_success() {
+        let attempts = AtomicUsize::new(0);
+        retry_pending_store_conflicts("pending_store.put", || async {
+            if attempts.fetch_add(1, Ordering::Relaxed) < 2 {
+                Err(storage::corekv::Error::TxnConflict)
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn pending_store_conflicts_have_a_bounded_terminal_result() {
+        let attempts = AtomicUsize::new(0);
+        let error = retry_pending_store_conflicts("pending_store.quarantine", || async {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Err::<(), _>(storage::corekv::Error::TxnConflict)
+        })
+        .await
+        .unwrap_err();
+        assert!(error.is_txn_conflict());
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            PENDING_STORE_TXN_MAX_ATTEMPTS
+        );
     }
 
     #[tokio::test]

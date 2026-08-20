@@ -94,6 +94,9 @@ async fn outbound_backlog_bounded_under_fanout_with_dead_peer() {
     signal(dead_pid, "-STOP");
 
     let pusher_api = cluster.api_url(0).to_string();
+    let baseline_retained = sync_status(&pusher_api).await["retained_background_tasks"]
+        .as_u64()
+        .expect("retained task baseline");
 
     // Sustained write burst far beyond the queue cap, sampling the resource
     // snapshot throughout.
@@ -131,11 +134,13 @@ async fn outbound_backlog_bounded_under_fanout_with_dead_peer() {
                 active_jobs <= worker_count,
                 "active_jobs {active_jobs} exceeded workers {worker_count}"
             );
-            // Fixed workers + transient fetch/replay tasks; a growing value
-            // here would be the #1099 handle-retention leak.
+            // The baseline includes fixed workers and coordinator clocks.
+            // Only bounded transient fetch/replay tasks may be added during
+            // the burst; comparing with `worker_count` alone misclassifies
+            // those fixed non-worker tasks as retained growth.
             assert!(
-                retained <= worker_count + 32,
-                "retained task handles grew unbounded: {retained}"
+                retained <= baseline_retained + 32,
+                "retained task handles grew unbounded: baseline={baseline_retained}, current={retained}"
             );
             saw_rejection |= backlog["rejected_items_total"].as_u64().unwrap() > 0
                 || backlog["rejected_bytes_total"].as_u64().unwrap() > 0;
@@ -203,6 +208,25 @@ async fn outbound_backlog_bounded_under_fanout_with_dead_peer() {
         "revived target",
     )
     .await;
+
+    // Quiescence must retire every per-update handle. Fixed coordinator tasks
+    // remain, so the correct terminal invariant is return to the measured
+    // pre-burst baseline rather than return to zero.
+    let quiescence_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let retained = sync_status(&pusher_api).await["retained_background_tasks"]
+            .as_u64()
+            .expect("retained task count");
+        if retained <= baseline_retained {
+            break;
+        }
+        assert!(
+            Instant::now() < quiescence_deadline,
+            "retained task handles did not return to baseline after quiescence: \
+             baseline={baseline_retained}, current={retained}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 async fn wait_for_docs(

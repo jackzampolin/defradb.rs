@@ -450,8 +450,7 @@ impl<S: Store> VersionedFetcher<S> {
         self.caller_identity
             .clone()
             .or_else(|| {
-                defra_core::current_identity::try_get_scoped_identity()
-                    .or_else(defra_core::current_identity::get_current_identity)
+                defra_core::current_identity::get_effective_identity()
                     .and_then(|did| identity::Did::new(&did).ok())
             })
             .map(kms::RequestContext::with_user)

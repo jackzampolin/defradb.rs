@@ -11,16 +11,18 @@ use integration_test::TestCluster;
 
 const SCHEMA: &str = "type User { name: String  age: Int }";
 const PERSISTED_REGISTRATION: &str = "Persisted pending DAG registration";
-const ACCEPTED_PUSH: &str = "PushLog accepted by replicator";
+const ACCEPTED_PUSH: &str = "PushLog head hint accepted by replicator";
+
+async fn sync_status(hub_api: &str) -> Option<serde_json::Value> {
+    let Ok(response) = reqwest::get(format!("{hub_api}/api/v0/p2p/sync/status")).await else {
+        return None;
+    };
+    response.json::<serde_json::Value>().await.ok()
+}
 
 async fn pending_dags(hub_api: &str) -> u64 {
-    let Ok(response) = reqwest::get(format!("{hub_api}/api/v0/p2p/sync/status")).await else {
-        return 0;
-    };
-    response
-        .json::<serde_json::Value>()
+    sync_status(hub_api)
         .await
-        .ok()
         .and_then(|status| status["pending_dags"].as_u64())
         .unwrap_or(0)
 }
@@ -191,11 +193,13 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
 
     let ready_deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let log = std::fs::read_to_string(&hub_log).unwrap_or_default();
-        let recovered = log.lines().any(|line| {
-            line.contains("DAG complete, emitting DagReady")
-                && line.contains(&format!("root_cid={expected_cid}"))
-                && line.contains(&format!("doc_id={expected_doc_id}"))
+        let recovered = sync_status(cluster.api_url(0)).await.is_some_and(|status| {
+            status["pending_dags"].as_u64() == Some(0)
+                && status["persisted_pending_dags"].as_u64() == Some(0)
+                && status["pending_dag_terminal_merged"]
+                    .as_u64()
+                    .is_some_and(|count| count >= 1)
+                && status["pending_dag_fetch_exhausted"].as_u64() == Some(0)
         });
         if recovered {
             break;

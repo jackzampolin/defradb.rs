@@ -214,6 +214,34 @@ pub(super) fn validate_embedding_and_kind_compatible(
     errs
 }
 
+/// A vector index must be built with a metric its algorithm can rank by.
+///
+/// Without this the definition is accepted and the failure surfaces on the
+/// first document write, as an index-manager construction error naming an
+/// engine the schema author never mentioned.
+pub(super) fn validate_vector_index_metrics(
+    new_state: &DefinitionState,
+    _old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for col in &new_state.collections {
+        for index in &col.indexes {
+            let Some(vector) = index.vector() else {
+                continue;
+            };
+            if !vector.algorithm.supports_metric(vector.metric) {
+                errs.push(format!(
+                    "index '{}' cannot rank by {}: the {} algorithm does not order it",
+                    index.name,
+                    vector.metric.as_str(),
+                    vector.algorithm.as_str()
+                ));
+            }
+        }
+    }
+    errs
+}
+
 /// Matches Go's validateEmbeddingFieldsForGeneration.
 pub(super) fn validate_embedding_fields_for_generation(
     new_state: &DefinitionState,

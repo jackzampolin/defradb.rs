@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 //! Live Go↔Rust pubsub_rpc parity test (#828).
 //!
 //! Spins up a Rust libp2p host + SyncCoordinator, dials a pre-running

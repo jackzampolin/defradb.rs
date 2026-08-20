@@ -18,13 +18,11 @@
 //!
 //! Coalescing retains only the greatest `(priority, cid)` version for each
 //! `(document, peer)`. Superseded active work may finish, but workers re-check
-//! the version before encoding and before durable failure handoff, so it can
+//! the version before transmission and before durable failure handoff, so it can
 //! never recreate a stale retry obligation (#1102).
 //!
-//! Failed jobs enter an escalating `(peer, cid)` cooldown (reset on success or
-//! retirement). Other CIDs for that peer remain eligible, avoiding the fixed
-//! timeout cadence without turning one bad head into peer-wide head-of-line
-//! blocking.
+//! Failed jobs leave volatile state immediately and are redriven only by the
+//! durable scope-marker ladder.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,12 +41,6 @@ use crate::transport::PeerId;
 /// Fixed per-job accounting overhead added to the payload/identifier bytes.
 const PUSH_JOB_FIXED_OVERHEAD_BYTES: usize = 128;
 
-/// First cooldown after a failed job; doubles per consecutive failure.
-pub const DEFAULT_PUSH_FAILURE_COOLDOWN_BASE: Duration = Duration::from_secs(1);
-
-/// Cooldown escalation cap: base << PUSH_FAILURE_COOLDOWN_MAX_SHIFT.
-const PUSH_FAILURE_COOLDOWN_MAX_SHIFT: u32 = 6;
-
 /// Base peer-wide cooldown applied when a receiver reports it is at capacity.
 /// Escalates exponentially (capped) while the peer keeps rejecting, and is
 /// jittered so a fleet of senders does not re-fire in lockstep (defradb#1112:
@@ -66,11 +58,8 @@ pub struct PushJobSpec {
     pub collection_id: String,
     pub creator: String,
     pub root_cid: Cid,
-    /// The head block only. Workers expand the full DAG from the blockstore
-    /// when `expand_dag` is set, so queued jobs never retain DAG payloads.
+    /// The current head block only. Linked blocks are receiver-pulled via CAR.
     pub head_block: Bytes,
-    pub expand_dag: bool,
-    pub(crate) encoded_payload: Option<Arc<super::push_encode_cache::PushPayload>>,
     key: JobKey,
     version: HeadVersion,
 }
@@ -83,7 +72,6 @@ impl PushJobSpec {
         creator: String,
         root_cid: Cid,
         head_block: Bytes,
-        expand_dag: bool,
     ) -> Self {
         let (priority, decoded) = match defra_core::Block::from_dag_cbor(&head_block) {
             Ok(block) => (block.delta.priority(), true),
@@ -109,8 +97,6 @@ impl PushJobSpec {
             creator,
             root_cid,
             head_block,
-            expand_dag,
-            encoded_payload: None,
             key,
             version: HeadVersion {
                 priority,
@@ -143,7 +129,6 @@ impl PushJobSpec {
     fn live_head(&self) -> LiveHead {
         LiveHead {
             version: self.version,
-            expand_dag: self.expand_dag,
         }
     }
 }
@@ -164,13 +149,6 @@ struct HeadVersion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LiveHead {
     version: HeadVersion,
-    expand_dag: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RetryKey {
-    peer_id: String,
-    cid: Cid,
 }
 
 /// Every admission resolves to exactly one of these.
@@ -178,8 +156,7 @@ struct RetryKey {
 pub enum EnqueueOutcome {
     Enqueued,
     /// The same `(document, peer, version)` with equal or stronger delivery
-    /// scope is already queued or active. Queued specs merge the full-DAG
-    /// obligation without adding an item.
+    /// scope is already queued or active.
     Coalesced,
     /// The arriving head was older than the current `(document, peer)` head.
     RetiredStale,
@@ -192,14 +169,6 @@ impl EnqueueOutcome {
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::RejectedItems | Self::RejectedBytes)
     }
-}
-
-#[derive(Clone)]
-struct RetryState {
-    until: Instant,
-    retry_count: u32,
-    job_key: JobKey,
-    version: HeadVersion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,13 +192,9 @@ struct Inner {
     queues: HashMap<String, VecDeque<PushJobSpec>>,
     ready: VecDeque<String>,
     active: HashMap<String, usize>,
-    /// Greatest live version and delivery strength per `(document, peer)`,
-    /// across queued and active work. Absence, a newer version, or a stronger
-    /// full-DAG obligation makes an active root-only job stale.
+    /// Greatest live version per `(document, peer)` across queued and active
+    /// work. Absence or a newer version makes an active job stale.
     latest: HashMap<JobKey, LiveHead>,
-    /// Exact `(peer, cid)` retry state. A failed CID never parks unrelated
-    /// work for the same peer.
-    retries: HashMap<RetryKey, RetryState>,
     /// PEER-WIDE cooldown for a receiver that reported its pending-DAG registry
     /// full. Unlike `retries`, this parks every CID for the peer: a saturated
     /// receiver rejects the next root for the same reason, so letting other CIDs
@@ -276,19 +241,20 @@ pub struct PushBacklogSnapshot {
     pub completed_total: u64,
     pub failed_total: u64,
     pub stale_head_retirements_total: u64,
+    pub head_hints_enqueued_document: u64,
+    pub head_hints_enqueued_collection: u64,
+    pub head_hints_sent_document: u64,
+    pub head_hints_sent_collection: u64,
+    pub head_hints_acked_document: u64,
+    pub head_hints_acked_collection: u64,
+    pub head_hints_nacked_capacity: u64,
+    pub head_hints_nacked_other: u64,
+    pub head_hints_failed_transport: u64,
+    pub head_hints_failed_local: u64,
     /// Times a peer was parked because its receiver reported saturation. Proves
     /// sender-side backpressure is engaging instead of storming (defradb#1112).
     pub peer_capacity_parks_total: u64,
-    pub per_cid_retry_counts: Vec<CidRetrySnapshot>,
     pub per_peer: Vec<PeerBacklogSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct CidRetrySnapshot {
-    /// Root CID whose exact peer retry state is active.
-    pub cid: String,
-    /// Sum of per-peer retry counts currently retained for this CID.
-    pub retry_count: u64,
 }
 
 /// Bounded admission queue drained by a fixed worker pool.
@@ -299,7 +265,6 @@ pub struct PushBacklog {
     byte_capacity: usize,
     per_peer_active_cap: usize,
     worker_count: usize,
-    failure_cooldown_base: Duration,
     peer_capacity_cooldown_base: Duration,
     enqueued_total: AtomicU64,
     coalesced_total: AtomicU64,
@@ -308,6 +273,16 @@ pub struct PushBacklog {
     completed_total: AtomicU64,
     failed_total: AtomicU64,
     stale_head_retirements_total: AtomicU64,
+    head_hints_enqueued_document: AtomicU64,
+    head_hints_enqueued_collection: AtomicU64,
+    head_hints_sent_document: AtomicU64,
+    head_hints_sent_collection: AtomicU64,
+    head_hints_acked_document: AtomicU64,
+    head_hints_acked_collection: AtomicU64,
+    head_hints_nacked_capacity: AtomicU64,
+    head_hints_nacked_other: AtomicU64,
+    head_hints_failed_transport: AtomicU64,
+    head_hints_failed_local: AtomicU64,
 }
 
 impl PushBacklog {
@@ -317,22 +292,6 @@ impl PushBacklog {
         per_peer_active_cap: usize,
         worker_count: usize,
     ) -> Arc<Self> {
-        Self::with_failure_cooldown_base(
-            item_capacity,
-            byte_capacity,
-            per_peer_active_cap,
-            worker_count,
-            DEFAULT_PUSH_FAILURE_COOLDOWN_BASE,
-        )
-    }
-
-    pub fn with_failure_cooldown_base(
-        item_capacity: usize,
-        byte_capacity: usize,
-        per_peer_active_cap: usize,
-        worker_count: usize,
-        failure_cooldown_base: Duration,
-    ) -> Arc<Self> {
         let worker_count = worker_count.max(1);
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
@@ -341,7 +300,6 @@ impl PushBacklog {
             byte_capacity: byte_capacity.max(1),
             per_peer_active_cap: per_peer_active_cap.max(1).min(worker_count),
             worker_count,
-            failure_cooldown_base,
             peer_capacity_cooldown_base: DEFAULT_PEER_CAPACITY_COOLDOWN_BASE,
             enqueued_total: AtomicU64::new(0),
             coalesced_total: AtomicU64::new(0),
@@ -350,6 +308,16 @@ impl PushBacklog {
             completed_total: AtomicU64::new(0),
             failed_total: AtomicU64::new(0),
             stale_head_retirements_total: AtomicU64::new(0),
+            head_hints_enqueued_document: AtomicU64::new(0),
+            head_hints_enqueued_collection: AtomicU64::new(0),
+            head_hints_sent_document: AtomicU64::new(0),
+            head_hints_sent_collection: AtomicU64::new(0),
+            head_hints_acked_document: AtomicU64::new(0),
+            head_hints_acked_collection: AtomicU64::new(0),
+            head_hints_nacked_capacity: AtomicU64::new(0),
+            head_hints_nacked_other: AtomicU64::new(0),
+            head_hints_failed_transport: AtomicU64::new(0),
+            head_hints_failed_local: AtomicU64::new(0),
         })
     }
 
@@ -361,6 +329,7 @@ impl PushBacklog {
     pub fn try_enqueue(&self, job: PushJobSpec) -> EnqueueOutcome {
         let cost = job.resident_bytes();
         let peer_key = job.peer_id.to_string();
+        let is_collection_scope = job.doc_id.is_empty();
         let job_key = job.key().clone();
         let version = job.version();
         let live_head = job.live_head();
@@ -369,29 +338,6 @@ impl PushBacklog {
         if inner.closed {
             return EnqueueOutcome::Closed;
         }
-        Self::prune_expired_retries(&mut inner, Instant::now());
-
-        let persisted_version = inner
-            .retries
-            .values()
-            .filter(|retry| retry.job_key == job_key)
-            .map(|retry| retry.version)
-            .max();
-        if persisted_version.is_some_and(|persisted| persisted > version) {
-            self.stale_head_retirements_total
-                .fetch_add(1, Ordering::Relaxed);
-            return EnqueueOutcome::RetiredStale;
-        }
-        let retired_retry_count = inner.retries.len();
-        inner
-            .retries
-            .retain(|_, retry| retry.job_key != job_key || retry.version >= version);
-        let retired_retry_count = retired_retry_count - inner.retries.len();
-        if retired_retry_count > 0 {
-            self.stale_head_retirements_total
-                .fetch_add(retired_retry_count as u64, Ordering::Relaxed);
-        }
-
         if let Some(current) = inner.latest.get(&job_key).copied() {
             match version.cmp(&current.version) {
                 std::cmp::Ordering::Less => {
@@ -406,9 +352,7 @@ impl PushBacklog {
                         .and_then(|queue| queue.iter_mut().find(|queued| queued.key() == &job_key))
                         .map(|existing| {
                             let old_cost = existing.resident_bytes();
-                            let expand_dag = existing.expand_dag || job.expand_dag;
                             *existing = job.clone();
-                            existing.expand_dag = expand_dag;
                             let new_cost = existing.resident_bytes();
                             (old_cost, new_cost, existing.live_head())
                         });
@@ -418,21 +362,12 @@ impl PushBacklog {
                         self.coalesced_total.fetch_add(1, Ordering::Relaxed);
                         return EnqueueOutcome::Coalesced;
                     }
-                    if !live_head.expand_dag || current.expand_dag {
-                        self.coalesced_total.fetch_add(1, Ordering::Relaxed);
-                        return EnqueueOutcome::Coalesced;
-                    }
-                    // The equal-version job is active, but it only owns the
-                    // root block. Queue the stronger full-DAG obligation
-                    // instead of losing it behind the active send.
+                    self.coalesced_total.fetch_add(1, Ordering::Relaxed);
+                    return EnqueueOutcome::Coalesced;
                 }
                 std::cmp::Ordering::Greater => {
                     Self::remove_queued_job(&mut inner, &peer_key, &job_key);
                     inner.latest.remove(&job_key);
-                    inner.retries.remove(&RetryKey {
-                        peer_id: peer_key.clone(),
-                        cid: current.version.cid,
-                    });
                     self.stale_head_retirements_total
                         .fetch_add(1, Ordering::Relaxed);
                 }
@@ -477,6 +412,13 @@ impl PushBacklog {
         inner.queued_bytes += cost;
         inner.latest.insert(job_key, live_head);
         self.enqueued_total.fetch_add(1, Ordering::Relaxed);
+        if is_collection_scope {
+            self.head_hints_enqueued_collection
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.head_hints_enqueued_document
+                .fetch_add(1, Ordering::Relaxed);
+        }
         drop(inner);
         self.notify.notify_waiters();
         EnqueueOutcome::Enqueued
@@ -497,13 +439,6 @@ impl PushBacklog {
             inner.queues.remove(peer_key);
             inner.ready.retain(|ready_peer| ready_peer != peer_key);
         }
-    }
-
-    fn prune_expired_retries(inner: &mut Inner, now: Instant) {
-        let live_keys: std::collections::HashSet<JobKey> = inner.latest.keys().cloned().collect();
-        inner
-            .retries
-            .retain(|_, retry| retry.until > now || live_keys.contains(&retry.job_key));
     }
 
     /// Park every job for a peer whose receiver reported it is at capacity.
@@ -563,10 +498,6 @@ impl PushBacklog {
             {
                 inner.latest.remove(job.key());
             }
-            inner.retries.remove(&RetryKey {
-                peer_id: peer_key.clone(),
-                cid: job.root_cid,
-            });
         }
         jobs
     }
@@ -579,6 +510,26 @@ impl PushBacklog {
             .latest
             .get(job.key())
             .is_some_and(|head| *head == job.live_head())
+    }
+
+    pub(crate) fn record_head_hint_sent(&self, job: &PushJobSpec) {
+        if job.doc_id.is_empty() {
+            self.head_hints_sent_collection
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.head_hints_sent_document
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn record_head_hint_failure(&self, reason: HeadHintFailureReason) {
+        let counter = match reason {
+            HeadHintFailureReason::CapacityNack => &self.head_hints_nacked_capacity,
+            HeadHintFailureReason::OtherNack => &self.head_hints_nacked_other,
+            HeadHintFailureReason::Transport => &self.head_hints_failed_transport,
+            HeadHintFailureReason::Local => &self.head_hints_failed_local,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Next job whose peer is below its active cap and not cooling down,
@@ -650,33 +601,7 @@ impl PushBacklog {
                 .queues
                 .get_mut(&peer_key)
                 .expect("ready peer has a queue");
-            let eligible_position = queue.iter().position(|job| {
-                inner
-                    .retries
-                    .get(&RetryKey {
-                        peer_id: peer_key.clone(),
-                        cid: job.root_cid,
-                    })
-                    .is_none_or(|retry| retry.until <= now)
-            });
-            let Some(eligible_position) = eligible_position else {
-                for job in queue.iter() {
-                    if let Some(retry) = inner.retries.get(&RetryKey {
-                        peer_id: peer_key.clone(),
-                        cid: job.root_cid,
-                    }) {
-                        next_wake = Some(match next_wake {
-                            Some(wake_at) => wake_at.min(retry.until),
-                            None => retry.until,
-                        });
-                    }
-                }
-                inner.ready.push_back(peer_key);
-                continue;
-            };
-            let job = queue
-                .remove(eligible_position)
-                .expect("eligible job position exists");
+            let job = queue.pop_front().expect("ready peer queue is non-empty");
             if queue.is_empty() {
                 inner.queues.remove(&peer_key);
             } else {
@@ -691,18 +616,12 @@ impl PushBacklog {
         Err(next_wake)
     }
 
-    /// Release the peer slot taken by `next_job`. A failure starts (or
-    /// escalates) this `(peer, cid)` cooldown; success or retirement clears it.
-    ///
+    /// Release the peer slot taken by `next_job`.
     /// Must be called exactly once per job returned by `next_job`. A call
     /// with no active slot for the peer is a caller bug and is ignored so it
-    /// cannot desync the accounting or double-charge the cooldown.
+    /// cannot desync the accounting.
     pub fn job_done(&self, job: &PushJobSpec, completion: JobCompletion) {
         let peer_key = job.peer_id.to_string();
-        let retry_key = RetryKey {
-            peer_id: peer_key.clone(),
-            cid: job.root_cid,
-        };
         {
             let mut inner = self.inner.lock();
             let Some(count) = inner.active.get_mut(&peer_key) else {
@@ -718,27 +637,6 @@ impl PushBacklog {
                 inner.active.remove(&peer_key);
             }
             inner.active_jobs = inner.active_jobs.saturating_sub(1);
-            if completion == JobCompletion::Failed {
-                let retry_count = inner
-                    .retries
-                    .get(&retry_key)
-                    .map(|retry| retry.retry_count)
-                    .unwrap_or(0)
-                    .saturating_add(1);
-                let shift = (retry_count - 1).min(PUSH_FAILURE_COOLDOWN_MAX_SHIFT);
-                let cooldown = self.failure_cooldown_base.saturating_mul(1 << shift);
-                inner.retries.insert(
-                    retry_key,
-                    RetryState {
-                        until: Instant::now() + cooldown,
-                        retry_count,
-                        job_key: job.key().clone(),
-                        version: job.version(),
-                    },
-                );
-            } else {
-                inner.retries.remove(&retry_key);
-            }
             let job_key = job.key().clone();
             if inner
                 .latest
@@ -751,6 +649,13 @@ impl PushBacklog {
         match completion {
             JobCompletion::Succeeded => {
                 self.completed_total.fetch_add(1, Ordering::Relaxed);
+                if job.doc_id.is_empty() {
+                    self.head_hints_acked_collection
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.head_hints_acked_document
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             JobCompletion::Failed => {
                 self.failed_total.fetch_add(1, Ordering::Relaxed);
@@ -770,7 +675,6 @@ impl PushBacklog {
             inner.queues.clear();
             inner.ready.clear();
             inner.latest.clear();
-            inner.retries.clear();
             inner.queued_items = 0;
             inner.queued_bytes = 0;
         }
@@ -778,23 +682,16 @@ impl PushBacklog {
     }
 
     pub fn snapshot(&self) -> PushBacklogSnapshot {
-        let mut inner = self.inner.lock();
+        let inner = self.inner.lock();
         let now = Instant::now();
-        Self::prune_expired_retries(&mut inner, now);
         let mut peers: std::collections::HashSet<&String> = inner.queues.keys().collect();
         peers.extend(inner.active.keys());
-        let retry_peers: std::collections::HashSet<&String> =
-            inner.retries.keys().map(|key| &key.peer_id).collect();
-        peers.extend(retry_peers);
+        peers.extend(inner.peer_cooldowns.keys());
         let mut per_peer: Vec<PeerBacklogSnapshot> = peers
             .into_iter()
             .map(|peer| {
                 let queued = inner.queues.get(peer);
-                let retries: Vec<&RetryState> = inner
-                    .retries
-                    .iter()
-                    .filter_map(|(key, retry)| (key.peer_id == *peer).then_some(retry))
-                    .collect();
+                let cooldown = inner.peer_cooldowns.get(peer);
                 PeerBacklogSnapshot {
                     peer_id: peer.clone(),
                     queued_items: queued.map(|jobs| jobs.len()).unwrap_or(0),
@@ -802,32 +699,14 @@ impl PushBacklog {
                         .map(|jobs| jobs.iter().map(PushJobSpec::resident_bytes).sum())
                         .unwrap_or(0),
                     active_jobs: inner.active.get(peer).copied().unwrap_or(0),
-                    consecutive_failures: retries
-                        .iter()
-                        .map(|retry| retry.retry_count)
-                        .max()
-                        .unwrap_or(0),
-                    cooldown_remaining_ms: retries
-                        .iter()
-                        .map(|retry| retry.until.saturating_duration_since(now).as_millis() as u64)
-                        .max()
+                    consecutive_failures: cooldown.map(|value| value.consecutive).unwrap_or(0),
+                    cooldown_remaining_ms: cooldown
+                        .map(|value| value.until.saturating_duration_since(now).as_millis() as u64)
                         .unwrap_or(0),
                 }
             })
             .collect();
         per_peer.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
-        let mut retries_by_cid: HashMap<Cid, u64> = HashMap::new();
-        for (key, retry) in &inner.retries {
-            *retries_by_cid.entry(key.cid).or_default() += u64::from(retry.retry_count);
-        }
-        let mut per_cid_retry_counts: Vec<CidRetrySnapshot> = retries_by_cid
-            .into_iter()
-            .map(|(cid, retry_count)| CidRetrySnapshot {
-                cid: cid.to_string(),
-                retry_count,
-            })
-            .collect();
-        per_cid_retry_counts.sort_by(|a, b| a.cid.cmp(&b.cid));
         PushBacklogSnapshot {
             queue_item_capacity: self.item_capacity,
             queue_byte_capacity: self.byte_capacity,
@@ -843,11 +722,30 @@ impl PushBacklog {
             completed_total: self.completed_total.load(Ordering::Relaxed),
             failed_total: self.failed_total.load(Ordering::Relaxed),
             stale_head_retirements_total: self.stale_head_retirements_total.load(Ordering::Relaxed),
+            head_hints_enqueued_document: self.head_hints_enqueued_document.load(Ordering::Relaxed),
+            head_hints_enqueued_collection: self
+                .head_hints_enqueued_collection
+                .load(Ordering::Relaxed),
+            head_hints_sent_document: self.head_hints_sent_document.load(Ordering::Relaxed),
+            head_hints_sent_collection: self.head_hints_sent_collection.load(Ordering::Relaxed),
+            head_hints_acked_document: self.head_hints_acked_document.load(Ordering::Relaxed),
+            head_hints_acked_collection: self.head_hints_acked_collection.load(Ordering::Relaxed),
+            head_hints_nacked_capacity: self.head_hints_nacked_capacity.load(Ordering::Relaxed),
+            head_hints_nacked_other: self.head_hints_nacked_other.load(Ordering::Relaxed),
+            head_hints_failed_transport: self.head_hints_failed_transport.load(Ordering::Relaxed),
+            head_hints_failed_local: self.head_hints_failed_local.load(Ordering::Relaxed),
             peer_capacity_parks_total: inner.peer_capacity_parks_total,
-            per_cid_retry_counts,
             per_peer,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadHintFailureReason {
+    CapacityNack,
+    OtherNack,
+    Transport,
+    Local,
 }
 
 #[cfg(test)]
@@ -866,7 +764,6 @@ mod tests {
             "creator".to_string(),
             Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
             Bytes::from_static(b"head-block"),
-            false,
         )
     }
 
@@ -892,7 +789,6 @@ mod tests {
             "creator".to_string(),
             defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
             head_block,
-            false,
         )
     }
 
@@ -1028,8 +924,7 @@ mod tests {
         let old = versioned_job("a", "doc", 1);
         assert_eq!(backlog.try_enqueue(old.clone()), EnqueueOutcome::Enqueued);
 
-        let mut duplicate = old;
-        duplicate.expand_dag = true;
+        let duplicate = old;
         assert_eq!(backlog.try_enqueue(duplicate), EnqueueOutcome::Coalesced);
         let newest = versioned_job("a", "doc", 2);
         assert_eq!(
@@ -1056,39 +951,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coalesced_job_keeps_expand_dag_obligation() {
-        let backlog = PushBacklog::new(1024, usize::MAX, 4, 4);
-        let mut full_dag = job("a", b"1");
-        full_dag.expand_dag = true;
-        backlog.try_enqueue(full_dag);
-        backlog.try_enqueue(job("a", b"1"));
-
-        let popped = backlog.next_job().await.expect("job queued");
-        assert!(popped.expand_dag, "coalescing must not shrink the job");
-    }
-
-    #[tokio::test]
-    async fn active_root_only_job_does_not_absorb_full_dag_obligation() {
-        let backlog = PushBacklog::new(1024, usize::MAX, 2, 2);
-        let root_only = versioned_job("a", "doc", 1);
-        assert_eq!(
-            backlog.try_enqueue(root_only.clone()),
-            EnqueueOutcome::Enqueued
-        );
-        let active = backlog.next_job().await.unwrap();
-
-        let mut full_dag = root_only;
-        full_dag.expand_dag = true;
-        assert_eq!(backlog.try_enqueue(full_dag), EnqueueOutcome::Enqueued);
-        assert!(!backlog.is_current(&active));
-        backlog.job_done(&active, JobCompletion::Retired);
-
-        let queued = backlog.next_job().await.unwrap();
-        assert!(queued.expand_dag);
-        assert!(backlog.is_current(&queued));
-    }
-
-    #[tokio::test]
     async fn undecodable_head_cannot_be_retired_by_document_version_order() {
         let backlog = PushBacklog::new(1024, usize::MAX, 2, 2);
         assert_eq!(
@@ -1102,7 +964,6 @@ mod tests {
             "creator".to_string(),
             Cid::new_v1(0x55, Code::Sha2_256.digest(b"undecodable")),
             Bytes::from_static(b"not dag-cbor"),
-            false,
         );
         assert_eq!(backlog.try_enqueue(undecodable), EnqueueOutcome::Enqueued);
         assert_eq!(backlog.snapshot().queued_items, 2);
@@ -1123,7 +984,6 @@ mod tests {
             collection.creator,
             collection.root_cid,
             collection.head_block,
-            collection.expand_dag,
         );
 
         assert_eq!(backlog.try_enqueue(document), EnqueueOutcome::Enqueued);
@@ -1234,87 +1094,8 @@ mod tests {
         );
     }
 
-    /// A failed `(peer, cid)` parks only that CID. A different CID for the same
-    /// peer and healthy peers both keep flowing during the cooldown.
-    #[tokio::test]
-    async fn failed_cid_cools_down_without_blocking_other_work() {
-        let backlog = PushBacklog::with_failure_cooldown_base(
-            1024,
-            usize::MAX,
-            4,
-            4,
-            Duration::from_millis(80),
-        );
-        let failed = job("dead", b"d1");
-        backlog.try_enqueue(failed.clone());
-        let dead_job = backlog.next_job().await.unwrap();
-        backlog.job_done(&dead_job, JobCompletion::Failed);
-
-        backlog.try_enqueue(failed);
-        backlog.try_enqueue(job("dead", b"d2"));
-        backlog.try_enqueue(job("healthy", b"h1"));
-
-        let first = backlog.next_job().await.unwrap();
-        assert_eq!(first.root_cid, job("dead", b"d2").root_cid);
-        backlog.job_done(&first, JobCompletion::Succeeded);
-        let second = backlog.next_job().await.unwrap();
-        assert_eq!(second.peer_id.to_string(), "healthy");
-        backlog.job_done(&second, JobCompletion::Succeeded);
-
-        let parked = tokio::time::timeout(Duration::from_millis(20), backlog.next_job()).await;
-        assert!(parked.is_err(), "failed CID must remain parked");
-
-        let released = tokio::time::timeout(Duration::from_millis(400), backlog.next_job())
-            .await
-            .expect("cooldown expiry must wake a parked worker")
-            .unwrap();
-        assert_eq!(released.peer_id.to_string(), "dead");
-        assert_eq!(released.root_cid, job("dead", b"d1").root_cid);
-    }
-
-    #[tokio::test]
-    async fn cooldown_escalates_on_consecutive_failures_and_resets_on_success() {
-        let backlog = PushBacklog::with_failure_cooldown_base(
-            1024,
-            usize::MAX,
-            4,
-            4,
-            Duration::from_millis(10),
-        );
-
-        for _ in 0..2 {
-            backlog.try_enqueue(job("flaky", b"1"));
-            let popped = tokio::time::timeout(Duration::from_secs(2), backlog.next_job())
-                .await
-                .expect("job available once any cooldown expires")
-                .unwrap();
-            backlog.job_done(&popped, JobCompletion::Failed);
-        }
-
-        let snap = backlog.snapshot();
-        let entry = snap
-            .per_peer
-            .iter()
-            .find(|entry| entry.peer_id == "flaky")
-            .expect("cooling peer appears in per-peer snapshot");
-        assert_eq!(entry.consecutive_failures, 2);
-        assert!(entry.cooldown_remaining_ms > 0);
-
-        backlog.try_enqueue(job("flaky", b"1"));
-        let popped = tokio::time::timeout(Duration::from_secs(2), backlog.next_job())
-            .await
-            .expect("job available once the cooldown expires")
-            .unwrap();
-        backlog.job_done(&popped, JobCompletion::Succeeded);
-        let snap = backlog.snapshot();
-        assert!(
-            !snap.per_peer.iter().any(|entry| entry.peer_id == "flaky"),
-            "success must clear the cooldown"
-        );
-    }
-
     /// A `job_done` with no matching active job (caller bug) must not desync
-    /// the accounting or charge a cooldown.
+    /// the accounting.
     #[tokio::test]
     #[cfg_attr(
         debug_assertions,

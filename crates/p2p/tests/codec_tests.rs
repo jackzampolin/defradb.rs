@@ -1,3 +1,5 @@
+#![cfg(feature = "libp2p-transport")]
+
 //! Tests for the CBOR codec module.
 
 use bytes::Bytes;

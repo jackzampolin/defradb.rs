@@ -5,7 +5,7 @@ use std::sync::Arc;
 use acp::DocumentACP;
 use blockstore::Blockstore;
 
-use super::{DagFetchLimiter, SyncCoordinator, SyncShutdownHandle};
+use super::{DagFetchLimiter, HeadHintCarAuthority, SyncCoordinator, SyncShutdownHandle};
 use crate::bitswap::ReplicatorRegistry;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::manager::SyncManager;
@@ -46,6 +46,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the shutdown handle for coordinator-owned background tasks.
     pub fn background_shutdown_handle(&self) -> SyncShutdownHandle {
         self.runtime.shutdown.clone()
+    }
+
+    /// Capability for existing-document and durable-retry paths to authorize
+    /// receiver-owned CAR completion before announcing a head.
+    pub fn head_hint_car_authority(&self) -> HeadHintCarAuthority {
+        HeadHintCarAuthority::new(Arc::clone(&self.runtime.selective_car_access))
     }
 
     /// Get the shared DAG fetch limiter.

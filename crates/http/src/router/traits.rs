@@ -715,6 +715,16 @@ pub trait SchemaOperations: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
 }
 
+/// Read-only collection-version observation.
+///
+/// Kept separate from collection management so embedded consumers can resolve
+/// collection names to IDs without enabling schema or data mutation routes.
+#[async_trait::async_trait]
+pub trait CollectionVersionOperations: Send + Sync {
+    /// Get all collection versions (active + inactive) from the system store.
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+}
+
 /// Trait for collection management operations beyond basic CRUD.
 ///
 /// Provides schema patching, version activation, and truncation operations
@@ -948,9 +958,9 @@ pub trait ViewOperations: Send + Sync {
 
     /// Refresh materialized view caches.
     ///
-    /// If `names` is provided, only those views are refreshed. Otherwise all
-    /// materialized views are refreshed.
-    async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String>;
+    /// The options select which views to refresh, mirroring Go's collection
+    /// lookup. Default options refresh every materialized view.
+    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String>;
 
     /// Run manual downsample history GC.
     ///

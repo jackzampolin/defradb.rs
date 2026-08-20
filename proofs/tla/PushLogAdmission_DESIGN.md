@@ -8,27 +8,25 @@ paths). Companion to `Replicator.tla`, which models the pusher's resumable retry
 lifecycle over a source→target edge; this slice isolates the **hub's reply decision**
 when its bounded pending-DAG map is full.
 
-> **Status: the RED config is current-main behavior.** The hub-side backpressure nacks
-> delivered for #592 were removed by `fa4a84f7` ("align iroh replay and shutdown with go
-> model", 2026-04-18) while the pusher-side consumer of those nacks
-> (`broadcast.rs::send_ordered_pushlogs_via_transport`, #843) stayed live and tested.
-> The GREEN config is the re-landed W1 behavior.
+> **Status: the RED config preserves the historical regression.** The hub-side
+> backpressure nacks delivered for #592 were removed by `fa4a84f7` ("align iroh replay
+> and shutdown with go model", 2026-04-18). The GREEN config fences the restored nack
+> behavior; sender redrive now belongs solely to the durable scope-marker ladder.
 
 ## Mechanism
 
 A pushed head block whose DAG has missing links must be **registered** in the hub's
 bounded pending-DAG map (`SyncConfig::max_pending_dags`) so Bitswap completion is
 tracked and the DAG eventually merges. The pusher drives its **persisted retry ladder**
-off the `PushLogReply`: a success reply is terminal — the pusher deletes its retry
-record (`defra-node/src/lib.rs` `remove_retry_doc`) and never re-pushes unless an
-unrelated later update arrives. Go's direct replicator channel has the same shape: its
+off the `PushLogReply`: a success reply clears the sender's document/collection marker
+only after the receiver has merged or durably registered the head. Go's direct
+replicator channel has the same shape: its
 retry ladder is driven by **error replies** (Go `replicator.go` retryInterval ladder),
 so nack-on-overload is the Go-aligned behavior; overload nacks are orthogonal to the
 trust/ACP bypasses that `fa4a84f7` was aligning.
 
-When the map is at capacity, current main **drops the registration and replies
-success** (`process/pushlog.rs` WARN + `Ok(())` → `PushLogReply::success`): the pusher's
-retry record is destroyed while the hub holds neither a merge nor a registration.
+In the RED behavior, a full map **drops the registration and replies success**: the
+sender clears its marker while the hub holds neither a merge nor a registration.
 Silent, permanent divergence (#1088 M1).
 
 ## Property

@@ -15,7 +15,8 @@ use storage::backends::MemoryStore;
 use tokio::time::timeout;
 
 use crate::bitswap::{
-    AccessMode, BlockAcpMeta, BlockClass, BlockClassifier, LateBoundServeAcp, ReplicatorRegistry,
+    AccessMode, BlockAcpMeta, BlockClass, BlockClassifier, BlockReadGate, LateBoundServeAcp,
+    ReplicatorRegistry, ServeAcp,
 };
 use crate::error::Error;
 use crate::message::{
@@ -31,6 +32,7 @@ use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::sync::SyncShutdownHandle;
 use crate::topics::{DefraTopic, DOC_SYNC_TOPIC};
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
+use crate::PeerIdentityResolver;
 use crate::QueryId;
 use crate::{ReplicationFilter, ReplicationFilters, ReplicatorInfo};
 use async_trait::async_trait;
@@ -66,6 +68,63 @@ impl BlockClassifier for StaticDataClassifier {
             is_branchable: false,
             policy: None,
             doc_ids: vec!["doc1".to_string()],
+        })
+    }
+}
+
+struct CollectionHeadClassifier {
+    collection_id: String,
+}
+
+struct FixedIdentityResolver(identity::Did);
+
+#[async_trait]
+impl PeerIdentityResolver for FixedIdentityResolver {
+    async fn resolve(&self, _peer_id: &PeerId) -> Option<identity::Did> {
+        Some(self.0.clone())
+    }
+}
+
+struct CountingIdentityResolver(Arc<AtomicUsize>);
+
+#[async_trait]
+impl PeerIdentityResolver for CountingIdentityResolver {
+    async fn resolve(&self, _peer_id: &PeerId) -> Option<identity::Did> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+}
+
+struct PeerBoundIdentityResolver {
+    peer_id: PeerId,
+    identity: identity::Did,
+}
+
+#[async_trait]
+impl PeerIdentityResolver for PeerBoundIdentityResolver {
+    async fn resolve(&self, peer_id: &PeerId) -> Option<identity::Did> {
+        (peer_id == &self.peer_id).then(|| self.identity.clone())
+    }
+}
+
+struct OnlyIdentityReadGate(identity::Did);
+
+#[async_trait]
+impl BlockReadGate for OnlyIdentityReadGate {
+    async fn may_read(&self, identity: &acp::Identity, _meta: &BlockAcpMeta) -> bool {
+        identity.did() == Some(&self.0)
+    }
+}
+
+#[async_trait]
+impl BlockClassifier for CollectionHeadClassifier {
+    async fn classify(&self, _cid: &Cid, _data: &[u8]) -> BlockClass {
+        BlockClass::Data(BlockAcpMeta {
+            collection_id: self.collection_id.clone(),
+            is_branchable: false,
+            policy: None,
+            // Collection commits are intentionally not mapped to one document.
+            doc_ids: Vec::new(),
         })
     }
 }
@@ -277,7 +336,6 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 crate::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER,
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             ),
-            push_encode_cache: Arc::new(crate::sync::push_encode_cache::PushEncodeCache::default()),
             broadcast_coalescer: Arc::new(
                 crate::sync::broadcast_coalescer::BroadcastCoalescer::default(),
             ),
@@ -290,7 +348,8 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             rate_limiter,
             request_rate_limiter,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
-            shutdown: SyncShutdownHandle::new(),
+            shutdown: SyncShutdownHandle::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
+            dispatch_diagnostics: Arc::new(crate::sync::DispatchDiagnostics::default()),
             filter_matcher: Arc::new(crate::replicator::EqOnlyFilterMatcher),
         },
         manager,
@@ -312,7 +371,9 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         classifier: Arc::new(crate::bitswap::DefaultBlockClassifier),
         serve_acp: Arc::new(crate::bitswap::LateBoundServeAcp::new()),
         document_acp: std::sync::OnceLock::new(),
+        #[cfg(feature = "libp2p-transport")]
         kms_transport: std::sync::OnceLock::new(),
+        #[cfg(feature = "libp2p-transport")]
         pubsub_services: None,
     };
 
@@ -322,7 +383,122 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
 struct ConflictOnceBlockstore {
     inner: TestBlockstore,
     remaining_put_conflicts: AtomicUsize,
+    remaining_put_many_conflicts: AtomicUsize,
     put_attempts: AtomicUsize,
+    put_many_attempts: AtomicUsize,
+}
+
+struct ObservedWriteGuard<'a> {
+    active: &'a AtomicUsize,
+}
+
+impl Drop for ObservedWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Test blockstore that holds the first inbound write so a second transport
+/// path has a deterministic chance to contend for the same CID.
+struct SingleOwnerBlockstore {
+    inner: TestBlockstore,
+    write_calls: AtomicUsize,
+    active_writes: AtomicUsize,
+    max_active_writes: AtomicUsize,
+    first_write_entered: tokio::sync::Semaphore,
+    concurrent_write_entered: tokio::sync::Semaphore,
+    release_first_write: tokio::sync::Semaphore,
+}
+
+impl SingleOwnerBlockstore {
+    fn new() -> Self {
+        Self {
+            inner: DefraBlockstore::new(Arc::new(MemoryStore::new()), true),
+            write_calls: AtomicUsize::new(0),
+            active_writes: AtomicUsize::new(0),
+            max_active_writes: AtomicUsize::new(0),
+            first_write_entered: tokio::sync::Semaphore::new(0),
+            concurrent_write_entered: tokio::sync::Semaphore::new(0),
+            release_first_write: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    async fn enter_write(&self) -> ObservedWriteGuard<'_> {
+        let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.active_writes.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active_writes.fetch_max(active, Ordering::SeqCst);
+        if active > 1 {
+            self.concurrent_write_entered.add_permits(1);
+        }
+        if call == 0 {
+            self.first_write_entered.add_permits(1);
+            self.release_first_write
+                .acquire()
+                .await
+                .expect("test release semaphore remains open")
+                .forget();
+        }
+        ObservedWriteGuard {
+            active: &self.active_writes,
+        }
+    }
+
+    fn max_active_writes(&self) -> usize {
+        self.max_active_writes.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Blockstore for SingleOwnerBlockstore {
+    async fn get(&self, cid: &Cid) -> blockstore::Result<Option<bytes::Bytes>> {
+        self.inner.get(cid).await
+    }
+
+    async fn put(&self, cid: &Cid, data: &[u8]) -> blockstore::Result<()> {
+        let _write = self.enter_write().await;
+        self.inner.put(cid, data).await
+    }
+
+    async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> blockstore::Result<()> {
+        let _write = self.enter_write().await;
+        self.inner.put_many(blocks).await
+    }
+
+    async fn has(&self, cid: &Cid) -> blockstore::Result<bool> {
+        self.inner.has(cid).await
+    }
+
+    async fn delete(&self, cid: &Cid) -> blockstore::Result<()> {
+        self.inner.delete(cid).await
+    }
+
+    async fn get_size(&self, cid: &Cid) -> blockstore::Result<Option<usize>> {
+        self.inner.get_size(cid).await
+    }
+
+    async fn all_cids(&self) -> blockstore::Result<Vec<Cid>> {
+        self.inner.all_cids().await
+    }
+
+    fn hash_on_read(&self, enabled: bool) {
+        self.inner.hash_on_read(enabled);
+    }
+
+    async fn is_merged(&self, cid: &Cid) -> blockstore::Result<bool> {
+        self.inner.is_merged(cid).await
+    }
+
+    async fn mark_as_merged(&self, cid: &Cid) -> blockstore::Result<()> {
+        self.inner.mark_as_merged(cid).await
+    }
+
+    async fn mark_batch_as_merged(&self, cids: &[Cid]) -> blockstore::Result<()> {
+        self.inner.mark_batch_as_merged(cids).await
+    }
+
+    async fn get_unmerged(&self) -> blockstore::Result<Vec<Cid>> {
+        self.inner.get_unmerged().await
+    }
 }
 
 impl ConflictOnceBlockstore {
@@ -331,12 +507,29 @@ impl ConflictOnceBlockstore {
         Self {
             inner: DefraBlockstore::new(store, true),
             remaining_put_conflicts: AtomicUsize::new(1),
+            remaining_put_many_conflicts: AtomicUsize::new(0),
             put_attempts: AtomicUsize::new(0),
+            put_many_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn new_put_many() -> Self {
+        let store = Arc::new(MemoryStore::new());
+        Self {
+            inner: DefraBlockstore::new(store, true),
+            remaining_put_conflicts: AtomicUsize::new(0),
+            remaining_put_many_conflicts: AtomicUsize::new(1),
+            put_attempts: AtomicUsize::new(0),
+            put_many_attempts: AtomicUsize::new(0),
         }
     }
 
     fn put_attempts(&self) -> usize {
         self.put_attempts.load(Ordering::SeqCst)
+    }
+
+    fn put_many_attempts(&self) -> usize {
+        self.put_many_attempts.load(Ordering::SeqCst)
     }
 }
 
@@ -368,6 +561,22 @@ impl Blockstore for ConflictOnceBlockstore {
     }
 
     async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> blockstore::Result<()> {
+        self.put_many_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .remaining_put_many_conflicts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                if remaining > 0 {
+                    Some(remaining - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(BlockstoreError::Storage(
+                storage::corekv::Error::TxnConflict,
+            ));
+        }
         self.inner.put_many(blocks).await
     }
 
@@ -770,8 +979,11 @@ fn branchable_sync_reply_event(
 }
 
 fn random_peer_id() -> PeerId {
-    let libp2p_peer = libp2p::PeerId::random();
-    PeerId::from(libp2p_peer)
+    static NEXT_PEER_ID: AtomicUsize = AtomicUsize::new(0);
+    PeerId::new(format!(
+        "test-peer-{}",
+        NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn cid_for(data: &[u8]) -> Cid {
@@ -780,32 +992,56 @@ fn cid_for(data: &[u8]) -> Cid {
 }
 
 fn pushlog_request(collection_id: &str) -> PushLogRequest {
+    let block = defra_core::Block::new(
+        defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().expect("encode composite head");
+    let cid = block.generate_cid().expect("composite head cid");
     PushLogRequest::new(
         "doc1".to_string(),
-        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
+        bytes::Bytes::from(cid.to_bytes()),
         collection_id.to_string(),
         "creator1".to_string(),
-        bytes::Bytes::copy_from_slice(BLOCK_DATA),
+        bytes::Bytes::from(block_data),
     )
 }
 
 /// A collection commit: doc-less, so it has no document topic to fall back to.
 fn collection_commit_request(collection_id: &str) -> PushLogRequest {
+    let block = defra_core::Block::new(
+        defra_core::CrdtDelta::Collection(defra_core::CollectionDeltaPayload {
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().expect("encode collection head");
+    let cid = block.generate_cid().expect("collection head cid");
     PushLogRequest::new(
         String::new(),
-        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
+        bytes::Bytes::from(cid.to_bytes()),
         collection_id.to_string(),
         "creator1".to_string(),
-        bytes::Bytes::copy_from_slice(BLOCK_DATA),
+        bytes::Bytes::from(block_data),
     )
 }
 
 fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<usize> {
+    let mut message = PushLogBroadcast::from_request(&collection_commit_request(collection_id));
+    message.authenticate_source_peer(peer_id.to_string());
+    message.authenticate_origin_peer(peer_id.to_string());
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
         topic: collection_id.to_string(),
-        message: PushLogBroadcast::from_request(&collection_commit_request(collection_id)),
+        message,
     }
 }
 
@@ -826,11 +1062,14 @@ fn gossip_event_on_topic(
     topic: &str,
     collection_id: &str,
 ) -> TransportEvent<usize> {
+    let mut message = PushLogBroadcast::from_request(&pushlog_request(collection_id));
+    message.authenticate_source_peer(peer_id.to_string());
+    message.authenticate_origin_peer(peer_id.to_string());
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
         topic: topic.to_string(),
-        message: PushLogBroadcast::from_request(&pushlog_request(collection_id)),
+        message,
     }
 }
 
@@ -850,6 +1089,18 @@ fn selective_car_fetch_event(
     TransportEvent::CarFetchRequest {
         peer_id,
         request: CarFetchRequest::selective_blocks(root_cid, wanted_cids),
+        token: None,
+    }
+}
+
+fn selective_dag_car_fetch_event(
+    peer_id: PeerId,
+    root_cid: Cid,
+    wanted_cids: Vec<Cid>,
+) -> TransportEvent<usize> {
+    TransportEvent::CarFetchRequest {
+        peer_id,
+        request: CarFetchRequest::selective_dag(root_cid, wanted_cids),
         token: None,
     }
 }
@@ -890,6 +1141,32 @@ async fn recv_block_received(
         .await
         .expect("expected sync event")
         .expect("event channel closed")
+}
+
+/// Test coordinators do not spawn the production receiver retry clock. Drive
+/// its single-owner boundary explicitly for a locally complete PushLog head.
+async fn dispatch_complete_pending<B: Blockstore + 'static, T: P2PTransport>(
+    coordinator: &SyncCoordinator<B, T>,
+) {
+    let roots = coordinator.manager().pending_dag_cids();
+    assert_eq!(roots.len(), 1, "expected one durable merge obligation");
+    let root = roots[0];
+    assert!(coordinator
+        .manager()
+        .try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+    assert!(coordinator
+        .manager()
+        .retry_pending_dag(&root)
+        .await
+        .expect("receiver clock dispatch should succeed"));
+}
+
+async fn recv_complete_pushlog<B: Blockstore + 'static, T: P2PTransport>(
+    coordinator: &SyncCoordinator<B, T>,
+    events: &mut tokio::sync::mpsc::Receiver<SyncEvent>,
+) -> SyncEvent {
+    dispatch_complete_pending(coordinator).await;
+    recv_block_received(events).await
 }
 
 // --- DocSync access check tests ---
@@ -1153,7 +1430,218 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
 }
 
 #[tokio::test]
-async fn selective_car_grant_bypasses_filtered_replicator_denial() {
+async fn duplicate_car_ingest_defers_without_waiting_for_root_owner() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let peer = random_peer_id();
+    let block_data = b"selective car block";
+    let root_cid = Cid::new_v1(0x71, Code::Sha2_256.digest(block_data));
+    let car_data =
+        crate::sync::car::encode_car(&[root_cid], &[(&root_cid, block_data.as_slice())]).unwrap();
+
+    let owner = coordinator
+        .manager()
+        .process_queue()
+        .try_acquire_nowait(&root_cid)
+        .expect("first CAR response owns the root");
+    let mut completion = coordinator
+        .manager()
+        .rooted_car_completion_tracker()
+        .register(root_cid);
+
+    coordinator
+        .handle_transport_event(TransportEvent::CarFetchResponse {
+            query_id: None,
+            peer_id: peer.clone(),
+            root_cid,
+            car_data: car_data.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completion.try_recv().unwrap(),
+        crate::sync::manager::FetchCompletion::Deferred
+    );
+    assert_eq!(
+        coordinator
+            .manager()
+            .diagnostics()
+            .snapshot()
+            .single_flight_suppressed,
+        1
+    );
+    assert!(!coordinator
+        .manager()
+        .blockstore()
+        .has(&root_cid)
+        .await
+        .unwrap());
+
+    drop(owner);
+    let completion = coordinator
+        .manager()
+        .rooted_car_completion_tracker()
+        .register(root_cid);
+    coordinator
+        .handle_transport_event(TransportEvent::CarFetchResponse {
+            query_id: None,
+            peer_id: peer,
+            root_cid,
+            car_data,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completion.await.unwrap(),
+        crate::sync::manager::FetchCompletion::Success
+    );
+    assert!(coordinator
+        .manager()
+        .blockstore()
+        .has(&root_cid)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn car_put_many_conflict_retries_before_publishing_one_success_completion() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let blockstore = Arc::new(ConflictOnceBlockstore::new_put_many());
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
+        access_mode: AccessMode::Open,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore: blockstore.clone(),
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+    let coordinator = Arc::new(coordinator);
+    let peer = random_peer_id();
+    let block_data = b"retryable selective car block";
+    let root_cid = Cid::new_v1(0x71, Code::Sha2_256.digest(block_data));
+    let car_data =
+        crate::sync::car::encode_car(&[root_cid], &[(&root_cid, block_data.as_slice())]).unwrap();
+    let completion = coordinator
+        .manager()
+        .rooted_car_completion_tracker()
+        .register(root_cid);
+
+    let ingest = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .handle_transport_event(TransportEvent::CarFetchResponse {
+                    query_id: None,
+                    peer_id: peer,
+                    root_cid,
+                    car_data,
+                })
+                .await
+        })
+    };
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), completion)
+            .await
+            .expect("final CAR completion should be published")
+            .expect("completion sender remains alive"),
+        crate::sync::manager::FetchCompletion::Success,
+        "a retriable attempt must not publish an intermediate failure",
+    );
+    ingest.await.unwrap().unwrap();
+    assert_eq!(blockstore.put_many_attempts(), 2);
+    assert!(blockstore.has(&root_cid).await.unwrap());
+}
+
+#[tokio::test]
+async fn car_fetch_allows_relayed_receiver_via_authenticated_defra_identity() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let receiver = random_peer_id();
+    let receiver_did =
+        identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let field_block = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "status".to_string(),
+            priority: 14,
+            schema_version_id: "collection1".to_string(),
+            data: b"ready".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let field_data = field_block.to_dag_cbor().unwrap();
+    let field_cid = field_block.generate_cid().unwrap();
+    blockstore.put(&field_cid, &field_data).await.unwrap();
+    let root_block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "collection1".to_string(),
+            priority: 17,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("status".to_string(), field_cid)],
+    );
+    let root_data = root_block.to_dag_cbor().unwrap();
+    let root_cid = root_block.generate_cid().unwrap();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    // A relayed receiver is neither a direct subscriber nor a configured
+    // replicator at the origin. Its authenticated DID is therefore the only
+    // authority for serving linked data blocks.
+    let serve_acp = Arc::new(LateBoundServeAcp::new());
+    serve_acp.set(ServeAcp {
+        resolver: Arc::new(FixedIdentityResolver(receiver_did.clone())),
+        gate: Arc::new(OnlyIdentityReadGate(receiver_did)),
+    });
+    let (coordinator, _events) = SyncCoordinator::with_access_control_and_serve_gate(
+        transport,
+        blockstore,
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        Arc::new(ReplicatorRegistry::new()),
+        Arc::new(NoOpCollectionStorage),
+        Arc::new(crate::replicator::EqOnlyFilterMatcher),
+        Arc::new(StaticDataClassifier {
+            collection_id: "collection1".to_string(),
+        }),
+        serve_acp,
+    )
+    .await
+    .unwrap();
+
+    coordinator
+        .handle_transport_event(selective_car_fetch_event(
+            receiver,
+            root_cid,
+            vec![field_cid],
+        ))
+        .await
+        .unwrap();
+
+    let responses = transport_handle.car_responses();
+    let (_roots, blocks) = crate::sync::car::decode_car(&responses[0]).unwrap();
+    assert_eq!(blocks, vec![(field_cid, field_data)]);
+}
+
+#[tokio::test]
+async fn derived_selective_car_authority_is_peer_and_root_scoped() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 
     let peer = random_peer_id();
@@ -1188,6 +1676,22 @@ async fn selective_car_grant_bypasses_filtered_replicator_denial() {
     let root_data = root_block.to_dag_cbor().unwrap();
     let root_cid = root_block.generate_cid().unwrap();
     blockstore.put(&root_cid, &root_data).await.unwrap();
+    let unrelated_block = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "other".to_string(),
+            priority: 1,
+            schema_version_id: "version1".to_string(),
+            data: b"unrelated".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let unrelated_data = unrelated_block.to_dag_cbor().unwrap();
+    let unrelated_cid = unrelated_block.generate_cid().unwrap();
+    blockstore
+        .put(&unrelated_cid, &unrelated_data)
+        .await
+        .unwrap();
 
     let replicators = filtered_replicator_registry(&peer, "collection1");
     let (coordinator, _events) = SyncCoordinator::with_access_control_and_serve_gate(
@@ -1215,16 +1719,11 @@ async fn selective_car_grant_bypasses_filtered_replicator_denial() {
         .await
         .unwrap();
     let responses = transport_handle.car_responses();
-    let (_roots, denied_blocks) = crate::sync::car::decode_car(&responses[0]).unwrap();
-    assert!(
-        denied_blocks.is_empty(),
-        "filtered replicators must be denied generic block reads"
-    );
-
-    let _active_push = coordinator.runtime.selective_car_access.register(
-        peer.clone(),
-        root_cid,
-        [root_cid, field_cid],
+    let (_roots, derived_blocks) = crate::sync::car::decode_car(&responses[0]).unwrap();
+    assert_eq!(
+        derived_blocks,
+        vec![(field_cid, field_data.clone())],
+        "durable replicator configuration plus the exact root must re-derive CAR authority"
     );
 
     coordinator
@@ -1239,7 +1738,22 @@ async fn selective_car_grant_bypasses_filtered_replicator_denial() {
     let (_roots, unrelated_peer_blocks) = crate::sync::car::decode_car(&responses[1]).unwrap();
     assert!(
         unrelated_peer_blocks.is_empty(),
-        "a push grant must not authorize another peer"
+        "derived root authority must not authorize another peer"
+    );
+
+    coordinator
+        .handle_transport_event(selective_car_fetch_event(
+            peer.clone(),
+            root_cid,
+            vec![unrelated_cid],
+        ))
+        .await
+        .unwrap();
+    let responses = transport_handle.car_responses();
+    let (_roots, unrelated_root_blocks) = crate::sync::car::decode_car(&responses[2]).unwrap();
+    assert!(
+        unrelated_root_blocks.is_empty(),
+        "derived root authority must not authorize an unrelated CID"
     );
 
     coordinator
@@ -1248,12 +1762,12 @@ async fn selective_car_grant_bypasses_filtered_replicator_denial() {
         .unwrap();
 
     let responses = transport_handle.car_responses();
-    let (_roots, blocks) = crate::sync::car::decode_car(&responses[2]).unwrap();
+    let (_roots, blocks) = crate::sync::car::decode_car(&responses[3]).unwrap();
     assert_eq!(blocks, vec![(field_cid, field_data)]);
 }
 
 #[tokio::test]
-async fn completed_push_allows_post_ack_selective_recovery() {
+async fn filtered_car_authority_is_rederived_after_sender_restart() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 
     let receiver = random_peer_id();
@@ -1265,6 +1779,22 @@ async fn completed_push_allows_post_ack_selective_recovery() {
 
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let previous_field = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "status".to_string(),
+            priority: 13,
+            schema_version_id: "version1".to_string(),
+            data: b"starting".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let previous_field_data = previous_field.to_dag_cbor().unwrap();
+    let previous_field_cid = previous_field.generate_cid().unwrap();
+    blockstore
+        .put(&previous_field_cid, &previous_field_data)
+        .await
+        .unwrap();
     let field_block = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
             field_name: "status".to_string(),
@@ -1272,7 +1802,7 @@ async fn completed_push_allows_post_ack_selective_recovery() {
             schema_version_id: "version1".to_string(),
             data: b"ready".to_vec(),
         }),
-        vec![],
+        vec![previous_field_cid],
         vec![],
     );
     let field_data = field_block.to_dag_cbor().unwrap();
@@ -1293,9 +1823,9 @@ async fn completed_push_allows_post_ack_selective_recovery() {
     blockstore.put(&root_cid, &root_data).await.unwrap();
 
     let replicators = filtered_replicator_registry(&receiver, "collection1");
-    let (coordinator, _events) = SyncCoordinator::with_access_control_and_serve_gate(
+    let (mut coordinator, _events) = SyncCoordinator::with_access_control_and_serve_gate(
         transport.clone(),
-        blockstore,
+        Arc::clone(&blockstore),
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
@@ -1308,6 +1838,15 @@ async fn completed_push_allows_post_ack_selective_recovery() {
     )
     .await
     .unwrap();
+    let (failure_tx, mut failure_rx) = tokio::sync::mpsc::channel(16);
+    coordinator.set_failure_channel(failure_tx);
+    tokio::spawn(async move {
+        while let Some(mut event) = failure_rx.recv().await {
+            if let Some(durable_tx) = event.durable_tx.take() {
+                let _ = durable_tx.send(true);
+            }
+        }
+    });
     let coordinator = Arc::new(coordinator);
 
     let receiver_blocks = Arc::new(RwLock::new(std::collections::HashSet::new()));
@@ -1336,8 +1875,9 @@ async fn completed_push_allows_post_ack_selective_recovery() {
     }));
 
     coordinator
-        .push_dag_to_replicators(&root_cid, &root_data, "doc1", "collection1")
-        .await;
+        .push_to_replicators(&root_cid, &root_data, "doc1", "collection1")
+        .await
+        .unwrap();
 
     let snapshot = timeout(Duration::from_secs(5), async {
         loop {
@@ -1357,10 +1897,37 @@ async fn completed_push_allows_post_ack_selective_recovery() {
     assert!(coordinator
         .runtime
         .selective_car_access
-        .allows(&receiver, &root_cid, &field_cid));
+        .allows_root(&receiver, &root_cid));
 
-    coordinator
-        .handle_transport_event(selective_car_fetch_event(
+    // A fresh coordinator has no process-local grant from the acknowledged
+    // push. It must reconstruct the exact-root authority from the persisted
+    // replicator configuration and the DB-classified requested root.
+    // Production restart begins with a cold coordinator cache. The transport
+    // owns the persisted replicator record and must repopulate the cache on
+    // demand at the CAR serve boundary.
+    let restarted_replicators = Arc::new(ReplicatorRegistry::new());
+    let (restarted, _restart_events) = SyncCoordinator::with_access_control_and_serve_gate(
+        transport.clone(),
+        blockstore,
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        restarted_replicators,
+        Arc::new(NoOpCollectionStorage),
+        Arc::new(crate::replicator::EqOnlyFilterMatcher),
+        Arc::new(StaticDataClassifier {
+            collection_id: "collection1".to_string(),
+        }),
+        Arc::new(LateBoundServeAcp::new()),
+    )
+    .await
+    .unwrap();
+    assert!(!restarted
+        .runtime
+        .selective_car_access
+        .allows_root(&receiver, &root_cid));
+
+    restarted
+        .handle_transport_event(selective_dag_car_fetch_event(
             receiver,
             root_cid,
             vec![field_cid],
@@ -1374,6 +1941,199 @@ async fn completed_push_allows_post_ack_selective_recovery() {
         receiver_blocks.write().insert(cid);
     }
     assert!(receiver_blocks.read().contains(&field_cid));
+    assert!(
+        receiver_blocks.read().contains(&previous_field_cid),
+        "one bounded frontier CAR must include linked descendants"
+    );
+}
+
+#[tokio::test]
+async fn collection_head_car_authority_is_rederived_from_transport_after_restart() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let receiver = random_peer_id();
+    let transport = NoopTransport::new();
+    transport
+        .create_replicator(&receiver, vec!["collection1".to_string()])
+        .await
+        .unwrap();
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let child = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "status".to_string(),
+            priority: 1,
+            schema_version_id: "version1".to_string(),
+            data: b"ready".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let child_data = child.to_dag_cbor().unwrap();
+    let child_cid = child.generate_cid().unwrap();
+    blockstore.put(&child_cid, &child_data).await.unwrap();
+
+    let collection_head = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "version1".to_string(),
+            priority: 2,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("member".to_string(), child_cid)],
+    );
+    let root_data = collection_head.to_dag_cbor().unwrap();
+    let root_cid = collection_head.generate_cid().unwrap();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    let identity_resolutions = Arc::new(AtomicUsize::new(0));
+    let serve_acp = Arc::new(LateBoundServeAcp::new());
+    serve_acp.set(ServeAcp {
+        resolver: Arc::new(CountingIdentityResolver(Arc::clone(&identity_resolutions))),
+        gate: Arc::new(OnlyIdentityReadGate(
+            identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap(),
+        )),
+    });
+    let (restarted, _events) = SyncCoordinator::with_access_control_and_serve_gate(
+        transport.clone(),
+        blockstore,
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        Arc::new(ReplicatorRegistry::new()),
+        Arc::new(NoOpCollectionStorage),
+        Arc::new(crate::replicator::EqOnlyFilterMatcher),
+        Arc::new(CollectionHeadClassifier {
+            collection_id: "collection1".to_string(),
+        }),
+        serve_acp,
+    )
+    .await
+    .unwrap();
+
+    assert!(!restarted
+        .runtime
+        .selective_car_access
+        .allows_root(&receiver, &root_cid));
+    restarted
+        .handle_transport_event(selective_car_fetch_event(
+            receiver.clone(),
+            root_cid,
+            vec![child_cid],
+        ))
+        .await
+        .unwrap();
+
+    let response = transport.car_responses().last().cloned().unwrap();
+    let (_roots, blocks) = crate::sync::car::decode_car(&response).unwrap();
+    assert_eq!(blocks, vec![(child_cid, child_data)]);
+    assert_eq!(
+        identity_resolutions.load(Ordering::SeqCst),
+        0,
+        "durable replicator authority must short-circuit reverse identity resolution"
+    );
+}
+
+#[tokio::test]
+async fn gossip_car_authority_is_rederived_from_acp_without_subscription_event_after_restart() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let receiver = random_peer_id();
+    let transport = NoopTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let child = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "status".to_string(),
+            priority: 1,
+            schema_version_id: "version1".to_string(),
+            data: b"ready".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let child_data = child.to_dag_cbor().unwrap();
+    let child_cid = child.generate_cid().unwrap();
+    blockstore.put(&child_cid, &child_data).await.unwrap();
+
+    let root = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "version1".to_string(),
+            priority: 2,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("status".to_string(), child_cid)],
+    );
+    let root_data = root.to_dag_cbor().unwrap();
+    let root_cid = root.generate_cid().unwrap();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+    // This is a cold sender coordinator: no volatile head-hint grant, no
+    // outbound replicator record, and deliberately no PeerSubscribed event.
+    // The authenticated requester's ACP identity plus the exact classified
+    // root must be sufficient; otherwise Iroh can race CAR recovery ahead of
+    // its gossip neighbor observation and strand a success-acked pending root.
+    let receiver_did =
+        identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+    let serve_acp = Arc::new(LateBoundServeAcp::new());
+    serve_acp.set(ServeAcp {
+        resolver: Arc::new(PeerBoundIdentityResolver {
+            peer_id: receiver.clone(),
+            identity: receiver_did.clone(),
+        }),
+        gate: Arc::new(OnlyIdentityReadGate(receiver_did)),
+    });
+    let (restarted, _events) = SyncCoordinator::with_access_control_and_serve_gate(
+        transport.clone(),
+        blockstore,
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        Arc::new(ReplicatorRegistry::new()),
+        Arc::new(NoOpCollectionStorage),
+        Arc::new(crate::replicator::EqOnlyFilterMatcher),
+        Arc::new(StaticDataClassifier {
+            collection_id: "collection1".to_string(),
+        }),
+        serve_acp,
+    )
+    .await
+    .unwrap();
+    assert!(!restarted
+        .access
+        .peer_state
+        .peer_subscribed_to_collection(receiver.as_str(), "collection1"));
+    assert!(!restarted
+        .runtime
+        .selective_car_access
+        .allows_root(&receiver, &root_cid));
+
+    restarted
+        .handle_transport_event(selective_car_fetch_event(
+            receiver.clone(),
+            root_cid,
+            vec![child_cid],
+        ))
+        .await
+        .unwrap();
+
+    let response = transport.car_responses().last().cloned().unwrap();
+    let (_roots, blocks) = crate::sync::car::decode_car(&response).unwrap();
+    assert_eq!(blocks, vec![(child_cid, child_data)]);
+
+    restarted
+        .handle_transport_event(selective_car_fetch_event(
+            random_peer_id(),
+            root_cid,
+            vec![child_cid],
+        ))
+        .await
+        .unwrap();
+    let response = transport.car_responses().last().cloned().unwrap();
+    let (_roots, blocks) = crate::sync::car::decode_car(&response).unwrap();
+    assert!(
+        blocks.is_empty(),
+        "a requester denied by ACP must not inherit another peer's rooted authority"
+    );
 }
 
 #[tokio::test]
@@ -1720,6 +2480,39 @@ async fn pushlog_controlled_mode_rejects_non_replicator_connected_peer() {
 }
 
 #[tokio::test]
+async fn committed_head_marker_failure_is_returned_before_queue_admission() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    let block = defra_core::Block::new(
+        defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
+            schema_version_id: "collection1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+
+    let error = coordinator
+        .push_to_replicators(&cid, &data, "doc1", "collection1")
+        .await
+        .expect_err("a missing durable recorder must fail the committed head handoff");
+    assert!(matches!(error, Error::DurableHeadMarker(_)));
+    let snapshot = coordinator.sync_status().push_backlog;
+    assert_eq!(snapshot.head_hints_failed_local, 1);
+    assert_eq!(snapshot.enqueued_total, 0);
+}
+
+#[tokio::test]
 async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -1739,8 +2532,8 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -1751,7 +2544,7 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
                 "collection subscription should not mark the source as an explicit replicator"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -1770,8 +2563,8 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -1782,7 +2575,7 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
                 "registered replicator should preserve explicit replicator trust"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -1804,8 +2597,8 @@ async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_re
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -1816,7 +2609,7 @@ async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_re
                 "ordinary direct replicator pushes should not imply explicit replay trust"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -1834,8 +2627,8 @@ async fn two_stream_controlled_mode_accepts_unknown_peer() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -1846,7 +2639,7 @@ async fn two_stream_controlled_mode_accepts_unknown_peer() {
                 "two-stream transport auth and explicit replay trust remain separate"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -1870,8 +2663,8 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -1882,7 +2675,7 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
                 "collection subscription should not mark two-stream senders as explicit replicators"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -1932,6 +2725,48 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
         "gossip on a subscribed collection must be accepted, got {:?}",
         result
     );
+}
+
+#[tokio::test]
+async fn gossip_relay_cannot_confer_explicit_replicator_trust_on_origin() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let relay = random_peer_id();
+    let origin = random_peer_id();
+    replicators.add_replicator("collection1", relay.as_str());
+    peer_state.peer_connected(relay.as_str());
+    peer_state.peer_connected(origin.as_str());
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let mut event = gossip_event(relay.clone(), "collection1");
+    let TransportEvent::GossipMessage { message, .. } = &mut event else {
+        unreachable!("gossip helper must create gossip event");
+    };
+    message.authenticate_origin_peer(origin.to_string());
+
+    coordinator.handle_transport_event(event).await.unwrap();
+
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(origin.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "the relay's configured status must not authorize a different origin"
+            );
+        }
+        other => panic!("expected DagReady, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2277,8 +3112,8 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
         .await
         .unwrap();
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady {
             sender_peer,
             is_explicit_replicator,
             ..
@@ -2289,7 +3124,7 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
                 "authenticated two-stream explicit replicator push should preserve explicit trust"
             );
         }
-        other => panic!("expected BlockReceived, got {:?}", other),
+        other => panic!("expected DagReady, got {:?}", other),
     }
 }
 
@@ -2354,11 +3189,11 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
         .unwrap();
 
     assert_eq!(blockstore.put_attempts(), 2);
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived { sender_peer, .. } => {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected BlockReceived after retry, got {:?}", other),
+        other => panic!("expected DagReady after retry, got {:?}", other),
     }
 }
 
@@ -2392,24 +3227,122 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
         .unwrap();
 
     assert_eq!(blockstore.put_attempts(), 2);
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived { sender_peer, .. } => {
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected BlockReceived after gossip retry, got {:?}", other),
+        other => panic!("expected DagReady after gossip retry, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn concurrent_same_cid_pushlog_and_car_have_one_storage_owner() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let blockstore = Arc::new(SingleOwnerBlockstore::new());
+
+    let (coordinator, mut events) =
+        create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
+            access_mode: AccessMode::Open,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore: blockstore.clone(),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        });
+    let coordinator = Arc::new(coordinator);
+    let peer = random_peer_id();
+    let request = pushlog_request("collection1");
+    let root_cid = Cid::try_from(request.cid.as_ref()).expect("request CID");
+    let root_data = request.block.clone();
+    let car_data = crate::sync::car::encode_car(&[root_cid], &[(&root_cid, root_data.as_ref())])
+        .expect("encode test CAR");
+    let query_id = QueryId(88);
+    let mut completion = Box::pin(
+        coordinator
+            .manager()
+            .block_sync_completion_tracker()
+            .register(query_id),
+    );
+
+    let push = {
+        let coordinator = Arc::clone(&coordinator);
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            coordinator
+                .handle_transport_event(TransportEvent::PushLogRequest {
+                    peer_id: peer,
+                    request,
+                    token: 0,
+                })
+                .await
+        })
+    };
+    blockstore
+        .first_write_entered
+        .acquire()
+        .await
+        .expect("first write observation semaphore remains open")
+        .forget();
+
+    let car = {
+        let coordinator = Arc::clone(&coordinator);
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            coordinator
+                .handle_transport_event(TransportEvent::CarFetchResponse {
+                    query_id: Some(query_id),
+                    peer_id: peer,
+                    root_cid,
+                    car_data,
+                })
+                .await
+        })
+    };
+
+    assert!(
+        timeout(
+            Duration::from_millis(25),
+            blockstore.concurrent_write_entered.acquire()
+        )
+        .await
+        .is_err(),
+        "CAR storage must wait behind the PushLog owner for the same root"
+    );
+    car.await.unwrap().unwrap();
+    assert_eq!(
+        timeout(Duration::from_millis(250), &mut completion)
+            .await
+            .expect("contended CAR should receive a prompt retry signal")
+            .expect("completion sender remains alive"),
+        crate::sync::manager::FetchCompletion::Deferred,
+        "contended CAR must defer without reporting provider failure or durable success",
+    );
+    blockstore.release_first_write.add_permits(1);
+
+    push.await.unwrap().unwrap();
+    assert_eq!(blockstore.max_active_writes(), 1);
+    dispatch_complete_pending(&coordinator).await;
+    assert!(matches!(
+        events.try_recv().expect("receiver clock emits merge event"),
+        SyncEvent::DagReady { root_cid: cid, .. } if cid == root_cid
+    ));
 }
 
 // --- #1088 W1/W4: intake backpressure nacks (re-land #592, regressed by fa4a84f7) ---
 //
 // The M1 invariant: a success PushLogReply implies the pushed block is either
 // merged or registered as pending on the hub. Both rejection classes must reply
-// a byte-exact sentinel so the pusher's backoff consumer
-// (send_ordered_pushlogs_via_transport) and persisted retry ladder keep the doc
-// queued instead of laundering the failure as success — but they are DISTINCT
-// sentinels (defradb#1112): rate limiting is a pacing condition the pusher may
-// retry through, while capacity saturation is peer-wide and structural, so the
-// sender must stop and park the peer rather than resend into a full receiver.
+// a byte-exact sentinel so the sender retains its durable scope marker instead
+// of laundering the failure as success. They remain distinct sentinels for
+// observability; neither starts an in-process resend loop.
 
 /// A PushLog request whose composite block links to a field block that is never
 /// stored, so `process_pushlog` must register a pending DAG to track it.
@@ -2650,6 +3583,39 @@ async fn pushlog_request_rate_limited_replies_backpressure_nack() {
 }
 
 #[tokio::test]
+async fn saturated_request_worker_replies_with_actionable_capacity_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event_with_admission(
+            pushlog_event(peer, "collection1"),
+            crate::sync::DispatchAdmission::Saturated,
+        )
+        .await;
+    assert!(result.is_err(), "saturated work must not be admitted");
+
+    let reply = transport
+        .pushlog_replies()
+        .pop()
+        .expect("capacity nack sent");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::AT_CAPACITY_MESSAGE)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), events.recv())
+            .await
+            .is_err(),
+        "rejected work must not reach receiver ownership"
+    );
+}
+
+#[tokio::test]
 async fn two_stream_rate_limited_replies_backpressure_nack() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -2877,10 +3843,12 @@ async fn doc_sync_reply_starts_independent_dag_roots_concurrently() {
         .unwrap();
     let first_root = cid_for(b"first root");
     let second_root = cid_for(b"second root");
+    let peer = random_peer_id();
+    transport_handle.set_connected_peers(vec![peer.clone()]);
 
     coordinator
         .handle_transport_event(TransportEvent::DocSyncReply {
-            peer_id: random_peer_id(),
+            peer_id: peer,
             reply: DocSyncReply::success(
                 "doc-sync-1",
                 vec![

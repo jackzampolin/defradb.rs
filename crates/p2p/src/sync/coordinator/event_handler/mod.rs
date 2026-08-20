@@ -12,7 +12,7 @@ use blockstore::Blockstore;
 use std::time::Duration;
 
 use super::SyncCoordinator;
-use crate::error::{Error, Result, RATE_LIMITED_MESSAGE};
+use crate::error::{Error, Result, AT_CAPACITY_MESSAGE, RATE_LIMITED_MESSAGE};
 use crate::message::{BranchableSyncReply, DocSyncReply, PushLogReply};
 use crate::signing::sign_with_transport;
 use crate::sync::rate_limiter::RateLimitDecision;
@@ -29,15 +29,19 @@ fn retriable_event_delay(attempt: usize) -> Duration {
 }
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
-    async fn retry_retriable_event<F, Fut>(&self, event_kind: &'static str, mut op: F) -> Result<()>
+    async fn retry_retriable_event<F, Fut, Output>(
+        &self,
+        event_kind: &'static str,
+        mut op: F,
+    ) -> Result<Output>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
+        Fut: std::future::Future<Output = Result<Output>>,
     {
         let mut attempt = 1;
         loop {
             match op().await {
-                Ok(()) => return Ok(()),
+                Ok(output) => return Ok(output),
                 Err(error) if error.is_retriable() && attempt < MAX_RETRIABLE_EVENT_ATTEMPTS => {
                     tracing::debug!(
                         event_kind,
@@ -103,6 +107,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
+    fn saturated_error(peer_id: &PeerId) -> Error {
+        Error::AccessDenied {
+            peer_id: peer_id.to_string(),
+            collection_id: "request-worker-saturated".into(),
+        }
+    }
+
     /// Consume one token from `limiter` for `peer_id`, returning the
     /// synthetic rate-limit error when the peer is over budget.
     ///
@@ -111,7 +122,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// ladder; request events are nacked with `RATE_LIMITED_MESSAGE` (via the
     /// `reject_rate_limited_*` helpers) and use the paced limiter, whose
     /// retry horizon is ~one token refill — a long lockout here wedges any
-    /// full-DAG push deeper than the burst (see `p2p_deep_catchup`).
+    /// receiver-owned recovery deeper than the burst (see `p2p_deep_catchup`).
     /// Nack-on-overload is the Go-aligned behavior: Go's direct replicator
     /// channel drives its retry ladder off error replies; overload replies
     /// are orthogonal to its trust/ACP bypasses.
@@ -139,13 +150,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
-    async fn reject_rate_limited_pushlog(
+    async fn reject_pushlog(
         &self,
         message_id: &str,
         token: T::ResponseToken,
+        reply_message: &str,
         error: Error,
     ) -> Error {
-        let reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
+        let reply = PushLogReply::error(message_id, reply_message);
         // Best-effort: if the nack cannot be sent, the pusher times out and
         // lands in the same retry path; no state was discarded.
         if let Err(send_err) = self
@@ -159,15 +171,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error
     }
 
-    async fn reject_rate_limited_two_stream(
+    async fn reject_two_stream(
         &self,
         peer_id: &PeerId,
         message_id: &str,
         token: Option<T::ResponseToken>,
         supports_same_stream_reply: bool,
+        reply_message: &str,
         error: Error,
     ) -> Error {
-        let mut reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
+        let mut reply = PushLogReply::error(message_id, reply_message);
         // Best-effort: send_two_stream_reply logs its own failures; an unsent
         // nack degrades to a pusher-side timeout on the same retry path.
         if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
@@ -178,14 +191,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error
     }
 
-    async fn reject_rate_limited_doc_sync(
+    async fn reject_doc_sync(
         &self,
         peer_id: &PeerId,
         message_id: &str,
         token: Option<T::ResponseToken>,
+        reply_message: &str,
         error: Error,
     ) -> Error {
-        let mut reply = DocSyncReply::error(message_id, RATE_LIMITED_MESSAGE);
+        let mut reply = DocSyncReply::error(message_id, reply_message);
         if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
             tracing::debug!(error = %sign_err, "Failed to sign DocSync backpressure nack");
         }
@@ -206,15 +220,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error
     }
 
-    async fn reject_rate_limited_branchable_sync(
+    async fn reject_branchable_sync(
         &self,
         peer_id: &PeerId,
         message_id: &str,
         collection_id: &str,
         token: Option<T::ResponseToken>,
+        reply_message: &str,
         error: Error,
     ) -> Error {
-        let mut reply = BranchableSyncReply::error(message_id, collection_id, RATE_LIMITED_MESSAGE);
+        let mut reply = BranchableSyncReply::error(message_id, collection_id, reply_message);
         if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
             tracing::debug!(error = %sign_err, "Failed to sign BranchableSync backpressure nack");
         }
@@ -235,7 +250,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error
     }
 
-    async fn reject_rate_limited_car_fetch(
+    async fn reject_car_fetch(
         &self,
         peer_id: &PeerId,
         token: Option<T::ResponseToken>,
@@ -258,6 +273,149 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             tracing::debug!(error = %send_err, "Failed to send CAR backpressure rejection");
         }
         error
+    }
+
+    /// Apply the shared request-worker admission result. Saturated requests
+    /// are rejected immediately; terminal, reply, and state events never take
+    /// this path and therefore cannot be hidden behind request work.
+    pub async fn handle_transport_event_with_admission(
+        &self,
+        event: TransportEvent<T::ResponseToken>,
+        admission: crate::sync::DispatchAdmission,
+    ) -> Result<()> {
+        if admission == crate::sync::DispatchAdmission::Admitted {
+            return self.handle_transport_event(event).await;
+        }
+
+        let event_kind = event.kind();
+        tracing::debug!(event_kind, "Rejecting transport request at worker capacity");
+        match event {
+            TransportEvent::PushLogRequest {
+                peer_id,
+                request,
+                token,
+            } => {
+                let error = Self::saturated_error(&peer_id);
+                Err(self
+                    .reject_pushlog(&request.message_id, token, AT_CAPACITY_MESSAGE, error)
+                    .await)
+            }
+            TransportEvent::TwoStreamRequest {
+                peer_id,
+                request,
+                token,
+                ..
+            } => {
+                let supports_same_stream_reply = request.supports_same_stream_reply;
+                let error = Self::saturated_error(&peer_id);
+                Err(self
+                    .reject_two_stream(
+                        &peer_id,
+                        &request.message_id,
+                        token,
+                        supports_same_stream_reply,
+                        AT_CAPACITY_MESSAGE,
+                        error,
+                    )
+                    .await)
+            }
+            TransportEvent::DocSyncRequest {
+                peer_id,
+                request,
+                token,
+            } => {
+                let error = Self::saturated_error(&peer_id);
+                Err(self
+                    .reject_doc_sync(
+                        &peer_id,
+                        &request.message_id,
+                        token,
+                        AT_CAPACITY_MESSAGE,
+                        error,
+                    )
+                    .await)
+            }
+            TransportEvent::BranchableSyncRequest {
+                peer_id,
+                request,
+                token,
+            } => {
+                let error = Self::saturated_error(&peer_id);
+                Err(self
+                    .reject_branchable_sync(
+                        &peer_id,
+                        &request.message_id,
+                        &request.collection_id,
+                        token,
+                        AT_CAPACITY_MESSAGE,
+                        error,
+                    )
+                    .await)
+            }
+            TransportEvent::CarFetchRequest { peer_id, token, .. } => {
+                let error = Self::saturated_error(&peer_id);
+                Err(self.reject_car_fetch(&peer_id, token, error).await)
+            }
+            TransportEvent::GossipMessage {
+                propagation_source, ..
+            }
+            | TransportEvent::GossipRawMessage {
+                propagation_source, ..
+            } => Err(Self::saturated_error(&propagation_source)),
+            TransportEvent::SEQueryRequest { peer_id, request } => {
+                let error = Self::saturated_error(&peer_id);
+                let reply = crate::message::QuerySEArtifactsReply::error(
+                    &request.message_id,
+                    AT_CAPACITY_MESSAGE,
+                );
+                if let Err(send_error) = self
+                    .runtime
+                    .transport
+                    .send_se_query_response(&peer_id, reply)
+                    .await
+                {
+                    tracing::debug!(%peer_id, error = %send_error, "Failed to send SE query capacity nack");
+                }
+                Err(error)
+            }
+            TransportEvent::ManageRequest { peer_id, request } => {
+                let error = Self::saturated_error(&peer_id);
+                let reply =
+                    crate::message::ManageReply::error(&request.message_id, AT_CAPACITY_MESSAGE);
+                if let Err(send_error) = self
+                    .runtime
+                    .transport
+                    .send_manage_response(&peer_id, reply)
+                    .await
+                {
+                    tracing::debug!(%peer_id, error = %send_error, "Failed to send management capacity nack");
+                }
+                Err(error)
+            }
+            TransportEvent::ManageQueryRequest { peer_id, request } => {
+                let error = Self::saturated_error(&peer_id);
+                let reply = crate::message::ManageQueryReply::error(
+                    &request.message_id,
+                    AT_CAPACITY_MESSAGE,
+                );
+                if let Err(send_error) = self
+                    .runtime
+                    .transport
+                    .send_manage_query_response(&peer_id, reply)
+                    .await
+                {
+                    tracing::debug!(%peer_id, error = %send_error, "Failed to send management query capacity nack");
+                }
+                Err(error)
+            }
+            TransportEvent::SEArtifactsReceived { peer_id, .. } => {
+                // The Iroh form is fire-and-forget and the legacy libp2p ack is
+                // owned by the runtime adapter. Dropping this bounded request
+                // closes that attempt; the sender's durable marker retries it.
+                Err(Self::saturated_error(&peer_id))
+            }
+            other => self.handle_transport_event(other).await,
+        }
     }
 
     /// Handle an event from the transport layer.
@@ -324,7 +482,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "PushLogRequest",
                 ) {
                     return Err(self
-                        .reject_rate_limited_pushlog(&request.message_id, token, error)
+                        .reject_pushlog(&request.message_id, token, RATE_LIMITED_MESSAGE, error)
                         .await);
                 }
                 self.handle_pushlog_request(peer_id, request, token).await?;
@@ -343,11 +501,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "TwoStreamRequest",
                 ) {
                     return Err(self
-                        .reject_rate_limited_two_stream(
+                        .reject_two_stream(
                             &peer_id,
                             &request.message_id,
                             token,
                             supports_same_stream_reply,
+                            RATE_LIMITED_MESSAGE,
                             error,
                         )
                         .await);
@@ -390,7 +549,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "DocSyncRequest",
                 ) {
                     return Err(self
-                        .reject_rate_limited_doc_sync(&peer_id, &request.message_id, token, error)
+                        .reject_doc_sync(
+                            &peer_id,
+                            &request.message_id,
+                            token,
+                            RATE_LIMITED_MESSAGE,
+                            error,
+                        )
                         .await);
                 }
                 self.handle_doc_sync_request(peer_id, request, token)
@@ -410,11 +575,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "BranchableSyncRequest",
                 ) {
                     return Err(self
-                        .reject_rate_limited_branchable_sync(
+                        .reject_branchable_sync(
                             &peer_id,
                             &request.message_id,
                             &request.collection_id,
                             token,
+                            RATE_LIMITED_MESSAGE,
                             error,
                         )
                         .await);
@@ -435,22 +601,64 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     &peer_id,
                     "CarFetchRequest",
                 ) {
-                    return Err(self
-                        .reject_rate_limited_car_fetch(&peer_id, token, error)
-                        .await);
+                    return Err(self.reject_car_fetch(&peer_id, token, error).await);
                 }
                 self.handle_car_fetch_request(peer_id, request, token)
                     .await?;
             }
             TransportEvent::CarFetchResponse {
+                query_id,
                 peer_id,
                 root_cid,
                 car_data,
             } => {
-                self.retry_retriable_event("car_fetch_response", || {
-                    self.handle_car_fetch_response(peer_id.clone(), root_cid, car_data.clone())
-                })
-                .await?;
+                let has_blocks = crate::sync::car::car_has_any_block(&car_data);
+                let result = self
+                    .retry_retriable_event("car_fetch_response", || {
+                        self.handle_car_fetch_response(peer_id.clone(), root_cid, car_data.clone())
+                    })
+                    .await;
+                let disposition = result.as_ref().ok().copied();
+                match disposition {
+                    Some(car::CarIngestDisposition::Completed) => {
+                        self.manager
+                            .rooted_car_completion_tracker()
+                            .complete(root_cid, true);
+                    }
+                    Some(car::CarIngestDisposition::Busy) => {
+                        self.manager.rooted_car_completion_tracker().defer(root_cid);
+                    }
+                    None => {
+                        self.manager
+                            .rooted_car_completion_tracker()
+                            .complete(root_cid, false);
+                    }
+                }
+                // Iroh block-sync success is query-correlated with the CAR
+                // response and becomes observable only after response storage.
+                // Header-only responses retain the transport's aggregate
+                // failure completion after all providers have answered.
+                if let Some(query_id) = query_id {
+                    if has_blocks {
+                        match disposition {
+                            Some(car::CarIngestDisposition::Completed) => {
+                                self.handle_bitswap_complete(query_id, true, None).await?;
+                            }
+                            Some(car::CarIngestDisposition::Busy) => {
+                                self.handle_bitswap_deferred(query_id).await?;
+                            }
+                            None => {
+                                self.handle_bitswap_complete(
+                                    query_id,
+                                    false,
+                                    result.as_ref().err().map(ToString::to_string),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+                result.map(|_| ())?;
             }
             other => {
                 let _ = other;
@@ -753,6 +961,141 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn gossip_root_only_relay_cannot_become_durable_recovery_provider() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("origin-peer".to_string());
+        message.authenticate_origin_peer("origin-peer".to_string());
+        message.authenticate_source_peer("relay-peer".to_string());
+
+        let result = coordinator
+            .handle_gossip_message(
+                PeerId::new("relay-peer".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(crate::error::Error::Unauthorized(_))));
+        assert!(events.try_recv().is_err());
+        assert!(pending_store.load_all().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gossip_routable_authenticated_origin_is_the_durable_recovery_provider() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        coordinator.access.peer_state.peer_connected("origin-peer");
+        coordinator
+            .access
+            .peer_state
+            .peer_connected("root-only-peer");
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        coordinator
+            .access
+            .peer_state
+            .peer_has_cid("root-only-peer", root_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("origin-peer".to_string());
+        message.authenticate_origin_peer("origin-peer".to_string());
+        message.authenticate_source_peer("relay-peer".to_string());
+
+        coordinator
+            .handle_gossip_message(
+                PeerId::new("relay-peer".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await
+            .expect("head hint should register receiver ownership");
+
+        assert!(events.try_recv().is_err());
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now()),
+            1
+        );
+        match events.try_recv().expect("clock-driven DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                sender_peer,
+                providers,
+                ..
+            } => {
+                assert_eq!(event_root, root_cid);
+                assert_eq!(sender_peer.as_deref(), Some("origin-peer"));
+                assert_eq!(providers, vec!["origin-peer".to_string()]);
+            }
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+
+        let records = pending_store.load_all().await.expect("load pending roots");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, root_cid);
+        assert_eq!(records[0].1.source_peer.as_deref(), Some("origin-peer"));
+    }
+
+    #[tokio::test]
+    async fn unsigned_gossip_origin_cannot_become_a_durable_recovery_provider() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("forged-origin".to_string());
+
+        let result = coordinator
+            .handle_gossip_message(
+                PeerId::new("authenticated-relay".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await;
+        assert!(matches!(result, Err(crate::error::Error::Unauthorized(_))));
+        assert!(events.try_recv().is_err());
+        assert!(pending_store.load_all().await.unwrap().is_empty());
+    }
+
     /// #1116 stage 2: a peer connect must not dispatch `DagNeedsFetch`
     /// directly anymore — it only expedites the root's retry clock, and the
     /// clock (a single dispatch site) performs the actual fetch. This
@@ -782,9 +1125,12 @@ mod tests {
             .await
             .expect("root pushlog");
 
-        // Registration claims its own immediate dispatch (#1116 stage 2);
-        // drain that event and use its dispatched count as the baseline.
-        match events.try_recv().expect("initial DagNeedsFetch event") {
+        assert!(events.try_recv().is_err());
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now()),
+            1
+        );
+        match events.try_recv().expect("clock-driven DagNeedsFetch event") {
             SyncEvent::DagNeedsFetch {
                 root_cid: event_root,
                 ..
@@ -825,7 +1171,7 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].0, root_cid);
         for (due_root, dag) in &due {
-            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+            coordinator.dispatch_pending_dag_fetch_for_test(*due_root, dag);
         }
         match events.try_recv().expect("redrive DagNeedsFetch event") {
             SyncEvent::DagNeedsFetch {
@@ -895,8 +1241,15 @@ mod tests {
             .await
             .expect("root pushlog");
 
-        // Registration claims its own immediate dispatch (#1116 stage 2).
-        match events.try_recv().expect("initial DagNeedsFetch event") {
+        assert!(events.try_recv().is_err());
+        let before_clock = coordinator.sync_status();
+        assert_eq!(before_clock.pending_dag_retry_dispatched, 0);
+        assert!(before_clock.next_pending_retry_in_ms.is_some());
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(tokio::time::Instant::now()),
+            1
+        );
+        match events.try_recv().expect("clock-driven DagNeedsFetch event") {
             SyncEvent::DagNeedsFetch {
                 root_cid: event_root,
                 ..
@@ -920,8 +1273,8 @@ mod tests {
             .try_claim_pending_dag_dispatch(&root_cid, tokio::time::Instant::now()));
         assert_eq!(coordinator.sync_status().pending_dag_retry_suppressed, 1);
 
-        // Feed the missing field block: the DAG completes and drains from
-        // the pending map, so the clock has nothing left to report.
+        // Feed the missing field block: the DAG is ready, but remains owned
+        // by the same clock until merge/mark reaches a terminal outcome.
         blockstore
             .put(&field_cid, &field_block)
             .await
@@ -940,6 +1293,60 @@ mod tests {
             other => panic!("expected DagReady, got {other:?}"),
         }
 
-        assert_eq!(coordinator.sync_status().next_pending_retry_in_ms, None);
+        assert!(
+            coordinator.sync_status().next_pending_retry_in_ms.is_some(),
+            "a complete but unmerged receiver obligation remains scheduled"
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_clock_does_not_claim_behind_the_fetch_task_bound() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let config = SyncConfig {
+            max_concurrent_dag_fetches: 1,
+            ..SyncConfig::default()
+        };
+        let (coordinator, mut events) = SyncCoordinator::new(transport, blockstore, config)
+            .await
+            .expect("coordinator");
+
+        for (doc_id, field_name) in [("doc-1", "name"), ("doc-2", "age")] {
+            let (field_cid, _field_block) = create_lww_block(field_name);
+            let (root_cid, root_block) = create_composite_block(doc_id, field_name, field_cid);
+            coordinator
+                .manager()
+                .process_pushlog(
+                    &make_broadcast(doc_id, root_cid, root_block, "collection1"),
+                    Some("peer-1"),
+                    false,
+                    None,
+                )
+                .await
+                .expect("durably register pending root");
+        }
+
+        let retained_before = coordinator.sync_status().retained_background_tasks;
+        let now = tokio::time::Instant::now();
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(now),
+            1
+        );
+        assert_eq!(
+            coordinator.dispatch_due_pending_dag_fetches_for_test(now),
+            0,
+            "the second root must remain due instead of queueing behind the owner"
+        );
+        assert_eq!(coordinator.sync_status().pending_dag_retry_dispatched, 1);
+        assert_eq!(
+            coordinator.sync_status().retained_background_tasks,
+            retained_before + 1
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SyncEvent::DagNeedsFetch { .. })
+        ));
+        assert!(events.try_recv().is_err());
     }
 }

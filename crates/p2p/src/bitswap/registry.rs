@@ -194,11 +194,14 @@ impl ReplicatorRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use crate::replicator::{ReplicationFilter, ReplicationFilters};
 
     fn random_peer_id() -> String {
-        libp2p::PeerId::random().to_string()
+        static NEXT_PEER_ID: AtomicU64 = AtomicU64::new(0);
+        format!("test-peer-{}", NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed))
     }
 
     #[test]
@@ -330,38 +333,44 @@ mod tests {
     #[test]
     fn test_replicator_registry_load_from_infos() {
         let registry = ReplicatorRegistry::new();
-        let peer1 = libp2p::PeerId::random();
-        let peer2 = libp2p::PeerId::random();
+        let peer1 = random_peer_id();
+        let peer2 = random_peer_id();
 
         let infos = vec![
-            ReplicatorInfo::new(peer1, vec!["users".to_string(), "posts".to_string()]).unwrap(),
-            ReplicatorInfo::new(peer2, vec!["comments".to_string()]).unwrap(),
+            ReplicatorInfo::from_raw(
+                peer1.clone(),
+                vec!["users".to_string(), "posts".to_string()],
+                vec![],
+            ),
+            ReplicatorInfo::from_raw(peer2.clone(), vec!["comments".to_string()], vec![]),
         ];
 
         let (loaded, skipped) = registry.load_from_infos(&infos);
         assert_eq!(loaded, 2);
         assert_eq!(skipped, 0);
 
-        let p1 = peer1.to_string();
-        let p2 = peer2.to_string();
-        assert!(registry.is_replicator("users", &p1));
-        assert!(registry.is_replicator("posts", &p1));
-        assert!(!registry.is_replicator("comments", &p1));
+        assert!(registry.is_replicator("users", &peer1));
+        assert!(registry.is_replicator("posts", &peer1));
+        assert!(!registry.is_replicator("comments", &peer1));
 
-        assert!(registry.is_replicator("comments", &p2));
-        assert!(!registry.is_replicator("users", &p2));
+        assert!(registry.is_replicator("comments", &peer2));
+        assert!(!registry.is_replicator("users", &peer2));
     }
 
     #[test]
     fn test_replicator_registry_load_clears_existing() {
         let registry = ReplicatorRegistry::new();
         let peer1 = random_peer_id();
-        let peer2 = libp2p::PeerId::random();
+        let peer2 = random_peer_id();
 
         registry.add_replicator("users", &peer1);
         assert!(registry.is_replicator("users", &peer1));
 
-        let infos = vec![ReplicatorInfo::new(peer2, vec!["comments".to_string()]).unwrap()];
+        let infos = vec![ReplicatorInfo::from_raw(
+            peer2.clone(),
+            vec!["comments".to_string()],
+            vec![],
+        )];
         let (loaded, skipped) = registry.load_from_infos(&infos);
         assert_eq!(loaded, 1);
         assert_eq!(skipped, 0);
@@ -369,7 +378,7 @@ mod tests {
         assert!(!registry.is_replicator("users", &peer1));
         assert!(!registry.is_any_replicator(&peer1));
 
-        assert!(registry.is_replicator("comments", &peer2.to_string()));
+        assert!(registry.is_replicator("comments", &peer2));
     }
 
     #[test]

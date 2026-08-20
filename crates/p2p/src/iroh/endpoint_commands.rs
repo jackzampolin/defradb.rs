@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
-use crate::message::{PushLogBroadcast, PushLogReply};
+use crate::message::PushLogBroadcast;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
@@ -19,15 +19,65 @@ use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
 use super::endpoint::{
     peer_direct_addr, snapshot_subscription_senders, track_task, ActiveSync, EndpointResources,
-    SpawnedTasks, SubscriptionSenders, TopicSubscription,
+    PendingPushLogReplies, SpawnedTasks, SubscriptionSenders, TopicSubscription,
 };
 use super::endpoint_rpc::{
     close_peer_connections, handle_block_sync, handle_car_request_response, handle_fire_and_forget,
     handle_request_response, handle_send_only, handle_two_stream_request, BlockSyncResources,
 };
+use super::endpoint_streams::ConnectionStreamContext;
 use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
+
+/// Authenticate the endpoint that originated a PushLog gossip envelope.
+///
+/// Iroh's `delivered_from` authenticates only the last hop. New publishers
+/// therefore sign the canonical envelope with their endpoint key. The signed
+/// origin proves who emitted the hint. The connected hop is retained only as
+/// ingress metadata: a gossip relay may not own the linked DAG. During a
+/// rolling upgrade, an unsigned envelope is accepted only when Iroh proves it
+/// arrived directly from its publisher; any payload `SourcePeerID` is ignored.
+fn authenticate_pushlog_origin(
+    broadcast: &mut PushLogBroadcast,
+    delivered_from: &iroh::EndpointId,
+    is_direct: bool,
+) -> crate::error::Result<iroh::EndpointId> {
+    match (
+        broadcast.source_peer_id.as_deref(),
+        broadcast.origin_signature.as_deref(),
+    ) {
+        (Some(claimed_source), Some(signature_bytes)) => {
+            let origin: iroh::EndpointId =
+                claimed_source
+                    .parse()
+                    .map_err(|error: iroh::KeyParsingError| {
+                        crate::error::Error::InvalidPeerId(error.to_string())
+                    })?;
+            let signature = iroh::Signature::try_from(signature_bytes)
+                .map_err(|_| crate::error::Error::InvalidSignature)?;
+            let signing_bytes = broadcast.origin_signing_bytes()?;
+            origin
+                .verify(&signing_bytes, &signature)
+                .map_err(|_| crate::error::Error::InvalidSignature)?;
+            broadcast.authenticate_origin_peer(origin.to_string());
+            broadcast.authenticate_source_peer(delivered_from.to_string());
+            Ok(origin)
+        }
+        (_, Some(_)) => Err(crate::error::Error::InvalidSignature),
+        (_, None) if is_direct => {
+            let origin = *delivered_from;
+            // Never retain an unsigned payload claim, even on the compatible
+            // direct path. Iroh's authenticated delivery metadata is the
+            // authority in this case.
+            broadcast.source_peer_id = Some(origin.to_string());
+            broadcast.authenticate_origin_peer(origin.to_string());
+            broadcast.authenticate_source_peer(origin.to_string());
+            Ok(origin)
+        }
+        (_, None) => Err(crate::error::Error::MissingSignature),
+    }
+}
 
 /// Handle a command from `IrohTransport`.
 ///
@@ -36,9 +86,7 @@ use super::protocols;
 pub(super) async fn handle_command(
     cmd: IrohCommand,
     resources: &EndpointResources,
-    pending_pushlog_replies: &Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
+    pending_pushlog_replies: &PendingPushLogReplies,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     raw_topics: &Arc<parking_lot::Mutex<HashSet<String>>>,
     replicators: &Arc<ReplicatorRegistry>,
@@ -110,6 +158,28 @@ pub(super) async fn handle_command(
         IrohCommand::NetworkChange { reply } => {
             endpoint.network_change().await;
             let _ = reply.send(Ok(()));
+        }
+        IrohCommand::ResolvePeerIdentity {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_request_response(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_IDENTITY,
+                    &request,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::Subscribe { topic, reply } => {
             let result =
@@ -672,8 +742,7 @@ pub(super) async fn handle_command(
 /// snapshot (the only previously-borrowed field).
 struct DialContext {
     resources: EndpointResources,
-    pending_pushlog_replies:
-        Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: PendingPushLogReplies,
     subscription_senders: SubscriptionSenders,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 }
@@ -741,19 +810,17 @@ async fn handle_dial(
     }
 
     // Keep connection alive by spawning a handler for incoming streams.
-    let event_tx = ctx.event_tx.clone();
-    let peer_map = Arc::clone(&ctx.resources.peer_map);
-    let pending_pushlog_replies = Arc::clone(&ctx.pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(&ctx.resources.spawned_tasks);
+    let stream_context = ConnectionStreamContext::new(
+        &ctx.resources,
+        Arc::clone(&ctx.pending_pushlog_replies),
+        ctx.event_tx.clone(),
+    );
     let task = tokio::spawn(async move {
-        super::endpoint_streams::handle_connection_streams_from_dial(
+        super::endpoint_streams::handle_connection_streams(
             connection,
             endpoint_id,
             conn_alpn,
-            event_tx,
-            peer_map,
-            pending_pushlog_replies,
-            &spawned_tasks_for_connection,
+            stream_context,
         )
         .await;
     });
@@ -873,7 +940,32 @@ pub(super) async fn subscribe_topic_str(
                         }
                         match crate::message::PushLogBroadcast::decode_gossip_payload(&msg.content)
                         {
-                            Ok((broadcast, encoding)) => {
+                            Ok((mut broadcast, encoding)) => {
+                                let origin = match authenticate_pushlog_origin(
+                                    &mut broadcast,
+                                    &msg.delivered_from,
+                                    msg.scope.is_direct(),
+                                ) {
+                                    Ok(origin) => origin,
+                                    Err(error) => {
+                                        warn!(
+                                            peer_id = %sender_peer_id,
+                                            claimed_source_peer_id = ?broadcast.source_peer_id,
+                                            topic = %topic_str_clone,
+                                            is_direct = msg.scope.is_direct(),
+                                            error = %error,
+                                            "Dropping Iroh head hint with unauthenticated origin"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    origin_peer_id = %origin,
+                                    is_direct = msg.scope.is_direct(),
+                                    topic = %topic_str_clone,
+                                    "Authenticated Iroh head-hint origin and ingress hop"
+                                );
                                 if encoding != crate::message::PushLogGossipPayloadEncoding::PostcardBroadcast {
                                     debug!(
                                         peer_id = %sender_peer_id,
@@ -1123,4 +1215,85 @@ const RAW_PUBLISH_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_
 fn topic_to_id(topic: &str) -> TopicId {
     let hash = blake3::hash(topic.as_bytes());
     TopicId::from(*hash.as_bytes())
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    fn broadcast() -> PushLogBroadcast {
+        PushLogBroadcast::new(
+            "doc".to_string(),
+            Bytes::from_static(&[1, 2, 3]),
+            "collection".to_string(),
+            "creator".to_string(),
+            Bytes::from_static(&[4, 5, 6]),
+        )
+    }
+
+    #[test]
+    fn relayed_origin_is_verified_and_hop_is_only_ingress_metadata() {
+        let origin = iroh::SecretKey::generate();
+        let relay = iroh::SecretKey::generate().public();
+        let mut message = broadcast();
+        message.source_peer_id = Some(origin.public().to_string());
+        let bytes = message.origin_signing_bytes().unwrap();
+        message.origin_signature = Some(origin.sign(&bytes).to_bytes().to_vec());
+
+        let authenticated = authenticate_pushlog_origin(&mut message, &relay, false).unwrap();
+        assert_eq!(authenticated, origin.public());
+        assert_eq!(
+            message.authenticated_origin_peer_id(),
+            Some(origin.public().to_string().as_str())
+        );
+        assert_eq!(
+            message.authenticated_source_peer_id(),
+            Some(relay.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn forged_relayed_origin_is_rejected() {
+        let claimed = iroh::SecretKey::generate();
+        let forger = iroh::SecretKey::generate();
+        let relay = iroh::SecretKey::generate().public();
+        let mut message = broadcast();
+        message.source_peer_id = Some(claimed.public().to_string());
+        let bytes = message.origin_signing_bytes().unwrap();
+        message.origin_signature = Some(forger.sign(&bytes).to_bytes().to_vec());
+
+        assert!(matches!(
+            authenticate_pushlog_origin(&mut message, &relay, false),
+            Err(crate::error::Error::InvalidSignature)
+        ));
+        assert!(message.authenticated_source_peer_id().is_none());
+        assert!(message.authenticated_origin_peer_id().is_none());
+    }
+
+    #[test]
+    fn rolling_unsigned_compatibility_is_direct_only_and_ignores_claim() {
+        let direct = iroh::SecretKey::generate().public();
+        let relay = iroh::SecretKey::generate().public();
+        let mut direct_message = broadcast();
+        direct_message.source_peer_id = Some("forged".to_string());
+        assert_eq!(
+            authenticate_pushlog_origin(&mut direct_message, &direct, true).unwrap(),
+            direct
+        );
+        assert_eq!(
+            direct_message.authenticated_source_peer_id(),
+            Some(direct.to_string().as_str())
+        );
+        assert_eq!(
+            direct_message.authenticated_origin_peer_id(),
+            Some(direct.to_string().as_str())
+        );
+
+        let mut relayed_message = broadcast();
+        relayed_message.source_peer_id = Some("forged".to_string());
+        assert!(matches!(
+            authenticate_pushlog_origin(&mut relayed_message, &relay, false),
+            Err(crate::error::Error::MissingSignature)
+        ));
+    }
 }

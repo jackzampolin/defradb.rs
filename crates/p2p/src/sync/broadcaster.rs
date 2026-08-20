@@ -168,7 +168,7 @@ impl<T: P2PTransport> Broadcaster<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "libp2p-transport"))]
 mod tests {
     use super::*;
 

@@ -115,7 +115,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let broadcast = PushLogBroadcast::from_request(&request);
         let process_result = self
             .manager
-            .process_pushlog(
+            .process_pushlog_from_dag_provider(
                 &broadcast,
                 Some(peer_id.as_str()),
                 is_explicit_replicator,
@@ -211,7 +211,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let broadcast = PushLogBroadcast::from_request(&request);
         let process_result = self
             .manager
-            .process_pushlog(
+            .process_pushlog_from_dag_provider(
                 &broadcast,
                 Some(peer_id.as_str()),
                 is_explicit_replicator,
