@@ -33,8 +33,8 @@ use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
 use crate::lensed_fetcher::LensedDocFetcher;
-use crate::txn_context::DbTransactionContext;
-use crate::txn_lens_store::TxnLensStore;
+use crate::txn::context::DbTransactionContext;
+use crate::txn::lens_store::TxnLensStore;
 
 /// Default max idle age for explicit HTTP transactions.
 pub const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1556,5 +1556,5 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 }
 
 #[cfg(test)]
-#[path = "txn_registry_tests.rs"]
+#[path = "registry_tests.rs"]
 mod tests;

@@ -91,9 +91,6 @@ pub(crate) mod patch;
 mod plan_close_tests;
 pub mod schema_loader;
 pub mod txn;
-pub(crate) mod txn_context;
-pub(crate) mod txn_lens_store;
-pub(crate) mod txn_registry;
 pub(crate) mod vector_search;
 pub(crate) mod versioned_fetcher;
 pub(crate) mod view;
@@ -142,12 +139,12 @@ pub use schema_loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,
 };
-pub use txn::DbTxn;
-pub use txn_context::DbTransactionContext;
-pub use txn_registry::{
+pub use txn::context::DbTransactionContext;
+pub use txn::registry::{
     CleanupResult, DbTransactionRegistry, DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
 };
+pub use txn::DbTxn;
 pub use versioned_fetcher::VersionedFetcher;
 pub use view::ops::{is_refreshable_view, RefreshViewsOptions};
 

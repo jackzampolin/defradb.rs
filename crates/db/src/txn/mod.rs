@@ -15,6 +15,10 @@ use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
+pub(crate) mod context;
+pub(crate) mod lens_store;
+pub(crate) mod registry;
+
 /// A counter mutation RECORDED during an interactive/explicit transaction but
 /// not yet applied to the authoritative CRDT accumulation store. The
 /// read-modify-write (and the per-doc guard that protects it) is deferred to the

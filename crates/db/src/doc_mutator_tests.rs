@@ -315,7 +315,7 @@ async fn explicit_txn_counter_increment_advances_accumulation_store() {
     // test drives commit through the registry (not a bare force_commit, which
     // would skip the finalize) — keeping the original intent: after commit the
     // authoritative store reflects the increment.
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -391,7 +391,7 @@ fn pcounter_collection() -> CollectionVersion {
 /// pre-write committed value (5) as the reconcile base fixes it.
 #[tokio::test]
 async fn explicit_txn_pcounter_increment_no_double_apply() {
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -449,7 +449,7 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
 /// advanced — exercising the sorted multi-doc acquire in the finalize driver.
 #[tokio::test]
 async fn explicit_txn_multi_doc_counter_finalize_advances_both_stores() {
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -593,7 +593,7 @@ async fn read_committed_doc(
 /// accumulation store is absent at update-finalize.
 #[tokio::test]
 async fn explicit_txn_pcounter_create_then_update_same_txn() {
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -656,7 +656,7 @@ async fn explicit_txn_pcounter_create_then_update_same_txn() {
 #[tokio::test]
 async fn update_seeds_absent_store_from_committed_base_load_bearing() {
     use crate::index_manager::IndexManager;
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -749,7 +749,7 @@ async fn update_seeds_absent_store_from_committed_base_load_bearing() {
 /// signed delta against the same-txn-staged base.
 #[tokio::test]
 async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -798,7 +798,7 @@ async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
 /// ran the finalize RMW.
 #[tokio::test]
 async fn explicit_txn_discard_drops_pending_counter_ops() {
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -850,7 +850,7 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
 /// against the SAME doc/field, summing to exactly 5 (each delta applied once).
 #[tokio::test]
 async fn explicit_txn_multiple_updates_same_field_sum_once() {
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
 
     let (db, _bus) = make_test_db_with_bus().await;
@@ -929,7 +929,7 @@ fn indexed_counter_collection() -> CollectionVersion {
 #[tokio::test]
 async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
     use crate::index_manager::IndexManager;
-    use crate::txn_registry::DbTransactionRegistry;
+    use crate::txn::registry::DbTransactionRegistry;
     use query::txn::TransactionRegistry;
     use storage::index::IndexIterator;
 
