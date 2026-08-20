@@ -270,8 +270,7 @@ impl<S: Store> crate::database::DB<S> {
             config.source_schema_version_id = old_version_id.to_string();
             config.destination_schema_version_id = new_version_id.clone();
 
-            let txn_lens_store =
-                crate::txn::lens_store::TxnLensStore::new(self.lens_store.clone())?;
+            let txn_lens_store = crate::txn::lenses::TxnLensStore::new(self.lens_store.clone())?;
             let transform_id = txn_lens_store.add(config.clone()).await?;
             new_schema.previous_version = Some(CollectionSource {
                 source_collection_id: old_version_id.to_string(),

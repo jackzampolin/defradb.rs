@@ -25,8 +25,8 @@ use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
 
 pub mod acp;
 pub(crate) mod cache;
-mod crud_datastore;
-mod index_ops;
+mod crud;
+mod index;
 pub(crate) mod loader;
 pub(crate) mod locks;
 pub(crate) mod name;

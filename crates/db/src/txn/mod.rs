@@ -16,7 +16,7 @@ use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 pub(crate) mod context;
-pub(crate) mod lens_store;
+pub(crate) mod lenses;
 pub(crate) mod registry;
 
 /// A counter mutation RECORDED during an interactive/explicit transaction but

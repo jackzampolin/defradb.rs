@@ -34,15 +34,15 @@ use crate::database::DB;
 use crate::error::{Error, Result};
 use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn::context::DbTransactionContext;
-use crate::txn::lens_store::TxnLensStore;
+use crate::txn::lenses::TxnLensStore;
 
 mod blocks;
 mod cleanup;
 mod collections;
 mod docs;
-mod lens_ops;
+mod lenses;
 mod lifecycle;
-mod schema_ops;
+mod schemas;
 
 /// Default max idle age for explicit HTTP transactions.
 pub const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
