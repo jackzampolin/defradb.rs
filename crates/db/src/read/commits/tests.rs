@@ -124,7 +124,7 @@ mod shared_owner_tests {
                 .await
                 .unwrap();
             for owner in &owners {
-                crate::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
+                crate::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
                     .await
                     .unwrap();
             }

@@ -8,8 +8,10 @@ use storage::corekv::Store;
 use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
-use crate::migration::helpers::{cache_migrated_document_with_indexes, lens_doc_to_document};
-use crate::schema_loader::get_collections_by_collection_id;
+use crate::definition::loader::get_collections_by_collection_id;
+use crate::definition::migration::helpers::{
+    cache_migrated_document_with_indexes, lens_doc_to_document,
+};
 
 use super::LensedAutoCommitFetcher;
 

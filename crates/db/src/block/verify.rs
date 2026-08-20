@@ -293,7 +293,7 @@ async fn load_authorized_block_signature<S: Store>(
                 // caller can read any owner. An ownerless document block is
                 // denied; only non-document blocks use collection-level access.
                 let owning_doc_ids =
-                    crate::doc_id_map::resolve_block_doc_ids(&systemstore, &parsed_cid, &block)
+                    crate::docid::map::resolve_block_doc_ids(&systemstore, &parsed_cid, &block)
                         .await
                         .map_err(|e| format!("failed to resolve block owners: {}", e))?
                         .ok_or_else(|| "missing permission".to_string())?;

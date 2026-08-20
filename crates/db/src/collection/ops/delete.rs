@@ -304,14 +304,14 @@ impl<S: Store> crate::database::DB<S> {
                 )
                 .await?;
 
-                let doc_id = crate::doc_id_map::get_doc_id(&systemstore, doc_short_id)
+                let doc_id = crate::docid::map::get_doc_id(&systemstore, doc_short_id)
                     .await?
                     .ok_or_else(|| {
                         Error::InvalidDocument(format!(
                             "document short ID {doc_short_id} has no canonical DocID"
                         ))
                     })?;
-                crate::block_cleanup::delete_owned_dag(
+                crate::block::cleanup::delete_owned_dag(
                     &blockstore,
                     &systemstore,
                     &block_cids,
@@ -321,7 +321,7 @@ impl<S: Store> crate::database::DB<S> {
 
                 // Clear the identity mappings so recreating identical content
                 // does not trip the create duplicate check.
-                crate::doc_id_map::delete_doc_id_mappings(&systemstore, doc_short_id).await?;
+                crate::docid::map::delete_doc_id_mappings(&systemstore, doc_short_id).await?;
             }
             Ok(())
         }
@@ -383,7 +383,7 @@ impl<S: Store> crate::database::DB<S> {
             }
             delete_prefix(&headstore, col_head_prefix).await?;
 
-            crate::block_cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
+            crate::block::cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
                 .await?;
 
             // Delete the top-level doc/del/version prefixes

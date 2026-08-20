@@ -18,7 +18,7 @@ async fn publish_latest_document_update(
     collection_id: &str,
     doc_id: &str,
 ) -> Result<(), String> {
-    let result = db::block_reader::read_latest_composite_block(database, doc_id).await?;
+    let result = db::block::reader::read_latest_composite_block(database, doc_id).await?;
     event_bus.publish(events::Message::update(events::Update::new(
         doc_id.to_string(),
         result.cid,

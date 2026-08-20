@@ -47,7 +47,7 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
             p2p::error::Error::HeadProvider(format!("failed to get systemstore: {}", e))
         })?;
 
-        let Some(doc_ref) = db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+        let Some(doc_ref) = db::docid::map::get_doc_ref(&systemstore, doc_id)
             .await
             .map_err(|e| {
                 p2p::error::Error::HeadProvider(format!("doc-ID mapping lookup failed: {}", e))
@@ -442,10 +442,10 @@ mod tests {
         {
             let systemstore = txn.systemstore().unwrap();
             let short_id = db.next_doc_short_id().await.unwrap();
-            db::doc_id_map::set_doc_id_mapping(&systemstore, 1, short_id, &doc_id)
+            db::docid::map::set_doc_id_mapping(&systemstore, 1, short_id, &doc_id)
                 .await
                 .unwrap();
-            db::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), &doc_id)
+            db::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), &doc_id)
                 .await
                 .unwrap();
         }
@@ -459,7 +459,7 @@ mod tests {
     async fn doc_short_id_for(db: &Arc<DB<MemoryStore>>, doc_id: &str) -> u64 {
         let txn = db.new_txn(true).await.unwrap();
         let systemstore = txn.systemstore().unwrap();
-        db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+        db::docid::map::get_doc_ref(&systemstore, doc_id)
             .await
             .unwrap()
             .expect("doc mapping")

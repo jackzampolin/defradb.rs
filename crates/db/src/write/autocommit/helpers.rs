@@ -133,7 +133,7 @@ pub(crate) async fn register_created_doc(
 ) -> query::error::Result<DocID> {
     let doc_id_str = &block_result.doc_id;
 
-    let existing = crate::doc_id_map::get_doc_ref(systemstore, doc_id_str)
+    let existing = crate::docid::map::get_doc_ref(systemstore, doc_id_str)
         .await
         .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
     if let Some(doc_ref) = existing {
@@ -153,7 +153,7 @@ pub(crate) async fn register_created_doc(
         )));
     }
 
-    crate::doc_id_map::set_doc_id_mapping(
+    crate::docid::map::set_doc_id_mapping(
         systemstore,
         collection.resolved_root_id(),
         doc_short_id,
@@ -180,7 +180,7 @@ pub(crate) async fn register_block_doc_id_mappings(
     cids.extend(block_result.field_cids.iter().copied());
     cids.extend(block_result.encryption_cids.iter().copied());
     for cid in cids {
-        crate::doc_id_map::set_block_doc_id_mapping(systemstore, &cid.to_string(), doc_id)
+        crate::docid::map::set_block_doc_id_mapping(systemstore, &cid.to_string(), doc_id)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
     }

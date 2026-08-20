@@ -477,7 +477,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
             let composite_cid = block_result.cid;
 
-            crate::doc_id_map::set_block_doc_id_mapping(
+            crate::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &composite_cid.to_string(),
                 &canonical_doc_id.to_string(),

@@ -6,16 +6,17 @@
 
 mod apply;
 mod helpers;
+pub(crate) mod json;
 mod store;
 mod validate;
-mod version_id;
+mod version;
 
 use crate::collection::Collection;
-use crate::error::{Error, Result};
-use crate::json_patch::{
+use crate::definition::patch::json::{
     extract_field_name_from_path, json_pointer_get, json_pointer_remove, json_pointer_replace,
     json_pointer_set, JsonPatchError,
 };
+use crate::error::{Error, Result};
 use schema::{CollectionSource, CollectionVersion};
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};

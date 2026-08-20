@@ -23,7 +23,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let txn_guard = shared_txn.lock().await;
         let txn = txn_guard.as_ref().ok_or(Error::TxnNotActive)?;
 
-        crate::block_verify::verify_block_signature_in_txn(
+        crate::block::verify::verify_block_signature_in_txn(
             &self.db,
             document_acp,
             txn,
@@ -58,7 +58,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             (txn.blockstore()?, txn.systemstore()?)
         };
 
-        crate::block_verify::verified_block_signer_did_with_blockstore(
+        crate::block::verify::verified_block_signer_did_with_blockstore(
             &self.db,
             document_acp,
             blockstore,

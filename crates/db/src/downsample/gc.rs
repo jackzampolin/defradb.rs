@@ -115,7 +115,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let doc_short_id = {
             let txn = self.new_txn(true).await?;
             let systemstore = txn.systemstore()?;
-            let doc_ref = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await?;
+            let doc_ref = crate::docid::map::get_doc_ref(&systemstore, doc_id).await?;
             drop(systemstore);
             let _ = txn.discard();
             match doc_ref {
@@ -161,7 +161,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     continue;
                 }
 
-                crate::block_cleanup::delete_owned_commit(&blockstore, &systemstore, &cid, doc_id)
+                crate::block::cleanup::delete_owned_commit(&blockstore, &systemstore, &cid, doc_id)
                     .await?;
             }
 

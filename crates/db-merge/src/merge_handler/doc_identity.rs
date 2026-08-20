@@ -109,7 +109,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }
 
                     let head_owners =
-                        db::doc_id_map::get_doc_ids_for_block(systemstore, &head_cid.to_string())
+                        db::docid::map::get_doc_ids_for_block(systemstore, &head_cid.to_string())
                             .await
                             .map_err(MergeError::Database)?;
                     // Field blocks can be co-owned, so the owner index is
@@ -148,7 +148,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             // document. (For Pending nodes this re-checks what their frame
             // already probed — the recursive predecessor performed the same
             // harmless re-check at the top of each recursion.)
-            let owners = db::doc_id_map::get_doc_ids_for_block(systemstore, &node_cid.to_string())
+            let owners = db::docid::map::get_doc_ids_for_block(systemstore, &node_cid.to_string())
                 .await
                 .map_err(MergeError::Database)?;
             if owners.len() == 1 {
@@ -177,7 +177,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<Option<String>, MergeError> {
         let txn = self.db.new_txn(true).await?;
         let systemstore = txn.systemstore().map_err(MergeError::Database)?;
-        let mut owners = db::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+        let mut owners = db::docid::map::get_doc_ids_for_block(&systemstore, &cid.to_string())
             .await
             .map_err(MergeError::Database)?;
         if owners.len() == 1 {
@@ -193,14 +193,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         systemstore: &NamespaceView,
         cid: &Cid,
     ) -> std::result::Result<Option<(String, u64)>, MergeError> {
-        let mut owners = db::doc_id_map::get_doc_ids_for_block(systemstore, &cid.to_string())
+        let mut owners = db::docid::map::get_doc_ids_for_block(systemstore, &cid.to_string())
             .await
             .map_err(MergeError::Database)?;
         if owners.len() != 1 {
             return Ok(None);
         }
         let doc_id = owners.remove(0);
-        let doc_ref = db::doc_id_map::get_doc_ref(systemstore, &doc_id)
+        let doc_ref = db::docid::map::get_doc_ref(systemstore, &doc_id)
             .await
             .map_err(MergeError::Database)?;
         Ok(doc_ref.map(|r| (doc_id, r.doc_short_id)))
@@ -218,16 +218,16 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         linked_field_cids: &[Cid],
         linked_encryption_cids: &[Cid],
     ) -> std::result::Result<(), MergeError> {
-        db::doc_id_map::set_block_doc_id_mapping(systemstore, &composite_cid.to_string(), doc_id)
+        db::docid::map::set_block_doc_id_mapping(systemstore, &composite_cid.to_string(), doc_id)
             .await
             .map_err(MergeError::Database)?;
         for field_cid in linked_field_cids {
-            db::doc_id_map::set_block_doc_id_mapping(systemstore, &field_cid.to_string(), doc_id)
+            db::docid::map::set_block_doc_id_mapping(systemstore, &field_cid.to_string(), doc_id)
                 .await
                 .map_err(MergeError::Database)?;
         }
         for encryption_cid in linked_encryption_cids {
-            db::doc_id_map::set_block_doc_id_mapping(
+            db::docid::map::set_block_doc_id_mapping(
                 systemstore,
                 &encryption_cid.to_string(),
                 doc_id,
@@ -236,7 +236,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .map_err(MergeError::Database)?;
         }
         if let Some(enc_cid) = &block.encryption {
-            db::doc_id_map::set_block_doc_id_mapping(systemstore, &enc_cid.to_string(), doc_id)
+            db::docid::map::set_block_doc_id_mapping(systemstore, &enc_cid.to_string(), doc_id)
                 .await
                 .map_err(MergeError::Database)?;
         }

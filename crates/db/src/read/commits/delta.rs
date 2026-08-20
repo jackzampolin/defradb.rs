@@ -32,7 +32,7 @@ impl<S: Store> CommitsFetcher<S> {
         block: &defra_core::Block,
     ) -> crate::Result<Option<Vec<String>>> {
         let systemstore = txn.systemstore()?;
-        crate::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block).await
+        crate::docid::map::resolve_block_doc_ids(&systemstore, cid, block).await
     }
 
     pub(super) async fn canonical_doc_id(
@@ -41,10 +41,10 @@ impl<S: Store> CommitsFetcher<S> {
         doc_id: &str,
     ) -> crate::Result<String> {
         let systemstore = txn.systemstore()?;
-        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+        let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
             return Ok(doc_id.to_string());
         };
-        crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+        crate::docid::map::get_doc_id(&systemstore, doc_ref.doc_short_id)
             .await?
             .ok_or_else(|| {
                 crate::Error::InvalidDocument(format!(

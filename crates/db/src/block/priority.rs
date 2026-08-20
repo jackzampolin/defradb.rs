@@ -228,7 +228,7 @@ mod tests {
                 .unwrap();
                 let doc_id = result.doc_id.clone();
                 doc.set_id(document::DocID::from_string(&doc_id).unwrap());
-                crate::doc_id_map::set_doc_id_mapping(&systemstore, 1, 1, &doc_id)
+                crate::docid::map::set_doc_id_mapping(&systemstore, 1, 1, &doc_id)
                     .await
                     .unwrap();
 

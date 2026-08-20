@@ -188,7 +188,7 @@ pub(crate) async fn resolve_collection_id_for_doc<S: storage::corekv::Store>(
         .await
         .map_err(|error| format!("document scope lookup txn: {error}"))?;
     let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
-    let Some(doc_ref) = db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+    let Some(doc_ref) = db::docid::map::get_doc_ref(&systemstore, doc_id)
         .await
         .map_err(|error| format!("document scope lookup: {error}"))?
     else {
@@ -264,7 +264,7 @@ pub(crate) async fn complete_document_retry_if_absent<S: storage::corekv::Store>
         .await
         .map_err(|error| format!("document absence verification transaction: {error}"))?;
     let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
-    if db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+    if db::docid::map::get_doc_ref(&systemstore, doc_id)
         .await
         .map_err(|error| format!("document absence verification: {error}"))?
         .is_some()

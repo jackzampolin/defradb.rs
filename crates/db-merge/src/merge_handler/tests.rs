@@ -101,7 +101,7 @@ async fn register_test_block_owner(
             .resolve_or_allocate_doc_short_id(&systemstore, collection_short_id, doc_id)
             .await
             .unwrap();
-        db::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), doc_id)
+        db::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), doc_id)
             .await
             .unwrap();
     }
@@ -137,7 +137,7 @@ async fn create_doc_locally(
         )
         .await
         .unwrap();
-        db::doc_id_map::set_doc_id_mapping(
+        db::docid::map::set_doc_id_mapping(
             &systemstore,
             collection.resolved_root_id(),
             short_id,
@@ -145,7 +145,7 @@ async fn create_doc_locally(
         )
         .await
         .unwrap();
-        db::doc_id_map::set_block_doc_id_mapping(
+        db::docid::map::set_block_doc_id_mapping(
             &systemstore,
             &result.cid.to_string(),
             &result.doc_id,
@@ -153,7 +153,7 @@ async fn create_doc_locally(
         .await
         .unwrap();
         for field_cid in &result.field_cids {
-            db::doc_id_map::set_block_doc_id_mapping(
+            db::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &field_cid.to_string(),
                 &result.doc_id,
@@ -1285,7 +1285,7 @@ async fn shared_counter_block_is_applied_once_per_document() {
         let txn = handler.db.new_txn(false).await.unwrap();
         let doc_short_id = {
             let systemstore = txn.systemstore().unwrap();
-            db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+            db::docid::map::get_doc_ref(&systemstore, doc_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -2300,7 +2300,7 @@ async fn composite_parent_replay_updates_headstore_for_merged_parent() {
     let (head_keys, doc_short_id) = {
         let headstore = txn.headstore().unwrap();
         let systemstore = txn.systemstore().unwrap();
-        let doc_short_id = db::doc_id_map::get_doc_ref(&systemstore, &doc_id_str)
+        let doc_short_id = db::docid::map::get_doc_ref(&systemstore, &doc_id_str)
             .await
             .unwrap()
             .expect("merged doc has a short-ID mapping")
@@ -2559,14 +2559,14 @@ async fn composite_access_denial_does_not_mark_unreadable_linked_counter_merged(
     );
     let txn = handler.db.new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
-    let doc_short_id = db::doc_id_map::get_doc_ref(&systemstore, &doc_id)
+    let doc_short_id = db::docid::map::get_doc_ref(&systemstore, &doc_id)
         .await
         .unwrap()
         .unwrap()
         .doc_short_id;
     for owned_cid in [field_cid, encryption_cid] {
         assert_eq!(
-            db::doc_id_map::get_doc_ids_for_block(&systemstore, &owned_cid.to_string(),)
+            db::docid::map::get_doc_ids_for_block(&systemstore, &owned_cid.to_string(),)
                 .await
                 .unwrap(),
             vec![doc_id.clone()]
@@ -2741,7 +2741,7 @@ async fn composite_kms_unavailable_rolls_back_and_retries() {
     {
         let txn = handler.db.new_txn(true).await.unwrap();
         let systemstore = txn.systemstore().unwrap();
-        assert!(db::doc_id_map::get_doc_ref(&systemstore, &doc_id)
+        assert!(db::docid::map::get_doc_ref(&systemstore, &doc_id)
             .await
             .unwrap()
             .is_none());
@@ -2767,7 +2767,7 @@ async fn composite_kms_unavailable_rolls_back_and_retries() {
         .unwrap();
     let txn = handler.db.new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
-    let doc_ref = db::doc_id_map::get_doc_ref(&systemstore, &doc_id)
+    let doc_ref = db::docid::map::get_doc_ref(&systemstore, &doc_id)
         .await
         .unwrap()
         .expect("successful retry registers document identity");

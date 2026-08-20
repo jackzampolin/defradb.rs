@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 
 use self::batch::BroadcastBatchMutator;
 use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
-use db::block_reader::read_latest_composite_block;
+use db::block::reader::read_latest_composite_block;
 use db::database::DB;
 use db::write::autocommit::AutoCommitMutator;
 use db_blocks::{build_blocks_from_document, BlockResult};
@@ -203,7 +203,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRep
         }
 
         let document =
-            match db::block_reader::read_document_for_se(&self.db, collection_id, doc_id).await {
+            match db::block::reader::read_document_for_se(&self.db, collection_id, doc_id).await {
                 Ok(Some(document)) => document,
                 Ok(None) => return,
                 Err(error) => {
@@ -819,7 +819,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
         let collection_id = collection.collection_id().to_string();
-        let pre_delete_document_json = match db::block_reader::read_document_for_se(
+        let pre_delete_document_json = match db::block::reader::read_document_for_se(
             &self.db,
             &collection_id,
             &doc_id.to_string(),

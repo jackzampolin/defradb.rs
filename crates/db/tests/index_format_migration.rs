@@ -38,7 +38,7 @@ fn the_old_and_new_encodings_differ() {
 /// second open finds the store current instead of rebuilding again.
 #[tokio::test]
 async fn an_unstamped_store_is_stamped_on_open() {
-    use db::migration::index_format::CURRENT_INDEX_FORMAT;
+    use db::definition::migration::format::CURRENT_INDEX_FORMAT;
 
     let store = MemoryStore::new();
 
@@ -62,7 +62,7 @@ async fn an_unstamped_store_is_stamped_on_open() {
 /// stamp still lands.
 #[tokio::test]
 async fn a_fresh_store_opens_clean() {
-    use db::migration::index_format::CURRENT_INDEX_FORMAT;
+    use db::definition::migration::format::CURRENT_INDEX_FORMAT;
 
     let db = db::DB::open(MemoryStore::new()).await.expect("open");
     assert_eq!(

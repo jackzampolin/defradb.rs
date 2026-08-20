@@ -257,7 +257,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .filter(|id| seen.insert(*id))
             .collect();
 
-        let doc_ids = crate::doc_id_map::resolve_doc_ids(&systemstore, &doc_short_ids)
+        let doc_ids = crate::docid::map::resolve_doc_ids(&systemstore, &doc_short_ids)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("doc ID resolution error: {}", e))

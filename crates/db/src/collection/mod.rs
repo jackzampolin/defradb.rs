@@ -283,7 +283,7 @@ impl Collection {
         systemstore: &NamespaceView,
         doc_id: &DocID,
     ) -> Result<Option<u64>> {
-        crate::doc_id_map::get_doc_short_id(
+        crate::docid::map::get_doc_short_id(
             systemstore,
             self.resolved_root_id(),
             &doc_id.to_string(),
@@ -301,7 +301,7 @@ impl Collection {
         let Some(doc_short_id) = self.resolve_doc_short_id(systemstore, doc_id).await? else {
             return Ok(None);
         };
-        let canonical = crate::doc_id_map::get_doc_id(systemstore, doc_short_id)
+        let canonical = crate::docid::map::get_doc_id(systemstore, doc_short_id)
             .await?
             .ok_or_else(|| {
                 Error::InvalidDocument(format!(

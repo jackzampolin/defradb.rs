@@ -67,7 +67,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         // Create a new transaction for this merge
         let txn = self.db.new_txn(false).await?;
-        let doc_short_id = db::doc_id_map::get_doc_ref(&txn.systemstore()?, &doc_id_str)
+        let doc_short_id = db::docid::map::get_doc_ref(&txn.systemstore()?, &doc_id_str)
             .await
             .map_err(MergeError::Database)?
             .ok_or_else(|| {

@@ -19,7 +19,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     pub(super) async fn latest_doc_priority(&self, doc_id: &str) -> Result<u64> {
         let txn = self.new_txn(true).await?;
         let systemstore = txn.systemstore()?;
-        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+        let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
             let _ = txn.discard();
             return Ok(0);
         };

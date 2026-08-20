@@ -228,7 +228,7 @@ impl Collection {
         mut doc: Document,
         show_deleted: bool,
     ) -> Result<Option<(u64, Document, bool)>> {
-        let Some(doc_id_str) = crate::doc_id_map::get_doc_id(systemstore, doc_short_id).await?
+        let Some(doc_id_str) = crate::docid::map::get_doc_id(systemstore, doc_short_id).await?
         else {
             return Ok(None);
         };

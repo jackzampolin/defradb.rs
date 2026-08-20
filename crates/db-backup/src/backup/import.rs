@@ -280,7 +280,7 @@ async fn ensure_doc_id_aliases_available<S: Store + 'static>(
             .map_err(|e| format!("failed to get systemstore: {e}"))?;
         let mut collision = false;
         for alias in aliases {
-            if db::doc_id_map::get_doc_ref(&systemstore, alias)
+            if db::docid::map::get_doc_ref(&systemstore, alias)
                 .await
                 .map_err(|e| format!("doc-ID alias lookup failed: {e}"))?
                 .is_some()
@@ -321,7 +321,7 @@ async fn register_doc_id_aliases<S: Store + 'static>(
         let systemstore = txn
             .systemstore()
             .map_err(|e| format!("failed to get systemstore: {}", e))?;
-        let doc_ref = db::doc_id_map::get_doc_ref(&systemstore, new_doc_id)
+        let doc_ref = db::docid::map::get_doc_ref(&systemstore, new_doc_id)
             .await
             .map_err(|e| format!("doc-ID mapping lookup failed: {}", e))?
             .ok_or_else(|| format!("imported document '{}' has no identity mapping", new_doc_id))?;
@@ -330,7 +330,7 @@ async fn register_doc_id_aliases<S: Store + 'static>(
             if alias == new_doc_id {
                 continue;
             }
-            db::doc_id_map::set_doc_id_alias(
+            db::docid::map::set_doc_id_alias(
                 &systemstore,
                 collection_short_id,
                 doc_ref.doc_short_id,

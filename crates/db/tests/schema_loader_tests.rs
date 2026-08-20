@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use datastore::BasicTxn;
 use db::database::DB;
-use db::schema_loader::load_active_collections;
+use db::definition::loader::load_active_collections;
 use db::txn::DbTxn;
 use lens::{LensConfig, LensModule};
 use schema::{CollectionVersion, ORPHAN_COLLECTION_ID};

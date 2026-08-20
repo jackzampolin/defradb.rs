@@ -69,7 +69,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             .map(|did| Did::try_from(did.to_string()))
             .transpose()?;
         let caller_identity: acp::Identity = caller_did.into();
-        db::block_verify::authorized_signed_block_bytes(
+        db::block::verify::authorized_signed_block_bytes(
             &self.database,
             self.document_acp.as_ref(),
             cid,
@@ -80,7 +80,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
     }
 
     async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String> {
-        db::block_verify::verified_block_signer_did(
+        db::block::verify::verified_block_signer_did(
             &self.database,
             self.document_acp.as_ref(),
             cid,

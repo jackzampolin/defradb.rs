@@ -510,7 +510,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .filter(|id| seen.insert(*id))
             .collect();
 
-        let doc_ids = crate::doc_id_map::resolve_doc_ids(&systemstore, &doc_short_ids)
+        let doc_ids = crate::docid::map::resolve_doc_ids(&systemstore, &doc_short_ids)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
@@ -579,7 +579,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 query::error::QueryError::execution(format!("fulltext search error: {}", e))
             })?;
 
-        crate::doc_id_map::resolve_doc_id_scores(&systemstore, scores)
+        crate::docid::map::resolve_doc_id_scores(&systemstore, scores)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("doc ID resolution error: {}", e))

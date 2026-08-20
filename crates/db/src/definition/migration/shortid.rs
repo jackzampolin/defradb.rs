@@ -161,9 +161,9 @@ async fn resolve_legacy_identities(
         let collection_short_id = document.collection.resolved_root_id();
 
         let existing_old =
-            crate::doc_id_map::get_doc_ref(systemstore, &document.old_doc_id).await?;
+            crate::docid::map::get_doc_ref(systemstore, &document.old_doc_id).await?;
         let existing_canonical =
-            crate::doc_id_map::get_doc_ref(systemstore, &canonical_doc_id).await?;
+            crate::docid::map::get_doc_ref(systemstore, &canonical_doc_id).await?;
         let doc_short_id = match (existing_old, existing_canonical) {
             (Some(old_ref), Some(canonical_ref)) if old_ref != canonical_ref => {
                 return Err(Error::Other(format!(
@@ -180,11 +180,11 @@ async fn resolve_legacy_identities(
                 }
                 doc_ref.doc_short_id
             }
-            (None, None) => crate::doc_id_map::next_doc_short_id(systemstore).await?,
+            (None, None) => crate::docid::map::next_doc_short_id(systemstore).await?,
         };
 
         if let Some(existing_doc_id) =
-            crate::doc_id_map::get_doc_id(systemstore, doc_short_id).await?
+            crate::docid::map::get_doc_id(systemstore, doc_short_id).await?
         {
             if existing_doc_id != canonical_doc_id && existing_doc_id != document.old_doc_id {
                 return Err(Error::Other(format!(
@@ -193,9 +193,9 @@ async fn resolve_legacy_identities(
                 )));
             }
         }
-        crate::doc_id_map::ensure_doc_short_id_sequence_at_least(systemstore, doc_short_id).await?;
+        crate::docid::map::ensure_doc_short_id_sequence_at_least(systemstore, doc_short_id).await?;
 
-        crate::doc_id_map::set_doc_id_mapping(
+        crate::docid::map::set_doc_id_mapping(
             systemstore,
             collection_short_id,
             doc_short_id,
@@ -203,7 +203,7 @@ async fn resolve_legacy_identities(
         )
         .await?;
         if document.old_doc_id != canonical_doc_id {
-            crate::doc_id_map::set_doc_id_alias(
+            crate::docid::map::set_doc_id_alias(
                 systemstore,
                 collection_short_id,
                 doc_short_id,
@@ -212,7 +212,7 @@ async fn resolve_legacy_identities(
             .await?;
         }
         for cid in &owned_block_cids {
-            crate::doc_id_map::set_block_doc_id_mapping(
+            crate::docid::map::set_block_doc_id_mapping(
                 systemstore,
                 &cid.to_string(),
                 &canonical_doc_id,

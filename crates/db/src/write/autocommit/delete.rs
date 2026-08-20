@@ -136,7 +136,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         ))
                     })?;
-                    crate::doc_id_map::set_block_doc_id_mapping(
+                    crate::docid::map::set_block_doc_id_mapping(
                         &systemstore,
                         &composite_cid.to_string(),
                         &doc_id_str,
@@ -333,7 +333,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let systemstore = txn.systemstore().map_err(|e| {
                     query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
                 })?;
-                crate::doc_id_map::set_block_doc_id_mapping(
+                crate::docid::map::set_block_doc_id_mapping(
                     &systemstore,
                     &composite_cid.to_string(),
                     &canonical_doc_id.to_string(),

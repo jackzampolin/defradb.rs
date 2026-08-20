@@ -112,7 +112,7 @@ pub enum Error {
     Lens(String),
 
     #[error("json patch error: {0}")]
-    JsonPatch(#[from] crate::json_patch::JsonPatchError),
+    JsonPatch(#[from] crate::definition::patch::json::JsonPatchError),
 }
 
 impl From<acp::Error> for Error {

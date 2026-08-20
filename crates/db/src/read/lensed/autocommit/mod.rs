@@ -235,7 +235,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
 
         let result = match ft_index.search_scored(&datastore, query).await {
             Ok(scores) => match txn.systemstore() {
-                Ok(systemstore) => crate::doc_id_map::resolve_doc_id_scores(&systemstore, scores)
+                Ok(systemstore) => crate::docid::map::resolve_doc_id_scores(&systemstore, scores)
                     .await
                     .map_err(|e| {
                         query::error::QueryError::execution(format!(

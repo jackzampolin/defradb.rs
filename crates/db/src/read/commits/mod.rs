@@ -205,11 +205,11 @@ impl<S: Store> CommitsFetcher<S> {
         let headstore = txn.headstore()?;
         let systemstore = txn.systemstore()?;
 
-        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+        let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
             return Ok(Vec::new());
         };
         let doc_short_id = doc_ref.doc_short_id;
-        let canonical_doc_id = crate::doc_id_map::get_doc_id(&systemstore, doc_short_id)
+        let canonical_doc_id = crate::docid::map::get_doc_id(&systemstore, doc_short_id)
             .await?
             .ok_or_else(|| {
                 Error::InvalidDocument(format!(
@@ -377,11 +377,11 @@ impl<S: Store> CommitsFetcher<S> {
 
         let (doc_prefix, fixed_doc_id) = if let Some(ref doc_id) = options.doc_id {
             let systemstore = txn.systemstore()?;
-            let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
                 return Ok(cids);
             };
             let canonical_doc_id =
-                crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+                crate::docid::map::get_doc_id(&systemstore, doc_ref.doc_short_id)
                     .await?
                     .ok_or_else(|| {
                         Error::InvalidDocument(format!(
@@ -415,7 +415,7 @@ impl<S: Store> CommitsFetcher<S> {
                             continue;
                         };
                         let systemstore = txn.systemstore()?;
-                        crate::doc_id_map::get_doc_id(&systemstore, doc_short_id).await?
+                        crate::docid::map::get_doc_id(&systemstore, doc_short_id).await?
                     };
                     if doc_id.is_some() {
                         cids.push((cid, doc_id));

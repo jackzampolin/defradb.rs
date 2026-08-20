@@ -37,7 +37,7 @@ async fn resolve_cursor_seek_key(
     };
 
     let doc_short_id =
-        crate::doc_id_map::get_doc_short_id(systemstore, collection_short_id, doc_id)
+        crate::docid::map::get_doc_short_id(systemstore, collection_short_id, doc_id)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("doc ID resolution error: {e}"))
@@ -62,7 +62,7 @@ mod tests {
         let store = MemoryStore::new();
         let txn = store.new_txn(false).await.unwrap();
         let systemstore = NamespaceView::new(SharedTxn::new(txn), Namespace::Systemstore);
-        crate::doc_id_map::set_doc_id_mapping(&systemstore, 7, 42, "bae-boundary")
+        crate::docid::map::set_doc_id_mapping(&systemstore, 7, 42, "bae-boundary")
             .await
             .unwrap();
 

@@ -184,7 +184,7 @@ async fn alias_lookup_uses_canonical_document_id() {
     let canonical_ref = sync.document_ref(&canonical_doc_id).await.unwrap().unwrap();
 
     let txn = sync.database().new_txn(false).await.unwrap();
-    db::doc_id_map::set_doc_id_alias(
+    db::docid::map::set_doc_id_alias(
         &txn.systemstore().unwrap(),
         sync.database()
             .get_collection("Users")

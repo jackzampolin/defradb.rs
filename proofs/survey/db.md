@@ -17,12 +17,12 @@ algebra all live in dependency crates (`crdt`, `db-merge`, `db-blocks`, `acp`,
   remove under write lock with `Arc::ptr_eq` + final idle re-check. A real
   concurrency protocol guarding against evicting a transaction a concurrent
   request just touched. NOT covered by an existing slice.
-- **Schema patch / version transition** (`patch/`, `migration/`): old→new
+- **Schema patch / version transition** (`definition/patch/`, `definition/migration/`): old→new
   version_id, IsActive-only vs Transform-only vs structural; rejects unsafe
   multi-active states. Validation logic; integration-test territory.
-- **block_verify** (`block_verify.rs`): verify-then-merge + dual-path ACP read
+- **block_verify** (`block/verify.rs`): verify-then-merge + dual-path ACP read
   gate — already modeled (Integrity, Commits slices).
-- **Schema version_id CID** (`patch/version_id.rs`): content-addressed schema
+- **Schema version_id CID** (`definition/patch/version.rs`): content-addressed schema
   version from field CIDs — a content-addressing instance.
 
 ## Candidates

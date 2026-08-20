@@ -106,7 +106,7 @@ pub async fn read_latest_composite_block<S: storage::corekv::Store>(
         .systemstore()
         .map_err(|e| format!("Failed to get systemstore: {}", e))?;
 
-    let doc_short_id = crate::doc_id_map::get_doc_ref(&systemstore, doc_id)
+    let doc_short_id = crate::docid::map::get_doc_ref(&systemstore, doc_id)
         .await
         .map_err(|e| format!("Failed to resolve doc ref: {}", e))?
         .map(|doc_ref| doc_ref.doc_short_id)

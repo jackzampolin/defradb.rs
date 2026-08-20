@@ -4,11 +4,11 @@
 //! older data is readable by the current storage layer. Lens migrations then
 //! provide document transforms between schema versions.
 
-mod doc_short_id;
+pub mod format;
 pub(crate) mod helpers;
-pub mod index_format;
 mod reindex;
-mod set_migration;
+mod set;
+mod shortid;
 
 #[cfg(test)]
 mod tests;

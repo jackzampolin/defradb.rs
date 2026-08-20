@@ -588,7 +588,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 ))
             })?;
 
-            crate::doc_id_map::set_block_doc_id_mapping(
+            crate::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &block_result.cid.to_string(),
                 &canonical_doc_id.to_string(),

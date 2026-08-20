@@ -128,7 +128,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
                 else {
                     continue;
                 };
-                let Some(doc_id) = db::doc_id_map::get_doc_id(&systemstore, doc_short_id)
+                let Some(doc_id) = db::docid::map::get_doc_id(&systemstore, doc_short_id)
                     .await
                     .map_err(|error| BrowserSyncError::Storage(error.to_string()))?
                 else {
@@ -163,13 +163,13 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
         let systemstore = txn
             .systemstore()
             .map_err(|error| BrowserSyncError::Storage(error.to_string()))?;
-        let Some(doc_ref) = db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+        let Some(doc_ref) = db::docid::map::get_doc_ref(&systemstore, doc_id)
             .await
             .map_err(|error| BrowserSyncError::Storage(error.to_string()))?
         else {
             return Ok(None);
         };
-        let canonical_doc_id = db::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+        let canonical_doc_id = db::docid::map::get_doc_id(&systemstore, doc_ref.doc_short_id)
             .await
             .map_err(|error| BrowserSyncError::Storage(error.to_string()))?
             .ok_or_else(|| {

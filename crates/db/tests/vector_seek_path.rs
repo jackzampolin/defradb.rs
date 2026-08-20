@@ -52,14 +52,14 @@ async fn populate(db: &DB<MemoryStore>, count: usize) -> Vec<(u64, String)> {
             // already; a fixed uuid per index keeps the corpus reproducible.
             doc.set_id(doc_id(i));
 
-            let short_id = db::doc_id_map::next_doc_short_id(&systemstore)
+            let short_id = db::docid::map::next_doc_short_id(&systemstore)
                 .await
                 .expect("short id");
             let doc_id = collection
                 .create_with_datastore(&datastore, &doc, short_id)
                 .await
                 .expect("create");
-            db::doc_id_map::set_doc_id_mapping(
+            db::docid::map::set_doc_id_mapping(
                 &systemstore,
                 COLLECTION_SHORT_ID,
                 short_id,

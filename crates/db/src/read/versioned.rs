@@ -258,15 +258,15 @@ impl<S: Store> VersionedFetcher<S> {
         block: &Block,
     ) -> Result<Option<Vec<String>>> {
         let systemstore = txn.systemstore()?;
-        crate::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block).await
+        crate::docid::map::resolve_block_doc_ids(&systemstore, cid, block).await
     }
 
     async fn canonical_doc_id(&self, txn: &mut DbTxn<S>, doc_id: &str) -> Result<String> {
         let systemstore = txn.systemstore()?;
-        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+        let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
             return Ok(doc_id.to_string());
         };
-        crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+        crate::docid::map::get_doc_id(&systemstore, doc_ref.doc_short_id)
             .await?
             .ok_or_else(|| {
                 Error::InvalidDocument(format!(

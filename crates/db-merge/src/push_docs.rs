@@ -193,7 +193,7 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
 
         let mut doc_ids = Vec::new();
         for short_id in doc_short_ids {
-            match db::doc_id_map::get_doc_id(&systemstore, short_id).await {
+            match db::docid::map::get_doc_id(&systemstore, short_id).await {
                 Ok(Some(doc_id)) => doc_ids.push((short_id, doc_id)),
                 Ok(None) => {}
                 Err(e) => return Err(format!("doc-ID mapping lookup failed: {}", e)),
@@ -476,7 +476,7 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
 
             let mut se_doc_ids = Vec::new();
             for short_id in se_doc_short_ids {
-                match db::doc_id_map::get_doc_id(&systemstore, short_id).await {
+                match db::docid::map::get_doc_id(&systemstore, short_id).await {
                     Ok(Some(doc_id)) => se_doc_ids.push((short_id, doc_id)),
                     Ok(None) => {}
                     Err(e) => return Err(format!("SE: doc-ID mapping lookup failed: {}", e)),
@@ -599,7 +599,7 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
         let systemstore = txn
             .systemstore()
             .map_err(|e| format!("failed to get systemstore: {}", e))?;
-        match db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+        match db::docid::map::get_doc_ref(&systemstore, doc_id)
             .await
             .map_err(|e| format!("doc-ID mapping lookup failed: {}", e))?
         {

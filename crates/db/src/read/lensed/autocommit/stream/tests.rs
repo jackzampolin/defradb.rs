@@ -253,10 +253,10 @@ async fn close_joins_inner_close_error_with_persist_error() {
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
     let systemstore = txn.systemstore().unwrap();
-    let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+    let doc_short_id = crate::docid::map::next_doc_short_id(&systemstore)
         .await
         .unwrap();
-    crate::doc_id_map::set_doc_id_mapping(
+    crate::docid::map::set_doc_id_mapping(
         &systemstore,
         collection.resolved_root_id(),
         doc_short_id,

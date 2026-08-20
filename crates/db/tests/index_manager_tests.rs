@@ -1745,7 +1745,7 @@ mod unique_boundaries {
     async fn register(systemstore: &NamespaceView, email: &str) -> Doc {
         let doc = doc_with_email(email);
         let short_id = next_test_doc_short_id();
-        db::doc_id_map::set_doc_id_mapping(
+        db::docid::map::set_doc_id_mapping(
             systemstore,
             COLLECTION_SHORT_ID,
             short_id,

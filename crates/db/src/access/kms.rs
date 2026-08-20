@@ -85,7 +85,7 @@ impl<S: storage::corekv::Store + Send + Sync + 'static> BlockDocIDResolver
         let systemstore = txn
             .systemstore()
             .map_err(|e| kms::Error::Storage(e.to_string()))?;
-        crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+        crate::docid::map::get_doc_ids_for_block(&systemstore, &cid.to_string())
             .await
             .map_err(|e| kms::Error::Storage(e.to_string()))
     }

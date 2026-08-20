@@ -6,9 +6,9 @@ use datastore::NamespaceView;
 use defra_core::Block;
 
 async fn remove_owner(systemstore: &NamespaceView, cid: &Cid, doc_id: &str) -> Result<bool> {
-    crate::doc_id_map::delete_block_doc_id_mapping(systemstore, &cid.to_string(), doc_id).await?;
+    crate::docid::map::delete_block_doc_id_mapping(systemstore, &cid.to_string(), doc_id).await?;
     Ok(
-        crate::doc_id_map::get_doc_ids_for_block(systemstore, &cid.to_string())
+        crate::docid::map::get_doc_ids_for_block(systemstore, &cid.to_string())
             .await?
             .is_empty(),
     )
@@ -221,7 +221,7 @@ mod tests {
             .await
             .unwrap();
         for owner in ["doc-a", "doc-b"] {
-            crate::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
+            crate::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
                 .await
                 .unwrap();
         }
@@ -232,7 +232,7 @@ mod tests {
 
         assert!(blockstore.get(&cid.to_bytes()).await.unwrap().is_some());
         assert_eq!(
-            crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+            crate::docid::map::get_doc_ids_for_block(&systemstore, &cid.to_string())
                 .await
                 .unwrap(),
             vec!["doc-b".to_string()]
@@ -269,11 +269,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        crate::doc_id_map::set_block_doc_id_mapping(&systemstore, &root_cid.to_string(), "doc-a")
+        crate::docid::map::set_block_doc_id_mapping(&systemstore, &root_cid.to_string(), "doc-a")
             .await
             .unwrap();
         for owner in ["doc-a", "doc-b"] {
-            crate::doc_id_map::set_block_doc_id_mapping(
+            crate::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &field_cid.to_string(),
                 owner,
@@ -328,7 +328,7 @@ mod tests {
                 .await
                 .unwrap();
             for owner in ["doc-a", "doc-b"] {
-                crate::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
+                crate::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
                     .await
                     .unwrap();
             }
@@ -341,7 +341,7 @@ mod tests {
         for cid in [root_cid, field_cid] {
             assert!(blockstore.get(&cid.to_bytes()).await.unwrap().is_some());
             assert_eq!(
-                crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+                crate::docid::map::get_doc_ids_for_block(&systemstore, &cid.to_string())
                     .await
                     .unwrap(),
                 vec!["doc-b".to_string()]

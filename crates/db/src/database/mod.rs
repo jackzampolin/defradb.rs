@@ -217,7 +217,7 @@ pub struct DB<S: Store> {
     /// their CRDT read-modify-write (#1021 counter convergence).
     doc_write_queue: Arc<crate::write::queue::DocWriteQueue>,
     /// Process-local document short-ID range allocator.
-    doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator<S>,
+    doc_short_id_allocator: crate::docid::map::DocShortIdAllocator<S>,
     /// Process-local claims for collection-wide actions.
     ///
     /// Persisted action statuses are observable lifecycle state, not locks: a
@@ -246,7 +246,7 @@ impl<S: Store> DB<S> {
         let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
         let store = Arc::new(store);
         Ok(Self {
-            doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator::new(store.clone()),
+            doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
@@ -308,7 +308,7 @@ impl<S: Store> DB<S> {
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
         let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
         Ok(Self {
-            doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator::new(store.clone()),
+            doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
@@ -398,13 +398,13 @@ impl<S: Store> DB<S> {
         doc_id: &str,
     ) -> Result<u64> {
         if let Some(short_id) =
-            crate::doc_id_map::get_doc_short_id(systemstore, collection_short_id, doc_id).await?
+            crate::docid::map::get_doc_short_id(systemstore, collection_short_id, doc_id).await?
         {
             return Ok(short_id);
         }
 
         let short_id = self.next_doc_short_id().await?;
-        crate::doc_id_map::set_doc_id_mapping(systemstore, collection_short_id, short_id, doc_id)
+        crate::docid::map::set_doc_id_mapping(systemstore, collection_short_id, short_id, doc_id)
             .await?;
         Ok(short_id)
     }

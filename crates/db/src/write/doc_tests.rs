@@ -259,11 +259,11 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
     let txn = db.new_txn(false).await.unwrap();
     {
         let systemstore = txn.systemstore().unwrap();
-        let doc_ref = crate::doc_id_map::get_doc_ref(&systemstore, &canonical_doc_id.to_string())
+        let doc_ref = crate::docid::map::get_doc_ref(&systemstore, &canonical_doc_id.to_string())
             .await
             .unwrap()
             .unwrap();
-        crate::doc_id_map::set_doc_id_alias(
+        crate::docid::map::set_doc_id_alias(
             &systemstore,
             doc_ref.collection_short_id,
             doc_ref.doc_short_id,
@@ -297,7 +297,7 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
     assert_eq!(deleted.doc_id, canonical_doc_id);
     let txn = db.new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
-    let owners = crate::doc_id_map::get_doc_ids_for_block(
+    let owners = crate::docid::map::get_doc_ids_for_block(
         &systemstore,
         &deleted.commit_cid.unwrap().to_string(),
     )
@@ -682,10 +682,10 @@ async fn update_seeds_absent_store_from_committed_base_load_bearing() {
     let setup_txn = db.new_txn(false).await.expect("write txn");
     let datastore = setup_txn.datastore().expect("datastore");
     let systemstore = setup_txn.systemstore().expect("systemstore");
-    let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+    let doc_short_id = crate::docid::map::next_doc_short_id(&systemstore)
         .await
         .expect("short id");
-    crate::doc_id_map::set_doc_id_mapping(
+    crate::docid::map::set_doc_id_mapping(
         &systemstore,
         collection.resolved_root_id(),
         doc_short_id,

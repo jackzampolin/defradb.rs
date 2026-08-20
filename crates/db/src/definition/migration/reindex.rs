@@ -5,9 +5,9 @@ use storage::corekv::Store;
 use tracing::{instrument, warn};
 
 use super::helpers::{cache_document_version, cache_migrated_document, lens_doc_to_document};
+use crate::definition::loader::get_collections_by_collection_id;
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
-use crate::schema_loader::get_collections_by_collection_id;
 use crate::DB;
 
 impl<S: Store> DB<S> {
@@ -41,7 +41,8 @@ impl<S: Store> DB<S> {
         let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
         let _ = read_txn.discard();
 
-        let history = crate::lens_utils::build_collection_history(&versions, &target_version_id);
+        let history =
+            crate::definition::lens::build_collection_history(&versions, &target_version_id);
         let in_history = history
             .as_ref()
             .is_some_and(|h| h.contains_key(dest_version_id));
@@ -119,13 +120,14 @@ impl<S: Store> DB<S> {
         let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
         let _ = read_txn.discard();
 
-        let history = crate::lens_utils::build_collection_history(&versions, &target_version_id)
-            .ok_or_else(|| {
-                Error::Lens(format!(
-                    "failed to build migration history for collection '{}'",
-                    collection_name
-                ))
-            })?;
+        let history =
+            crate::definition::lens::build_collection_history(&versions, &target_version_id)
+                .ok_or_else(|| {
+                    Error::Lens(format!(
+                        "failed to build migration history for collection '{}'",
+                        collection_name
+                    ))
+                })?;
 
         let write_txn = self.new_txn(false).await?;
         let mut materialized_count = 0usize;
@@ -172,7 +174,7 @@ impl<S: Store> DB<S> {
                     continue;
                 }
 
-                let path_has_transform = crate::lens_utils::migration_path_has_transform(
+                let path_has_transform = crate::definition::lens::migration_path_has_transform(
                     &history,
                     &doc_version,
                     &target_version_id,
@@ -194,7 +196,7 @@ impl<S: Store> DB<S> {
                     continue;
                 }
 
-                let lens_doc = crate::lens_utils::doc_to_lens_doc(&doc).ok_or_else(|| {
+                let lens_doc = crate::definition::lens::doc_to_lens_doc(&doc).ok_or_else(|| {
                     Error::Lens(format!(
                         "failed to convert document {:?} for materialization",
                         doc.id()

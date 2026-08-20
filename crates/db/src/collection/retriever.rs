@@ -59,7 +59,7 @@ pub async fn resolve_collection_from_doc_id<S: Store>(
     let blockstore = txn.blockstore()?;
     let systemstore = txn.systemstore()?;
 
-    let doc_short_id = match crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await {
+    let doc_short_id = match crate::docid::map::get_doc_ref(&systemstore, doc_id).await {
         Ok(Some(doc_ref)) => doc_ref.doc_short_id,
         Ok(None) => {
             let _ = txn.discard();
@@ -132,7 +132,8 @@ pub async fn resolve_collection_from_doc_id<S: Store>(
 
     // Resolve collection via the systemstore.
     let collection_res =
-        crate::schema_loader::get_collection_by_version_id(&systemstore, &schema_version_id).await;
+        crate::definition::loader::get_collection_by_version_id(&systemstore, &schema_version_id)
+            .await;
     let info = match collection_res {
         Ok(Some(collection)) => collection.policy.clone().map(|policy| DocCollectionInfo {
             collection_id: collection.collection_id.clone(),

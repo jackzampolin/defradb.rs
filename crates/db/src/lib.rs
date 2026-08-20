@@ -46,12 +46,10 @@
 // import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
 pub(crate) use db_blocks as block_builder;
-pub(crate) mod block_cleanup;
-pub mod block_reader;
-pub mod block_verify;
+pub mod access;
+pub mod block;
 pub mod collection;
 pub use collection::stream::BackfillSource;
-mod commit_priority_index;
 #[cfg(test)]
 mod counting_store;
 pub mod database;
@@ -59,29 +57,21 @@ pub mod database;
 // slice) — see `schema::definition_validation`.
 // dense_search and embedding extracted to standalone db-search crate (Phase 6 of #796).
 pub use db_search as dense_search;
-pub mod doc_id_map;
+pub mod definition;
+pub mod docid;
 pub mod downsample;
 pub mod error;
 pub mod event;
 pub use event::emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
-pub(crate) mod json_patch;
-pub mod kms_adapters;
-#[allow(dead_code)]
-pub(crate) mod lens_utils;
 #[cfg(test)]
 mod limit_pushdown_tests;
-pub mod migration;
 pub(crate) mod read;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
-mod nac_guard;
-pub mod node_access_checker;
-pub(crate) mod patch;
 #[cfg(test)]
 mod plan_close_tests;
-pub mod schema_loader;
 pub mod txn;
 pub(crate) mod view;
 pub mod write;
@@ -111,25 +101,25 @@ pub use read::commits::{CommitsFetcher, CommitsQueryOptions};
 pub use write::autocommit::AutoCommitMutator;
 pub use write::queue::DocWriteQueue;
 // dense_search items re-exported transparently from db-search
+pub use access::kms::{
+    DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
+};
+pub use access::node::{node_access_checker, NodeAccessChecker};
 pub use db_search::{
     embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,
     DenseHybridSearchRequest, DenseHybridSearchResponse,
 };
+pub use definition::loader::{
+    get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
+    load_active_collections,
+};
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
-pub use kms_adapters::{
-    DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
-};
-pub use node_access_checker::{node_access_checker, NodeAccessChecker};
 pub use read::doc::DbDocFetcher;
 pub use read::lensed::autocommit::LensedAutoCommitFetcher;
 pub use read::lensed::fetcher::LensedDocFetcher;
 pub use read::versioned::VersionedFetcher;
-pub use schema_loader::{
-    get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
-    load_active_collections,
-};
 pub use txn::context::DbTransactionContext;
 pub use txn::registry::{
     CleanupResult, DbTransactionRegistry, DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
