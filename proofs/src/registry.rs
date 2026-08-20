@@ -300,7 +300,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Deferred-ACP overlay consistency",
         name: "INV_FailClosedActive — txn-local ACP projection gates as committed state would",
         axis: Tla,
-        anchor: "crates/query-plan deferred-acp overlay",
+        anchor: "crates/query deferred-acp overlay",
         model_ref: "MC_DeferredAcp_Green.cfg",
         tiers: &[Behavioral],
     },

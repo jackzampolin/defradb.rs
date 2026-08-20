@@ -9558,79 +9558,25 @@ dependencies = [
  "bm25",
  "chrono",
  "ciborium",
+ "cid",
  "criterion 0.6.0",
- "defra-core",
- "document",
- "graphql-parser",
- "identity",
- "lens",
- "query-parse",
- "query-plan",
- "query-types",
- "schema",
- "serde",
- "serde_json",
- "storage",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "query-parse"
-version = "0.5.0"
-dependencies = [
- "chrono",
- "cid",
- "graphql-parser",
- "query-types",
- "regex",
- "schema",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "query-plan"
-version = "0.5.0"
-dependencies = [
- "acp",
- "async-lock",
- "async-trait",
- "chrono",
- "cid",
  "cursor",
  "defra-core",
  "document",
  "futures",
+ "graphql-parser",
  "identity",
  "lens",
- "query-parse",
- "query-types",
- "schema",
- "serde_json",
- "storage",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "query-types"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "chrono",
- "document",
+ "regex",
  "schema",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "storage",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "web-time",
 ]
 
 [[package]]

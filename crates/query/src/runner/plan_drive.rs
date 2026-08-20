@@ -32,9 +32,9 @@ pub(crate) async fn close_after<T>(plan: &mut dyn PlanNode, outcome: Result<T>) 
 mod tests {
     use super::*;
     use crate::document::DocumentMapping;
+    use crate::error::QueryError;
     use crate::planner::{Doc, PlanNode};
     use async_trait::async_trait;
-    use query_types::error::QueryError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
