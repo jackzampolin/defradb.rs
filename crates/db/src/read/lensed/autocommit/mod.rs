@@ -4,13 +4,10 @@
 //! Documents are automatically migrated during fetch when migrations are registered.
 
 mod fetch;
-pub(crate) mod migration;
+pub mod migration;
 mod scan;
-mod stream;
+pub mod stream;
 mod vector;
-
-#[cfg(test)]
-mod tests;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -189,7 +189,3 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .map_err(|_| Error::LockPoisoned("failed to acquire read lock for count".to_string()))
     }
 }
-
-#[cfg(test)]
-#[path = "../registry_tests.rs"]
-mod tests;

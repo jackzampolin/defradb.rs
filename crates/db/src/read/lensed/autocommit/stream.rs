@@ -37,11 +37,7 @@ use super::LensedAutoCommitFetcher;
 /// callback storage doesn't stop this struct satisfying `DocStream`'s
 /// `MaybeSendSync` bound; every access goes through `&mut self` via
 /// `get_mut`, so it never actually locks.
-<<<<<<< HEAD
-struct LensedAutoCommitDocStream<S: Store + 'static> {
-=======
 pub struct LensedAutoCommitDocStream<S: Store + 'static> {
->>>>>>> 2e0bb59e (fixup! chore(db): widen db internals for out-of-crate tests)
     inner: Option<Box<dyn DocStream>>,
     txn: std::sync::Mutex<Option<DbTxn<S>>>,
     fetcher: LensedAutoCommitFetcher<S>,
@@ -271,6 +267,3 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         }))
     }
 }
-
-#[cfg(test)]
-mod tests;

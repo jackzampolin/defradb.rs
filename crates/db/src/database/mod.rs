@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use storage::corekv::Store;
 
-pub(crate) mod action;
+pub mod action;
 pub(crate) mod dump;
 
 /// Default maximum number of lazy migrations written in one transaction.
@@ -182,7 +182,7 @@ pub struct DB<S: Store> {
     /// Event bus for subscription notifications.
     event_bus: Option<Arc<dyn Bus>>,
     /// Lens transform store for schema migrations.
-    pub(crate) lens_store: Arc<dyn TransformStore>,
+    pub lens_store: Arc<dyn TransformStore>,
     /// Pending migrations registered before their destination version exists.
     /// Maps dest_version_id -> (source_version_id, transform_id_string).
     pub(crate) pending_migrations: RwLock<HashMap<String, (String, String)>>,
@@ -224,7 +224,7 @@ pub struct DB<S: Store> {
     /// process can exit while an action is in progress and leave that state
     /// behind. The registry provides cancellation-safe mutual exclusion for
     /// operations running in this database instance.
-    pub(crate) active_actions: Arc<crate::database::action::ActionRegistry>,
+    pub active_actions: Arc<crate::database::action::ActionRegistry>,
     /// Per-collection locks coordinating document writes with schema changes.
     pub(crate) collection_locks: Mutex<HashMap<String, Arc<async_lock::RwLock<()>>>>,
 }
@@ -410,7 +410,7 @@ impl<S: Store> DB<S> {
     }
 
     /// Return the generation of the committed migration graph.
-    pub(crate) fn migration_generation(&self) -> u64 {
+    pub fn migration_generation(&self) -> u64 {
         self.migration_generation.load(Ordering::Acquire)
     }
 
@@ -615,58 +615,5 @@ impl<S: Store> DB<S> {
     /// Get the current transaction ID counter value.
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use storage::backends::MemoryStore;
-
-    struct StubKms;
-
-    #[async_trait]
-    impl kms::KmsService for StubKms {
-        async fn get_keys(
-            &self,
-            _: &kms::RequestContext,
-            _: &[kms::EncryptionCid],
-        ) -> kms::Result<kms::KeyResults> {
-            let (r, tx) = kms::KeyResults::new(1);
-            drop(tx);
-            Ok(r)
-        }
-
-        async fn generate_key(
-            &self,
-            _: &kms::RequestContext,
-            _: kms::KeyScope,
-        ) -> kms::Result<(kms::EncryptionCid, [u8; 32])> {
-            Err(kms::Error::Unsupported("stub"))
-        }
-
-        async fn serve_request(
-            &self,
-            _: kms::PeerIdentity,
-            _: kms::FetchEncryptionKeyRequest,
-        ) -> kms::Result<kms::FetchEncryptionKeyReply> {
-            Err(kms::Error::Unsupported("stub"))
-        }
-    }
-
-    #[test]
-    fn db_kms_accessor_round_trips() {
-        let db = DB::new(MemoryStore::new()).unwrap();
-        assert!(db.kms().is_none());
-
-        let first: Arc<dyn kms::KmsService> = Arc::new(StubKms);
-        db.set_kms(first);
-        assert!(db.kms().is_some());
-
-        // OnceLock: second set is silently ignored.
-        let second: Arc<dyn kms::KmsService> = Arc::new(StubKms);
-        db.set_kms(second);
-        assert!(db.kms().is_some());
     }
 }

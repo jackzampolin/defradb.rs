@@ -5,13 +5,10 @@
 //! provide document transforms between schema versions.
 
 pub mod format;
-pub(crate) mod helpers;
+pub mod helpers;
 mod reindex;
 mod set;
 mod shortid;
-
-#[cfg(test)]
-mod tests;
 
 use std::sync::Arc;
 

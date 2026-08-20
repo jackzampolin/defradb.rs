@@ -18,12 +18,9 @@
 //! The migrated values and new version are cached in the datastore.
 
 mod fetch;
-mod migration;
+pub mod migration;
 mod scan;
-mod stream;
-
-#[cfg(test)]
-mod tests;
+pub mod stream;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,15 +35,15 @@ use storage::corekv::Store;
 use crate::txn::DbTxn;
 use crate::{database::DB, read::lensed::autocommit::migration::MigrationWriteBack};
 
-pub(crate) struct PendingMigrationWriteBack {
+pub struct PendingMigrationWriteBack {
     pub(crate) collection_name: String,
     pub(crate) write_back: MigrationWriteBack,
 }
 
 #[derive(Default)]
-pub(crate) struct PendingMigrationWriteBacks {
-    pub(crate) documents: Vec<PendingMigrationWriteBack>,
-    pub(crate) full_scans: HashMap<String, bool>,
+pub struct PendingMigrationWriteBacks {
+    pub documents: Vec<PendingMigrationWriteBack>,
+    pub full_scans: HashMap<String, bool>,
 }
 
 /// Document fetcher that applies lens migrations to documents.
@@ -63,7 +60,7 @@ pub struct LensedDocFetcher<S: Store> {
     lens_store: Arc<dyn TransformStore>,
     /// Cache of collection version histories keyed by collection name.
     #[allow(dead_code)]
-    history_cache: async_lock::RwLock<HashMap<String, HashMap<String, TargetedHistoryLink>>>,
+    pub history_cache: async_lock::RwLock<HashMap<String, HashMap<String, TargetedHistoryLink>>>,
 }
 
 impl<S: Store> LensedDocFetcher<S> {
@@ -79,7 +76,7 @@ impl<S: Store> LensedDocFetcher<S> {
     /// * `txn` - The database transaction
     /// * `lens_store` - The lens transform store for applying migrations
     #[allow(dead_code)]
-    pub(crate) fn new(
+    pub fn new(
         db: Arc<DB<S>>,
         txn: DbTxn<S>,
         lens_store: Arc<dyn TransformStore>,
@@ -112,7 +109,7 @@ impl<S: Store> LensedDocFetcher<S> {
 
     /// Take the transaction out of the fetcher (for commit/rollback).
     #[allow(dead_code)]
-    pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
+    pub async fn take_txn(&self) -> Option<DbTxn<S>> {
         self.txn.lock().await.take()
     }
 
@@ -169,7 +166,7 @@ impl<S: Store> LensedDocFetcher<S> {
             .retain(|candidate| candidate.collection_name != collection_name);
     }
 
-    pub(crate) async fn take_pending_write_backs(&self) -> PendingMigrationWriteBacks {
+    pub async fn take_pending_write_backs(&self) -> PendingMigrationWriteBacks {
         std::mem::take(&mut *self.pending_write_backs.lock().await)
     }
 }

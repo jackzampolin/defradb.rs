@@ -50,8 +50,6 @@ pub mod access;
 pub mod block;
 pub mod collection;
 pub use collection::stream::BackfillSource;
-#[cfg(test)]
-mod counting_store;
 pub mod database;
 // Definition validation moved to the `schema` crate (was #791 substitute
 // slice) — see `schema::definition_validation`.
@@ -68,10 +66,6 @@ pub use db_index as index_manager;
 pub mod read;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
-#[cfg(test)]
-mod limit_pushdown_tests;
-#[cfg(test)]
-mod plan_close_tests;
 pub mod txn;
 pub(crate) mod view;
 pub mod write;

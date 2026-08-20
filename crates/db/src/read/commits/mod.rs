@@ -5,8 +5,6 @@
 
 mod conversion;
 mod delta;
-#[cfg(test)]
-mod tests;
 
 use async_lock::Mutex as TokioMutex;
 use cid::Cid;
@@ -272,7 +270,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// 1. Group by docID first (documents in order they were created/discovered)
     /// 2. Within each document, sort by field ID: regular fields first (by name),
     ///    composite field (_C) last
-    fn sort_commits_go_order(&self, commits: &mut [Document]) {
+    pub fn sort_commits_go_order(&self, commits: &mut [Document]) {
         let mut doc_order = std::collections::HashMap::new();
         for commit in commits.iter() {
             let doc_id = commit

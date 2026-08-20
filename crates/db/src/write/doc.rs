@@ -74,7 +74,7 @@ impl<S: Store> DbDocMutator<S> {
     /// committed writes to a `TxnBroadcaster`. When `broadcaster` is `Some`,
     /// each per-mutation `on_success_async` callback both publishes to the
     /// local event bus and asks the broadcaster to push to P2P peers.
-    pub(crate) fn from_shared_txn_with_broadcaster(
+    pub fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,
         txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
@@ -649,7 +649,3 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })
     }
 }
-
-#[cfg(test)]
-#[path = "doc_tests.rs"]
-mod tests;

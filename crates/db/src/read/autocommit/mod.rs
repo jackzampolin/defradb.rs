@@ -457,11 +457,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 /// doesn't stop this struct satisfying `DocStream`'s `MaybeSendSync` bound;
 /// every access goes through `&mut self` via `get_mut`, so it never actually
 /// locks.
-<<<<<<< HEAD
-struct AutoCommitDocStream<S: Store + 'static> {
-=======
 pub struct AutoCommitDocStream<S: Store + 'static> {
->>>>>>> 2e0bb59e (fixup! chore(db): widen db internals for out-of-crate tests)
     inner: Option<Box<dyn DocStream>>,
     txn: std::sync::Mutex<Option<DbTxn<S>>>,
 }
@@ -543,6 +539,3 @@ impl<S: Store + 'static> DocStream for AutoCommitDocStream<S> {
         self.close_inner_then_release().await
     }
 }
-
-#[cfg(test)]
-mod tests;
