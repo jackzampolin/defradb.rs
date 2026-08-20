@@ -1,16 +1,12 @@
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use tempfile::TempDir;
 
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap())
-}
+mod common;
 
 /// Fixture holding a seeded store plus the keys the benchmarks read against.
 ///
@@ -44,7 +40,7 @@ impl<S: Store> BenchStore<S> {
             .map(|index| format!("rand:{:04}", (index * 37) % 1000).into_bytes())
             .collect();
 
-        runtime().block_on(async {
+        common::shared_runtime().block_on(async {
             let mut txn = store.new_txn(false).await.unwrap();
             txn.set(&tree_key, b"tree-value").await.unwrap();
 
@@ -118,7 +114,7 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
     group.bench_function(BenchmarkId::from_parameter("get_from_tree"), |b| {
         b.iter_batched(
             || {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     (
                         fixture.store.new_txn(true).await.unwrap(),
                         fixture.tree_key.clone(),
@@ -126,7 +122,7 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
                 })
             },
             |(txn, key)| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let value = txn.get(&key).await.unwrap();
                     black_box(value);
                     txn.discard();
@@ -139,7 +135,7 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
     group.bench_function(BenchmarkId::from_parameter("get_from_pending"), |b| {
         b.iter_batched(
             || {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut txn = fixture.store.new_txn(false).await.unwrap();
                     txn.set(&fixture.pending_key, &fixture.pending_value)
                         .await
@@ -148,7 +144,7 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
                 })
             },
             |(txn, key)| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let value = txn.get(&key).await.unwrap();
                     black_box(value);
                     txn.discard();
@@ -162,7 +158,7 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
         b.iter_batched(
             || fixture.next_set_payload(),
             |(key, value)| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut txn = fixture.store.new_txn(false).await.unwrap();
                     txn.set(&key, &value).await.unwrap();
                     txn.commit().await.unwrap();
@@ -174,9 +170,12 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
 
     group.bench_function(BenchmarkId::from_parameter("sequential_scan_100"), |b| {
         b.iter_batched(
-            || runtime().block_on(async { fixture.store.new_txn(true).await.unwrap() }),
+            || {
+                common::shared_runtime()
+                    .block_on(async { fixture.store.new_txn(true).await.unwrap() })
+            },
             |txn| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut iter = txn
                         .iterator(IterOptions::new().with_prefix(fixture.scan_prefix.clone()))
                         .await
@@ -200,9 +199,12 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
 
     group.bench_function(BenchmarkId::from_parameter("sequential_scan_1000"), |b| {
         b.iter_batched(
-            || runtime().block_on(async { fixture.store.new_txn(true).await.unwrap() }),
+            || {
+                common::shared_runtime()
+                    .block_on(async { fixture.store.new_txn(true).await.unwrap() })
+            },
             |txn| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut iter = txn
                         .iterator(IterOptions::new().with_prefix(fixture.scan_large_prefix.clone()))
                         .await
@@ -223,9 +225,12 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
 
     group.bench_function(BenchmarkId::from_parameter("keys_only_scan_1000"), |b| {
         b.iter_batched(
-            || runtime().block_on(async { fixture.store.new_txn(true).await.unwrap() }),
+            || {
+                common::shared_runtime()
+                    .block_on(async { fixture.store.new_txn(true).await.unwrap() })
+            },
             |txn| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut iter = txn
                         .iterator(
                             IterOptions::new()
@@ -250,9 +255,12 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
 
     group.bench_function(BenchmarkId::from_parameter("random_get_1000"), |b| {
         b.iter_batched(
-            || runtime().block_on(async { fixture.store.new_txn(true).await.unwrap() }),
+            || {
+                common::shared_runtime()
+                    .block_on(async { fixture.store.new_txn(true).await.unwrap() })
+            },
             |txn| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut hits = 0usize;
                     for key in &fixture.random_keys {
                         if txn.get(key).await.unwrap().is_some() {

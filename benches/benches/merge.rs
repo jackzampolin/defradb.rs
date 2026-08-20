@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::OnceLock;
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use crdt::composite::FieldDelta;
@@ -14,10 +13,7 @@ use defra_core::types::DocId;
 use std::hint::black_box;
 use storage::{MemoryStore, Store, Txn};
 
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap())
-}
+mod common;
 
 /// Single-poll executor for futures that never yield.
 ///
@@ -62,7 +58,7 @@ fn make_merge_setup(
     initial: LwwDelta,
     incoming: LwwDelta,
 ) -> (Box<dyn Txn>, Lww, Context, LwwDelta) {
-    runtime().block_on(async move {
+    common::shared_runtime().block_on(async move {
         let store = MemoryStore::new();
         let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
         let ctx = make_context();
@@ -149,7 +145,7 @@ fn bench_merge_contaminated(c: &mut Criterion) {
         b.iter_batched(
             || make_merge_setup(clear_winner_initial.clone(), clear_winner_incoming.clone()),
             |(txn, lww, ctx, incoming)| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut txn = txn;
                     black_box(lww.merge(&mut *txn, &ctx, &incoming).await.unwrap());
                     black_box(lww.value(&*txn).await.unwrap());
@@ -166,7 +162,7 @@ fn bench_merge_contaminated(c: &mut Criterion) {
         b.iter_batched(
             || make_merge_setup(tiebreak_initial.clone(), tiebreak_incoming.clone()),
             |(txn, lww, ctx, incoming)| {
-                runtime().block_on(async {
+                common::shared_runtime().block_on(async {
                     let mut txn = txn;
                     black_box(lww.merge(&mut *txn, &ctx, &incoming).await.unwrap());
                     black_box(lww.value(&*txn).await.unwrap());
@@ -409,7 +405,7 @@ fn bench_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("crdt_overhead");
 
     group.bench_function(BenchmarkId::from_parameter("tokio_block_on_ready"), |b| {
-        b.iter(|| runtime().block_on(async { black_box(1u64) }));
+        b.iter(|| common::shared_runtime().block_on(async { black_box(1u64) }));
     });
 
     group.bench_function(BenchmarkId::from_parameter("noop_block_on_ready"), |b| {

@@ -7,24 +7,19 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use db::index::vector::core::{dot, squared_euclidean, Metric, Tier};
 use std::hint::black_box;
-use tokio::runtime::Runtime;
 
 mod common;
 
-use common::{Corpus, Index, ALL_KINDS, SEED};
+use common::vector::{Corpus, Index, ALL_KINDS, SEED};
 
 const DIMENSIONS: usize = 128;
 const K: usize = 10;
-
-fn runtime() -> Runtime {
-    Runtime::new().expect("a tokio runtime")
-}
 
 /// The batch-built kinds are measured in their built state, which is the one a
 /// production query hits. Their untrained state is a flat scan and is already
 /// covered by the `flat` row.
 fn search(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut corpus = Corpus::new(SEED);
     let vectors = corpus.clustered(5_000, DIMENSIONS, 50, 0.25);
     let query = corpus.vector(DIMENSIONS);
@@ -47,7 +42,7 @@ fn search(c: &mut Criterion) {
 /// How query cost grows with the corpus. The exhaustive kind is linear by
 /// construction; the point of the others is that they are not.
 fn search_by_corpus_size(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut group = c.benchmark_group("search_by_corpus");
     group.sample_size(20);
 
