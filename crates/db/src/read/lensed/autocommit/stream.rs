@@ -37,7 +37,11 @@ use super::LensedAutoCommitFetcher;
 /// callback storage doesn't stop this struct satisfying `DocStream`'s
 /// `MaybeSendSync` bound; every access goes through `&mut self` via
 /// `get_mut`, so it never actually locks.
+<<<<<<< HEAD
 struct LensedAutoCommitDocStream<S: Store + 'static> {
+=======
+pub struct LensedAutoCommitDocStream<S: Store + 'static> {
+>>>>>>> 2e0bb59e (fixup! chore(db): widen db internals for out-of-crate tests)
     inner: Option<Box<dyn DocStream>>,
     txn: std::sync::Mutex<Option<DbTxn<S>>>,
     fetcher: LensedAutoCommitFetcher<S>,
@@ -49,6 +53,30 @@ struct LensedAutoCommitDocStream<S: Store + 'static> {
 }
 
 impl<S: Store + 'static> LensedAutoCommitDocStream<S> {
+    /// Wrap an inner stream, optionally holding the read transaction it owns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        inner: Box<dyn DocStream>,
+        txn: Option<DbTxn<S>>,
+        fetcher: LensedAutoCommitFetcher<S>,
+        collection: Collection,
+        migration_generation: u64,
+        has_migrations: bool,
+        preloaded_history: Option<HashMap<String, TargetedHistoryLink>>,
+        write_backs: Vec<MigrationWriteBack>,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            txn: std::sync::Mutex::new(txn),
+            fetcher,
+            collection,
+            migration_generation,
+            has_migrations,
+            preloaded_history,
+            write_backs,
+        }
+    }
+
     fn release_read_txn(&mut self) {
         self.inner = None;
         let slot = self

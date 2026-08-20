@@ -5,8 +5,8 @@
 //! including field addition, removal, and schema version management.
 
 mod apply;
-mod helpers;
-pub(crate) mod json;
+pub mod helpers;
+pub mod json;
 mod store;
 mod validate;
 mod version;

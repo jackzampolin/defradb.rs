@@ -125,7 +125,7 @@ pub(crate) async fn load_collection_from_systemstore(
 ///
 /// Returns the collection, datastore, and systemstore (for DocID <-> short-ID
 /// resolution) for document operations.
-pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
+pub async fn get_collection_with_lazy_load<S: Store + 'static>(
     txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
     collection_name: &str,
 ) -> query::error::Result<(Collection, NamespaceView, NamespaceView)> {
@@ -190,7 +190,7 @@ pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
 ///
 /// Returns the collection, datastore, systemstore, and IndexManager for
 /// document operations.
-pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
+pub async fn get_collection_with_index_manager<S: Store + 'static>(
     txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
     collection_name: &str,
 ) -> query::error::Result<(Collection, NamespaceView, NamespaceView, IndexManager)> {

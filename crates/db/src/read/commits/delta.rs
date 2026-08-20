@@ -100,7 +100,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// prefixes but invalid hash components. Rust's library is stricter and rejects
     /// these. This function detects strings that "look like" CIDv1 so we can return
     /// a more appropriate error message for Go compatibility.
-    pub(super) fn looks_like_cidv1(s: &str) -> bool {
+    pub fn looks_like_cidv1(s: &str) -> bool {
         if s.len() < 40 {
             return false;
         }

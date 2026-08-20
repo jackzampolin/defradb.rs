@@ -48,6 +48,13 @@ pub(crate) struct ActionRegistry {
     active: Mutex<HashSet<ActionKey>>,
 }
 
+impl ActionRegistry {
+    /// True when no process-local action claim is held.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active.lock().is_empty()
+    }
+}
+
 /// Owns the process-local claim for one collection-wide action.
 ///
 /// Dropping the lease always releases the claim, including when the operation

@@ -15,15 +15,15 @@ use crate::definition::migration::helpers::{
 
 use super::LensedAutoCommitFetcher;
 
-pub(super) struct MigrationOutcome {
-    pub(super) document: Document,
-    pub(super) source_document: Option<Document>,
+pub struct MigrationOutcome {
+    pub document: Document,
+    pub source_document: Option<Document>,
 }
 
-pub(crate) struct MigrationWriteBack {
-    pub(crate) source_document: Document,
-    pub(crate) migrated_document: Document,
-    pub(crate) migration_generation: u64,
+pub struct MigrationWriteBack {
+    pub source_document: Document,
+    pub migrated_document: Document,
+    pub migration_generation: u64,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -88,7 +88,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     }
 
     /// Convert a Document to a LensDoc.
-    pub(super) fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
+    pub fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
         let map = doc.to_map().ok()?;
         let mut lens_doc = LensDoc::new();
         for (key, value) in map {
@@ -240,7 +240,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     }
 
     /// Process a document, applying migration if needed.
-    pub(super) async fn process_document(
+    pub async fn process_document(
         &self,
         doc: Document,
         collection: &Collection,

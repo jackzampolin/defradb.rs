@@ -24,18 +24,18 @@ use storage::keys::doc_id_index::encode_doc_short_id;
 use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
 
 pub mod acp;
-pub(crate) mod cache;
+pub mod cache;
 mod crud;
 mod index;
-pub(crate) mod loader;
+pub mod loader;
 pub(crate) mod locks;
-pub(crate) mod name;
+pub mod name;
 pub(crate) mod ops;
 pub(crate) mod provider;
-pub(crate) mod retriever;
-pub(crate) mod snapshot;
-pub(crate) mod stream;
-mod validation;
+pub mod retriever;
+pub mod snapshot;
+pub mod stream;
+pub mod validation;
 
 /// Derive the legacy short ID from a collection_id string.
 ///
@@ -240,7 +240,7 @@ impl Collection {
     /// collection is allocation (insertion) order, matching Go v1.0.0's
     /// short-ID-keyed datastore (#4838). Delegates to the shared key helper
     /// so the write, merge, and index layers agree on the layout (#1111).
-    pub(crate) fn doc_key(&self, doc_short_id: u64) -> Vec<u8> {
+    pub fn doc_key(&self, doc_short_id: u64) -> Vec<u8> {
         storage::keys::doc_key(&self.def.collection_id, doc_short_id)
     }
 
@@ -278,7 +278,7 @@ impl Collection {
     ///
     /// Returns `None` for unknown documents or documents belonging to a
     /// different collection.
-    pub(crate) async fn resolve_doc_short_id(
+    pub async fn resolve_doc_short_id(
         &self,
         systemstore: &NamespaceView,
         doc_id: &DocID,

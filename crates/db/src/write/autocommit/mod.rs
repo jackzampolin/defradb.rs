@@ -10,7 +10,7 @@ mod create;
 mod delete;
 pub(crate) mod helpers;
 mod read;
-mod update;
+pub mod update;
 
 use async_trait::async_trait;
 use cid::Cid;

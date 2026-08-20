@@ -96,7 +96,7 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     ///
     /// After calling this, `is_consumed()` will return `true` and all
     /// fetcher operations will return an error.
-    pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
+    pub async fn take_txn(&self) -> Option<DbTxn<S>> {
         self.fetcher.take_txn().await
     }
 

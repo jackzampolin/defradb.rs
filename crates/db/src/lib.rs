@@ -45,7 +45,7 @@
 // Backup extracted to standalone db-backup crate (#789). Callers now
 // import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
-pub(crate) use db_blocks as block_builder;
+pub use db_blocks as block_builder;
 pub mod access;
 pub mod block;
 pub mod collection;
@@ -65,11 +65,11 @@ pub mod event;
 pub use event::emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
-#[cfg(test)]
-mod limit_pushdown_tests;
-pub(crate) mod read;
+pub mod read;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
+#[cfg(test)]
+mod limit_pushdown_tests;
 #[cfg(test)]
 mod plan_close_tests;
 pub mod txn;

@@ -684,7 +684,7 @@ fn decode_counter_value(bytes: &[u8], kind: NumericKind) -> Option<NormalValue> 
     }
 }
 
-pub(super) fn ensure_collection_is_active<S: Store>(
+pub(crate) fn ensure_collection_is_active<S: Store>(
     db: &DB<S>,
     collection_name: &str,
     collection: &Collection,

@@ -421,6 +421,16 @@ impl<S: Store> DB<S> {
 
     /// Install the KMS service. First call wins (OnceLock); subsequent calls
     /// are silently discarded. Called once at node startup.
+    /// True when no process-local action claim is held.
+    pub fn has_no_active_actions(&self) -> bool {
+        self.active_actions.is_empty()
+    }
+
+    /// Replace the transform store backing lens migrations.
+    pub fn set_lens_store(&mut self, store: Arc<dyn TransformStore>) {
+        self.lens_store = store;
+    }
+
     pub fn set_kms(&self, kms: std::sync::Arc<dyn kms::KmsService>) {
         let _ = self.kms.set(kms);
     }

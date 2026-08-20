@@ -193,7 +193,7 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 
     /// Convert a Document to a LensDoc.
-    pub(super) fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
+    pub fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
         // Use Document's to_map which handles all field conversions properly
         let map = doc.to_map().ok()?;
 
@@ -224,7 +224,7 @@ impl<S: Store> LensedDocFetcher<S> {
     ///
     /// If the document's schema version matches the target, returns it unchanged.
     /// Otherwise, transforms it through the lens pipeline and caches the result.
-    pub(super) async fn process_document(
+    pub async fn process_document(
         &self,
         doc: Document,
         collection: &Collection,

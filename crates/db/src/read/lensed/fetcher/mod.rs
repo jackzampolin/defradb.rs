@@ -67,6 +67,11 @@ pub struct LensedDocFetcher<S: Store> {
 }
 
 impl<S: Store> LensedDocFetcher<S> {
+    /// Seed the per-version history cache directly.
+    pub async fn insert_history(&self, key: String, history: HashMap<String, TargetedHistoryLink>) {
+        self.history_cache.write().await.insert(key, history);
+    }
+
     /// Create a new lensed document fetcher.
     ///
     /// # Arguments

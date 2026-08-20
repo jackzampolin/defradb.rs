@@ -18,6 +18,11 @@ pub struct CollectionSnapshot {
 }
 
 impl CollectionSnapshot {
+    /// True when both snapshots share one allocation, i.e. the clone was cheap.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.collections, &other.collections)
+    }
+
     /// Create a new collection snapshot from a HashMap.
     pub fn new(collections: HashMap<String, Collection>) -> Self {
         Self {

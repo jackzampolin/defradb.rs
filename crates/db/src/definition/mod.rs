@@ -4,4 +4,4 @@
 pub(crate) mod lens;
 pub mod loader;
 pub mod migration;
-pub(crate) mod patch;
+pub mod patch;

@@ -457,12 +457,40 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 /// doesn't stop this struct satisfying `DocStream`'s `MaybeSendSync` bound;
 /// every access goes through `&mut self` via `get_mut`, so it never actually
 /// locks.
+<<<<<<< HEAD
 struct AutoCommitDocStream<S: Store + 'static> {
+=======
+pub struct AutoCommitDocStream<S: Store + 'static> {
+>>>>>>> 2e0bb59e (fixup! chore(db): widen db internals for out-of-crate tests)
     inner: Option<Box<dyn DocStream>>,
     txn: std::sync::Mutex<Option<DbTxn<S>>>,
 }
 
 impl<S: Store + 'static> AutoCommitDocStream<S> {
+    /// Wrap an inner stream that owns `txn` until the stream closes.
+    pub fn new(inner: Box<dyn DocStream>, txn: DbTxn<S>) -> Self {
+        Self {
+            inner: Some(inner),
+            txn: std::sync::Mutex::new(Some(txn)),
+        }
+    }
+
+    /// Wrap an inner stream that holds no read transaction.
+    pub fn without_txn(inner: Box<dyn DocStream>) -> Self {
+        Self {
+            inner: Some(inner),
+            txn: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// True once the read transaction has been released.
+    pub fn txn_released(&self) -> bool {
+        self.txn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+    }
+
     fn release_read_txn(&mut self) {
         self.inner = None;
         let slot = self
