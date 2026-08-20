@@ -361,7 +361,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Execute the view query
         let txn = self.new_txn(true).await?;
-        let fetcher = crate::doc_fetcher::DbDocFetcher::new(txn);
+        let fetcher = crate::read::doc::DbDocFetcher::new(txn);
 
         // Keep a handle to the transaction mutex so we can discard it after the query
         let txn_handle = fetcher.shared_txn();

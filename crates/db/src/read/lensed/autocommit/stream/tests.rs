@@ -14,7 +14,7 @@ use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::backends::MemoryStore;
 
 use super::LensedAutoCommitDocStream;
-use crate::lensed_auto_commit_fetcher::migration::MigrationWriteBack;
+use crate::read::lensed::autocommit::migration::MigrationWriteBack;
 use crate::write::doc::DbDocMutator;
 use crate::{Collection, LensedAutoCommitFetcher, DB};
 
@@ -47,7 +47,7 @@ async fn fixture_with_docs(n: usize) -> Arc<DB<MemoryStore>> {
     db
 }
 
-/// Duplicated from `auto_commit_fetcher::tests::RecordingStream`: that struct
+/// Duplicated from `read::autocommit::tests::RecordingStream`: that struct
 /// is private to its own module tree, unreachable from here.
 struct RecordingStream {
     inner: Box<dyn DocStream>,

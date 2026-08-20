@@ -59,7 +59,7 @@ mod unit_tests {
 mod additional_tests {
     #[test]
     fn test_looks_like_cidv1() {
-        use crate::commits_fetcher::CommitsFetcher;
+        use crate::read::commits::CommitsFetcher;
         use storage::backends::memory::MemoryStore;
 
         assert!(CommitsFetcher::<MemoryStore>::looks_like_cidv1(
@@ -89,7 +89,7 @@ mod shared_owner_tests {
     use document::{DocID, NormalValue};
     use storage::backends::MemoryStore;
 
-    use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
+    use crate::read::commits::{CommitsFetcher, CommitsQueryOptions};
     use crate::{VersionedFetcher, DB};
 
     #[tokio::test]

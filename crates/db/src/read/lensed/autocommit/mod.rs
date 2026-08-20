@@ -3,11 +3,11 @@
 //! This fetcher combines auto-commit transaction management with lens migrations.
 //! Documents are automatically migrated during fetch when migrations are registered.
 
-mod fetcher;
-mod index_scan;
+mod fetch;
 pub(crate) mod migration;
+mod scan;
 mod stream;
-mod vector_search;
+mod vector;
 
 #[cfg(test)]
 mod tests;

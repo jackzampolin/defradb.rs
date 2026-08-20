@@ -42,7 +42,6 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
-pub(crate) mod auto_commit_fetcher;
 // Backup extracted to standalone db-backup crate (#789). Callers now
 // import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
@@ -53,7 +52,6 @@ pub mod block_verify;
 pub mod collection;
 pub use collection::stream::BackfillSource;
 mod commit_priority_index;
-pub(crate) mod commits_fetcher;
 #[cfg(test)]
 mod counting_store;
 pub mod database;
@@ -61,7 +59,6 @@ pub mod database;
 // slice) — see `schema::definition_validation`.
 // dense_search and embedding extracted to standalone db-search crate (Phase 6 of #796).
 pub use db_search as dense_search;
-pub(crate) mod doc_fetcher;
 pub mod doc_id_map;
 pub mod downsample;
 pub mod error;
@@ -69,16 +66,14 @@ pub mod event;
 pub use event::emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
-pub(crate) mod index_seek;
 pub(crate) mod json_patch;
 pub mod kms_adapters;
 #[allow(dead_code)]
 pub(crate) mod lens_utils;
-pub(crate) mod lensed_auto_commit_fetcher;
-pub(crate) mod lensed_fetcher;
 #[cfg(test)]
 mod limit_pushdown_tests;
 pub mod migration;
+pub(crate) mod read;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
 mod nac_guard;
@@ -88,13 +83,10 @@ pub(crate) mod patch;
 mod plan_close_tests;
 pub mod schema_loader;
 pub mod txn;
-pub(crate) mod vector_search;
-pub(crate) mod versioned_fetcher;
 pub(crate) mod view;
 pub mod write;
 
 // Re-export commonly used types
-pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use block_builder::{build_blocks_from_document, BlockResult};
 pub use collection::acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
@@ -108,13 +100,14 @@ pub use collection::retriever::{resolve_collection_from_doc_id, DocCollectionInf
 pub use collection::snapshot::CollectionSnapshot;
 #[allow(deprecated)]
 pub use collection::{collection_short_id, Collection};
-pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{
     DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES,
     DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE,
 };
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use defra_core::{Action, ActionExecution, ActionStatus};
+pub use read::autocommit::AutoCommitFetcher;
+pub use read::commits::{CommitsFetcher, CommitsQueryOptions};
 pub use write::autocommit::AutoCommitMutator;
 pub use write::queue::DocWriteQueue;
 // dense_search items re-exported transparently from db-search
@@ -122,16 +115,17 @@ pub use db_search::{
     embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,
     DenseHybridSearchRequest, DenseHybridSearchResponse,
 };
-pub use doc_fetcher::DbDocFetcher;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use kms_adapters::{
     DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
 };
-pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
-pub use lensed_fetcher::LensedDocFetcher;
 pub use node_access_checker::{node_access_checker, NodeAccessChecker};
+pub use read::doc::DbDocFetcher;
+pub use read::lensed::autocommit::LensedAutoCommitFetcher;
+pub use read::lensed::fetcher::LensedDocFetcher;
+pub use read::versioned::VersionedFetcher;
 pub use schema_loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,
@@ -142,7 +136,6 @@ pub use txn::registry::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
 };
 pub use txn::DbTxn;
-pub use versioned_fetcher::VersionedFetcher;
 pub use view::ops::{is_refreshable_view, RefreshViewsOptions};
 pub use write::doc::DbDocMutator;
 

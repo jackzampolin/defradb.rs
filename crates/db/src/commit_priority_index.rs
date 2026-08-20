@@ -123,7 +123,7 @@ mod tests {
 
     use super::*;
     use crate::block_builder::write_document_blocks;
-    use crate::commits_fetcher::CommitsFetcher;
+    use crate::read::commits::CommitsFetcher;
     use crate::txn::DbTxn;
 
     async fn count_priority_entries<S: Store>(txn: &DbTxn<S>) -> usize {
@@ -301,7 +301,7 @@ mod tests {
 
         let fetcher = CommitsFetcher::new(Arc::new(async_lock::Mutex::new(Some(read_txn))));
         let composite_commits = fetcher
-            .fetch_commits(&crate::commits_fetcher::CommitsQueryOptions {
+            .fetch_commits(&crate::read::commits::CommitsQueryOptions {
                 doc_id: Some(doc_id.clone()),
                 cid: None,
                 depth: None,
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(composite_heights, vec![1, 2, 3]);
 
         let age_commit = fetcher
-            .fetch_commits(&crate::commits_fetcher::CommitsQueryOptions {
+            .fetch_commits(&crate::read::commits::CommitsQueryOptions {
                 doc_id: Some(doc_id),
                 cid: None,
                 depth: None,

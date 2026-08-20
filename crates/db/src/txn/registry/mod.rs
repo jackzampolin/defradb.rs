@@ -32,7 +32,7 @@ use web_time::Instant;
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
-use crate::lensed_fetcher::LensedDocFetcher;
+use crate::read::lensed::fetcher::LensedDocFetcher;
 use crate::txn::context::DbTransactionContext;
 use crate::txn::lenses::TxnLensStore;
 

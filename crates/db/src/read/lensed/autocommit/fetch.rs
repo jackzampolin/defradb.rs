@@ -11,9 +11,9 @@ use storage::corekv::Store;
 use tracing::{debug, trace};
 
 use crate::collection::Collection;
-use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
+use crate::read::commits::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
+use crate::read::versioned::VersionedFetcher;
 use crate::txn::DbTxn;
-use crate::versioned_fetcher::VersionedFetcher;
 
 use super::migration::MigrationWriteBack;
 use super::LensedAutoCommitFetcher;

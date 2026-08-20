@@ -25,7 +25,7 @@ use crate::block_builder::{write_collection_block, write_delete_block, write_doc
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
-use crate::lensed_fetcher::LensedDocFetcher;
+use crate::read::lensed::fetcher::LensedDocFetcher;
 
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).

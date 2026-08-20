@@ -280,7 +280,7 @@ mod tests {
     use storage::backends::MemoryStore;
 
     use crate::database::DB;
-    use crate::doc_fetcher::DbDocFetcher;
+    use crate::read::doc::DbDocFetcher;
     use crate::write::doc::DbDocMutator;
 
     fn test_schema() -> CollectionVersion {

@@ -27,7 +27,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
 
-        let hits = crate::vector_search::search_vector_index(
+        let hits = crate::read::vector::search_vector_index(
             &collection,
             &datastore,
             index_id,

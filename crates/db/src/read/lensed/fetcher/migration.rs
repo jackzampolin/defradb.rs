@@ -10,8 +10,8 @@ use storage::corekv::Store;
 use tracing::{debug, trace};
 
 use crate::collection::Collection;
-use crate::lensed_auto_commit_fetcher::migration::MigrationWriteBack;
 use crate::migration::helpers::{cache_migrated_document_with_indexes, lens_doc_to_document};
+use crate::read::lensed::autocommit::migration::MigrationWriteBack;
 use crate::schema_loader::get_collections_by_collection_id;
 
 use super::LensedDocFetcher;
@@ -86,7 +86,7 @@ impl<S: Store> LensedDocFetcher<S> {
         // traverse forward from older versions. Without this, a node whose
         // collection sits at v1 cannot find a path to a doc that arrived at
         // v2 — the previous-only graph is unreachable from v1.
-        // Mirrors the equivalent pass in `lensed_auto_commit_fetcher`.
+        // Mirrors the equivalent pass in `lensed::autocommit`.
         let reverse_links: Vec<(String, String)> = full_history
             .values()
             .flat_map(|link| {

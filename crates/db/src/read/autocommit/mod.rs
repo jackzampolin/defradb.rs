@@ -16,8 +16,8 @@ use tracing::warn;
 
 use crate::collection::stream::CollectionDocStream;
 use crate::database::DB;
+use crate::read::versioned::VersionedFetcher;
 use crate::txn::DbTxn;
-use crate::versioned_fetcher::VersionedFetcher;
 
 /// Document fetcher that auto-commits transactions for each operation.
 ///

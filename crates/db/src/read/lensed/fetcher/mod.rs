@@ -17,9 +17,9 @@
 //! This allows schema updates without rewriting all existing documents.
 //! The migrated values and new version are cached in the datastore.
 
-mod fetcher;
-mod index_scan;
+mod fetch;
 mod migration;
+mod scan;
 mod stream;
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 
 use crate::txn::DbTxn;
-use crate::{database::DB, lensed_auto_commit_fetcher::migration::MigrationWriteBack};
+use crate::{database::DB, read::lensed::autocommit::migration::MigrationWriteBack};
 
 pub(crate) struct PendingMigrationWriteBack {
     pub(crate) collection_name: String,
@@ -226,7 +226,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         &self,
         options: &query::fetcher::CommitsQueryOptions,
     ) -> query::error::Result<Vec<Document>> {
-        use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
+        use crate::read::commits::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 
         let db_options = DbCommitsOptions {
             doc_id: options.doc_id.clone(),
@@ -315,7 +315,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             crate::collection::loader::get_collection_with_lazy_load(&self.txn, collection_name)
                 .await?;
 
-        crate::vector_search::search_vector_index(
+        crate::read::vector::search_vector_index(
             &collection,
             &datastore,
             index_id,
@@ -336,7 +336,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        use crate::versioned_fetcher::VersionedFetcher;
+        use crate::read::versioned::VersionedFetcher;
 
         let versioned_fetcher =
             VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned());
@@ -352,7 +352,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        use crate::versioned_fetcher::VersionedFetcher;
+        use crate::read::versioned::VersionedFetcher;
 
         let versioned_fetcher =
             VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned());

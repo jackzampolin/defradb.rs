@@ -4,7 +4,7 @@
 //! Commits are the CRDT blocks that make up document version history.
 
 mod conversion;
-mod delta_helpers;
+mod delta;
 #[cfg(test)]
 mod tests;
 

@@ -11,10 +11,10 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
-use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
-use crate::index_seek::apply_cursor_seek_to_iterator;
+use crate::read::commits::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
+use crate::read::seek::apply_cursor_seek_to_iterator;
+use crate::read::versioned::VersionedFetcher;
 use crate::txn::DbTxn;
-use crate::versioned_fetcher::VersionedFetcher;
 
 /// Document fetcher that uses a database transaction.
 ///
@@ -116,7 +116,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let (collection, datastore, _) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        crate::vector_search::search_vector_index(
+        crate::read::vector::search_vector_index(
             &collection,
             &datastore,
             index_id,

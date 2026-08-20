@@ -1,6 +1,6 @@
 //! Streaming variant of the lensed auto-commit read path.
 //!
-//! Like `lensed_fetcher::stream`, this applies migration per document as it
+//! Like `lensed::fetcher::stream`, this applies migration per document as it
 //! is pulled from storage (Go's read-through model) instead of after a full
 //! collection read. Write-back stays batched as the eager path batches it
 //! (`process_document_with_bounded_write_back` flushes every
