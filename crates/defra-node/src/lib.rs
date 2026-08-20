@@ -60,10 +60,14 @@ pub use config::HttpConfig;
 pub use config::P2PConfig;
 #[cfg(feature = "sourcehub")]
 pub use config::SourceHubConfig;
+/// Typed document access, for values JSON cannot carry — binary above all.
+/// See [`EmbeddedNode::doc_mutator`] and [`EmbeddedNode::doc_fetcher`].
+pub use db::{DocID, Document, NormalValue};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
+pub use query::{DocFetcher, DocMutator};
 pub use query::{QueryExecutor, QueryRequest, QueryResponse, TransactionHandle};
 pub use schema::CollectionVersion;
 pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
@@ -166,6 +170,8 @@ pub struct EmbeddedNode {
     rocksdb_stats: Option<storage::RocksDbStatsHandle>,
     #[cfg(feature = "http")]
     txn_cleanup_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    doc_mutator: Arc<dyn query::DocMutator>,
+    doc_fetcher: Arc<dyn query::DocFetcher>,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
@@ -485,6 +491,30 @@ impl EmbeddedNode {
     /// or [`Self::execute_request_in_txn`] for document reads and writes.
     pub fn runner(&self) -> &Arc<dyn QueryExecutor> {
         &self.runner
+    }
+
+    /// Write documents with typed field values.
+    ///
+    /// GraphQL is the usual path, but its variables are JSON, which has no
+    /// binary type: bytes have to be hex or base64 to get through, costing
+    /// double or a third again on every write, in storage, and on the wire.
+    /// A [`Document`] carries [`NormalValue::Bytes`] as bytes, and the CBOR
+    /// block encoding keeps them that way.
+    ///
+    /// This is the same seam the GraphQL planner mutates through, so
+    /// validation, indexing, ACP, and P2P broadcast all behave identically —
+    /// only the JSON step is skipped.
+    pub fn doc_mutator(&self) -> &Arc<dyn query::DocMutator> {
+        &self.doc_mutator
+    }
+
+    /// Read documents with typed field values, the counterpart to
+    /// [`doc_mutator`](Self::doc_mutator).
+    ///
+    /// Query results are JSON, which renders [`NormalValue::Bytes`] as a hex
+    /// string. Reading through the fetcher returns the bytes themselves.
+    pub fn doc_fetcher(&self) -> &Arc<dyn query::DocFetcher> {
+        &self.doc_fetcher
     }
 
     /// Access the event bus directly.
@@ -1454,7 +1484,15 @@ impl NodeBuilder {
         let mutator: Arc<dyn query::DocMutator> =
             Arc::new(db::AutoCommitMutator::new(database.clone()));
 
-        // Query runner components
+        let doc_mutator = mutator.clone();
+
+        // Query runner components. The fetcher is built twice rather than
+        // shared: `DocFetcher` has no blanket impl for `Arc`, and a delegating
+        // wrapper is exactly how `FetcherWrapper` once lost method overrides
+        // silently. Both instances read the same `Arc<DB>`; only a migration
+        // cache is duplicated.
+        let doc_fetcher: Arc<dyn query::DocFetcher> =
+            Arc::new(db::LensedAutoCommitFetcher::new(database.clone()));
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
         let provider: Arc<dyn query::CollectionProvider> =
             db::DbCollectionProvider::new_arc(database.clone());
@@ -1565,6 +1603,8 @@ impl NodeBuilder {
             rocksdb_stats: None,
             #[cfg(feature = "http")]
             txn_cleanup_task: tokio::sync::Mutex::new(txn_cleanup_task),
+            doc_mutator,
+            doc_fetcher,
             #[cfg(feature = "p2p")]
             p2p_ops,
             #[cfg(feature = "p2p")]
