@@ -1157,12 +1157,12 @@ async fn delete_missing_doc_publishes_no_event_and_writes_no_block() {
 /// `TxnBroadcaster` test double: captures every event it's asked to
 /// broadcast for inspection.
 struct CapturingBroadcaster {
-    events: Arc<std::sync::Mutex<Vec<crate::event_emission::TxnBroadcastEvent>>>,
+    events: Arc<std::sync::Mutex<Vec<crate::event::emission::TxnBroadcastEvent>>>,
 }
 
 #[async_trait::async_trait]
-impl crate::event_emission::TxnBroadcaster for CapturingBroadcaster {
-    async fn broadcast_update(&self, event: crate::event_emission::TxnBroadcastEvent) {
+impl crate::event::emission::TxnBroadcaster for CapturingBroadcaster {
+    async fn broadcast_update(&self, event: crate::event::emission::TxnBroadcastEvent) {
         self.events.lock().unwrap().push(event);
     }
 }
@@ -1177,9 +1177,9 @@ async fn create_in_tx_forwards_to_broadcaster_on_commit() {
         .await
         .expect("schema");
 
-    let captured: Arc<std::sync::Mutex<Vec<crate::event_emission::TxnBroadcastEvent>>> =
+    let captured: Arc<std::sync::Mutex<Vec<crate::event::emission::TxnBroadcastEvent>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    let broadcaster: Arc<dyn crate::event_emission::TxnBroadcaster> =
+    let broadcaster: Arc<dyn crate::event::emission::TxnBroadcaster> =
         Arc::new(CapturingBroadcaster {
             events: Arc::clone(&captured),
         });
@@ -1225,9 +1225,9 @@ async fn create_in_tx_does_not_broadcast_on_discard() {
         .await
         .expect("schema");
 
-    let captured: Arc<std::sync::Mutex<Vec<crate::event_emission::TxnBroadcastEvent>>> =
+    let captured: Arc<std::sync::Mutex<Vec<crate::event::emission::TxnBroadcastEvent>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    let broadcaster: Arc<dyn crate::event_emission::TxnBroadcaster> =
+    let broadcaster: Arc<dyn crate::event::emission::TxnBroadcaster> =
         Arc::new(CapturingBroadcaster {
             events: Arc::clone(&captured),
         });

@@ -27,7 +27,7 @@ impl Node {
         document_acp: Arc<dyn acp::DocumentACP>,
         nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
         mutator: Arc<dyn query::mutator::DocMutator>,
-        txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
+        txn_broadcaster: Option<Arc<dyn db::event::emission::TxnBroadcaster>>,
         se_transport: Option<Arc<dyn query::SeQueryTransport>>,
     ) -> QueryRunnerSetup {
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());

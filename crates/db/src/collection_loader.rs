@@ -94,14 +94,15 @@ pub(crate) async fn load_collection_from_systemstore(
                     ))
                 })?;
 
-            let actions = crate::action::index_action_statuses(systemstore, &schema.collection_id)
-                .await
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to load index actions for collection '{}': {}",
-                        name, e
-                    ))
-                })?;
+            let actions =
+                crate::database::action::index_action_statuses(systemstore, &schema.collection_id)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to load index actions for collection '{}': {}",
+                            name, e
+                        ))
+                    })?;
 
             Ok(Some(Collection::with_index_actions(schema, &actions)))
         }

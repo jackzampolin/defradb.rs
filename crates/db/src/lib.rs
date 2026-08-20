@@ -42,7 +42,6 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
-mod action;
 pub(crate) mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 // Backup extracted to standalone db-backup crate (#789). Callers now
@@ -78,10 +77,9 @@ pub mod doc_id_map;
 pub(crate) mod doc_mutator;
 pub mod doc_write_queue;
 pub mod downsample;
-pub(crate) mod dump;
 pub mod error;
-pub mod event_emission;
-pub use event_emission::{TxnBroadcastEvent, TxnBroadcaster};
+pub mod event;
+pub use event::emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
 pub(crate) mod index_seek;
@@ -108,7 +106,7 @@ pub(crate) mod txn_lens_store;
 pub(crate) mod txn_registry;
 pub(crate) mod vector_search;
 pub(crate) mod versioned_fetcher;
-pub(crate) mod view_ops;
+pub(crate) mod view;
 
 // Re-export commonly used types
 pub use auto_commit_fetcher::AutoCommitFetcher;
@@ -161,7 +159,7 @@ pub use txn_registry::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
 };
 pub use versioned_fetcher::VersionedFetcher;
-pub use view_ops::{is_refreshable_view, RefreshViewsOptions};
+pub use view::ops::{is_refreshable_view, RefreshViewsOptions};
 
 // P2P merge/sync extracted to standalone db-merge crate.
 // Consumer crates (cli, embedded, defra-node, ffi) should depend on db-merge directly.

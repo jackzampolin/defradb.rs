@@ -88,7 +88,7 @@ pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,
     id_counter: AtomicU64,
-    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+    broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
 }
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
@@ -111,7 +111,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// local event bus.
     pub fn with_broadcaster(
         db: Arc<DB<S>>,
-        broadcaster: Arc<dyn crate::event_emission::TxnBroadcaster>,
+        broadcaster: Arc<dyn crate::event::emission::TxnBroadcaster>,
     ) -> Self {
         Self {
             db,

@@ -110,7 +110,7 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                         collection::populate_collection_root_id(&systemstore, &mut schema)
                             .await
                             .map_err(|e| QueryError::execution(e.to_string()))?;
-                        let actions = crate::action::index_action_statuses(
+                        let actions = crate::database::action::index_action_statuses(
                             &systemstore,
                             &schema.collection_id,
                         )
@@ -134,10 +134,12 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                     collection::populate_collection_root_id(&systemstore, &mut schema)
                         .await
                         .map_err(|e| QueryError::execution(e.to_string()))?;
-                    let actions =
-                        crate::action::index_action_statuses(&systemstore, &schema.collection_id)
-                            .await
-                            .map_err(|e| QueryError::execution(e.to_string()))?;
+                    let actions = crate::database::action::index_action_statuses(
+                        &systemstore,
+                        &schema.collection_id,
+                    )
+                    .await
+                    .map_err(|e| QueryError::execution(e.to_string()))?;
                     return Ok(Some(Arc::new(
                         collection::Collection::with_index_actions(schema, &actions)
                             .schema_for_queries(),

@@ -17,7 +17,7 @@ use super::helpers::{
 use crate::block_builder::{write_delete_block, write_document_blocks};
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
-use crate::event_emission::register_update_event_callback;
+use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use db_blocks::DocStorageIdentity;
 use defra_core::encryption::get_encryption_config;

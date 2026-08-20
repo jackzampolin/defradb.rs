@@ -154,7 +154,7 @@ pub(super) struct P2PSetupResult {
     pub(super) lifecycle: Option<P2PLifecycle>,
     pub(super) mutator: Arc<dyn query::DocMutator>,
     pub(super) wire_document_acp: Option<WireDocumentAcpCallback>,
-    pub(super) txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
+    pub(super) txn_broadcaster: Arc<dyn db::event::emission::TxnBroadcaster>,
 }
 
 pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(

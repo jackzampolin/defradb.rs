@@ -178,8 +178,11 @@ impl<S: Store> crate::database::DB<S> {
             for schema in schemas.values() {
                 index_actions.insert(
                     schema.collection_id.clone(),
-                    crate::action::index_action_statuses(&systemstore, &schema.collection_id)
-                        .await?,
+                    crate::database::action::index_action_statuses(
+                        &systemstore,
+                        &schema.collection_id,
+                    )
+                    .await?,
                 );
             }
         }

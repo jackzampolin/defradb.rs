@@ -18,7 +18,7 @@ use crate::broadcast_mutator::BroadcastMutator;
 use crate::head_provider::DbHeadProvider;
 use crate::merge_handler::DbMergeHandler;
 use crate::txn_broadcaster::SyncTxnBroadcaster;
-use db::event_emission::TxnBroadcaster;
+use db::event::emission::TxnBroadcaster;
 
 pub struct ReplicationStack<S: Store, B: Blockstore + Send + Sync, T: P2PTransport> {
     pub merge_handler_inner: Arc<DbMergeHandler<S, B>>,

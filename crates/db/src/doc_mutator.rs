@@ -13,7 +13,7 @@ use crate::block_builder::{write_delete_block, write_document_blocks};
 use crate::collection::Collection;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
-use crate::event_emission::register_update_event_callback;
+use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use db_blocks::DocStorageIdentity;
 use defra_core::encryption::get_encryption_config;
@@ -55,7 +55,7 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 pub struct DbDocMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+    broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
 }
 
 impl<S: Store> DbDocMutator<S> {
@@ -77,7 +77,7 @@ impl<S: Store> DbDocMutator<S> {
     pub(crate) fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,
         txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-        broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
             db,

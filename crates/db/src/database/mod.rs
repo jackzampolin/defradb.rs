@@ -24,6 +24,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use storage::corekv::Store;
 
+pub(crate) mod action;
+pub(crate) mod dump;
+
 /// Default maximum number of lazy migrations written in one transaction.
 pub const DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE: usize = 128;
 /// Default maximum number of retries after an auto-commit transaction conflict.
@@ -221,7 +224,7 @@ pub struct DB<S: Store> {
     /// process can exit while an action is in progress and leave that state
     /// behind. The registry provides cancellation-safe mutual exclusion for
     /// operations running in this database instance.
-    pub(crate) active_actions: Arc<crate::action::ActionRegistry>,
+    pub(crate) active_actions: Arc<crate::database::action::ActionRegistry>,
     /// Per-collection locks coordinating document writes with schema changes.
     pub(crate) collection_locks: Mutex<HashMap<String, Arc<async_lock::RwLock<()>>>>,
 }
@@ -259,7 +262,7 @@ impl<S: Store> DB<S> {
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
-            active_actions: Arc::new(crate::action::ActionRegistry::default()),
+            active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
             collection_locks: Mutex::new(HashMap::new()),
         })
     }
@@ -321,7 +324,7 @@ impl<S: Store> DB<S> {
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
-            active_actions: Arc::new(crate::action::ActionRegistry::default()),
+            active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
             collection_locks: Mutex::new(HashMap::new()),
         })
     }

@@ -23,7 +23,7 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// Forwards committed `/tx` writes to P2P peers; mirrors what the CLI
     /// `P2PSetup` exposes. Without this, transactional writes commit locally
     /// but never replicate.
-    pub txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
+    pub txn_broadcaster: Arc<dyn db::event::emission::TxnBroadcaster>,
     /// Type-erased KMS transport for this node's P2P system. node.rs adds it
     /// to the DefraKms transports list and installs the serve handler.
     pub kms_transport: Arc<dyn kms::KeyTransport>,

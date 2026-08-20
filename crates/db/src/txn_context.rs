@@ -28,7 +28,7 @@ pub struct DbTransactionContext<S: Store> {
     readonly: bool,
     fetcher: Arc<LensedDocFetcher<S>>,
     deferred_acp_mutations: Arc<DeferredAcpMutations>,
-    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+    broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     action_lock: Arc<async_lock::Mutex<()>>,
     created_at: Instant,
     last_request_seen: Mutex<Instant>,
@@ -43,7 +43,7 @@ impl<S: Store> DbTransactionContext<S> {
         readonly: bool,
         fetcher: Arc<LensedDocFetcher<S>>,
         deferred_acp_mutations: Arc<DeferredAcpMutations>,
-        broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         let now = Instant::now();
         Self {

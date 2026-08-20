@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use blockstore::Blockstore;
-use db::event_emission::{TxnBroadcastEvent, TxnBroadcaster};
+use db::event::emission::{TxnBroadcastEvent, TxnBroadcaster};
 use db_blocks::BlockResult;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
