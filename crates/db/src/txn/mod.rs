@@ -130,7 +130,7 @@ pub struct DbTxn<S: Store> {
     /// held batch gate, a finalize local) and inserted here, so they release
     /// only when the `DbTxn` is consumed by
     /// `commit`/`discard`/`force_commit`/`force_discard` — i.e. AFTER the durable
-    /// commit. See the finalize driver in `txn_registry.rs` and
+    /// commit. See the finalize driver in `txn/registry/lifecycle.rs` and
     /// `InteractiveTxnCounter.tla`.
     doc_guards: BTreeMap<String, MutexGuardArc<()>>,
     /// Collection locks held until this transaction commits or rolls back.

@@ -1,17 +1,17 @@
 ---- MODULE TxnRegistry ----
 \* Stale-transaction cleanup race in the Rust db transaction registry.
 \*
-\* Abstracts crates/db/src/txn_registry.rs `DbTransactionRegistry::cleanup_stale_transactions`
+\* Abstracts crates/db/src/txn/registry/cleanup.rs `DbTransactionRegistry::cleanup_stale_transactions`
 \* and the concurrent `get`/`get_ctx` touch path (anchors in TxnRegistry_DESIGN.md).
 \*
 \* THE RACE. A periodic sweep evicts transactions idle longer than `max_idle_age`. It runs
 \* in two phases:
 \*   1. Collect candidates under the registry READ lock: every ctx whose idle_for(now) >
-\*      max_idle_age (txn_registry.rs:275-285).
+\*      max_idle_age (txn/registry/cleanup.rs:30-40).
 \*   2. For each candidate, under the registry WRITE lock, RE-CHECK idle_for and remove only
-\*      if still idle and still the same Arc (txn_registry.rs:300-318).
+\*      if still idle and still the same Arc (txn/registry/cleanup.rs:55-72).
 \* Meanwhile a request `get`s a txn and calls ctx.touch(), resetting its idle clock to 0
-\* (txn_registry.rs:192-199, 766-784; txn_context.rs:65-75). The touch happens while holding
+\* (txn/registry/mod.rs:157-165, txn/registry/lifecycle.rs:282-290; txn/context.rs:68-77). The touch happens while holding
 \* the registry READ lock, so it is mutually exclusive with the write-locked remove.
 \*
 \* THE HAZARD the model exposes: a NAIVE sweep that removes purely on the phase-1 verdict
@@ -50,7 +50,7 @@ VARIABLES
 
 vars == <<clock, lastSeen, present, rlock, wlock, candidates, collectAt, removedLive>>
 
-\* idle_for(now) = now - last_request_seen   (txn_context.rs:86-88)
+\* idle_for(now) = now - last_request_seen   (txn/context.rs:89-91)
 IdleFor(t, now) == now - lastSeen[t]
 IsStale(t, now) == IdleFor(t, now) > MaxIdle
 
@@ -89,7 +89,7 @@ Tick ==
   /\ clock' = clock + 1
   /\ UNCHANGED <<lastSeen, present, rlock, wlock, candidates, collectAt, removedLive>>
 
-\* ---- get / get_ctx touch (txn_registry.rs:192-213, 766-784) ----
+\* ---- get / get_ctx touch (txn/registry/mod.rs:157-172, txn/registry/lifecycle.rs:282-290) ----
 \* Acquire the read lock, refresh last_request_seen to now, release. Only present txns can
 \* be looked up (a removed txn returns NotFound; nothing to touch).
 TouchAcquire(t) ==
@@ -104,7 +104,7 @@ TouchRelease(t) ==
   /\ rlock' = rlock \ {t}
   /\ UNCHANGED <<clock, present, wlock, candidates, collectAt, removedLive>>
 
-\* ---- Sweep phase 1: collect stale candidates under the read lock (txn_registry.rs:275-285)
+\* ---- Sweep phase 1: collect stale candidates under the read lock (txn/registry/cleanup.rs:30-40)
 \* Snapshot lastSeen at collect time into collectAt for each candidate.
 Collect ==
   /\ candidates = {}            \* one sweep at a time (the background task is single)
@@ -115,7 +115,7 @@ Collect ==
        /\ collectAt' = [t \in Txns |-> IF t \in stale THEN lastSeen[t] ELSE collectAt[t]]
   /\ UNCHANGED <<clock, lastSeen, present, rlock, wlock, removedLive>>
 
-\* ---- Sweep phase 2: per-candidate remove under the WRITE lock (txn_registry.rs:300-318) ----
+\* ---- Sweep phase 2: per-candidate remove under the WRITE lock (txn/registry/cleanup.rs:55-72) ----
 \* Recheck == "WriteLocked": real code. Remove only if still present AND still idle by the
 \*   write-locked re-check `current.idle_for(Instant::now()) > max_idle_age`.
 \* Recheck == "None": buggy naive sweep. Remove on the phase-1 verdict alone (no re-check).

@@ -58,14 +58,14 @@ states, so the invariants hold over a non-trivial space:
 |---|---|---|
 | `Reg(o)` / `Unreg` (`ProjectedDocRegistration::Registered{owner}` / `Unregistered`) | `enum ProjectedDocRegistration` | `crates/query/src/txn/primitives/context.rs:30-34` |
 | `proj[t]` (txn-local `projected_registrations`) | `DeferredAcpState.projected_registrations` | `context.rs:48-52` |
-| one `DeferredAcpMutations` per txn (isolation by construction) | `Arc::new(DeferredAcpMutations::new())` at `begin()` | `crates/db/src/txn_registry.rs:721-722, 749-756` |
+| one `DeferredAcpMutations` per txn (isolation by construction) | `Arc::new(DeferredAcpMutations::new())` at `begin()` | `crates/db/src/txn/registry/lifecycle.rs:216-229` |
 | `proj[t][d] := Reg(o)` + buffer hook (`Register` action) | `schedule_register_doc_object` | `context.rs:120-158` (projection insert 131-137; hook push 141-157) |
 | `proj[t][d] := Unreg` + buffer hook (`Unregister` action) | `schedule_unregister_doc_object` | `context.rs:161-204` (projection insert 172-176) |
 | `EffectiveProj` / `OverlayGrant` (the gate: projection-first, else committed) | `check_doc_access_with_overlay` | `context.rs:328-351` |
 | `OwnerCheck="Strict"` (Registered grants only to owner) | `matches!(identity, Identity::Authenticated(did) if did == &owner)` | `context.rs:342-344` |
 | projected `Unregistered ⇒ open` | `ProjectedDocRegistration::Unregistered => true` | `context.rs:341` |
 | `Commit` runs hooks atomically (one action) | `run_all_logged` drains and runs all hooks | `context.rs:207-237` |
-| commit hook wired to **commit only** (`on_success_async`), never rollback | `db_txn.on_success_async(... run_all_logged ...)` | `txn_registry.rs:723-734` |
+| commit hook wired to **commit only** (`on_success_async`), never rollback | `db_txn.on_success_async(... run_all_logged ...)` | `txn/registry/lifecycle.rs:218-229` |
 | `on_success_async` semantics: fired on `commit()`, NOT on `discard()` | corekv `Transaction` trait docs | `crates/storage/src/corekv/traits.rs:304-369` |
 | projection scoped per query execution via task-local | `scope_deferred_acp_mutations` | `crates/query/src/runner/executor.rs:444-474`, `context.rs:266-303` |
 | register/unregister scheduled from the mutation runner | `schedule_register_doc_object` / `schedule_unregister_doc_object` call sites | `crates/query/src/runner/mutation.rs:705-720, 764-771` |
@@ -142,7 +142,7 @@ the named invariant "is violated" with a concrete two-txn counterexample trace.
 - **Integrator TODO:** no automated model↔code conformance harness yet (repo-wide policy,
   `proofs/README.md` "Model ≠ code"). Keep anchors in step manually if `txn/context.rs` changes
   the projection-first gate, the owner check, the per-txn `DeferredAcpMutations` allocation in
-  `txn_registry.rs`, or the `on_success_async` (commit-only) hook wiring.
+  `txn/registry/lifecycle.rs`, or the `on_success_async` (commit-only) hook wiring.
 - **Integrator TODO (run-all):** add the four `MC_DeferredAcp_*` rows to
   `proofs/tla/run-all.sh` (shared file, intentionally not edited by this slice):
 

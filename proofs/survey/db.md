@@ -10,9 +10,9 @@ algebra all live in dependency crates (`crdt`, `db-merge`, `db-blocks`, `acp`,
 `db-nac`) that have their own slices.
 
 ## State machines
-- **Explicit/implicit txn lifecycle** (`txn.rs`): `Some(txn)`→committed/discarded
+- **Explicit/implicit txn lifecycle** (`txn/mod.rs`): `Some(txn)`→committed/discarded
   (`None`); explicit txns reject `commit()`/`discard()` (must `force_*`). Plumbing.
-- **Stale-txn registry cleanup** (`txn_registry.rs` `cleanup_stale_transactions`):
+- **Stale-txn registry cleanup** (`txn/registry/cleanup.rs` `cleanup_stale_transactions`):
   collect candidates under read lock → re-check idle under per-ctx action lock →
   remove under write lock with `Arc::ptr_eq` + final idle re-check. A real
   concurrency protocol guarding against evicting a transaction a concurrent

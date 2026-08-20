@@ -1,9 +1,9 @@
 ---- MODULE InteractiveTxnCounter ----
 \* Guard-acquisition LIFECYCLE of the interactive / explicit-transaction counter mutator,
-\* abstracting crates/db/src/doc_mutator.rs (DbDocMutator), crates/db/src/txn.rs (DbTxn
+\* abstracting crates/db/src/doc_mutator.rs (DbDocMutator), crates/db/src/txn/mod.rs (DbTxn
 \* pending counter deltas + commit) and crates/db/src/doc_write_queue.rs (acquire /
 \* acquire_batch_gate). This is the #1044 design, IMPLEMENTED in the tree (commit-time
-\* finalize in txn_registry.rs::finalize_and_commit / apply_counter_ops_at_finalize — see
+\* finalize in txn/registry/lifecycle.rs::finalize_and_commit / apply_counter_ops_at_finalize — see
 \* InteractiveTxnCounter_DESIGN.md). Companion to MergeQueue.tla, which models the per-doc
 \* serialization itself; this slice isolates WHEN the interactive txn takes the
 \* process-wide batch_gate over its user-controlled lifetime.
@@ -30,7 +30,7 @@
 \* gate, grab their per-doc guards, then RELEASE the gate — a bounded hold. The OLD
 \* interactive path (DbDocMutator on DbTxn) discovers its docs INCREMENTALLY and so held
 \* the gate (and its per-doc guards) for the WHOLE user-controlled transaction — which can
-\* sit IDLE between requests up to the ~600s idle reaper (txn_registry.rs
+\* sit IDLE between requests up to the ~600s idle reaper (txn/registry/mod.rs
 \* DEFAULT_TRANSACTION_IDLE_TIMEOUT). An abandoned interactive counter txn therefore
 \* stalled every other gate acquirer node-wide.
 \*
