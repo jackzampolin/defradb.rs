@@ -50,7 +50,7 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_LOG_SOURCE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub log_source: Option<bool>,
 
-    /// Logger config overrides. Format <name>,<key>=<val>,...;<name>,...
+    /// Logger config overrides. Format `<name>,<key>=<val>,...;<name>,...`
     #[arg(long, global = true, env = "DEFRA_LOG_OVERRIDES")]
     pub log_overrides: Option<String>,
 

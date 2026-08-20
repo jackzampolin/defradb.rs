@@ -171,6 +171,44 @@ impl ProcessQueue {
         })
     }
 
+    /// Try to acquire exclusive processing rights for every CID without
+    /// registering a waiter.
+    ///
+    /// CAR responses can contain blocks shared by several document DAGs.  A
+    /// root-only guard therefore does not prevent two imports from racing the
+    /// same mutable merge marker. Sorting and de-duplicating the keys gives one
+    /// batch every affected CID in one critical section. If any CID already
+    /// has an owner, no ownership changes and the conflicting CID is returned.
+    /// This is intentionally
+    /// non-waiting: duplicate CAR arrivals must not retain global transport
+    /// task slots while the owner they are waiting for needs that transport to
+    /// make progress.
+    pub(crate) fn try_acquire_all_nowait<I>(&self, cids: I) -> Result<Vec<ProcessGuard>, Cid>
+    where
+        I: IntoIterator<Item = Cid>,
+    {
+        let mut cids: Vec<_> = cids.into_iter().collect();
+        cids.sort_unstable();
+        cids.dedup();
+
+        let mut waiters = self.inner.waiters.lock();
+        if let Some(conflict) = cids.iter().find(|cid| waiters.contains_key(cid)) {
+            return Err(*conflict);
+        }
+        for cid in &cids {
+            waiters.insert(*cid, Vec::new());
+        }
+        drop(waiters);
+
+        Ok(cids
+            .into_iter()
+            .map(|cid| ProcessGuard {
+                cid,
+                queue: self.clone(),
+            })
+            .collect())
+    }
+
     /// Release the CID and notify all waiters (synchronous version).
     fn release_sync(&self, cid: &Cid) {
         let mut waiters = self.inner.waiters.lock();
@@ -291,6 +329,34 @@ mod tests {
         // Second CID should also acquire (different CID)
         let result = queue.try_acquire(&cid2).await;
         assert!(result.is_ok(), "Different CIDs should be independent");
+    }
+
+    #[tokio::test]
+    async fn acquire_all_nowait_is_atomic_for_an_overlapping_batch() {
+        let queue = ProcessQueue::new();
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+
+        let mut ordered = [cid1, cid2];
+        ordered.sort_unstable();
+        let blocker = queue.try_acquire_nowait(&ordered[1]).unwrap();
+        assert_eq!(
+            queue
+                .try_acquire_all_nowait([cid2, cid1, cid2])
+                .unwrap_err(),
+            ordered[1]
+        );
+        assert_eq!(queue.active_count(), 1);
+        let unblocked = queue
+            .try_acquire_nowait(&ordered[0])
+            .expect("failed batch must not transiently retain its earlier CID");
+        drop(unblocked);
+        drop(blocker);
+
+        let second = queue.try_acquire_all_nowait([cid1, cid2]).unwrap();
+        assert_eq!(second.len(), 2);
+        drop(second);
+        assert_eq!(queue.active_count(), 0);
     }
 
     #[tokio::test]

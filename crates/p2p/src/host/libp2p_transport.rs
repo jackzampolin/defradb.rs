@@ -476,6 +476,7 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent<Respo
             root_cid,
             car_data,
         } => TransportEvent::CarFetchResponse {
+            query_id: None,
             peer_id: PeerId::from(peer_id),
             root_cid,
             car_data,

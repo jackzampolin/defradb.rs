@@ -20,8 +20,17 @@ pub(super) struct ConnectionCacheKey {
     alpn: Vec<u8>,
 }
 
-pub(super) type ConnectionCache =
-    Arc<parking_lot::Mutex<HashMap<ConnectionCacheKey, iroh::endpoint::Connection>>>;
+#[derive(Default)]
+pub(super) struct ConnectionCacheState {
+    connections: parking_lot::Mutex<HashMap<ConnectionCacheKey, iroh::endpoint::Connection>>,
+    dial_guards: parking_lot::Mutex<HashMap<ConnectionCacheKey, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+pub(super) type ConnectionCache = Arc<ConnectionCacheState>;
+
+pub(super) fn new_connection_cache() -> ConnectionCache {
+    Arc::new(ConnectionCacheState::default())
+}
 
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const OPEN_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -182,7 +191,7 @@ fn cached_connection(
     alpn: &[u8],
 ) -> crate::error::Result<Option<iroh::endpoint::Connection>> {
     let key = connection_cache_key(peer_id, alpn)?;
-    Ok(cache.lock().get(&key).cloned())
+    Ok(cache.connections.lock().get(&key).cloned())
 }
 
 fn remember_connection(
@@ -192,14 +201,24 @@ fn remember_connection(
     connection: &iroh::endpoint::Connection,
 ) -> crate::error::Result<()> {
     let key = connection_cache_key(peer_id, alpn)?;
-    cache.lock().insert(key, connection.clone());
+    cache.connections.lock().insert(key, connection.clone());
     Ok(())
 }
 
 fn evict_connection(cache: &ConnectionCache, peer_id: &PeerId, alpn: &[u8]) {
     if let Ok(key) = connection_cache_key(peer_id, alpn) {
-        cache.lock().remove(&key);
+        cache.connections.lock().remove(&key);
     }
+}
+
+fn dial_guard(cache: &ConnectionCache, key: ConnectionCacheKey) -> Arc<tokio::sync::Mutex<()>> {
+    let mut guards = cache.dial_guards.lock();
+    guards.retain(|_, guard| Arc::strong_count(guard) > 1);
+    Arc::clone(
+        guards
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
 }
 
 /// QUIC application error code used when locally closing a connection in
@@ -211,7 +230,7 @@ const DISCONNECT_ERROR_CODE: u32 = 0;
 /// Used by `disconnect` to tear down the outbound-send connection cache for a
 /// peer. Closing is idempotent — a peer with no cached connections is a no-op.
 pub(super) fn close_cached_connections(cache: &ConnectionCache, endpoint_id: &iroh::EndpointId) {
-    let mut guard = cache.lock();
+    let mut guard = cache.connections.lock();
     let keys: Vec<ConnectionCacheKey> = guard
         .keys()
         .filter(|key| &key.endpoint_id == endpoint_id)
@@ -247,6 +266,17 @@ async fn connect_with_cache(
     direct_addr: Option<std::net::SocketAddr>,
     cache: &ConnectionCache,
 ) -> crate::error::Result<iroh::endpoint::Connection> {
+    if let Some(connection) = cached_connection(cache, peer_id, alpn)? {
+        return Ok(connection);
+    }
+
+    let key = connection_cache_key(peer_id, alpn)?;
+    let guard = dial_guard(cache, key);
+    let _dial_guard = guard.lock().await;
+
+    // Another request may have established the shared QUIC connection while
+    // this request waited. Only the keyed dial owner may create it; requests
+    // remain concurrent as independent streams after this point.
     if let Some(connection) = cached_connection(cache, peer_id, alpn)? {
         return Ok(connection);
     }
@@ -542,6 +572,7 @@ pub(super) async fn handle_car_request_response(
 
     if event_tx
         .send(TransportEvent::CarFetchResponse {
+            query_id: None,
             peer_id: peer_id.clone(),
             root_cid,
             car_data,
@@ -560,6 +591,7 @@ pub(super) async fn handle_car_request_response(
 /// Returns a provider outcome so the caller can aggregate useful diagnostics.
 async fn try_fetch_from_provider(
     endpoint: &Endpoint,
+    query_id: QueryId,
     provider: &PeerId,
     request: CarFetchRequest,
     direct_addr: Option<std::net::SocketAddr>,
@@ -702,6 +734,7 @@ async fn try_fetch_from_provider(
         // failure for the aggregation in handle_block_sync (issue #858).
         let _ = event_tx
             .send(TransportEvent::CarFetchResponse {
+                query_id: Some(query_id),
                 peer_id: provider.clone(),
                 root_cid: request.root_cid,
                 car_data: Vec::new(),
@@ -733,6 +766,7 @@ async fn try_fetch_from_provider(
 
     if event_tx
         .send(TransportEvent::CarFetchResponse {
+            query_id: Some(query_id),
             peer_id: provider.clone(),
             root_cid: request.root_cid,
             car_data,
@@ -782,8 +816,10 @@ impl BlockSyncResources {
 
 /// CAR-based block sync: fetch blocks from providers concurrently.
 ///
-/// Full-DAG requests are recursive from `root`; partial recovery requests carry
-/// the exact missing CIDs and expect a selective CAR response.
+/// Full-DAG requests are recursive from the root; partial recovery requests
+/// recurse only from the known missing frontier. The responder's shared
+/// block/byte caps bound that descendant closure, and a truncated response is
+/// resumed from the recomputed frontier by the same receiver owner.
 pub(super) async fn handle_block_sync(
     resources: BlockSyncResources,
     query_id: QueryId,
@@ -807,7 +843,7 @@ pub(super) async fn handle_block_sync(
     let request = if missing.is_empty() {
         CarFetchRequest::full_dag(root)
     } else {
-        CarFetchRequest::selective_blocks(root, missing.clone())
+        CarFetchRequest::selective_dag(root, missing.clone())
     };
 
     let BlockSyncResources {
@@ -828,6 +864,7 @@ pub(super) async fn handle_block_sync(
             let direct_addr = super::endpoint::peer_direct_addr(&peer_map, &provider);
             try_fetch_from_provider(
                 &endpoint,
+                query_id,
                 &provider,
                 request,
                 direct_addr,
@@ -883,14 +920,19 @@ pub(super) async fn handle_block_sync(
         ))
     };
 
-    if event_tx
-        .send(TransportEvent::BitswapComplete {
-            query_id,
-            success: any_success,
-            error,
-        })
-        .await
-        .is_err()
+    // A usable response completes from the coordinator only after its blocks
+    // are durable. An independent success event can otherwise overtake the
+    // concurrently dispatched CAR response. Failures have no useful response
+    // payload to order behind and retain the aggregate completion event.
+    if !any_success
+        && event_tx
+            .send(TransportEvent::BitswapComplete {
+                query_id,
+                success: false,
+                error,
+            })
+            .await
+            .is_err()
     {
         warn!("Event channel closed, cannot emit BitswapComplete");
     }
@@ -984,7 +1026,7 @@ mod tests {
         let conn_b = dial_ep.connect(addr, b"test/b").await.expect("connect b");
 
         let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
-        let cache: ConnectionCache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let cache = new_connection_cache();
         let id = accept_ep.id();
         peer_map
             .lock()
@@ -1002,6 +1044,69 @@ mod tests {
         assert!(
             conn_b.close_reason().is_some(),
             "second retained handle must be closed"
+        );
+
+        accept_task.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_one_connection_dial() {
+        const ALPN: &[u8] = b"test/shared-dial";
+        const CALLERS: usize = 16;
+
+        let accept_ep = localhost_endpoint(vec![ALPN.to_vec()]).await;
+        let dial_ep = localhost_endpoint(vec![]).await;
+        let direct_addr = accept_ep
+            .addr()
+            .ip_addrs()
+            .next()
+            .copied()
+            .expect("listener direct address");
+        let peer_id = PeerId::new(accept_ep.id().to_string());
+        let cache = new_connection_cache();
+        let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS));
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let accept_task = tokio::spawn({
+            let endpoint = accept_ep.clone();
+            async move {
+                let mut held = Vec::new();
+                while let Some(incoming) = endpoint.accept().await {
+                    if let Ok(connection) = incoming.await {
+                        held.push(connection);
+                        let _ = accepted_tx.send(());
+                    }
+                }
+            }
+        });
+
+        let mut callers = tokio::task::JoinSet::new();
+        for _ in 0..CALLERS {
+            let endpoint = dial_ep.clone();
+            let peer_id = peer_id.clone();
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            callers.spawn(async move {
+                barrier.wait().await;
+                connect_with_cache(&endpoint, &peer_id, ALPN, Some(direct_addr), &cache)
+                    .await
+                    .expect("shared connection")
+            });
+        }
+
+        while let Some(result) = callers.join_next().await {
+            result.expect("dial task");
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), accepted_rx.recv())
+            .await
+            .expect("receiver accepted the connection")
+            .expect("accept observer remained open");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), accepted_rx.recv())
+                .await
+                .is_err(),
+            "one peer/ALPN key must establish only one transport connection"
         );
 
         accept_task.abort();

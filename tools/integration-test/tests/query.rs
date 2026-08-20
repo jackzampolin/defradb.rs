@@ -18,6 +18,8 @@ mod downsample_gc;
 mod exhaustive_orphans_4454;
 #[path = "query/explain_nested.rs"]
 mod explain_nested;
+#[path = "query/go_view_paths.rs"]
+mod go_view_paths;
 #[path = "query/gql_list_args.rs"]
 mod gql_list_args;
 #[path = "query/index_fallback_4633.rs"]

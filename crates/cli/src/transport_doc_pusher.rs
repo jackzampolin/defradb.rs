@@ -1,4 +1,4 @@
-//! Transport-generic DocPusher for iroh (and future transports).
+//! Transport-generic document pusher for every P2P runtime.
 //!
 //! Re-exports the shared implementation from `defra-p2p-adapter`.
 

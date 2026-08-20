@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use blockstore::Blockstore;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 
 use super::config::ReplicationConfig;
 use super::handlers::{
@@ -47,7 +47,7 @@ use crate::transport::P2PTransport;
 ///
 /// // Run the replication loop
 /// let config = ReplicationConfig::default();
-/// ReplicationLoop::run(coordinator, events, handler, config).await;
+/// ReplicationLoop::run(coordinator, events, handler, config, |_| {}).await;
 /// ```
 pub struct ReplicationLoop;
 
@@ -57,15 +57,17 @@ impl ReplicationLoop {
     /// This method runs until the event channel is closed or a fatal error occurs.
     /// It batches merge-eligible events together for efficient processing with
     /// shared transactions, reducing fsync overhead during P2P catch-up.
-    pub async fn run<B, T, H>(
+    pub async fn run<B, T, H, F>(
         coordinator: Arc<SyncCoordinator<B, T>>,
         mut events: mpsc::Receiver<SyncEvent>,
         handler: Arc<H>,
         config: ReplicationConfig,
+        on_result: F,
     ) where
         B: Blockstore + 'static,
         T: P2PTransport,
         H: MergeHandler + 'static,
+        F: Fn(&ReplicationResult) + Send + Sync + 'static,
     {
         tracing::info!(batch_size = config.batch_size, "Starting replication loop");
 
@@ -76,6 +78,7 @@ impl ReplicationLoop {
 
             let mut should_break = false;
             for result in &results {
+                on_result(result);
                 match result {
                     ReplicationResult::Merged {
                         cid,
@@ -164,88 +167,6 @@ impl ReplicationLoop {
         }
 
         tracing::info!("Replication loop stopped");
-    }
-
-    /// Run the replication loop with concurrent workers.
-    ///
-    /// Spawns up to `config.max_workers` concurrent tasks via a semaphore.
-    /// Each result is passed to `on_result` for caller-specific handling
-    /// (e.g., publishing events to an event bus).
-    pub async fn run_parallel<B, T, H, F>(
-        coordinator: Arc<SyncCoordinator<B, T>>,
-        events: mpsc::Receiver<SyncEvent>,
-        handler: Arc<H>,
-        config: ReplicationConfig,
-        on_result: F,
-    ) where
-        B: Blockstore + 'static,
-        T: P2PTransport,
-        H: MergeHandler + 'static,
-        F: Fn(ReplicationResult) + Send + Sync + 'static,
-    {
-        tracing::info!(
-            max_workers = config.max_workers,
-            "Starting parallel replication loop"
-        );
-
-        let semaphore = Arc::new(Semaphore::new(config.max_workers));
-        Self::run_parallel_with_semaphore(
-            coordinator,
-            events,
-            handler,
-            config,
-            on_result,
-            semaphore,
-        )
-        .await;
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) async fn run_parallel_with_semaphore<B, T, H, F>(
-        coordinator: Arc<SyncCoordinator<B, T>>,
-        mut events: mpsc::Receiver<SyncEvent>,
-        handler: Arc<H>,
-        config: ReplicationConfig,
-        on_result: F,
-        semaphore: Arc<Semaphore>,
-    ) where
-        B: Blockstore + 'static,
-        T: P2PTransport,
-        H: MergeHandler + 'static,
-        F: Fn(ReplicationResult) + Send + Sync + 'static,
-    {
-        let on_result = Arc::new(on_result);
-        let config = Arc::new(config);
-
-        loop {
-            let event = match events.recv().await {
-                Some(e) => e,
-                None => {
-                    tracing::info!("Event channel closed, stopping parallel replication loop");
-                    break;
-                }
-            };
-
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    tracing::info!("Worker semaphore closed, stopping parallel replication loop");
-                    break;
-                }
-            };
-            let coord = coordinator.clone();
-            let h = handler.clone();
-            let c = config.clone();
-            let cb = on_result.clone();
-
-            tokio::spawn(async move {
-                let result = process_event_serialized(&coord, event, h.as_ref(), &c).await;
-                cb(result);
-                drop(permit);
-            });
-        }
-
-        tracing::info!("Parallel replication loop stopped");
     }
 
     /// Process the next sync event.

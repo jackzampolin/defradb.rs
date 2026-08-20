@@ -7,6 +7,7 @@ mod fetcher;
 mod index_scan;
 pub(crate) mod migration;
 mod stream;
+mod vector_search;
 
 #[cfg(test)]
 mod tests;
@@ -152,6 +153,22 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
     }
 
     fn supports_index_queries(&self) -> bool {
+        true
+    }
+
+    async fn vector_search(
+        &self,
+        collection_name: &str,
+        index_id: u32,
+        query_vector: &[f64],
+        k: usize,
+        effort: Option<usize>,
+    ) -> query::error::Result<Vec<u64>> {
+        self.vector_search_impl(collection_name, index_id, query_vector, k, effort)
+            .await
+    }
+
+    fn supports_vector_search(&self) -> bool {
         true
     }
 

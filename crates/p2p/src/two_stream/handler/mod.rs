@@ -122,6 +122,7 @@ impl PendingResponses {
 /// flow on separate streams identified by different protocol IDs.
 ///
 /// Uses `libp2p-stream` for stream management.
+#[derive(Clone)]
 pub struct TwoStreamHandler {
     /// Control for the stream behaviour (for opening streams).
     pub(super) control: stream::Control,

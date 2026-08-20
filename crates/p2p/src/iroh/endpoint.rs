@@ -24,7 +24,7 @@ use super::endpoint_config::{
     apply_bind_config, apply_discovery_config, apply_multipath_config, relay_mode_from_config,
     IrohEndpointConfig,
 };
-use super::endpoint_rpc::ConnectionCache;
+use super::endpoint_rpc::{new_connection_cache, ConnectionCache};
 use super::endpoint_streams::handle_incoming;
 use super::gossip_heal::{self, GossipHealer};
 use super::peer_map::{parse_endpoint_id, PeerMap};
@@ -42,6 +42,7 @@ pub(super) struct EndpointResources {
     pub(super) connection_cache: ConnectionCache,
     pub(super) healer: Arc<GossipHealer>,
     pub(super) spawned_tasks: SpawnedTasks,
+    pub(super) node_identity: Option<Arc<identity::RawIdentity>>,
 }
 
 /// Handle to a gossip topic subscription.
@@ -59,6 +60,8 @@ pub(super) struct ActiveSync {
 }
 
 pub(super) type SpawnedTasks = Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>;
+pub(super) type PendingPushLogReplies =
+    Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>;
 
 pub(super) fn track_task(spawned_tasks: &SpawnedTasks, task: JoinHandle<()>) {
     let mut tasks = spawned_tasks.lock();
@@ -129,6 +132,7 @@ pub async fn spawn_endpoint(
     alpns.push(iroh_gossip::net::GOSSIP_ALPN.to_vec());
 
     let relay_mode = relay_mode_from_config(&config.relay_mode)?;
+    let node_identity = config.node_identity.clone();
     let relay_urls: Vec<String> = relay_mode
         .relay_map()
         .urls::<Vec<_>>()
@@ -159,6 +163,7 @@ pub async fn spawn_endpoint(
         endpoint,
         gossip,
         gossip_heal,
+        node_identity,
         command_rx,
         event_tx,
         replicators.clone(),
@@ -172,6 +177,7 @@ async fn run_event_loop(
     endpoint: Endpoint,
     gossip: Gossip,
     gossip_heal_config: super::gossip_heal::GossipHealConfig,
+    node_identity: Option<Arc<identity::RawIdentity>>,
     mut command_rx: mpsc::Receiver<IrohCommand>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     replicators: Arc<ReplicatorRegistry>,
@@ -182,7 +188,7 @@ async fn run_event_loop(
         String,
         oneshot::Sender<PushLogReply>,
     >::new()));
-    let connection_cache: ConnectionCache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let connection_cache = new_connection_cache();
     let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();
     let raw_topics: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
         Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
@@ -200,6 +206,7 @@ async fn run_event_loop(
         connection_cache: Arc::clone(&connection_cache),
         healer: Arc::new(GossipHealer::new(gossip_heal_config)),
         spawned_tasks: Arc::clone(&spawned_tasks),
+        node_identity,
     };
 
     // Emit Listening event with our endpoint address

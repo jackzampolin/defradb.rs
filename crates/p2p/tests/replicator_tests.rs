@@ -1,10 +1,12 @@
 //! Tests for replicator types, including Go wire-format parity.
 
 use chrono::{TimeZone, Utc};
+#[cfg(feature = "libp2p-transport")]
+use p2p::replicator::ReplicatorError;
 use p2p::replicator::{
-    EqOnlyFilterMatcher, ReplicationFilterMatcher as _, ReplicatorError, ReplicatorInfo,
-    ReplicatorStatus,
+    EqOnlyFilterMatcher, ReplicationFilterMatcher as _, ReplicatorInfo, ReplicatorStatus,
 };
+#[cfg(feature = "libp2p-transport")]
 use p2p::{Multiaddr, PeerId};
 use p2p::{ReplicationFilter, ReplicationFilters};
 
@@ -190,6 +192,7 @@ fn filter_matches_numbers_numerically() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "libp2p-transport")]
 fn json_round_trip_preserves_all_fields() {
     let peer_id = PeerId::random();
     let mut info =
@@ -203,6 +206,7 @@ fn json_round_trip_preserves_all_fields() {
 }
 
 #[test]
+#[cfg(feature = "libp2p-transport")]
 fn status_update_records_first_transition_only() {
     let peer_id = PeerId::random();
     let mut info = ReplicatorInfo::new(peer_id, vec!["users".to_string()]).unwrap();
@@ -223,6 +227,7 @@ fn status_update_records_first_transition_only() {
 }
 
 #[test]
+#[cfg(feature = "libp2p-transport")]
 fn set_status_if_changed_now_matches_go_recovery_rule() {
     // Go's `updateReplicatorStatus` (`defradb/internal/db/p2p/replicator.go:495`)
     // resets `LastStatusChange` to `time.Time{}` on `Inactive → Active`,
@@ -300,6 +305,7 @@ fn decode_ignores_unknown_fields() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "libp2p-transport")]
 fn new_rejects_empty_collections() {
     let peer_id = PeerId::random();
     let result = ReplicatorInfo::new(peer_id, vec![]);
@@ -307,6 +313,7 @@ fn new_rejects_empty_collections() {
 }
 
 #[test]
+#[cfg(feature = "libp2p-transport")]
 fn new_accepts_non_empty_collections() {
     let peer_id = PeerId::random();
     let info = ReplicatorInfo::new(peer_id, vec!["users".to_string()]).unwrap();
@@ -320,12 +327,16 @@ fn from_raw_skips_validation() {
     // from_raw is the escape hatch for reconstructing from storage or
     // building test fixtures — no checks on collections or peer ID.
     let info = ReplicatorInfo::from_raw("invalid".to_string(), vec![], vec![]);
+    assert_eq!(info.peer_id_str(), "invalid");
+    #[cfg(feature = "libp2p-transport")]
     assert!(info.peer_id().is_none());
+    #[cfg(feature = "libp2p-transport")]
     assert!(info.try_peer_id().is_err());
     assert!(info.collections.is_empty());
 }
 
 #[test]
+#[cfg(feature = "libp2p-transport")]
 fn invalid_addresses_filtered_on_read() {
     let peer_id = PeerId::random();
     let info = ReplicatorInfo::from_raw(

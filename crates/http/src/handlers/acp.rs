@@ -30,7 +30,7 @@ pub struct AddPolicyResponse {
 
 /// Add a new ACP policy.
 ///
-/// POST /api/v0/acp/policy
+/// POST /api/v1/acp/document/policy (Go-compatible), POST /api/v1/acp/policy
 ///
 /// Accepts raw policy text in the request body (text/plain), matching Go DefraDB.
 /// The policy should be valid YAML or JSON following the ACP policy specification.

@@ -6,112 +6,110 @@ use std::time::Duration;
 use std::{hash::Hash, hash::Hasher};
 use web_time::{SystemTime, UNIX_EPOCH};
 
-/// Exponential backoff intervals in seconds, matching Go's seconds-to-hours retry ladder.
-pub const RETRY_INTERVALS_SECS: &[u64] = &[
-    30, 60, 120, 240, 480, 960, 1920, 3600, 7200, 14400, 28800, 43200,
-];
+/// Go-compatible document retry ladder: 30s through a 32-minute cap.
+///
+/// Source parity: Go `cli/config/config.go`, default
+/// `replicator.retryintervals`.
+pub const RETRY_INTERVALS_SECS: &[u64] = &[30, 60, 120, 240, 480, 960, 1920];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RetryInfo {
     pub num_retries: u32,
     pub next_retry_unix: u64,
+    /// Durable round-robin start for the peer's presence-only scope markers.
+    ///
+    /// All scopes share this peer clock.  Persisting the cursor prevents a
+    /// bounded consumer from retrying the same failing lexical prefix after
+    /// every sweep or process restart.
+    #[serde(default)]
+    pub dispatch_cursor: u64,
+}
+
+/// Durable sender obligations surfaced through P2P sync diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PushRetryMarkerStats {
+    pub document_markers: usize,
+    pub collection_markers: usize,
+    pub scheduled_peers: usize,
+    pub oldest_scheduled_retry_unix: Option<u64>,
 }
 
 /// What kind of push obligation a retry record represents.
 ///
-/// Document heads replay by document id; collection commits are doc-less and
-/// replay by CID. Persisting the scope lets the ledger re-derive the correct
-/// store key from a record alone, and lets the replay loop dispatch to the
-/// right executor. Defaults to `Document` so records written before the
-/// collection-commit keyspace existed still decode (defradb#1113).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+/// Document heads replay by document id; collection commits replay by
+/// collection id. Defaults to `Document` so legacy payload records decode for
+/// one-way marker migration.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RetryScope {
     #[default]
     Document,
     CollectionCommit,
 }
 
-/// Durable newest-head state for one `(peer, document, CID)` pair — or, for a
-/// collection commit, one `(peer, collection, CID)` triple. It is either a
-/// dormant ordering watermark for an active live send or a pending retry.
-/// `doc_id` is encoded with the value as a self-contained migration-safe record
-/// even though it is also present in the store key.
+/// Presence-only retry scope returned to the sender retry sweep.
+///
+/// Durable marker values remain empty. The peer-scoped `RetryInfo` schedule is
+/// joined onto each marker only while dispatching a sweep.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PersistedPushRetry {
+pub struct PushRetryMarker {
     pub doc_id: String,
     pub collection_id: String,
-    pub cid: String,
-    pub priority: u64,
-    /// Whether this head is eligible for the retry loop. A newer live enqueue
-    /// stores a dormant watermark first so an older in-flight failure cannot
-    /// recreate stale retry work or race the active send.
-    #[serde(default = "default_pending")]
-    pub pending: bool,
-    /// Document head vs collection commit. `#[serde(default)]` keeps records
-    /// written before this field existed decoding as `Document`.
-    #[serde(default)]
     pub scope: RetryScope,
     pub retry_info: RetryInfo,
 }
 
-impl PersistedPushRetry {
+impl PushRetryMarker {
     /// Whether this record is a doc-less collection-commit obligation.
     pub fn is_collection_commit(&self) -> bool {
         matches!(self.scope, RetryScope::CollectionCommit)
     }
+}
 
-    pub fn new_observed(
-        doc_id: impl Into<String>,
-        collection_id: impl Into<String>,
-        cid: impl Into<String>,
-        priority: u64,
-    ) -> Self {
-        Self {
-            doc_id: doc_id.into(),
-            collection_id: collection_id.into(),
-            cid: cid.into(),
-            priority,
-            pending: false,
-            scope: RetryScope::Document,
-            retry_info: RetryInfo::new_initial(),
-        }
-    }
+/// Pre-stage-3 payload record, decoded only while migrating old stores.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct LegacyPersistedPushRetry {
+    doc_id: String,
+    collection_id: String,
+    cid: String,
+    priority: u64,
+    #[serde(default = "default_pending")]
+    pending: bool,
+    #[serde(default)]
+    scope: RetryScope,
+    retry_info: RetryInfo,
+}
 
-    /// Dormant watermark for a doc-less collection-commit push.
-    pub fn new_observed_commit(
-        collection_id: impl Into<String>,
-        cid: impl Into<String>,
-        priority: u64,
-    ) -> Self {
-        Self {
-            doc_id: String::new(),
-            collection_id: collection_id.into(),
-            cid: cid.into(),
-            priority,
-            pending: false,
-            scope: RetryScope::CollectionCommit,
-            retry_info: RetryInfo::new_initial(),
-        }
+/// Rewrite an embedded document ID in a legacy retry payload during the
+/// document-short-ID migration. Marker records have empty values and return
+/// `Ok(None)` without decoding.
+pub fn rewrite_legacy_push_retry_doc_id(
+    bytes: &[u8],
+    old_doc_id: &str,
+    canonical_doc_id: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if bytes.is_empty() {
+        return Ok(None);
     }
-
-    /// Activate a live-send failure with the first 15–30 second jittered
-    /// interval. The in-memory backlog already made the immediate attempt;
-    /// delaying durable fanout prevents failed peers retrying in lockstep.
-    pub fn activate(&mut self, retry_key: &str) {
-        self.pending = true;
-        self.retry_info = RetryInfo::new_initial();
-        self.retry_info.bump_for(retry_key);
+    let mut retry: LegacyPersistedPushRetry = defra_core::cbor::from_slice(bytes)
+        .map_err(|error| format!("failed to deserialize legacy push retry: {error}"))?;
+    if retry.doc_id != old_doc_id {
+        return Ok(None);
     }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        defra_core::cbor::to_vec(self)
-            .map_err(|error| format!("failed to serialize persisted push retry: {error}"))
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        defra_core::cbor::from_slice(bytes)
-            .map_err(|error| format!("failed to deserialize persisted push retry: {error}"))
-    }
+    retry.doc_id = canonical_doc_id.to_string();
+    defra_core::cbor::to_vec(&retry)
+        .map(Some)
+        .map_err(|error| format!("failed to serialize legacy push retry: {error}"))
 }
 
 fn default_pending() -> bool {
@@ -121,13 +119,12 @@ fn default_pending() -> bool {
 impl RetryInfo {
     /// Create retry state that is due immediately.
     ///
-    /// Restart promotion uses this directly because the volatile live send
-    /// no longer exists. Fresh live failures call `PersistedPushRetry::activate`
-    /// and advance to the first jittered interval instead.
+    /// Fresh scope registration advances the peer clock to the first interval.
     pub fn new_initial() -> Self {
         Self {
             num_retries: 0,
             next_retry_unix: 0,
+            dispatch_cursor: 0,
         }
     }
 
@@ -145,9 +142,9 @@ impl RetryInfo {
         self.bump_for("");
     }
 
-    /// Advance with deterministic bounded jitter derived from the exact
-    /// `(peer, CID)` key and attempt. This preserves the exponential cap while
-    /// preventing a fan-out failure from retrying every peer in lockstep.
+    /// Advance with deterministic bounded jitter derived from the peer and
+    /// retry rung.  The published Go-compatible ladder remains the cap while
+    /// peers do not wake in lockstep after a fleet-wide outage.
     pub fn bump_for(&mut self, retry_key: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -162,6 +159,11 @@ impl RetryInfo {
         let delay = floor + hasher.finish() % (cap - floor + 1);
         self.next_retry_unix = now + delay;
         self.num_retries += 1;
+    }
+
+    /// Move the next bounded pass to a different lexical marker prefix.
+    pub fn advance_dispatch_cursor(&mut self) {
+        self.dispatch_cursor = self.dispatch_cursor.wrapping_add(1);
     }
 
     /// Schedule another attempt without recording a delivery failure.
@@ -187,11 +189,30 @@ impl RetryInfo {
 mod tests {
     use super::*;
 
+    #[derive(serde::Serialize)]
+    struct LegacyRetryInfo {
+        num_retries: u32,
+        next_retry_unix: u64,
+    }
+
     #[test]
     fn test_new_initial_is_due() {
         let info = RetryInfo::new_initial();
         assert!(info.is_due());
         assert_eq!(info.num_retries, 0);
+    }
+
+    #[test]
+    fn legacy_retry_info_decodes_with_zero_dispatch_cursor() {
+        let bytes = defra_core::cbor::to_vec(&LegacyRetryInfo {
+            num_retries: 4,
+            next_retry_unix: 42,
+        })
+        .unwrap();
+        let decoded = RetryInfo::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.num_retries, 4);
+        assert_eq!(decoded.next_retry_unix, 42);
+        assert_eq!(decoded.dispatch_cursor, 0);
     }
 
     #[test]
@@ -203,11 +224,8 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_intervals_reach_hours_scale_cap() {
-        assert_eq!(
-            RETRY_INTERVALS_SECS,
-            &[30, 60, 120, 240, 480, 960, 1920, 3600, 7200, 14400, 28800, 43200]
-        );
+    fn test_retry_intervals_match_go_document_ladder() {
+        assert_eq!(RETRY_INTERVALS_SECS, &[30, 60, 120, 240, 480, 960, 1920]);
     }
 
     #[test]
@@ -222,7 +240,7 @@ mod tests {
     #[test]
     fn persisted_retry_without_pending_field_defaults_to_pending() {
         #[derive(serde::Serialize)]
-        struct LegacyPersistedPushRetry<'a> {
+        struct LegacyRetryFixture<'a> {
             doc_id: &'a str,
             collection_id: &'a str,
             cid: &'a str,
@@ -230,7 +248,7 @@ mod tests {
             retry_info: RetryInfo,
         }
 
-        let bytes = defra_core::cbor::to_vec(&LegacyPersistedPushRetry {
+        let bytes = defra_core::cbor::to_vec(&LegacyRetryFixture {
             doc_id: "doc",
             collection_id: "collection",
             cid: "cid",
@@ -238,9 +256,12 @@ mod tests {
             retry_info: RetryInfo::new_initial(),
         })
         .unwrap();
-        let restored = PersistedPushRetry::from_bytes(&bytes).unwrap();
+        let rewritten = rewrite_legacy_push_retry_doc_id(&bytes, "doc", "canonical")
+            .unwrap()
+            .unwrap();
+        let restored: LegacyPersistedPushRetry = defra_core::cbor::from_slice(&rewritten).unwrap();
 
         assert!(restored.pending);
-        assert_eq!(restored.doc_id, "doc");
+        assert_eq!(restored.doc_id, "canonical");
     }
 }

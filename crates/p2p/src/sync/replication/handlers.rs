@@ -124,6 +124,7 @@ where
         let blockstore = coordinator.blockstore().clone();
         let event_tx = coordinator.manager().event_sender();
         let limiter = coordinator.dag_fetch_limiter();
+        let diagnostics = coordinator.manager().diagnostics();
         let source_peer = crate::transport::PeerId::new(source_peer);
         let alternate_providers: Vec<crate::transport::PeerId> = providers
             .into_iter()
@@ -132,17 +133,33 @@ where
         let context = DagFetchContext::new(doc_id, collection_id, creator, source_peer)
             .with_alternate_providers(alternate_providers)
             .with_explicit_replicator(is_explicit_replicator)
-            .with_explicit_replay_authorization(explicit_replay_authorization);
+            .with_explicit_replay_authorization(explicit_replay_authorization)
+            .with_pending_lease(coordinator.manager().pending_dag_lease(root_cid))
+            .with_block_sync_completions(coordinator.manager().block_sync_completion_tracker())
+            .with_rooted_car_completions(coordinator.manager().rooted_car_completion_tracker())
+            .with_rooted_provider_discovery();
 
         coordinator.spawn_pending_dag_fetch_task(root_cid, "pushlog_fetch_dag", async move {
             crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
-                transport, blockstore, event_tx, root_cid, context, limiter,
+                transport,
+                blockstore,
+                event_tx,
+                root_cid,
+                context,
+                limiter,
+                diagnostics,
             )
             .await;
         });
 
         return ReplicationResult::DagFetchStarted { root_cid };
     }
+
+    // Legacy pending records may not name an origin provider and therefore
+    // use transport-native block sync rather than a retained poll-fetch task.
+    // Release the clock's task reservation before handing ownership to that
+    // query; current PushLog registrations always take the source-peer path.
+    coordinator.release_pending_dag_fetch_reservation(&root_cid);
 
     // Convert string peer IDs to transport PeerIds.
     // If the provider list is empty, fall back to all connected transport peers.
@@ -173,7 +190,31 @@ where
     {
         Ok(query_id) => {
             // Register the query so we can track completion
-            coordinator.manager().register_query(query_id, root_cid);
+            if let Some(completion) = coordinator.manager().register_query(query_id, root_cid) {
+                let result = match completion {
+                    crate::sync::manager::FetchCompletion::Success => {
+                        coordinator
+                            .handle_bitswap_complete(query_id, true, None)
+                            .await
+                    }
+                    crate::sync::manager::FetchCompletion::Failure => {
+                        coordinator
+                            .handle_bitswap_complete(query_id, false, None)
+                            .await
+                    }
+                    crate::sync::manager::FetchCompletion::Deferred => {
+                        coordinator.handle_bitswap_deferred(query_id).await
+                    }
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        query_id = query_id.0,
+                        cid = %root_cid,
+                        error = %error,
+                        "Failed to consume block-sync completion that preceded query registration"
+                    );
+                }
+            }
             ReplicationResult::BitswapFetchStarted { root_cid, query_id }
         }
         Err(e) => {
@@ -262,6 +303,7 @@ where
     let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
     let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
     let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
+    let creator_for_forward = metadata.creator.unwrap_or("").to_string();
 
     // Delegate merge to handler
     match handler.handle_block(&cid, &block_data, metadata).await {
@@ -274,6 +316,31 @@ where
                     cid,
                     error: e.to_string(),
                 };
+            }
+
+            // Match Go's post-merge Update -> SendUpdate replicator fanout:
+            // once this node has merged the complete DAG it may become the
+            // authenticated serving origin for its configured downstream
+            // replicators. This is independent of optional gossip
+            // rebroadcast, which remains disabled in production for stage 3.
+            if !collection_id_for_broadcast.is_empty() {
+                if let Err(error) = coordinator
+                    .push_to_replicators_with_creator(
+                        &cid,
+                        &block_data,
+                        &doc_id_for_result,
+                        collection_id_for_broadcast,
+                        (!creator_for_forward.is_empty()).then_some(creator_for_forward.as_str()),
+                    )
+                    .await
+                {
+                    return ReplicationResult::MergedButBroadcastFailed {
+                        cid,
+                        doc_id: doc_id_for_result,
+                        collection_id: collection_id_for_result,
+                        broadcast_error: error.to_string(),
+                    };
+                }
             }
 
             // Optionally re-broadcast (skip if metadata incomplete - can't broadcast without doc/collection IDs)
@@ -396,7 +463,7 @@ where
     B: Blockstore + 'static,
     T: P2PTransport,
 {
-    match coordinator.manager().is_merged(&cid).await {
+    match coordinator.reconcile_merged_pending(&cid).await {
         Ok(false) => None,
         Ok(true) => match event {
             SyncEvent::BlockReceived {
@@ -409,10 +476,7 @@ where
                 doc_id,
                 collection_id,
                 ..
-            } => {
-                coordinator.clear_pending_dag(root_cid);
-                Some(already_merged_result(cid, doc_id, collection_id))
-            }
+            } => Some(already_merged_result(*root_cid, doc_id, collection_id)),
             _ => None,
         },
         Err(error) => Some(ReplicationResult::Failed {
@@ -504,10 +568,6 @@ where
             is_explicit_replicator,
             explicit_replay_authorization,
         } = event_to_merge_metadata(event);
-
-        if matches!(event, SyncEvent::DagReady { .. }) {
-            coordinator.clear_pending_dag(&cid);
-        }
 
         match coordinator.blockstore().get(&cid).await {
             Ok(Some(data)) => {
@@ -642,6 +702,35 @@ where
         }
     }
 
+    // A merged receiver may be the configured sender for a downstream hop.
+    // Forward only to explicit replicators here; gossip rebroadcast remains
+    // controlled by `rebroadcast_on_merge` below.
+    for (index, block) in merge_blocks.iter().enumerate() {
+        let result_index = batch_result_start + index;
+        if block.collection_id.is_empty()
+            || !matches!(results[result_index], ReplicationResult::Merged { .. })
+        {
+            continue;
+        }
+        if let Err(error) = coordinator
+            .push_to_replicators_with_creator(
+                &block.cid,
+                block.block_data.as_ref(),
+                &block.doc_id,
+                &block.collection_id,
+                (!block.creator.is_empty()).then_some(block.creator.as_str()),
+            )
+            .await
+        {
+            results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                cid: block.cid,
+                doc_id: block.doc_id.clone(),
+                collection_id: block.collection_id.clone(),
+                broadcast_error: error.to_string(),
+            };
+        }
+    }
+
     if config.rebroadcast_on_merge {
         for (index, block) in merge_blocks.iter().enumerate() {
             let result_index = batch_result_start + index;
@@ -773,7 +862,6 @@ where
             is_explicit_replicator,
             explicit_replay_authorization,
         } => {
-            coordinator.clear_pending_dag(&root_cid);
             // DAG is complete after Bitswap fetch - process as block received
             tracing::info!(
                 cid = %root_cid,
@@ -822,7 +910,12 @@ where
             .try_acquire(&cid)
             .await
         {
-            Ok(_guard) => return process_event(coordinator, event, handler, config).await,
+            Ok(_guard) => {
+                if let Some(result) = skipped_if_already_merged(coordinator, &event, cid).await {
+                    return result;
+                }
+                return process_event(coordinator, event, handler, config).await;
+            }
             Err(wait_for_current_merge) => {
                 if wait_for_current_merge.await.is_err() {
                     tracing::debug!(
