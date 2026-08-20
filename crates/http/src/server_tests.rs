@@ -101,6 +101,16 @@ async fn view_add_rejects_oversized_body() {
     );
 }
 
+/// `/view` is the Go-compatible mount of the same `add_view` handler, so it
+/// carries the same SDL body and must not be a bypass for the `/views` cap.
+#[tokio::test]
+async fn go_view_add_rejects_oversized_body() {
+    assert_eq!(
+        post(schema_limited(), "/api/v1/view", OVERSIZED).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}
+
 #[tokio::test]
 async fn txn_scoped_schema_add_rejects_oversized_body() {
     assert_eq!(
