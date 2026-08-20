@@ -59,7 +59,12 @@ crates/
 ├── crypto/             # Cryptographic operations
 ├── cursor/             # Opaque cursor token codec for GraphQL pagination
 ├── datastore/          # Data persistence abstractions
-├── db/                 # Database core
+├── db/                 # Database core, one module per execution role:
+│                       #   txn/ (the transaction seam), read/, write/,
+│                       #   collection/, block/, definition/, access/,
+│                       #   database/, docid/, downsample/, view/,
+│                       #   event/, error/. src/ holds only lib.rs;
+│                       #   every test lives in db/tests/.
 ├── db-backup/          # Database export/import (backup)
 ├── db-blocks/          # IPLD block builder for document mutations
 ├── db-index/           # Secondary index manager for collections
