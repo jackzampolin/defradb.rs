@@ -83,9 +83,6 @@ crates/
 ├── p2p-adapter/        # P2P adapters for HTTP-facing operations
 ├── pg-compat/          # Postgres wire protocol compatibility
 ├── query/              # Query engine (GraphQL, BM25)
-├── query-parse/        # GraphQL/SDL parsing and schema generation
-├── query-plan/         # Query plan tree, planner, execution boundaries
-├── query-types/        # Shared type vocabulary for the query engine
 ├── replication-filter/ # Query-filter-backed replication matcher
 ├── schema/             # Schema validation
 ├── sourcehub/          # On-chain ACP client (Cosmos/EVM)

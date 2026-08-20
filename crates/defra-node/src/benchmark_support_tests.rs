@@ -1961,3 +1961,146 @@ async fn coding_session_embedding_fixture_real_models_context1_task_eval() {
         );
     }
 }
+
+/// `indexFetches` counts a vector-index hit. A full-scan fallback leaves it at
+/// zero, which is the regression this guards.
+fn index_fetches(explain: &serde_json::Value) -> u64 {
+    fn walk(node: &serde_json::Value, total: &mut u64) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(fetches) = map.get("indexFetches").and_then(serde_json::Value::as_u64) {
+                    *total += fetches;
+                }
+                map.values().for_each(|value| walk(value, total));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, total)),
+            _ => {}
+        }
+    }
+    let mut total = 0;
+    walk(explain, &mut total);
+    total
+}
+
+/// The corpus is written with vector indexing enabled, so its similarity
+/// queries must reach the index rather than scanning every document.
+///
+/// This is the shape that hid the bug: a full scan returns the same rows in the
+/// same order, so the sibling assertions on content all passed while the index
+/// was never consulted.
+#[tokio::test]
+async fn coding_session_embedding_fixture_similarity_uses_the_vector_index() {
+    let server = MockEmbeddingServer::start().await;
+
+    let mut config = CodingSessionFixtureConfig::smoke_test();
+    config.hot_session_messages = 40;
+    config.hot_session_actions = 16;
+    config.medium_session_messages = 12;
+    config.medium_session_actions = 6;
+
+    let node = crate::EmbeddedNode::builder()
+        .with_embedding_url(server.base_url.clone())
+        .build()
+        .await
+        .unwrap();
+    let _fixture = seed_coding_session_embedding_fixture(&node, &config)
+        .await
+        .unwrap();
+
+    let message_vector = deterministic_embedding("coding-message-model", "pushdown");
+    let explain = ensure_success(
+        node.execute(&format!(
+            "query @explain(type: execute) {}",
+            render_message_similarity_query("pushdown", &message_vector)
+        ))
+        .await,
+        "message similarity explain",
+    )
+    .unwrap();
+    assert!(
+        index_fetches(&explain) > 0,
+        "CodingMessage similarity full-scanned instead of using its vector index\n{explain:#}"
+    );
+
+    let action_vector = deterministic_embedding("coding-action-model", "rg");
+    let explain = ensure_success(
+        node.execute(&format!(
+            "query @explain(type: execute) {}",
+            render_action_similarity_query(&action_vector)
+        ))
+        .await,
+        "action similarity explain",
+    )
+    .unwrap();
+    assert!(
+        index_fetches(&explain) > 0,
+        "CodingAction similarity full-scanned instead of using its vector index\n{explain:#}"
+    );
+}
+
+/// A filter over the corpus must still fill the requested page: the answer is
+/// the nearest matching messages, not whatever survives filtering the nearest
+/// overall.
+#[tokio::test]
+async fn coding_session_embedding_fixture_filtered_similarity_fills_the_page() {
+    let server = MockEmbeddingServer::start().await;
+
+    let mut config = CodingSessionFixtureConfig::smoke_test();
+    config.hot_session_messages = 60;
+    config.hot_session_actions = 20;
+    config.medium_session_messages = 20;
+    config.medium_session_actions = 8;
+
+    let node = crate::EmbeddedNode::builder()
+        .with_embedding_url(server.base_url.clone())
+        .build()
+        .await
+        .unwrap();
+    let _fixture = seed_coding_session_embedding_fixture(&node, &config)
+        .await
+        .unwrap();
+
+    let roles = ensure_success(
+        node.execute(r#"{ CodingMessage(limit: 500) { role } }"#)
+            .await,
+        "collect roles",
+    )
+    .unwrap();
+    let assistant_messages = roles["CodingMessage"]
+        .as_array()
+        .expect("CodingMessage array")
+        .iter()
+        .filter(|row| row["role"] == "assistant")
+        .count();
+    assert!(
+        assistant_messages >= 5,
+        "fixture must hold enough assistant messages to fill a page; got {assistant_messages}"
+    );
+
+    let vector = deterministic_embedding("coding-message-model", "pushdown");
+    let query = format!(
+        r#"{{
+  CodingMessage(filter: {{ role: {{ _eq: "assistant" }} }}, order: {{ _alias: {{ sim: DESC }} }}, limit: 5) {{
+role
+sim: SIMILARITY(content_v: {{vector: [{}]}})
+  }}
+}}"#,
+        format_vector(&vector)
+    );
+
+    let data = ensure_success(node.execute(&query).await, "filtered similarity").unwrap();
+    let rows = data["CodingMessage"]
+        .as_array()
+        .expect("CodingMessage array");
+    assert_eq!(
+        rows.len(),
+        5,
+        "a filtered similarity query must still return a full page; a short page \
+         means the index returned the nearest 5 overall and the filter dropped \
+         the non-matching ones"
+    );
+    assert!(
+        rows.iter().all(|row| row["role"] == "assistant"),
+        "every row must match the filter"
+    );
+}

@@ -177,3 +177,73 @@ pub enum SignatureType {
     /// Threshold BLS12-381 (Orbis ring signing)
     BLS,
 }
+
+impl SignatureType {
+    /// Whether a Go peer can verify a block signed with this type.
+    ///
+    /// Go's `getPublicKeyFromSignature` (`internal/core/block/signature.go:186`)
+    /// maps only `EdDSA` and `ES256K` to a key type and returns
+    /// `ErrUnsupportedPrivKeyType` for anything else, so a block signed with any
+    /// other type is rejected during replication rather than merely unverified.
+    ///
+    /// The match is exhaustive on purpose: a new signature type cannot be added
+    /// without deciding, here, whether Go peers can consume it.
+    pub fn is_go_verifiable(self) -> bool {
+        match self {
+            Self::ES256K | Self::EdDSA => true,
+            // Rust-only. `BLS` is the Orbis ring extension; `ES256` covers
+            // Secure Enclave and other secp256r1 keys.
+            Self::BLS | Self::ES256 => false,
+        }
+    }
+}
+
+/// Node policy for emitting block signatures Go peers cannot verify.
+///
+/// `SignatureType::is_go_verifiable` says which types a Go peer accepts. Signing
+/// with any other type produces blocks that replicate between Rust nodes and are
+/// refused by Go ones, which is a deployment decision rather than a per-key one,
+/// so it is answered once for the process.
+///
+/// Denied by default: a node that has not said otherwise must not put blocks on
+/// the wire that half the network will reject.
+pub mod go_verifiable_policy {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    /// Set by an operator to allow Rust-only signature types.
+    pub const ALLOW_ENV: &str = "DEFRA_ALLOW_NON_GO_VERIFIABLE_SIGNING";
+
+    const UNSET: u8 = 0;
+    const DENIED: u8 = 1;
+    const ALLOWED: u8 = 2;
+
+    static POLICY: AtomicU8 = AtomicU8::new(UNSET);
+
+    /// Allow or deny signing with a type Go peers cannot verify.
+    pub fn allow_non_go_verifiable_signing(allow: bool) {
+        POLICY.store(if allow { ALLOWED } else { DENIED }, Ordering::Release);
+    }
+
+    /// Whether this node may sign blocks Go peers cannot verify.
+    ///
+    /// Falls back to [`ALLOW_ENV`] the first time it is asked, so an operator can
+    /// open the gate without a code change; an explicit call always wins.
+    pub fn non_go_verifiable_signing_allowed() -> bool {
+        match POLICY.load(Ordering::Acquire) {
+            ALLOWED => true,
+            DENIED => false,
+            _ => {
+                let allowed = std::env::var(ALLOW_ENV)
+                    .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+                    .unwrap_or(false);
+                POLICY.store(if allowed { ALLOWED } else { DENIED }, Ordering::Release);
+                allowed
+            }
+        }
+    }
+
+    /// Forget the cached decision. Test-only: the policy is process-global.
+    pub fn reset_for_test() {
+        POLICY.store(UNSET, Ordering::Release);
+    }
+}

@@ -1075,16 +1075,15 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-    defra_core::signing::set_broadcast_creator_did(Some(owner.to_string()));
-
-    let created = mutator
-        .create(
+    let created = defra_core::signing::scope_broadcast_creator_did(
+        Some(owner.to_string()),
+        mutator.create(
             "TestDoc",
             Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
-        )
-        .await
-        .expect("create");
-    defra_core::signing::set_broadcast_creator_did(None);
+        ),
+    )
+    .await
+    .expect("create");
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
         .await

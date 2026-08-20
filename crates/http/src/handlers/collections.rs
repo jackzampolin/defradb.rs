@@ -427,9 +427,9 @@ pub async fn get_all_collections(
 ) -> Result<Json<Vec<schema::CollectionVersion>>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_versions = state.require_collection_versions()?;
 
-    let collections = collection_mgmt
+    let collections = collection_versions
         .get_all_collections()
         .await
         .map_err(http_error_from_backend_message)?;

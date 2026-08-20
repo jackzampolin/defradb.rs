@@ -29,8 +29,7 @@ impl<S: Store> DB<S> {
         // thread_local (set on the pinned query/FFI path).
         let resolved: Option<Did> = match identity {
             Some(d) => Some(d.clone()),
-            None => defra_core::current_identity::try_get_scoped_identity()
-                .or_else(defra_core::current_identity::get_current_identity)
+            None => defra_core::current_identity::get_effective_identity()
                 .and_then(|s| Did::new(s).ok()),
         };
         // Node's own identity always has access (mirrors Go db_nac.go).

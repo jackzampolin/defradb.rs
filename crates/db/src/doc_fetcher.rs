@@ -113,33 +113,18 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         k: usize,
         effort: Option<usize>,
     ) -> query::error::Result<Vec<u64>> {
-        let (collection, datastore, systemstore) =
+        let (collection, datastore, _) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        let execution = |e: String| query::error::QueryError::execution(e);
-        let collection_short_id = crate::collection::require_persisted_collection_short_id(
-            &systemstore,
-            collection.collection_id(),
+        crate::vector_search::search_vector_index(
+            &collection,
+            &datastore,
+            index_id,
+            query_vector,
+            k,
+            effort,
         )
         .await
-        .map_err(|e| execution(format!("collection short id: {e}")))?;
-
-        let desc = collection
-            .get_indexes()
-            .iter()
-            .find(|index| index.id == index_id && index.is_vector())
-            .cloned()
-            .ok_or_else(|| execution(format!("no vector index with id {index_id}")))?;
-
-        let index = db_index::vector::index::VectorIndex::try_new(collection_short_id, desc)
-            .map_err(|e| execution(format!("vector index: {e}")))?;
-
-        let mut view = datastore.clone();
-        index
-            .search(&mut view, query_vector, k, effort)
-            .await
-            .map(|hits| hits.into_iter().map(|hit| hit.id.0).collect())
-            .map_err(|e| execution(format!("vector search: {e}")))
     }
 
     fn supports_vector_search(&self) -> bool {

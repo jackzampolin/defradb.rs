@@ -15,6 +15,8 @@ pub struct IndexCreateRequest {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unique: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<schema::VectorIndexDescription>,
 }
 
 /// Index info from list/create
@@ -56,6 +58,7 @@ impl HttpClient {
         fields: &[String],
         name: Option<&str>,
         unique: bool,
+        vector: Option<schema::VectorIndexDescription>,
     ) -> Result<IndexInfo> {
         let url = format!("{}/api/v0/index", self.base_url);
         let request = IndexCreateRequest {
@@ -63,6 +66,7 @@ impl HttpClient {
             fields: fields.to_vec(),
             name: name.map(|s| s.to_string()),
             unique,
+            vector,
         };
         self.post_json(&url, &request).await
     }

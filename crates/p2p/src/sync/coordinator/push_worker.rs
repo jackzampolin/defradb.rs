@@ -2,14 +2,11 @@
 //!
 //! Exactly `worker_count` tasks are spawned once at coordinator construction
 //! and live until shutdown; they are the only long-lived push handles, and
-//! they own the expensive parts of a push — DAG expansion from the blockstore
-//! and request signing — so queued jobs stay compact.
+//! they own request signing and transport sends, so queued jobs stay compact.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use blockstore::Blockstore;
 use bytes::Bytes;
 use cid::Cid;
 use parking_lot::Mutex;
@@ -17,13 +14,11 @@ use parking_lot::Mutex;
 use super::{PushFailure, SyncShutdownHandle};
 use crate::message::PushLogRequest;
 use crate::signing::sign_with_transport;
-use crate::sync::push_backlog::{JobCompletion, PushBacklog, PushJobSpec};
-use crate::sync::push_encode_cache::PushPayload;
+use crate::sync::push_backlog::{HeadHintFailureReason, JobCompletion, PushBacklog, PushJobSpec};
 use crate::transport::P2PTransport;
 
-pub(super) struct PushWorkerContext<B, T> {
+pub(super) struct PushWorkerContext<T> {
     pub(super) transport: T,
-    pub(super) blockstore: Arc<B>,
     pub(super) backlog: Arc<PushBacklog>,
     pub(super) selective_car_access: Arc<super::selective_car_access::SelectiveCarAccess>,
     pub(super) failure_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
@@ -42,7 +37,7 @@ pub(super) async fn report_push_failure(
     collection_id: String,
     cid: Option<Cid>,
     head_priority: u64,
-) {
+) -> bool {
     report_push_event(
         failure_tx,
         peer_id,
@@ -51,14 +46,15 @@ pub(super) async fn report_push_failure(
         cid,
         head_priority,
         true,
+        false,
     )
-    .await;
+    .await
 }
 
 pub(super) async fn report_observed_head(
     failure_tx: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
     job: &PushJobSpec,
-) {
+) -> bool {
     report_push_event(
         failure_tx,
         &job.peer_id,
@@ -67,8 +63,26 @@ pub(super) async fn report_observed_head(
         Some(job.root_cid),
         job.head_priority(),
         false,
+        false,
     )
-    .await;
+    .await
+}
+
+pub(super) async fn report_push_ack(
+    failure_tx: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
+    job: &PushJobSpec,
+) -> bool {
+    report_push_event(
+        failure_tx,
+        &job.peer_id,
+        job.doc_id.clone(),
+        job.collection_id.clone(),
+        Some(job.root_cid),
+        job.head_priority(),
+        false,
+        true,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -80,12 +94,11 @@ async fn report_push_event(
     cid: Option<Cid>,
     head_priority: u64,
     create_retry: bool,
-) {
-    // Collection commits are doc-less: their obligation is CID-scoped. They are
-    // recorded in the ledger's collection-commit keyspace and replayed by CID
-    // (defradb#1113). Dropping them here made a failed collection-commit push
-    // permanent — the receiver kept heads whose parents never arrived, so its
-    // pending-DAG registrations could never complete (source-inc/gents#696).
+    acknowledged: bool,
+) -> bool {
+    // Collection commits are doc-less. Their durable obligation is a collection
+    // marker whose retry rederives the current collection heads. The CID below
+    // identifies only this live attempt and is never persisted as delivery state.
     //
     // A doc-less failure with no CID (the versionless SE-artifact path) still
     // has nothing to replay: no document to re-resolve and no CID to re-send.
@@ -97,10 +110,16 @@ async fn report_push_event(
                 "Versionless collection-scoped push failed with no CID; nothing to replay"
             );
         }
-        return;
+        return false;
     }
     let tx = failure_tx.lock().clone();
     if let Some(tx) = tx {
+        let (durable_tx, durable_rx) = if create_retry || acknowledged {
+            (None, None)
+        } else {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        };
         let failure = PushFailure {
             peer_id: peer_id.to_string(),
             doc_id,
@@ -108,6 +127,8 @@ async fn report_push_event(
             cid: cid.map(|cid| cid.to_string()).unwrap_or_default(),
             head_priority,
             create_retry,
+            acknowledged,
+            durable_tx,
         };
         // reserve() is cancel-safe, so waiting in a loop lets sustained
         // recorder backpressure surface in the logs instead of silently
@@ -116,7 +137,10 @@ async fn report_push_event(
             match tokio::time::timeout(Duration::from_secs(5), tx.reserve()).await {
                 Ok(Ok(permit)) => {
                     permit.send(failure);
-                    return;
+                    return match durable_rx {
+                        Some(rx) => rx.await.unwrap_or(false),
+                        None => true,
+                    };
                 }
                 Ok(Err(_closed)) => {
                     tracing::warn!(
@@ -124,7 +148,7 @@ async fn report_push_event(
                         doc_id = %failure.doc_id,
                         "Push failure recorder is gone; dropping retry record"
                     );
-                    return;
+                    return false;
                 }
                 Err(_elapsed) => {
                     tracing::warn!(
@@ -136,13 +160,13 @@ async fn report_push_event(
             }
         }
     }
+    false
 }
 
-pub(super) fn spawn_push_workers<B, T>(
-    context: Arc<PushWorkerContext<B, T>>,
+pub(super) fn spawn_push_workers<T>(
+    context: Arc<PushWorkerContext<T>>,
     shutdown: &SyncShutdownHandle,
 ) where
-    B: Blockstore + 'static,
     T: P2PTransport,
 {
     for _ in 0..context.backlog.worker_count() {
@@ -157,105 +181,49 @@ pub(super) fn spawn_push_workers<B, T>(
     }
 }
 
-async fn run_push_job<B, T>(context: &PushWorkerContext<B, T>, job: &PushJobSpec) -> JobCompletion
+async fn run_push_job<T>(context: &PushWorkerContext<T>, job: &PushJobSpec) -> JobCompletion
 where
-    B: Blockstore + 'static,
     T: P2PTransport,
 {
     if !context.backlog.is_current(job) {
         return JobCompletion::Retired;
     }
 
-    let payload = job
-        .encoded_payload
-        .clone()
-        .unwrap_or_else(|| Arc::new(PushPayload::from_job(job)));
-    let root_request = payload
-        .root_request
-        .get_or_try_init(|| async {
-            build_request(
-                &context.transport,
-                &payload,
-                job.root_cid,
-                job.head_block.clone(),
-            )
-            .ok_or(())
-        })
-        .await
-        .ok()
-        .cloned();
+    let root_request = build_request(&context.transport, job);
     let root_missing = root_request.is_none();
-    let (dependencies, dependency_failed) = if job.expand_dag {
-        match payload
-            .dependency_requests
-            .get_or_try_init(|| async {
-                let (blocks, complete) = load_ordered_dag_blocks(
-                    context.blockstore.as_ref(),
-                    job.root_cid,
-                    job.head_block.clone(),
-                )
-                .await;
-                if !complete {
-                    return Err(());
-                }
-                blocks
-                    .into_iter()
-                    .filter(|(cid, _)| *cid != job.root_cid)
-                    .map(|(cid, block)| build_request(&context.transport, &payload, cid, block))
-                    .collect::<Option<Vec<_>>>()
-                    .map(Arc::new)
-                    .ok_or(())
-            })
-            .await
-        {
-            Ok(requests) => (Arc::clone(requests), false),
-            Err(()) => (Arc::new(Vec::new()), true),
-        }
+    let send_outcome = if let Some(root_request) = root_request {
+        // The receiver owns DAG completion. Install a bounded root capability
+        // before announcing the head; linked-CID reachability is validated on
+        // demand in the CAR handler, so announcement work stays O(heads×peers).
+        let Some(_car_access) = context
+            .selective_car_access
+            .register(job.peer_id.clone(), job.root_cid)
+        else {
+            context
+                .backlog
+                .record_head_hint_failure(HeadHintFailureReason::Local);
+            return JobCompletion::Failed;
+        };
+        context.backlog.record_head_hint_sent(job);
+        send_head_hint_via_transport(
+            &context.transport,
+            &job.peer_id,
+            (job.root_cid, root_request),
+            context.send_timeout,
+        )
+        .await
     } else {
-        (Arc::new(Vec::new()), false)
-    };
-    let mut requests = Vec::with_capacity(dependencies.len() + usize::from(root_request.is_some()));
-    requests.extend(dependencies.iter().cloned());
-    if let Some(root_request) = root_request {
-        requests.push(root_request);
-    }
-    let send_outcome = if requests.is_empty() {
         // Every block failed to sign: report so the persisted retry ladder
         // regenerates and re-pushes instead of silently losing the doc.
         PushSendOutcome {
             failed: true,
             at_capacity: false,
+            failure_reason: Some(HeadHintFailureReason::Local),
         }
-    } else {
-        // Authorize the receiver's post-ack recovery pull from the DAG
-        // itself, not from `requests` (what this job happened to push).
-        // A root-only push (`expand_dag = false`) still grants the full
-        // local DAG, decoupling recovery from payload expansion so a future
-        // removal of payload expansion (#1116 stage 3) keeps recovery
-        // working. Fall back to the pushed CIDs on a walk error: never send
-        // a push whose recovery pull we could not authorize.
-        let grant_cids = match crate::sync::car::collect_dag_cids(
-            context.blockstore.as_ref(),
-            &job.root_cid,
-            crate::sync::car::CAR_MAX_BLOCKS,
-        )
-        .await
-        {
-            Ok(cids) => cids,
-            Err(_) => requests.iter().map(|(cid, _)| *cid).collect(),
-        };
-        let _car_access =
-            context
-                .selective_car_access
-                .register(job.peer_id.clone(), job.root_cid, grant_cids);
-        send_ordered_pushlogs_via_transport(
-            &context.transport,
-            &job.peer_id,
-            requests,
-            context.send_timeout,
-        )
-        .await
     };
+    if let Some(reason) = send_outcome.failure_reason {
+        context.backlog.record_head_hint_failure(reason);
+    }
     // A saturated receiver parks the whole peer: every CID we would push next
     // is going to be rejected for the same reason (defradb#1112).
     if send_outcome.at_capacity {
@@ -263,7 +231,7 @@ where
         for queued_job in context.backlog.take_queued_for_peer(&job.peer_id) {
             let peer_id = queued_job.peer_id.clone();
             let head_priority = queued_job.head_priority();
-            report_push_failure(
+            let _ = report_push_failure(
                 &context.failure_tx,
                 &peer_id,
                 queued_job.doc_id,
@@ -275,10 +243,10 @@ where
         }
     }
     let send_failed = send_outcome.failed;
-    let any_failed = root_missing || dependency_failed || send_failed;
+    let any_failed = root_missing || send_failed;
 
     if any_failed && context.backlog.is_current(job) {
-        report_push_failure(
+        let _ = report_push_failure(
             &context.failure_tx,
             &job.peer_id,
             job.doc_id.clone(),
@@ -289,92 +257,31 @@ where
         .await;
         JobCompletion::Failed
     } else if context.backlog.is_current(job) {
+        let _ = report_push_ack(&context.failure_tx, job).await;
         JobCompletion::Succeeded
     } else {
         JobCompletion::Retired
     }
 }
 
-fn build_request<T: P2PTransport>(
-    transport: &T,
-    payload: &PushPayload,
-    block_cid: Cid,
-    block_data: Bytes,
-) -> Option<(Cid, PushLogRequest)> {
+fn build_request<T: P2PTransport>(transport: &T, job: &PushJobSpec) -> Option<PushLogRequest> {
     let mut request = PushLogRequest::new(
-        payload.doc_id.clone(),
-        Bytes::from(block_cid.to_bytes()),
-        payload.collection_id.clone(),
-        payload.creator.clone(),
-        block_data,
+        job.doc_id.clone(),
+        Bytes::from(job.root_cid.to_bytes()),
+        job.collection_id.clone(),
+        job.creator.clone(),
+        job.head_block.clone(),
     );
     match sign_with_transport(transport, &mut request) {
-        Ok(()) => Some((block_cid, request)),
+        Ok(()) => Some(request),
         Err(error) => {
-            tracing::debug!(cid = %block_cid, error = %error, "Failed to sign PushLog request");
+            tracing::debug!(cid = %job.root_cid, error = %error, "Failed to sign PushLog request");
             None
         }
     }
 }
 
-/// Load every transitive block in a document DAG, with dependencies first.
-pub(super) async fn load_ordered_dag_blocks<B: Blockstore>(
-    blockstore: &B,
-    root_cid: Cid,
-    root_bytes: Bytes,
-) -> (Vec<(Cid, Bytes)>, bool) {
-    let mut ordered = Vec::new();
-    let mut complete = true;
-    let mut visited = HashSet::new();
-    let mut stack = vec![(root_cid, root_bytes, false)];
-
-    while let Some((cid, data, expanded)) = stack.pop() {
-        if expanded {
-            ordered.push((cid, data));
-            continue;
-        }
-
-        if !visited.insert(cid) {
-            continue;
-        }
-
-        let linked_cids = defra_core::Block::from_dag_cbor(&data)
-            .ok()
-            .and_then(|block| defra_core::collect_block_links(&block).ok())
-            .unwrap_or_default();
-
-        stack.push((cid, data, true));
-
-        for linked_cid in linked_cids.into_iter().rev() {
-            match blockstore.get(&linked_cid).await {
-                Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
-                Ok(None) => {
-                    complete = false;
-                    tracing::debug!(
-                        root_cid = %root_cid,
-                        linked_cid = %linked_cid,
-                        "Linked DAG block not found in blockstore"
-                    );
-                }
-                Err(error) => {
-                    complete = false;
-                    tracing::debug!(
-                        root_cid = %root_cid,
-                        linked_cid = %linked_cid,
-                        error = %error,
-                        "Failed to load linked DAG block"
-                    );
-                }
-            }
-        }
-    }
-
-    (ordered, complete)
-}
-
-/// Send PushLog requests to a peer in order via the transport, waiting for
-/// each to complete. Returns true when any request failed terminally.
-/// Outcome of an ordered push to one peer.
+/// Outcome of announcing one head hint to one peer.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PushSendOutcome {
     /// Any block failed to land.
@@ -383,133 +290,97 @@ pub(super) struct PushSendOutcome {
     /// and structural, so the caller parks the whole peer rather than just this
     /// CID (defradb#1112).
     pub at_capacity: bool,
+    pub failure_reason: Option<HeadHintFailureReason>,
 }
 
-pub(super) async fn send_ordered_pushlogs_via_transport<T: P2PTransport>(
+pub(super) async fn send_head_hint_via_transport<T: P2PTransport>(
     transport: &T,
     peer_id: &crate::transport::PeerId,
-    requests: Vec<(Cid, PushLogRequest)>,
+    (cid, request): (Cid, PushLogRequest),
     send_timeout: Duration,
 ) -> PushSendOutcome {
-    use crate::error::{is_at_capacity_message, is_rate_limited_message};
+    use crate::error::is_at_capacity_message;
 
-    let mut any_failed = false;
-    let mut at_capacity = false;
-    'requests: for (cid, request) in requests {
-        let mut rate_limited_attempts = 0;
-        loop {
-            match tokio::time::timeout(
-                send_timeout,
-                transport.send_two_stream_request(peer_id, request.clone()),
-            )
-            .await
-            {
-                Err(_) => {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        cid = %cid,
-                        timeout_ms = send_timeout.as_millis(),
-                        "PushLog to replicator timed out"
-                    );
-                    any_failed = true;
-                    break 'requests;
-                }
-                Ok(Err(e)) => {
-                    if e.is_connection_like() {
-                        tracing::debug!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            error = %e,
-                            "PushLog to replicator failed because the connection became unavailable; stopping replay for this peer"
-                        );
-                        any_failed = true;
-                        break 'requests;
-                    }
-
-                    tracing::debug!(
+    match tokio::time::timeout(
+        send_timeout,
+        transport.send_two_stream_request(peer_id, request.clone()),
+    )
+    .await
+    {
+        Err(_) => {
+            tracing::warn!(
+                peer_id = %peer_id,
+                cid = %cid,
+                timeout_ms = send_timeout.as_millis(),
+                "PushLog to replicator timed out"
+            );
+            PushSendOutcome {
+                failed: true,
+                at_capacity: false,
+                failure_reason: Some(HeadHintFailureReason::Transport),
+            }
+        }
+        Ok(Err(e)) => {
+            if e.is_connection_like() {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    cid = %cid,
+                    error = %e,
+                    "PushLog to replicator failed because the connection became unavailable"
+                );
+            } else {
+                tracing::debug!(
                         peer_id = %peer_id,
                         cid = %cid,
                         error = %e,
                         "PushLog to replicator failed"
-                    );
-                    any_failed = true;
-                    break;
-                }
-                Ok(Ok(reply)) => {
-                    let Some(error_message) = reply.err_message.as_deref() else {
-                        tracing::debug!(
-                            target: "p2p::sync::restart_recovery",
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            doc_id = %request.doc_id,
-                            "PushLog accepted by replicator"
-                        );
-                        break;
-                    };
-
-                    // A saturated receiver is a PEER-WIDE, structural condition:
-                    // it cannot accept any new root until it drains. Resending
-                    // the same block at pacing intervals just burns receiver
-                    // work (a block write + a full DAG traversal per attempt),
-                    // and because the failure cooldown is keyed per-CID, every
-                    // other CID for that peer would start its own burst. Stop
-                    // immediately, park the whole PEER, and let the persisted
-                    // retry sweep resume once the receiver can drain
-                    // (defradb#1112).
-                    if is_at_capacity_message(error_message) {
-                        tracing::debug!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            "PushLog rejected: receiver at capacity; parking peer and deferring \
-                             to persisted retry"
-                        );
-                        at_capacity = true;
-                        any_failed = true;
-                        break 'requests;
-                    }
-
-                    if is_rate_limited_message(error_message) {
-                        rate_limited_attempts += 1;
-                        if rate_limited_attempts > super::broadcast::MAX_RATE_LIMITED_PUSH_ATTEMPTS
-                        {
-                            tracing::warn!(
-                                peer_id = %peer_id,
-                                cid = %cid,
-                                attempts = rate_limited_attempts,
-                                "PushLog to replicator remained rate-limited; stopping ordered push"
-                            );
-                            any_failed = true;
-                            break 'requests;
-                        }
-
-                        let delay =
-                            super::broadcast::rate_limited_push_delay(rate_limited_attempts);
-                        tracing::debug!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            attempt = rate_limited_attempts,
-                            delay_ms = delay.as_millis(),
-                            "PushLog to replicator was rate-limited; backing off before retry"
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        cid = %cid,
-                        error = %error_message,
-                        "PushLog to replicator was rejected"
-                    );
-                    any_failed = true;
-                    break;
-                }
+                );
+            }
+            PushSendOutcome {
+                failed: true,
+                at_capacity: false,
+                failure_reason: Some(HeadHintFailureReason::Transport),
             }
         }
-    }
-    PushSendOutcome {
-        failed: any_failed,
-        at_capacity,
+        Ok(Ok(reply)) => {
+            let Some(error_message) = reply.err_message.as_deref() else {
+                tracing::debug!(
+                    target: "p2p::sync::restart_recovery",
+                    peer_id = %peer_id,
+                    cid = %cid,
+                    doc_id = %request.doc_id,
+                    "PushLog head hint accepted by replicator"
+                );
+                return PushSendOutcome {
+                    failed: false,
+                    at_capacity: false,
+                    failure_reason: None,
+                };
+            };
+            if is_at_capacity_message(error_message) {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    cid = %cid,
+                    "PushLog rejected: receiver at capacity; parking peer and deferring to persisted retry"
+                );
+                return PushSendOutcome {
+                    failed: true,
+                    at_capacity: true,
+                    failure_reason: Some(HeadHintFailureReason::CapacityNack),
+                };
+            }
+            tracing::warn!(
+                peer_id = %peer_id,
+                cid = %cid,
+                error = %error_message,
+                "PushLog head hint was rejected"
+            );
+            PushSendOutcome {
+                failed: true,
+                at_capacity: false,
+                failure_reason: Some(HeadHintFailureReason::OtherNack),
+            }
+        }
     }
 }
 

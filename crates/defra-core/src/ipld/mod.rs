@@ -5,9 +5,9 @@
 //!
 //! # Submodules
 //!
-//! - [`to_ipld`]: Conversions from DefraDB types to IPLD
-//! - [`from_ipld`]: Conversions from IPLD to DefraDB types
-//! - [`traversal`]: Link traversal helpers and visitor pattern
+//! - `to_ipld`: Conversions from DefraDB types to IPLD
+//! - `from_ipld`: Conversions from IPLD to DefraDB types
+//! - `traversal`: Link traversal helpers and visitor pattern
 
 mod from_ipld;
 mod to_ipld;

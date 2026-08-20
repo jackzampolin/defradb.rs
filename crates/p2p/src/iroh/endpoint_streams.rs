@@ -1,19 +1,19 @@
 //! Incoming connection and stream processing for the iroh endpoint.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use iroh::endpoint::Connection;
 use iroh::EndpointId;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::error::Error;
 use crate::message::{Message, PushLogReply};
 use crate::transport::{PeerId, TransportEvent};
 
-use super::endpoint::{track_task, EndpointResources, SpawnedTasks, SubscriptionSenders};
+use super::endpoint::{
+    track_task, EndpointResources, PendingPushLogReplies, SpawnedTasks, SubscriptionSenders,
+};
 use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
@@ -22,9 +22,7 @@ use super::protocols;
 pub(super) async fn handle_incoming(
     incoming: iroh::endpoint::Incoming,
     resources: &EndpointResources,
-    pending_pushlog_replies: &Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
+    pending_pushlog_replies: &PendingPushLogReplies,
     subscription_senders: &SubscriptionSenders,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
@@ -95,46 +93,60 @@ pub(super) async fn handle_incoming(
     }
 
     // Spawn handler for this connection's streams
-    let event_tx = event_tx.clone();
-    let peer_map = Arc::clone(&resources.peer_map);
-    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(&resources.spawned_tasks);
+    let context = ConnectionStreamContext::new(
+        resources,
+        Arc::clone(pending_pushlog_replies),
+        event_tx.clone(),
+    );
     let task = tokio::spawn(async move {
-        handle_connection_streams(
-            connection,
-            remote_id,
-            conn_alpn,
-            event_tx,
-            peer_map,
-            pending_pushlog_replies,
-            &spawned_tasks_for_connection,
-        )
-        .await;
+        handle_connection_streams(connection, remote_id, conn_alpn, context).await;
     });
     track_task(&resources.spawned_tasks, task);
+}
+
+/// Shared state for every stream accepted on one authenticated connection.
+#[derive(Clone)]
+pub(super) struct ConnectionStreamContext {
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: PendingPushLogReplies,
+    node_identity: Option<Arc<identity::RawIdentity>>,
+    spawned_tasks: SpawnedTasks,
+}
+
+impl ConnectionStreamContext {
+    pub(super) fn new(
+        resources: &EndpointResources,
+        pending_pushlog_replies: PendingPushLogReplies,
+        event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    ) -> Self {
+        Self {
+            event_tx,
+            peer_map: Arc::clone(&resources.peer_map),
+            pending_pushlog_replies,
+            node_identity: resources.node_identity.clone(),
+            spawned_tasks: Arc::clone(&resources.spawned_tasks),
+        }
+    }
 }
 
 /// Process streams on an accepted connection, dispatching by ALPN.
 ///
 /// Emits `PeerDisconnected` only when the last connection for this peer closes.
-async fn handle_connection_streams(
+pub(super) async fn handle_connection_streams(
     connection: Connection,
     remote_id: EndpointId,
     alpn: Vec<u8>,
-    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
-    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
-    spawned_tasks: &SpawnedTasks,
+    context: ConnectionStreamContext,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
     while let Ok((send, mut recv)) = connection.accept_bi().await {
         let peer_id = peer_id.clone();
-        let event_tx = event_tx.clone();
+        let event_tx = context.event_tx.clone();
         let alpn = alpn.clone();
-        let pending_pushlog_replies = pending_pushlog_replies.clone();
+        let pending_pushlog_replies = context.pending_pushlog_replies.clone();
+        let node_identity = context.node_identity.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = dispatch_stream(
                 &alpn,
@@ -143,50 +155,28 @@ async fn handle_connection_streams(
                 &mut recv,
                 &event_tx,
                 &pending_pushlog_replies,
+                node_identity.as_deref(),
             )
             .await
             {
                 debug!("Stream error from {}: {}", peer_id, e);
             }
         });
-        track_task(spawned_tasks, task);
+        track_task(&context.spawned_tasks, task);
     }
 
-    let fully_disconnected = peer_map.lock().decrement_connections(&remote_id);
+    let fully_disconnected = context.peer_map.lock().decrement_connections(&remote_id);
     debug!(peer_id = %peer_id, fully_disconnected, "Connection closed");
 
     if fully_disconnected
-        && event_tx
+        && context
+            .event_tx
             .send(TransportEvent::PeerDisconnected(peer_id))
             .await
             .is_err()
     {
         debug!("Event channel closed, cannot emit PeerDisconnected");
     }
-}
-
-/// Variant for connections initiated by dial (reuses the same stream handling).
-pub(super) async fn handle_connection_streams_from_dial(
-    connection: Connection,
-    remote_id: EndpointId,
-    alpn: Vec<u8>,
-    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
-    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
-    spawned_tasks: &SpawnedTasks,
-) {
-    handle_connection_streams(
-        connection,
-        remote_id,
-        alpn,
-        event_tx,
-        peer_map,
-        pending_pushlog_replies,
-        spawned_tasks,
-    )
-    .await;
 }
 
 /// Dispatch a stream based on the connection ALPN.
@@ -196,11 +186,44 @@ async fn dispatch_stream(
     send: iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
-    pending_pushlog_replies: &Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
+    pending_pushlog_replies: &PendingPushLogReplies,
+    node_identity: Option<&identity::RawIdentity>,
 ) -> crate::error::Result<()> {
     match alpn {
+        x if x == protocols::ALPN_IDENTITY => {
+            let request: crate::message::IdentityRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            let mut send = send;
+            let response = if request.peer_id != peer_id.as_str() {
+                crate::message::IdentityResponse::error(
+                    &request.message_id,
+                    "identity request peer did not match authenticated endpoint",
+                )
+            } else if let Some(node_identity) = node_identity {
+                match identity::new_token(
+                    node_identity,
+                    std::time::Duration::from_secs(60 * 60 * 24),
+                    Some(peer_id.to_string()),
+                    None,
+                ) {
+                    Ok(token) => {
+                        crate::message::IdentityResponse::success(&request.message_id, token)
+                    }
+                    Err(error) => crate::message::IdentityResponse::error(
+                        &request.message_id,
+                        &format!("failed to generate identity token: {error}"),
+                    ),
+                }
+            } else {
+                crate::message::IdentityResponse::error(
+                    &request.message_id,
+                    "node identity is not configured",
+                )
+            };
+            protocols::write_message(&mut send, &response).await?;
+            send.finish()
+                .map_err(|error| Error::Transport(error.to_string()))?;
+        }
         x if x == protocols::ALPN_PUSHLOG => {
             let request: crate::message::PushLogRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
@@ -320,6 +343,7 @@ async fn dispatch_stream(
             if let Some(root_cid) = root_cid {
                 if event_tx
                     .send(TransportEvent::CarFetchResponse {
+                        query_id: None,
                         peer_id: peer_id.clone(),
                         root_cid,
                         car_data,

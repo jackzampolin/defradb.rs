@@ -48,7 +48,6 @@ where
         continue_on_error: true,
         rebroadcast_on_merge: false,
         batch_size: 50,
-        max_workers: 32,
     };
 
     let unmerged = coordinator.get_unmerged().await?;

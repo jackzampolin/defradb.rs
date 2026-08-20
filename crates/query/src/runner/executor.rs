@@ -186,10 +186,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
+        let creator_did = identity.as_ref().map(ToString::to_string);
+        let acting_identity = creator_did
+            .clone()
+            .or_else(defra_core::current_identity::get_effective_identity);
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
-        let execution = async {
+        let execution = Box::pin(async {
             match parsed {
                 ParsedOperation::Query {
                     mut selects,
@@ -251,9 +255,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     self.execute_introspection(&query).await
                 }
             }
-        };
+        });
 
-        let result = await_with_timeout(execution, self.query_timeout).await;
+        // The primary QueryExecutor path parses mutations once and therefore
+        // does not pass through execute_mutation_internal_with_vars. Scope the
+        // resolved request identity here as well so HTTP/CLI auto-commit and
+        // transactional broadcasts carry the same Creator DID as direct
+        // mutation entry points.
+        let result = defra_core::current_identity::with_scoped_identity(
+            acting_identity,
+            defra_core::signing::scope_broadcast_creator_did(
+                creator_did,
+                await_with_timeout(execution, self.query_timeout),
+            ),
+        )
+        .await;
 
         match result {
             Ok(data) => QueryResponse {
@@ -284,9 +300,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
-        // Look up the transaction in the registry. `GetTransactionResult` is
-        // `#[non_exhaustive]` (defined in the `query-plan` crate), so matches
-        // from this crate require a wildcard arm.
         let txn_ctx = match self.registry.get(handle) {
             GetTransactionResult::Found(ctx) => ctx,
             GetTransactionResult::NotFound => {
@@ -298,12 +311,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             GetTransactionResult::LockPoisoned => {
                 return QueryResponse::error(format!(
                     "transaction registry lock poisoned - system may be in corrupted state (transaction '{}')",
-                    handle
-                ));
-            }
-            _ => {
-                return QueryResponse::error(format!(
-                    "unknown transaction registry result for '{}'",
                     handle
                 ));
             }

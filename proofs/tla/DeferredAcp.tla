@@ -1,6 +1,6 @@
 ---- MODULE DeferredAcp ----
 \* Deferred-ACP overlay consistency, abstracting
-\* crates/query-plan/src/txn/context.rs (DeferredAcpMutations: projected_registrations
+\* crates/query/src/txn/primitives/context.rs (DeferredAcpMutations: projected_registrations
 \* + commit-time hooks, check_doc_access_with_overlay / is_doc_registered_with_overlay)
 \* and crates/db/src/txn_registry.rs (one Arc<DeferredAcpMutations> per txn, hooks wired
 \* to db_txn.on_success_async => run only on commit, never on discard/rollback).

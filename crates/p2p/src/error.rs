@@ -286,6 +286,10 @@ pub enum Error {
     /// Head provider error (used in DocSync / BranchableSync).
     #[error("head provider error: {0}")]
     HeadProvider(String),
+
+    /// A committed head could not be backed by its durable sender marker.
+    #[error("durable head-hint marker error: {0}")]
+    DurableHeadMarker(String),
 }
 
 impl Error {

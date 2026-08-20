@@ -1,3 +1,5 @@
+#![cfg(feature = "libp2p-transport")]
+
 use std::str::FromStr;
 
 use libp2p::{

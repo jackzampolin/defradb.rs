@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use super::node::{Node, P2PTasks};
 use crate::config::{AcpDocumentType, Config, TransportType};
-use crate::error::{Error, Result};
+#[cfg(not(feature = "iroh"))]
+use crate::error::Error;
+use crate::error::Result;
 
 #[cfg(feature = "iroh")]
 mod iroh;
@@ -13,64 +15,6 @@ mod libp2p_setup;
 
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
 type WireKms = Option<Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>>;
-
-/// Redial a replicator target that dropped, using its stored addresses, so a
-/// stalled connection cannot strand the peer's persisted retry ledger after
-/// the target restarts (the connectivity gate below would otherwise skip it
-/// forever, while nothing else redials it).
-async fn redial_replicator(
-    peerstore: &storage::stores::Peerstore<storage::DynStore>,
-    handle: &p2p::P2PHostHandle,
-    peer_id_str: &str,
-    peer_id: libp2p::PeerId,
-) {
-    let Ok(Some(bytes)) = peerstore.get_replicator(peer_id_str).await else {
-        return;
-    };
-    let Ok(info) = p2p::ReplicatorInfo::from_bytes(&bytes) else {
-        return;
-    };
-    let addrs: Vec<libp2p::Multiaddr> = info
-        .addresses
-        .iter()
-        .filter_map(|addr| addr.parse().ok())
-        .collect();
-    if addrs.is_empty() {
-        return;
-    }
-    if let Err(error) = handle.dial(peer_id, addrs).await {
-        tracing::debug!(peer_id = %peer_id, %error, "replicator retry redial failed");
-    }
-}
-
-async fn set_persisted_replicator_status(
-    peerstore: &storage::stores::Peerstore<storage::DynStore>,
-    peer_id: &str,
-    status: p2p::ReplicatorStatus,
-) -> Result<bool> {
-    let Some(bytes) = peerstore
-        .get_replicator(peer_id)
-        .await
-        .map_err(|e| Error::Server(format!("failed to load replicator: {e}")))?
-    else {
-        return Ok(false);
-    };
-
-    let mut info = p2p::ReplicatorInfo::from_bytes(&bytes)
-        .map_err(|e| Error::Server(format!("failed to decode replicator: {e}")))?;
-    if !info.set_status_if_changed_now(status) {
-        return Ok(false);
-    }
-
-    let bytes = info
-        .to_bytes()
-        .map_err(|e| Error::Server(format!("failed to encode replicator: {e}")))?;
-    peerstore
-        .create_replicator(peer_id, &bytes)
-        .await
-        .map_err(|e| Error::Server(format!("failed to persist replicator: {e}")))?;
-    Ok(true)
-}
 
 pub(super) struct P2PSetup {
     pub(super) host_handle: Option<p2p::P2PHostHandle>,
@@ -126,6 +70,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup> {
         if config.net.p2p_disabled {
@@ -141,13 +86,21 @@ impl Node {
                     event_bus,
                     config,
                     peer_keypair,
+                    node_identity,
                     se_key,
                 )
                 .await;
             }
             #[cfg(not(feature = "iroh"))]
             {
-                let _ = (store, database, event_bus, peer_keypair, se_key);
+                let _ = (
+                    store,
+                    database,
+                    event_bus,
+                    peer_keypair,
+                    node_identity,
+                    se_key,
+                );
                 return Err(Error::InvalidTransport(
                     "iroh transport not enabled. Rebuild with --features iroh".into(),
                 ));

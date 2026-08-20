@@ -23,11 +23,7 @@ pub(crate) struct PendingPush {
     pub(crate) doc_id: String,
     pub(crate) collection_id: String,
     pub(crate) creator: String,
-    /// Whether unfiltered replicators need the complete DAG instead of only
-    /// the head block.
-    pub(crate) expand_unfiltered_dag: bool,
-    /// Filter material also represents an obligation to send the complete DAG
-    /// to matching filtered replicators.
+    /// Filter material determines which peers receive the head hint.
     pub(crate) document: Option<JsonValue>,
 }
 
@@ -48,18 +44,15 @@ impl PendingPush {
     }
 
     fn merge_same_version(&mut self, incoming: PendingPush) -> bool {
-        let strengthened = (!self.expand_unfiltered_dag && incoming.expand_unfiltered_dag)
-            || (self.document.is_none() && incoming.document.is_some());
-        self.expand_unfiltered_dag |= incoming.expand_unfiltered_dag;
+        let strengthened = self.document.is_none() && incoming.document.is_some();
         if incoming.document.is_some() {
             self.document = incoming.document;
         }
         strengthened
     }
 
-    fn replace_with_newer(&mut self, mut incoming: PendingPush) {
+    fn replace_with_newer(&mut self, incoming: PendingPush) {
         debug_assert_eq!(incoming.document.is_some(), self.document.is_some());
-        incoming.expand_unfiltered_dag |= self.expand_unfiltered_dag;
         *self = incoming;
     }
 }
@@ -280,7 +273,6 @@ mod tests {
             doc_id: "doc".to_string(),
             collection_id: "collection".to_string(),
             creator: "creator".to_string(),
-            expand_unfiltered_dag: false,
             document: Some(JsonValue::Null),
         }
     }
@@ -292,28 +284,14 @@ mod tests {
             doc_id: "doc".to_string(),
             collection_id: "collection".to_string(),
             creator: "creator".to_string(),
-            expand_unfiltered_dag: false,
             document: Some(JsonValue::Null),
         }
-    }
-
-    #[test]
-    fn same_version_merges_full_dag_obligation() {
-        let mut combined = push(b"same");
-        let mut incoming = push(b"same");
-        incoming.expand_unfiltered_dag = true;
-
-        combined.merge_same_version(incoming);
-
-        assert!(combined.expand_unfiltered_dag);
-        assert!(combined.document.is_some());
     }
 
     #[tokio::test(start_paused = true)]
     async fn documentless_newer_preserves_separate_filtered_obligation() {
         let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(10)));
-        let mut buffered = push(b"old");
-        buffered.expand_unfiltered_dag = true;
+        let buffered = push(b"old");
         let buffered_cid = buffered.cid;
         let mut newer = push(b"newer-version");
         let newer_cid = newer.cid;
@@ -353,7 +331,6 @@ mod tests {
 
         assert_eq!(sent.len(), 2);
         let buffered = sent.iter().find(|push| push.cid == buffered_cid).unwrap();
-        assert!(buffered.expand_unfiltered_dag);
         assert!(buffered.document.is_some());
         let newer = sent.iter().find(|push| push.cid == newer_cid).unwrap();
         assert!(newer.document.is_none());

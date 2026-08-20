@@ -128,9 +128,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
         // Fail closed: a present-but-malformed ambient identity must error, not
         // silently degrade a permissioned collection to public (unregistered).
-        let creator = match defra_core::current_identity::try_get_scoped_identity()
-            .or_else(defra_core::current_identity::get_current_identity)
-        {
+        let creator = match defra_core::current_identity::get_effective_identity() {
             Some(raw) => {
                 Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
             }
@@ -164,9 +162,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
         if !materialized_names.is_empty() {
             self.database
-                .refresh_views(Some(db::RefreshViewsOptions::with_names(
-                    materialized_names,
-                )))
+                .refresh_views(db::RefreshViewsOptions::with_names(materialized_names))
                 .await
                 .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
         }
@@ -181,13 +177,12 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
         Ok(created_versions)
     }
 
-    async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String> {
+    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String> {
         self.database
             .check_node_access(None, acp::nac::NodePermission::ViewRefresh)
             .await
             .map_err(|e| format!("{}", e))?;
 
-        let options = names.map(db::RefreshViewsOptions::with_names);
         self.database
             .refresh_views(options)
             .await
