@@ -10,12 +10,73 @@ publish = false
 
 [dev-dependencies]
 criterion.workspace = true
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "test-util",
+] }
 
+async-trait.workspace = true
+axum.workspace = true
 cid.workspace = true
+lru.workspace = true
+multihash.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tower = { workspace = true, features = ["util"] }
+
+blockstore = { path = "../crates/blockstore" }
+crdt = { path = "../crates/crdt" }
+crypto = { path = "../crates/crypto" }
+datastore = { path = "../crates/datastore" }
+db = { path = "../crates/db" }
 defra-core = { path = "../crates/defra-core" }
+defra-http = { path = "../crates/http", features = ["test-utils"] }
+document = { path = "../crates/document" }
+query = { path = "../crates/query" }
+schema = { path = "../crates/schema" }
+storage = { path = "../crates/storage" }
 
 [[bench]]
 name = "block"
+harness = false
+
+[[bench]]
+name = "block_write"
+harness = false
+
+[[bench]]
+name = "blockstore"
+harness = false
+
+[[bench]]
+name = "filter"
+harness = false
+
+[[bench]]
+name = "groupby"
+harness = false
+
+[[bench]]
+name = "merge"
+harness = false
+
+[[bench]]
+name = "merge_dag"
+harness = false
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[[bench]]
+name = "planner"
+harness = false
+
+[[bench]]
+name = "transport"
 harness = false
 
 [lints]

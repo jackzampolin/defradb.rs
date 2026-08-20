@@ -114,14 +114,6 @@ ed25519-dalek.workspace = true
 workspace = true
 
 [[bench]]
-name = "block_write"
-harness = false
-
-[[bench]]
-name = "merge_dag"
-harness = false
-
-[[bench]]
 name = "vector_mutations"
 harness = false
 

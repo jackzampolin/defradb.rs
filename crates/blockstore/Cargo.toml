@@ -40,14 +40,9 @@ lru = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]
-criterion.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 multihash = { workspace = true }
 sha2 = { workspace = true }
-
-[[bench]]
-name = "blockstore"
-harness = false
 
 [lints]
 workspace = true
