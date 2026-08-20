@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 
 use super::http_client::HttpClient;
 use super::{validate_identifier, ClientContext};
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Manage database indexes
 #[derive(Args, Debug)]
@@ -43,6 +43,33 @@ pub struct IndexNewArgs {
     /// Make a unique index
     #[arg(long)]
     pub unique: bool,
+
+    /// Make a vector index, searchable by SIMILARITY
+    #[arg(long)]
+    pub vector: bool,
+
+    /// Vector length. Omit on an `@embedding` field, where the model fixes it.
+    #[arg(long, requires = "vector")]
+    pub vector_dimensions: Option<u32>,
+
+    /// Vector index algorithm
+    #[arg(
+        long,
+        requires = "vector",
+        default_value = "HNSW",
+        value_parser = algorithm_names()
+    )]
+    pub vector_algorithm: String,
+
+    /// How the index ranks. SIMILARITY ranks by dot product, so only a DOT
+    /// index can serve it; a COSINE index is built but never routed to.
+    #[arg(
+        long,
+        requires = "vector",
+        default_value = "COSINE",
+        value_parser = metric_names()
+    )]
+    pub vector_metric: String,
 }
 
 /// Arguments for index list command
@@ -76,7 +103,46 @@ impl IndexArgs {
     }
 }
 
+/// Accepted `--vector-algorithm` values, taken from the enum so a new engine
+/// becomes selectable without touching the CLI.
+fn algorithm_names() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        schema::VectorAlgorithm::ALL
+            .iter()
+            .map(|algorithm| algorithm.as_str())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Accepted `--vector-metric` values, from the enum for the same reason.
+fn metric_names() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        schema::DistanceMetric::ALL
+            .iter()
+            .map(|metric| metric.as_str())
+            .collect::<Vec<_>>(),
+    )
+}
+
 impl IndexNewArgs {
+    /// The vector configuration this request carries, if any.
+    pub fn vector_description(&self) -> Result<Option<schema::VectorIndexDescription>> {
+        if !self.vector {
+            return Ok(None);
+        }
+
+        let algorithm = schema::VectorAlgorithm::from_sdl_name(&self.vector_algorithm)
+            .ok_or_else(|| Error::InvalidIdentifier(self.vector_algorithm.clone()))?;
+        let metric = schema::DistanceMetric::from_sdl_name(&self.vector_metric)
+            .ok_or_else(|| Error::InvalidIdentifier(self.vector_metric.clone()))?;
+
+        Ok(Some(schema::VectorIndexDescription::with_defaults(
+            algorithm,
+            metric,
+            self.vector_dimensions.unwrap_or(0),
+        )))
+    }
+
     /// Execute the index new command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
@@ -97,6 +163,7 @@ impl IndexNewArgs {
                 &self.fields,
                 self.name.as_deref(),
                 self.unique,
+                self.vector_description()?,
             )
             .await?;
 
@@ -152,6 +219,10 @@ mod tests {
             fields: vec!["name".to_string(), "email".to_string()],
             name: Some("idx_name_email".to_string()),
             unique: true,
+            vector: false,
+            vector_dimensions: None,
+            vector_algorithm: "HNSW".to_string(),
+            vector_metric: "COSINE".to_string(),
         };
         assert_eq!(args.collection, "Users");
         assert_eq!(args.fields.len(), 2);
@@ -165,6 +236,10 @@ mod tests {
             fields: vec!["name".to_string()],
             name: None,
             unique: false,
+            vector: false,
+            vector_dimensions: None,
+            vector_algorithm: "HNSW".to_string(),
+            vector_metric: "COSINE".to_string(),
         };
         assert!(args.name.is_none());
         assert!(!args.unique);

@@ -287,7 +287,7 @@ impl HttpClient {
     }
 }
 
-/// Deserializable mirror of [`RemoteManageQueryResult`] for client responses.
+/// Deserializable mirror of `RemoteManageQueryResult` for client responses.
 ///
 /// The server-side `RemoteManageQueryResult` is serialize-only (it embeds a
 /// response type), so the client needs its own deserializable shape.

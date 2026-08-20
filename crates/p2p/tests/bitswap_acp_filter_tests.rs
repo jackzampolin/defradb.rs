@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 //! End-to-end tests for per-peer Bitswap access control (#830).
 //!
 //! Spins up two real `P2PHost` instances over loopback TCP with the

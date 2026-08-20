@@ -524,11 +524,10 @@ async fn move_terminal_doc_ids(
         new_key.extend_from_slice(canonical.as_bytes());
         let mut value = pair.value;
         if rewrite_push_retry {
-            if let Ok(mut retry) = storage::stores::PersistedPushRetry::from_bytes(&value) {
-                if retry.doc_id == old_doc_id {
-                    retry.doc_id = canonical.clone();
-                    value = retry.to_bytes().map_err(Error::Serialization)?;
-                }
+            if let Ok(Some(rewritten)) =
+                storage::stores::rewrite_legacy_push_retry_doc_id(&value, old_doc_id, canonical)
+            {
+                value = rewritten;
             }
         }
         moves.push((pair.key, new_key, value));

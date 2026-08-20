@@ -93,6 +93,16 @@ fn test_replicator_retry_doc_id_key() {
 }
 
 #[test]
+fn test_replicator_retry_collection_key() {
+    let key = ReplicatorRetryCollectionKey::new("peer1", "collection1");
+    assert_eq!(key.bytes(), b"/rep/retry/col/peer1/collection1".to_vec());
+    assert_eq!(
+        ReplicatorRetryCollectionKey::peer_prefix("peer1"),
+        b"/rep/retry/col/peer1/".to_vec()
+    );
+}
+
+#[test]
 fn test_peerstore_se_retry() {
     let peer_id = "QmXxxx123456789";
     let collection_id = "users";

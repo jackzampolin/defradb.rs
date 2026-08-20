@@ -395,10 +395,11 @@ async fn install_filtered_one_way_replicator(
         .add_collections(collection_names.clone())
         .await
         .expect("add collections to sender p2p");
-    receiver_p2p
-        .add_collections(collection_names.clone())
-        .await
-        .expect("add collections to receiver p2p");
+    // Keep the receiver off the collection-wide gossip topic. A filtered
+    // replicator is selective on the directed PushLog path, not an access
+    // boundary for peers that separately subscribe to every collection head.
+    // Subscribing here would make the test observe the unfiltered gossip path
+    // instead of the behavior its name and assertions are intended to cover.
     receiver_p2p
         .add_replicator(
             collection_names.clone(),
@@ -1765,6 +1766,11 @@ async fn p2p_shutdown_releases_store_for_immediate_reopen() {
     let retained = status["retained_background_tasks"]
         .as_u64()
         .expect("retained_background_tasks");
+    let retry_markers = status["push_retry_markers"]
+        .as_object()
+        .expect("push_retry_markers");
+    assert_eq!(retry_markers["document_markers"], 0);
+    assert_eq!(retry_markers["collection_markers"], 0);
     assert!(
         retained >= 2,
         "the resync sweep and retry clock must be registered, got {retained}"

@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 //! Step-1 discriminator probe for issue #976: does the `"encryption"`
 //! gossipsub topic form a usable publish mesh between two Rust nodes?
 //!

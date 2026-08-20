@@ -35,7 +35,7 @@ pub struct VectorEmbeddingDescription {
     pub template: String,
 
     /// URL endpoint of the provider's API.
-    /// Example: "https://api.openai.com/v1"
+    /// Example: `https://api.openai.com/v1`
     /// If not provided, uses the default URL for the given provider.
     #[serde(rename = "URL", default)]
     pub url: String,

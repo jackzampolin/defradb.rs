@@ -1,12 +1,11 @@
 //! Broadcasting local updates to the network.
 //!
 //! Replicator pushes are admitted into the bounded push backlog as compact
-//! job specs; the fixed worker pool (`push_worker`) expands DAGs, signs, and
+//! job specs; the fixed worker pool (`push_worker`) authorizes rooted CAR, signs, and
 //! sends. Admission happens before any task is spawned or payload captured,
 //! so outbound resident state stays bounded under sustained writes (#1099).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use blockstore::Blockstore;
 use bytes::Bytes;
@@ -23,54 +22,23 @@ use crate::sync::push_fanout_coalescer::PendingPush;
 use crate::sync::BroadcastResult;
 use crate::transport::{P2PTransport, PeerId};
 
-pub(super) const MAX_RATE_LIMITED_PUSH_ATTEMPTS: usize = 10;
-
-pub(super) fn rate_limited_push_delay(attempt: usize) -> Duration {
-    #[cfg(test)]
-    {
-        match attempt {
-            1 => Duration::from_millis(1),
-            2 => Duration::from_millis(2),
-            3 => Duration::from_millis(4),
-            4 => Duration::from_millis(8),
-            _ => Duration::from_millis(10),
-        }
-    }
-
-    #[cfg(not(test))]
-    {
-        match attempt {
-            1 => Duration::from_millis(25),
-            2 => Duration::from_millis(50),
-            3 => Duration::from_millis(100),
-            4 => Duration::from_millis(200),
-            5 => Duration::from_millis(400),
-            _ => Duration::from_millis(500),
-        }
-    }
-}
-
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
-    async fn list_replicators_for_push(&self) -> Option<Vec<crate::replicator::ReplicatorInfo>> {
+    async fn list_replicators_for_push(&self) -> Result<Vec<crate::replicator::ReplicatorInfo>> {
         if self.runtime.shutdown.is_shutting_down() {
-            tracing::debug!("Skipping replicator push because coordinator is shutting down");
-            return None;
+            return Err(crate::error::Error::DurableHeadMarker(
+                "coordinator is shutting down".to_string(),
+            ));
         }
 
-        match self.runtime.transport.list_replicators().await {
-            Ok(replicators) => Some(replicators),
-            Err(e) => {
-                if e.is_connection_like() {
-                    tracing::debug!(
-                        error = %e,
-                        "Skipping replicator push because the transport is unavailable"
-                    );
-                } else {
-                    tracing::warn!(error = %e, "Failed to get replicators for push");
-                }
-                None
-            }
-        }
+        self.runtime
+            .transport
+            .list_replicators()
+            .await
+            .map_err(|error| {
+                crate::error::Error::DurableHeadMarker(format!(
+                    "failed to enumerate durable replicators: {error}"
+                ))
+            })
     }
 
     /// Admit one replicator push into the bounded backlog. Overflow is an
@@ -84,9 +52,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let head_priority = job.head_priority();
         let outcome = self.runtime.push_backlog.try_enqueue(job.clone());
         match outcome {
-            EnqueueOutcome::Enqueued => {
-                report_observed_head(&self.runtime.failure_tx, &job).await;
-            }
+            EnqueueOutcome::Enqueued => {}
             EnqueueOutcome::Coalesced | EnqueueOutcome::RetiredStale => {}
             EnqueueOutcome::RejectedItems | EnqueueOutcome::RejectedBytes => {
                 tracing::warn!(
@@ -96,7 +62,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     outcome = ?outcome,
                     "Outbound push backlog full; deferring push to persisted retry"
                 );
-                report_push_failure(
+                let _ = report_push_failure(
                     &self.runtime.failure_tx,
                     &peer_id,
                     doc_id,
@@ -158,11 +124,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         creator_override: Option<&str>,
     ) -> Result<BroadcastResult> {
         let creator = creator_override.unwrap_or(&self.access.local_peer_id);
-        let broadcast =
+        let mut broadcast =
             Broadcaster::<T>::create_broadcast(cid, block, doc_id, collection_id, creator);
-        if doc_id.is_empty() {
-            return self.runtime.broadcaster.broadcast_update(&broadcast).await;
-        }
+        // Iroh exposes only the immediate relay for received gossip. Carry
+        // and authenticate the publisher so a directly connected receiver can
+        // recover from the actual DAG owner; sparse receivers safely fall back
+        // to their separately authenticated propagation hop.
+        broadcast.source_peer_id = Some(self.access.local_peer_id.clone());
+        let origin_bytes = broadcast.origin_signing_bytes()?;
+        broadcast.origin_signature = Some(self.runtime.transport.sign(&origin_bytes)?);
         let broadcaster = self.runtime.broadcaster.clone();
         self.runtime
             .broadcast_coalescer
@@ -176,53 +146,20 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .map_err(crate::error::Error::GossipSubPublish)
     }
 
-    /// Push a full document DAG to replicator peers.
-    pub async fn push_dag_to_replicators(
-        &self,
-        cid: &Cid,
-        block: &[u8],
-        doc_id: &str,
-        collection_id: &str,
-    ) {
-        self.push_dag_to_replicators_with_creator(cid, block, doc_id, collection_id, None)
-            .await
-    }
-
-    /// Push a full document DAG to replicators with optional creator override.
-    pub async fn push_dag_to_replicators_with_creator(
-        &self,
-        cid: &Cid,
-        block: &[u8],
-        doc_id: &str,
-        collection_id: &str,
-        creator_override: Option<&str>,
-    ) {
-        let creator = creator_override.unwrap_or(&self.access.local_peer_id);
-        self.coalesce_replicator_push(PendingPush {
-            cid: *cid,
-            block: Bytes::copy_from_slice(block),
-            doc_id: doc_id.to_string(),
-            collection_id: collection_id.to_string(),
-            creator: creator.to_string(),
-            expand_unfiltered_dag: true,
-            document: None,
-        })
-        .await;
-    }
-
-    /// Push a single block to replicator peers (no DAG expansion).
+    /// Announce one current head block to replicator peers. The receiver pulls
+    /// missing linked blocks through the rooted CAR path.
     pub async fn push_to_replicators(
         &self,
         cid: &Cid,
         block: &[u8],
         doc_id: &str,
         collection_id: &str,
-    ) {
+    ) -> Result<()> {
         self.push_to_replicators_with_creator(cid, block, doc_id, collection_id, None)
             .await
     }
 
-    /// Push a single block to replicators with optional creator override.
+    /// Announce one current head with an optional creator override.
     pub async fn push_to_replicators_with_creator(
         &self,
         cid: &Cid,
@@ -230,7 +167,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         doc_id: &str,
         collection_id: &str,
         creator_override: Option<&str>,
-    ) {
+    ) -> Result<()> {
         let creator = creator_override.unwrap_or(&self.access.local_peer_id);
         self.coalesce_replicator_push(PendingPush {
             cid: *cid,
@@ -238,15 +175,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             doc_id: doc_id.to_string(),
             collection_id: collection_id.to_string(),
             creator: creator.to_string(),
-            expand_unfiltered_dag: false,
             document: None,
         })
-        .await;
+        .await
     }
 
     /// Push a committed document update to replicators using document JSON to
-    /// evaluate filtered peers. Filtered peers receive the full document DAG so
-    /// merge completeness does not depend on generic Bitswap access.
+    /// evaluate filtered peers. Matching peers receive the same bounded head
+    /// hint and pull missing dependencies through selective CAR.
     pub async fn push_document_to_replicators_with_creator(
         &self,
         cid: &Cid,
@@ -255,7 +191,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_id: &str,
         document: &JsonValue,
         creator_override: Option<&str>,
-    ) {
+    ) -> Result<()> {
         let creator = creator_override.unwrap_or(&self.access.local_peer_id);
         self.coalesce_replicator_push(PendingPush {
             cid: *cid,
@@ -263,36 +199,46 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             doc_id: doc_id.to_string(),
             collection_id: collection_id.to_string(),
             creator: creator.to_string(),
-            expand_unfiltered_dag: false,
             document: Some(document.clone()),
         })
-        .await;
+        .await
     }
 
-    async fn coalesce_replicator_push(&self, push: PendingPush) {
+    async fn coalesce_replicator_push(&self, push: PendingPush) -> Result<()> {
+        // Register every peer/scope obligation before coalescing or queueing.
+        // The marker is presence-only, so observing a newer head remains
+        // idempotent while making a storage failure visible to the committed
+        // write path instead of silently dropping delivery.
+        for job in self.push_jobs(&push).await? {
+            if !report_observed_head(&self.runtime.failure_tx, &job).await {
+                self.runtime.push_backlog.record_head_hint_failure(
+                    crate::sync::push_backlog::HeadHintFailureReason::Local,
+                );
+                tracing::error!(
+                    peer_id = %job.peer_id,
+                    collection_id = %job.collection_id,
+                    doc_id = %job.doc_id,
+                    "Committed head has no durable sender marker"
+                );
+                return Err(crate::error::Error::DurableHeadMarker(format!(
+                    "failed to register peer {} scope {}/{}",
+                    job.peer_id, job.collection_id, job.doc_id
+                )));
+            }
+        }
+
         let coalescer = Arc::clone(&self.runtime.push_fanout_coalescer);
         coalescer
             .run(push, |latest| async move {
                 self.dispatch_replicator_push(latest).await;
             })
             .await;
+        Ok(())
     }
 
-    async fn dispatch_replicator_push(&self, push: PendingPush) {
-        let Some(replicators) = self.list_replicators_for_push().await else {
-            return;
-        };
-        if replicators.is_empty() {
-            return;
-        }
-        tracing::debug!(
-            cid = %push.cid,
-            doc_id = %push.doc_id,
-            collection_id = %push.collection_id,
-            replicator_count = replicators.len(),
-            "Queueing coalesced push to replicators"
-        );
-        let mut payload_guard = None;
+    async fn push_jobs(&self, push: &PendingPush) -> Result<Vec<PushJobSpec>> {
+        let replicators = self.list_replicators_for_push().await?;
+        let mut jobs = Vec::new();
         for rep in &replicators {
             if !Self::replicator_in_collection(rep, &push.collection_id) {
                 continue;
@@ -300,7 +246,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let Some(peer_id) = Self::peer_id_for_replicator(rep) else {
                 continue;
             };
-            let expand_dag = if rep.is_filtered_for_collection(&push.collection_id) {
+            if rep.is_filtered_for_collection(&push.collection_id) {
                 let Some(document) = push.document.as_ref() else {
                     continue;
                 };
@@ -311,22 +257,35 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 ) {
                     continue;
                 }
-                true
-            } else {
-                push.expand_unfiltered_dag
-            };
-            let mut job = PushJobSpec::new(
+            }
+            jobs.push(PushJobSpec::new(
                 peer_id,
                 push.doc_id.clone(),
                 push.collection_id.clone(),
                 push.creator.clone(),
                 push.cid,
                 push.block.clone(),
-                expand_dag,
-            );
-            let payload = self.runtime.push_encode_cache.acquire(&job);
-            payload_guard.get_or_insert_with(|| Arc::clone(&payload));
-            job.encoded_payload = Some(payload);
+            ));
+        }
+        Ok(jobs)
+    }
+
+    async fn dispatch_replicator_push(&self, push: PendingPush) {
+        let jobs = match self.push_jobs(&push).await {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                tracing::warn!(%error, "Durably marked head deferred to retry sweep");
+                return;
+            }
+        };
+        tracing::debug!(
+            cid = %push.cid,
+            doc_id = %push.doc_id,
+            collection_id = %push.collection_id,
+            replicator_count = jobs.len(),
+            "Queueing coalesced push to replicators"
+        );
+        for job in jobs {
             self.enqueue_replicator_push(job).await;
         }
     }
@@ -343,8 +302,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         }
 
-        let Some(replicators) = self.list_replicators_for_push().await else {
-            return;
+        let replicators = match self.list_replicators_for_push().await {
+            Ok(replicators) => replicators,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to enumerate replicators for SE artifact push");
+                return;
+            }
         };
 
         for rep in replicators {
@@ -379,7 +342,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     .map(|artifact| artifact.doc_id.clone())
                     .collect::<std::collections::HashSet<_>>()
                 {
-                    report_push_failure(
+                    let _ = report_push_failure(
                         &self.runtime.failure_tx,
                         &peer_id,
                         doc_id,
@@ -404,8 +367,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         }
 
-        let Some(replicators) = self.list_replicators_for_push().await else {
-            return;
+        let replicators = match self.list_replicators_for_push().await {
+            Ok(replicators) => replicators,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to enumerate replicators for filtered SE artifact push");
+                return;
+            }
         };
 
         for rep in replicators {
@@ -441,7 +408,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     .map(|artifact| artifact.doc_id.clone())
                     .collect::<std::collections::HashSet<_>>()
                 {
-                    report_push_failure(
+                    let _ = report_push_failure(
                         &self.runtime.failure_tx,
                         &peer_id,
                         doc_id,

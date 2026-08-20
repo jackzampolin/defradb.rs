@@ -55,7 +55,8 @@
 //! - `POST /api/v1/p2p/documents/sync` - Sync specific documents (`handlers/p2p/documents.rs`)
 //!
 //! ## ACP (requires AcpOperations)
-//! - `POST /api/v1/acp/policy` - Add policy
+//! - `POST /api/v1/acp/document/policy` - Add policy (Go-compatible path)
+//! - `POST /api/v1/acp/policy` - Add policy (Rust alias)
 //! - `GET /api/v1/acp/policy` - List policies
 //! - `GET /api/v1/acp/policy/{id}` - Get policy by ID
 //!
@@ -67,6 +68,13 @@
 //! ## Backup (requires BackupOperations)
 //! - `POST /api/v1/backup/export` - Export database
 //! - `POST /api/v1/backup/import` - Import database
+//!
+//! ## Views (requires ViewOperations)
+//! - `POST /api/v1/view` - Add a view (Go-compatible path)
+//! - `POST /api/v1/views` - Add a view (Rust alias)
+//! - `POST /api/v1/view/refresh` - Refresh views (Go-compatible path)
+//! - `POST /api/v1/views/refresh` - Refresh views (Rust alias)
+//! - `POST /api/v1/views/gc` - Downsample history GC (Rust only)
 //!
 //! # Example
 //!
@@ -85,6 +93,7 @@
 pub mod auth_error;
 pub mod auth_middleware;
 pub mod error;
+pub mod go_paths;
 pub mod handlers;
 pub mod identity_extractor;
 pub mod nac_guard;

@@ -26,6 +26,7 @@ impl TestNode {
         let secret_key = SecretKey::generate();
         let config = IrohEndpointConfig {
             secret_key: secret_key.clone(),
+            node_identity: None,
             relay_mode: crate::iroh::IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,

@@ -1,6 +1,6 @@
 //! Transaction guard for compile-time safety.
 
-use query_types::error::TransactionError;
+use crate::error::TransactionError;
 
 use super::TransactionHandle;
 

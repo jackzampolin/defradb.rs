@@ -36,7 +36,8 @@ pub enum NodePermission {
     /// Delete DAC relation on a document
     DacRelationDelete,
 
-    /// Add a new DAC policy (used by POST /api/v0/acp/policy)
+    /// Add a new DAC policy (used by POST /api/v0/acp/document/policy and
+    /// its /acp/policy alias)
     DacPolicyAdd,
 
     // =========================================================================
@@ -183,13 +184,14 @@ pub enum NodePermission {
     // =========================================================================
     // View Operations
     // =========================================================================
-    /// Refresh materialized views (used by POST /api/v0/views/refresh)
+    /// Refresh materialized views (used by POST /api/v0/view/refresh and
+    /// its /views/refresh alias)
     ViewRefresh,
 
     /// Run explicit downsample history GC (used by POST /api/v0/views/gc)
     ViewGc,
 
-    /// Add a view (used by POST /api/v0/views)
+    /// Add a view (used by POST /api/v0/view and its /views alias)
     ViewAdd,
 
     // =========================================================================

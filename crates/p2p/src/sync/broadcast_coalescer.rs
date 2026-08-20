@@ -1,4 +1,4 @@
-//! Short-window coalescing for rapid document gossip updates (#1102).
+//! Short-window coalescing for rapid document and collection gossip updates (#1102).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -112,7 +112,7 @@ impl BroadcastCoalescer {
         loop {
             let Some(incoming_version) = version(&candidate) else {
                 // Without a decoded priority there is no safe proof that this
-                // update subsumes another document head.
+                // update subsumes another scope head.
                 return send.take().expect("send closure available")(candidate).await;
             };
             let key = BroadcastKey {
@@ -221,7 +221,7 @@ fn version(broadcast: &PushLogBroadcast) -> Option<(u64, Cid)> {
             tracing::warn!(
                 cid = %String::from_utf8_lossy(&broadcast.cid),
                 %error,
-                "broadcast head priority decode failed; bypassing document coalescing"
+                "broadcast head priority decode failed; bypassing scope coalescing"
             );
             return None;
         }
@@ -229,7 +229,7 @@ fn version(broadcast: &PushLogBroadcast) -> Option<(u64, Cid)> {
     let cid = match Cid::try_from(broadcast.cid.as_ref()) {
         Ok(cid) => cid,
         Err(error) => {
-            tracing::warn!(%error, "broadcast CID decode failed; bypassing document coalescing");
+            tracing::warn!(%error, "broadcast CID decode failed; bypassing scope coalescing");
             return None;
         }
     };

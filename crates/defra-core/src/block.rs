@@ -17,6 +17,7 @@ pub use crate::block_delta::{
 };
 
 // Re-export signature/encryption types
+pub use crate::block_signature::go_verifiable_policy;
 pub use crate::block_signature::{
     DocumentStatus, Encryption, Signature, SignatureHeader, SignatureType,
 };

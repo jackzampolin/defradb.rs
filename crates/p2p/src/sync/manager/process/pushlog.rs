@@ -18,6 +18,33 @@ use super::SyncManager;
 
 const MAX_RETRIABLE_PUSHLOG_ATTEMPTS: usize = 4;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnnouncedBlockKind {
+    Head(u64),
+    Descendant,
+}
+
+impl AnnouncedBlockKind {
+    fn priority(self) -> Option<u64> {
+        match self {
+            Self::Head(priority) => Some(priority),
+            Self::Descendant => None,
+        }
+    }
+}
+
+fn announced_block_kind(bytes: &[u8]) -> AnnouncedBlockKind {
+    let Ok(block) = defra_core::Block::from_dag_cbor(bytes) else {
+        return AnnouncedBlockKind::Descendant;
+    };
+    match &block.delta {
+        defra_core::CrdtDelta::Composite(_) | defra_core::CrdtDelta::Collection(_) => {
+            AnnouncedBlockKind::Head(block.delta.priority())
+        }
+        _ => AnnouncedBlockKind::Descendant,
+    }
+}
+
 fn retriable_pushlog_delay(attempt: usize) -> Duration {
     match attempt {
         1 => Duration::from_millis(10),
@@ -81,11 +108,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// # Flow
     ///
     /// 1. Parse CID from the message
-    /// 2. Serialize authorized replay or cheaply suppress an ordinary duplicate
+    /// 2. Claim one CID owner or nack/suppress a duplicate without waiting
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
-    /// 5. Emit BlockReceived only once the full reachable DAG is locally present,
-    ///    otherwise emit DagNeedsFetch for the missing descendants
+    /// 5. Durably register the root for the receiver retry clock, which emits
+    ///    merge work once the full reachable DAG is locally present
     ///
     /// # Go Compatibility
     ///
@@ -98,6 +125,48 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         is_explicit_replicator: bool,
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     ) -> Result<()> {
+        let recovery_provider_evidenced =
+            is_explicit_replicator || explicit_replay_authorization.is_some();
+        self.process_pushlog_with_provider_evidence(
+            msg,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+            recovery_provider_evidenced,
+        )
+        .await
+    }
+
+    /// Process a hint delivered directly by its authenticated transport peer.
+    /// Direct delivery is the protocol evidence that this peer owns the rooted
+    /// CAR authority promised by the hint; relayed gossip must use
+    /// [`Self::process_pushlog`] unless its signed origin is also the immediate
+    /// transport peer.
+    pub(crate) async fn process_pushlog_from_dag_provider(
+        &self,
+        msg: &PushLogBroadcast,
+        sender_peer: Option<&str>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    ) -> Result<()> {
+        self.process_pushlog_with_provider_evidence(
+            msg,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+            true,
+        )
+        .await
+    }
+
+    async fn process_pushlog_with_provider_evidence(
+        &self,
+        msg: &PushLogBroadcast,
+        sender_peer: Option<&str>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        recovery_provider_evidenced: bool,
+    ) -> Result<()> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_ref())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
@@ -109,50 +178,40 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Processing pushlog"
         );
 
-        let _guard = if explicit_replay_authorization.is_some() {
-            loop {
-                match self.process_queue.try_acquire(&cid).await {
-                    Ok(guard) => break guard,
-                    Err(waiter) => {
-                        let _ = waiter.await;
-                    }
-                }
-            }
-        } else {
-            match self.process_queue.try_acquire_nowait(&cid) {
-                Some(guard) => guard,
-                None => {
-                    self.diagnostics.record_single_flight_suppressed();
-                    tracing::debug!(
-                        cid = %cid,
-                        sender_peer = ?sender_peer,
-                        "Suppressing PushLog while the same CID is already being processed"
-                    );
+        let _guard = match self.process_queue.try_acquire_nowait(&cid) {
+            Some(guard) => guard,
+            None => {
+                self.diagnostics.record_single_flight_suppressed();
+                tracing::debug!(
+                    cid = %cid,
+                    sender_peer = ?sender_peer,
+                    explicit_replay = explicit_replay_authorization.is_some(),
+                    "Suppressing PushLog while the same CID is already being processed"
+                );
 
-                    if self.is_pending_dag_recovery_registered(&cid) {
+                if self.is_pending_dag_recovery_registered(&cid) {
+                    return Ok(());
+                }
+
+                match self
+                    .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
+                        self.blockstore
+                            .is_merged(&cid)
+                            .await
+                            .map_err(Error::from_blockstore)
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        self.diagnostics.record_already_merged_fast_path();
                         return Ok(());
                     }
-
-                    match self
-                        .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
-                            self.blockstore
-                                .is_merged(&cid)
-                                .await
-                                .map_err(Error::from_blockstore)
-                        })
-                        .await
-                    {
-                        Ok(true) => {
-                            self.diagnostics.record_already_merged_fast_path();
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            return Err(Error::PushLogInFlight {
-                                cid: cid.to_string(),
-                            });
-                        }
-                        Err(error) => return Err(error),
+                    Ok(false) => {
+                        return Err(Error::PushLogInFlight {
+                            cid: cid.to_string(),
+                        });
                     }
+                    Err(error) => return Err(error),
                 }
             }
         };
@@ -163,6 +222,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            recovery_provider_evidenced,
         )
         .await
     }
@@ -175,6 +235,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         sender_peer: Option<&str>,
         is_explicit_replicator: bool,
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        recovery_provider_evidenced: bool,
     ) -> Result<()> {
         // Check if already merged
         match self
@@ -200,7 +261,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
 
-        if !self.can_process_pushlog(cid) {
+        let announced_block_kind = announced_block_kind(&msg.block);
+        let head_priority = announced_block_kind.priority();
+        if !self.can_process_pushlog(cid)
+            && !self.scope_head_is_refresh_or_newer(
+                *cid,
+                sender_peer,
+                &msg.collection_id,
+                &msg.doc_id,
+                head_priority,
+            )
+        {
             self.diagnostics.record_pending_dag_capacity_shed();
             tracing::warn!(
                 cid = %cid,
@@ -247,6 +318,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Block stored, checking DAG for missing links"
         );
 
+        // Rolling old Rust senders may still announce dependency blocks before
+        // the composite/collection head. Keep those bytes as useful CAR
+        // descendants, and advance any root already waiting on them, but never
+        // admit or merge them as standalone document heads (#1450). The later
+        // head hint remains the sole durable receiver obligation.
+        if announced_block_kind == AnnouncedBlockKind::Descendant {
+            tracing::debug!(
+                cid = %cid,
+                doc_id = %msg.doc_id,
+                collection_id = %msg.collection_id,
+                "Stored legacy dependency PushLog without treating it as a head"
+            );
+            self.retry_pending_dags_waiting_on(cid).await?;
+            return Ok(());
+        }
+
         // Check for missing linked blocks at every depth of the reachable DAG.
         // A single-level check can incorrectly declare Collection -> Composite
         // roots complete while nested field blocks are still missing locally.
@@ -271,67 +358,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         };
 
         if missing.is_empty() {
-            // DAG is complete - emit BlockReceived for merge
-            tracing::info!(
+            tracing::debug!(
                 ?cid,
                 doc_id = %msg.doc_id,
-                "DAG complete, emitting BlockReceived event"
+                collection_id = %msg.collection_id,
+                "DAG arrived complete; registering durable merge obligation"
             );
-
-            if self
-                .event_tx
-                .send(SyncEvent::BlockReceived {
-                    cid: *cid,
-                    doc_id: msg.doc_id.clone(),
-                    collection_id: msg.collection_id.clone(),
-                    creator: msg.creator.clone(),
-                    sender_peer: sender_peer.map(str::to_owned),
-                    is_explicit_replicator,
-                    explicit_replay_authorization,
-                })
-                .await
-                .is_err()
-            {
-                tracing::error!(
-                    ?cid,
-                    doc_id = %msg.doc_id,
-                    "CRITICAL: Failed to send BlockReceived event - block stored but will not be merged. \
-                     Event receiver may have been dropped."
-                );
-                return Err(Error::ChannelSend);
-            }
-
-            // Not wrapped in retry_retriable_pushlog_op: the inner blockstore
-            // reads already propagate typed `BlockstoreTxnConflict` via
-            // `Error::from_blockstore`, and those are the only retriable errors
-            // surfaced here. DAG-traversal failures (missing links, bitswap
-            // timeouts, channel-send) are terminal in this context, so an outer
-            // retry would not make progress.
-            match self.retry_pending_dags_waiting_on(cid).await {
-                Ok(completed_roots) => {
-                    if !completed_roots.is_empty() {
-                        tracing::info!(
-                            received_cid = %cid,
-                            completed_count = completed_roots.len(),
-                            completed_roots = ?completed_roots,
-                            "Late PushLog block completed pending DAGs"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        received_cid = %cid,
-                        error = %e,
-                        "Failed to retry pending DAGs after PushLog block arrival"
-                    );
-                    return Err(e);
-                }
-            }
         } else {
-            // DAG has missing blocks - track as pending and request Bitswap fetch.
-            // Debug level: this fires per PushLog with missing links and is
-            // expected during catch-up; the terminal outcome is logged at info
-            // (DagReady) or warn (final failure) — see issue #858.
             tracing::debug!(
                 ?cid,
                 missing_count = missing.len(),
@@ -339,19 +372,163 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 collection_id = %msg.collection_id,
                 "DAG has missing links, requesting Bitswap fetch"
             );
+        }
 
-            // Track this DAG as pending (enforces TTL eviction and capacity limit).
+        {
+            // Every unmerged success-acked head, including a complete-at-arrival
+            // DAG, enters the same durable receiver clock. The clock emits the
+            // merge work and keeps the registration until merge or quarantine
+            // reaches a durable terminal disposition.
+            // Different CIDs for one sender/scope must make one serialized
+            // durable replacement decision. Otherwise concurrent heartbeats
+            // can both observe the old head and recreate a per-root ledger.
+            let _metadata_writer = self.pending_metadata_writer.lock().await;
+            // The root may have completed through another arrival after the
+            // initial is_merged check but before this durable registration.
+            // Terminal merge uses this same writer for pending cleanup, so a
+            // second check here prevents recreating an already-discharged
+            // receiver obligation from a stale PushLog traversal.
+            if self.is_merged(cid).await? {
+                self.reconcile_merged_pending_inner(cid).await;
+                tracing::debug!(
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    collection_id = %msg.collection_id,
+                    "Head merged while awaiting durable pending registration"
+                );
+                return Ok(());
+            }
+
+            // A root already owned by the receiver is idempotently covered by
+            // that durable registration. Do not let a relay or another
+            // collection-authorized peer replace its recovery provider, reset
+            // its backoff, or rewrite its authorization metadata merely by
+            // replaying the same signed head bytes.
+            let existing = self.pending_dag_snapshot(cid);
+            if let Some(mut existing) = existing {
+                // A stronger explicit-replay authorization may arrive through
+                // the same authenticated provider after an ordinary hint. Keep
+                // the provider/backoff owner, but durably upgrade the merge
+                // authorization before acknowledging that replay.
+                let same_provider = existing.source_peer.as_deref() == sender_peer;
+                let upgrades_authorization = same_provider
+                    && explicit_replay_authorization.is_some()
+                    && (existing.explicit_replay_authorization != explicit_replay_authorization
+                        || !existing.is_explicit_replicator);
+                // Exact-root equality alone is not availability evidence: a
+                // gossip relay may hold only the envelope head. Admit a new
+                // durable provider only through authenticated direct PushLog
+                // delivery (including configured or signed two-stream
+                // replicators). Honest downstream fanout crosses this seam
+                // only after the sender has merged the complete DAG.
+                let new_alternate = sender_peer.filter(|provider| {
+                    recovery_provider_evidenced
+                        && existing.source_peer.as_deref() != Some(*provider)
+                        && !existing
+                            .alternate_providers
+                            .iter()
+                            .any(|candidate| candidate == *provider)
+                        && existing.alternate_providers.len()
+                            < crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS
+                });
+                if upgrades_authorization || new_alternate.is_some() {
+                    if let Some(provider) = new_alternate {
+                        existing.alternate_providers.push(provider.to_owned());
+                        existing.alternate_providers.sort_unstable();
+                        existing.alternate_providers.dedup();
+                    }
+                    if upgrades_authorization {
+                        existing.is_explicit_replicator = true;
+                        existing.explicit_replay_authorization =
+                            explicit_replay_authorization.clone();
+                    }
+                    if let Some(store) = self.pending_store() {
+                        let record = crate::sync::pending_store::PersistedPendingDag {
+                            doc_id: existing.doc_id.clone(),
+                            collection_id: existing.collection_id.clone(),
+                            head_priority: existing.head_priority,
+                            creator: existing.creator.clone(),
+                            source_peer: existing.source_peer.clone(),
+                            alternate_providers: existing.alternate_providers.clone(),
+                            is_explicit_replicator: existing.is_explicit_replicator,
+                            explicit_replay_authorization: existing
+                                .explicit_replay_authorization
+                                .as_ref()
+                                .map(Into::into),
+                        };
+                        store.replace_scope_head(None, cid, &record).await?;
+                    }
+                    if let Some(current) = self.pending_dags.write().get_mut(cid) {
+                        current.alternate_providers = existing.alternate_providers.clone();
+                        if upgrades_authorization {
+                            current.is_explicit_replicator = true;
+                            current.explicit_replay_authorization =
+                                explicit_replay_authorization.clone();
+                        }
+                    }
+                    tracing::debug!(
+                        cid = %cid,
+                        source_peer = ?sender_peer,
+                        alternate_count = existing.alternate_providers.len(),
+                        authorization_upgraded = upgrades_authorization,
+                        "Extended receiver-owned root recovery without replacing its provider"
+                    );
+                    return Ok(());
+                }
+                tracing::debug!(
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    collection_id = %msg.collection_id,
+                    announced_source_peer = ?sender_peer,
+                    "Incoming root is already receiver-owned; retaining its recovery provider"
+                );
+                return Ok(());
+            }
+            if self.persisted_roots.read().contains(cid) {
+                tracing::debug!(
+                    cid = %cid,
+                    announced_source_peer = ?sender_peer,
+                    "Incoming root is durably receiver-owned; retaining its recovery provider"
+                );
+                return Ok(());
+            }
+            let durable_superseded_root = match self.persisted_scope_decision(
+                *cid,
+                sender_peer,
+                &msg.collection_id,
+                &msg.doc_id,
+                head_priority,
+            ) {
+                super::PersistedScopeDecision::CoveredByCurrent => {
+                    tracing::debug!(
+                        cid = %cid,
+                        doc_id = %msg.doc_id,
+                        collection_id = %msg.collection_id,
+                        source_peer = ?sender_peer,
+                        "Incoming head is covered by a newer durable sender/scope obligation"
+                    );
+                    return Ok(());
+                }
+                super::PersistedScopeDecision::Supersedes(root) => Some(root),
+                super::PersistedScopeDecision::Independent
+                | super::PersistedScopeDecision::Current => None,
+            };
+
+            // Track this DAG as pending (enforces TTL eviction, capacity, and
+            // current-head retirement for one sender/document-or-collection scope).
             let inserted_at = Instant::now();
-            {
+            let superseded = {
                 use super::pending_dag::PendingDagAdmission;
                 let admission = self.try_insert_pending_dag(
                     *cid,
                     PendingDag {
                         doc_id: msg.doc_id.clone(),
                         collection_id: msg.collection_id.clone(),
+                        head_priority,
                         creator: msg.creator.clone(),
                         missing: missing.iter().cloned().collect(),
                         source_peer: sender_peer.map(str::to_owned),
+                        alternate_providers: Vec::new(),
                         is_explicit_replicator,
                         explicit_replay_authorization: explicit_replay_authorization.clone(),
                         is_recovery_registered: false,
@@ -365,10 +542,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
                 // Report the limit that actually tripped so the nack and its
                 // WARN log agree (the global cap vs the smaller per-peer quota).
-                let rejected_max = match admission {
-                    PendingDagAdmission::Admitted => None,
+                let rejected_max = match &admission {
+                    PendingDagAdmission::Admitted { .. }
+                    | PendingDagAdmission::CoveredByCurrent => None,
                     PendingDagAdmission::GlobalCapacity => Some(self.max_pending_dags),
-                    PendingDagAdmission::PeerQuota { max_per_peer } => Some(max_per_peer),
+                    PendingDagAdmission::PeerQuota { max_per_peer } => Some(*max_per_peer),
                 };
                 if let Some(max) = rejected_max {
                     self.diagnostics.record_pending_dag_capacity_shed();
@@ -389,13 +567,25 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     );
                     return Err(Error::PendingDagCapacity { max });
                 }
-            }
-
-            // A fresh registration is immediately due (`insert_pending_dag`
-            // leaves `next_retry_at = now`); claim it here so the retry
-            // clock's next tick does not also dispatch it. The `bool` is
-            // unused — the DagNeedsFetch emission below is the dispatch.
-            let _claimed = self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now());
+                match admission {
+                    PendingDagAdmission::Admitted { superseded } => *superseded,
+                    PendingDagAdmission::CoveredByCurrent => {
+                        tracing::debug!(
+                            cid = %cid,
+                            doc_id = %msg.doc_id,
+                            collection_id = %msg.collection_id,
+                            source_peer = ?sender_peer,
+                            "Incoming head is covered by the current durable sender/scope obligation"
+                        );
+                        return Ok(());
+                    }
+                    PendingDagAdmission::GlobalCapacity | PendingDagAdmission::PeerQuota { .. } => {
+                        unreachable!("handled above")
+                    }
+                }
+            };
+            let superseded_root =
+                durable_superseded_root.or_else(|| superseded.as_ref().map(|(root, _)| *root));
 
             // Persist the registration before the caller acks success: the
             // ack destroys the pusher's retry record, so an unpersisted
@@ -421,16 +611,24 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     let mut roots = self.persisted_roots.write();
                     if roots.contains(cid) {
                         DurableAdmission::AlreadyPresent
-                    } else if roots.len() >= durable_cap {
+                    } else if roots.len() >= durable_cap
+                        && superseded_root.is_none_or(|old| !roots.contains(&old))
+                    {
                         DurableAdmission::AtCapacity
                     } else {
                         roots.insert(*cid);
+                        if let Some(old) = superseded_root {
+                            roots.remove(&old);
+                        }
                         DurableAdmission::Reserved
                     }
                 };
                 if matches!(admission, DurableAdmission::AtCapacity) {
                     self.diagnostics.record_pending_dag_capacity_shed();
                     self.pending_dags.write().remove(cid);
+                    if let Some((old_root, old_dag)) = superseded.clone() {
+                        self.pending_dags.write().insert(old_root, old_dag);
+                    }
                     tracing::warn!(
                         cid = %cid,
                         doc_id = %msg.doc_id,
@@ -443,18 +641,29 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 let record = crate::sync::pending_store::PersistedPendingDag {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
+                    head_priority,
                     creator: msg.creator.clone(),
                     source_peer: sender_peer.map(str::to_owned),
+                    alternate_providers: Vec::new(),
                     is_explicit_replicator,
                     explicit_replay_authorization: explicit_replay_authorization
                         .as_ref()
                         .map(Into::into),
                 };
-                if let Err(error) = store.put(cid, &record).await {
+                if let Err(error) = store
+                    .replace_scope_head(superseded_root.as_ref(), cid, &record)
+                    .await
+                {
                     if newly_reserved {
                         self.persisted_roots.write().remove(cid);
+                        if let Some(old) = superseded_root {
+                            self.persisted_roots.write().insert(old);
+                        }
                     }
                     self.pending_dags.write().remove(cid);
+                    if let Some((old_root, old_dag)) = superseded.clone() {
+                        self.pending_dags.write().insert(old_root, old_dag);
+                    }
                     tracing::warn!(
                         cid = %cid,
                         doc_id = %msg.doc_id,
@@ -465,7 +674,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         "failed to persist pending DAG registration: {error}"
                     )));
                 }
+                self.diagnostics
+                    .observe_persisted_pending_dag_depth(self.persisted_roots.read().len());
+                self.remember_persisted_scope_head(
+                    *cid,
+                    sender_peer,
+                    &msg.collection_id,
+                    &msg.doc_id,
+                    head_priority,
+                );
+                self.diagnostics.record_pending_dag_registered();
                 self.mark_pending_dag_recovery_registered(cid, inserted_at);
+                if let Some(old) = superseded_root {
+                    tracing::debug!(
+                        old_root_cid = %old,
+                        root_cid = %cid,
+                        doc_id = %msg.doc_id,
+                        collection_id = %msg.collection_id,
+                        source_peer = ?sender_peer,
+                        "Durably superseded older pending head for sender/scope"
+                    );
+                }
                 tracing::debug!(
                     target: "p2p::sync::restart_recovery",
                     cid = %cid,
@@ -477,58 +706,49 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 false
             };
 
-            // Get providers for the missing blocks
-            let providers = self.get_providers_for_cids(&missing);
-
-            // Emit event to request Bitswap fetch
-            if self
-                .event_tx
-                .send(SyncEvent::DagNeedsFetch {
-                    root_cid: *cid,
-                    missing: missing.clone(),
-                    providers,
-                    doc_id: msg.doc_id.clone(),
-                    collection_id: msg.collection_id.clone(),
-                    creator: msg.creator.clone(),
-                    sender_peer: sender_peer.map(str::to_owned),
-                    is_explicit_replicator,
-                    explicit_replay_authorization,
-                })
-                .await
-                .is_err()
-            {
-                tracing::error!(
-                    ?cid,
-                    "Failed to send DagNeedsFetch event - receiver dropped"
-                );
-                // Clean up the in-memory entry since we can't request the
-                // fetch; the durable record stays and is re-driven by the
-                // resync sweep (the pusher was nacked, so it also retries).
-                self.pending_dags.write().remove(cid);
-                return Err(Error::ChannelSend);
-            }
             if !has_durable_registration {
                 self.mark_pending_dag_recovery_registered(cid, inserted_at);
             }
+
+            // Registration ends after the durable obligation is made due.
+            // The #1123 per-root clock is the sole fetch dispatcher: waiting
+            // here to enqueue a DagNeedsFetch event retains the transport
+            // reply and the pending-state writer behind merge/fetch work. A
+            // successful reply is already honest because the durable record,
+            // not an in-flight fetch task, owns completion from this point.
+            tracing::debug!(
+                cid = %cid,
+                doc_id = %msg.doc_id,
+                collection_id = %msg.collection_id,
+                "Pending DAG durably registered and left due for receiver clock"
+            );
+        }
+
+        // This head can also be a missing descendant of another registered
+        // root. Advance that root's frontier after this head's own durable
+        // obligation is safely installed.
+        let completed_roots = self.retry_pending_dags_waiting_on(cid).await?;
+        if !completed_roots.is_empty() {
+            tracing::info!(
+                received_cid = %cid,
+                completed_count = completed_roots.len(),
+                completed_roots = ?completed_roots,
+                "PushLog head completed other pending DAGs"
+            );
         }
 
         Ok(())
     }
 
-    /// Get providers (peers that may have the blocks) for the given CIDs.
-    pub(super) fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<String> {
+    /// Get connected providers with positive evidence for at least one of the
+    /// requested CIDs. Merely being connected or having announced the root is
+    /// not evidence that a peer can serve linked descendants (#1512).
+    pub(crate) fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<String> {
         let mut providers = HashSet::new();
 
         // Add peers known to have any of the CIDs
         for cid in cids {
             for peer in self.peer_state.peers_with_cid(cid) {
-                providers.insert(peer);
-            }
-        }
-
-        // If no specific providers found, use all connected peers
-        if providers.is_empty() {
-            for peer in self.peer_state.connected_peers() {
                 providers.insert(peer);
             }
         }
@@ -542,14 +762,79 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use blockstore::DefraBlockstore;
     use bytes::Bytes;
     use defra_core::{
         Block, CollectionDeltaPayload, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
     };
     use storage::backends::MemoryStore;
+    use tokio::sync::Notify;
 
+    use crate::sync::pending_store::{
+        PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+    };
     use crate::sync::{PeerStateTracker, SyncConfig};
+
+    struct BlockingPendingDagStore {
+        inner: PendingDagStore<MemoryStore>,
+        replace_entered: Notify,
+        replace_release: Notify,
+    }
+
+    impl BlockingPendingDagStore {
+        fn new(store: Arc<MemoryStore>) -> Self {
+            Self {
+                inner: PendingDagStore::new(store),
+                replace_entered: Notify::new(),
+                replace_release: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PendingDagStorage for BlockingPendingDagStore {
+        async fn put(&self, root_cid: &Cid, record: &PersistedPendingDag) -> Result<()> {
+            self.inner.put(root_cid, record).await
+        }
+
+        async fn replace_scope_head(
+            &self,
+            superseded_root: Option<&Cid>,
+            root_cid: &Cid,
+            record: &PersistedPendingDag,
+        ) -> Result<()> {
+            self.replace_entered.notify_one();
+            self.replace_release.notified().await;
+            self.inner
+                .replace_scope_head(superseded_root, root_cid, record)
+                .await
+        }
+
+        async fn remove(&self, root_cid: &Cid) -> Result<()> {
+            self.inner.remove(root_cid).await
+        }
+
+        async fn load_all(&self) -> Result<Vec<(Cid, PersistedPendingDag)>> {
+            self.inner.load_all().await
+        }
+
+        async fn quarantine(&self, root_cid: &Cid, entry: &PersistedQuarantinedDag) -> Result<()> {
+            self.inner.quarantine(root_cid, entry).await
+        }
+
+        async fn is_quarantined(&self, root_cid: &Cid) -> Result<bool> {
+            self.inner.is_quarantined(root_cid).await
+        }
+
+        async fn load_quarantined(&self) -> Result<Vec<(Cid, PersistedQuarantinedDag)>> {
+            self.inner.load_quarantined().await
+        }
+
+        async fn remove_quarantined(&self, root_cid: &Cid) -> Result<()> {
+            self.inner.remove_quarantined(root_cid).await
+        }
+    }
 
     fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
         let block = Block::new(
@@ -643,33 +928,137 @@ mod tests {
             .await
             .expect("process pushlog");
 
-        match events.try_recv().expect("DagNeedsFetch event") {
-            SyncEvent::DagNeedsFetch {
-                root_cid,
-                missing,
-                doc_id,
-                collection_id,
-                sender_peer,
-                ..
-            } => {
-                assert_eq!(root_cid, collection_cid);
-                assert_eq!(missing, vec![field_cid]);
-                assert_eq!(doc_id, "doc123");
-                assert_eq!(collection_id, "collection1");
-                assert_eq!(sender_peer.as_deref(), Some("peer-1"));
-            }
-            other => panic!("expected DagNeedsFetch, got {:?}", other),
-        }
+        assert!(
+            events.try_recv().is_err(),
+            "registration must not dispatch outside the receiver clock"
+        );
 
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(
             manager.pending_dag_missing(&collection_cid),
             vec![field_cid]
         );
+        let due = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, collection_cid);
+        assert_eq!(due[0].1.missing, [field_cid].into_iter().collect());
     }
 
     #[tokio::test]
-    async fn process_pushlog_clears_pending_dag_when_fetch_event_receiver_is_dropped() {
+    async fn legacy_dependency_pushlog_is_stored_without_becoming_a_head() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+
+        let metadata = defra_core::cbor::to_vec(&"signature-metadata").unwrap();
+        let metadata_cid = defra_core::block::generate_cid_from_bytes(&metadata).unwrap();
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", metadata_cid, metadata, "collection1"),
+                Some("old-rust-peer"),
+                true,
+                None,
+            )
+            .await
+            .expect("legacy metadata should remain usable as a descendant");
+        assert!(blockstore
+            .has(&metadata_cid)
+            .await
+            .expect("metadata blockstore lookup"));
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert!(events.try_recv().is_err());
+
+        let (field_cid, field_block) = create_lww_block("name");
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", field_cid, field_block, "collection1"),
+                Some("old-rust-peer"),
+                true,
+                None,
+            )
+            .await
+            .expect("legacy dependency should remain wire-compatible");
+
+        assert!(blockstore.has(&field_cid).await.expect("blockstore lookup"));
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert!(
+            events.try_recv().is_err(),
+            "a field block must not be merged or registered as a document head"
+        );
+
+        let (head_cid, head_block) = create_composite_block("doc123", "name", field_cid);
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", head_cid, head_block, "collection1"),
+                Some("old-rust-peer"),
+                true,
+                None,
+            )
+            .await
+            .expect("the later composite head should use the stored descendant");
+
+        assert!(manager.try_claim_pending_dag_dispatch(&head_cid, tokio::time::Instant::now()));
+        assert!(manager
+            .retry_pending_dag(&head_cid)
+            .await
+            .expect("receiver clock should find the locally complete DAG"));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SyncEvent::DagReady { root_cid, .. }) if root_cid == head_cid
+        ));
+        assert_eq!(manager.pending_dag_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_registration_does_not_emit_after_receiver_clock_claims_fetch() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+        let pending_store = Arc::new(BlockingPendingDagStore::new(store));
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        let manager = Arc::new(manager);
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let message = make_broadcast("doc123", root_cid, root_block, "collection1");
+
+        let process_manager = Arc::clone(&manager);
+        let process = tokio::spawn(async move {
+            process_manager
+                .process_pushlog(&message, Some("peer-1"), false, None)
+                .await
+        });
+
+        pending_store.replace_entered.notified().await;
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(
+            claimed.len(),
+            0,
+            "the receiver clock must not claim before durable registration"
+        );
+        pending_store.replace_release.notify_one();
+
+        process
+            .await
+            .expect("PushLog task should not panic")
+            .expect("durable registration should still succeed");
+        assert!(
+            events.try_recv().is_err(),
+            "the PushLog path must not emit outside the receiver clock"
+        );
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, root_cid);
+    }
+
+    #[tokio::test]
+    async fn durable_registration_does_not_depend_on_fetch_event_receiver() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
@@ -696,8 +1085,14 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(Error::ChannelSend)));
-        assert_eq!(manager.pending_dag_count(), 0);
+        result.expect("durable registration should own recovery without an event receiver");
+        assert_eq!(manager.pending_dag_count(), 1);
+        assert_eq!(
+            manager
+                .claim_due_pending_dag_retries(tokio::time::Instant::now())
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -705,13 +1100,17 @@ mod tests {
         const ANNOUNCEMENT_COUNT: usize = 8;
 
         let store = Arc::new(MemoryStore::new());
-        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let config = SyncConfig {
             event_buffer_size: 1,
             ..SyncConfig::default()
         };
         let (manager, mut events) = SyncManager::new(blockstore, peer_state, config);
+        let pending_store = Arc::new(BlockingPendingDagStore::new(store));
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
         let manager = Arc::new(manager);
 
         let (field_cid, _field_block) = create_lww_block("name");
@@ -723,15 +1122,6 @@ mod tests {
             "collection1",
         ));
 
-        manager
-            .event_tx
-            .send(SyncEvent::SyncError {
-                cid: root_cid,
-                error: "hold event channel full".to_string(),
-            })
-            .await
-            .expect("prefill event channel");
-
         let owner_manager = Arc::clone(&manager);
         let owner_message = Arc::clone(&message);
         let owner = tokio::spawn(async move {
@@ -740,13 +1130,8 @@ mod tests {
                 .await
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while manager.pending_dag_count() != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("owner should register the pending DAG");
+        pending_store.replace_entered.notified().await;
+        assert_eq!(manager.pending_dag_count(), 1);
 
         let mut suppressed = Vec::new();
         for peer in 1..ANNOUNCEMENT_COUNT {
@@ -782,19 +1167,16 @@ mod tests {
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(manager.process_queue.active_count(), 1);
 
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::SyncError { .. })
-        ));
+        pending_store.replace_release.notify_one();
         owner
             .await
             .expect("owner task should not panic")
             .expect("owner should complete");
 
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::DagNeedsFetch { root_cid: cid, .. }) if cid == root_cid
-        ));
+        assert!(events.try_recv().is_err());
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, root_cid);
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(manager.process_queue.active_count(), 0);
 
@@ -809,7 +1191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_replay_waits_for_in_flight_announcement() {
+    async fn explicit_replay_nacks_in_flight_then_succeeds_after_owner_completes() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
@@ -817,9 +1199,13 @@ mod tests {
             event_buffer_size: 1,
             ..SyncConfig::default()
         };
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), peer_state, config);
-        let manager = Arc::new(manager);
-        let (cid, block) = create_lww_block("name");
+        let (manager, _events) = SyncManager::new(blockstore.clone(), peer_state, config);
+        let (field_cid, field_block) = create_lww_block("name");
+        blockstore
+            .put(&field_cid, &field_block)
+            .await
+            .expect("store composite dependency");
+        let (cid, block) = create_composite_block("doc123", "name", field_cid);
         let message = Arc::new(make_broadcast("doc123", cid, block, "collection1"));
         let authorization = ExplicitReplayAuthorization {
             source_peer_id: "peer-1".to_string(),
@@ -830,67 +1216,40 @@ mod tests {
             capability: None,
         };
 
-        manager
-            .event_tx
-            .send(SyncEvent::SyncError {
-                cid,
-                error: "hold event channel full".to_string(),
-            })
-            .await
-            .unwrap();
+        let owner = manager
+            .process_queue
+            .try_acquire_nowait(&cid)
+            .expect("simulate the ordinary announcement owner");
 
-        let owner_manager = Arc::clone(&manager);
-        let owner_message = Arc::clone(&message);
-        let owner = tokio::spawn(async move {
-            owner_manager
-                .process_pushlog(&owner_message, Some("peer-1"), false, None)
-                .await
-        });
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !blockstore.has(&cid).await.unwrap() {
-                tokio::task::yield_now().await;
-            }
-        })
+        let replay_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.process_pushlog(&message, Some("peer-1"), true, Some(authorization.clone())),
+        )
         .await
-        .expect("ordinary announcement should store the block");
-
-        let replay_manager = Arc::clone(&manager);
-        let replay_message = Arc::clone(&message);
-        let replay_authorization = authorization.clone();
-        let replay = tokio::spawn(async move {
-            replay_manager
-                .process_pushlog(
-                    &replay_message,
-                    Some("peer-1"),
-                    true,
-                    Some(replay_authorization),
-                )
-                .await
-        });
-
+        .expect("explicit replay must not retain a transport task behind the owner");
         assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::SyncError { .. })
+            replay_result,
+            Err(Error::PushLogInFlight { cid: ref busy_cid }) if busy_cid == &cid.to_string()
         ));
-        owner.await.unwrap().unwrap();
 
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::BlockReceived {
-                explicit_replay_authorization: None,
-                ..
-            })
-        ));
-        replay.await.unwrap().unwrap();
-
-        assert!(matches!(
-            events.recv().await,
-            Some(SyncEvent::BlockReceived {
-                explicit_replay_authorization: Some(actual),
-                ..
-            }) if actual == authorization
-        ));
+        drop(owner);
+        manager
+            .process_pushlog(&message, Some("peer-1"), false, None)
+            .await
+            .expect("ordinary announcement should durably register");
+        manager
+            .process_pushlog(&message, Some("peer-1"), true, Some(authorization.clone()))
+            .await
+            .expect("durable sender retry should succeed after the owner completes");
+        assert_eq!(manager.pending_dag_count(), 1);
+        let pending = manager
+            .pending_dag_snapshot(&cid)
+            .expect("receiver obligation remains live");
+        assert_eq!(
+            pending.explicit_replay_authorization.as_ref(),
+            Some(&authorization)
+        );
+        assert_eq!(pending.source_peer.as_deref(), Some("peer-1"));
     }
 
     #[tokio::test]
@@ -945,10 +1304,7 @@ mod tests {
             )
             .await
             .expect("fill pending DAG registry");
-        assert!(matches!(
-            events.try_recv(),
-            Ok(SyncEvent::DagNeedsFetch { root_cid, .. }) if root_cid == first_cid
-        ));
+        assert!(events.try_recv().is_err());
 
         let (rejected_cid, _rejected_block) = create_lww_block("rejected");
         let allocation_heavy_garbage = vec![0xff; 4 * 1024 * 1024];
@@ -991,6 +1347,10 @@ mod tests {
             .has(&missing_cid)
             .await
             .expect("check missing dependency"));
-        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(
+            manager.pending_dag_count(),
+            1,
+            "receiving the final dependency is not terminal before merge/mark"
+        );
     }
 }

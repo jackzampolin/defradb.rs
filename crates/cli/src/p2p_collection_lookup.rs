@@ -1,6 +1,6 @@
 //! Collection lookup for the database.
 //!
-//! Retained for backward compatibility. Prefer `DbDocPusher` for new code.
+//! Retained for backward compatibility. Prefer `DbTransportDocPusher` for new code.
 //!
 //! Re-exports the shared `CollectionLookup` trait from `defra-p2p-adapter`.
 
@@ -10,7 +10,7 @@ pub use defra_p2p_adapter::CollectionLookup;
 
 /// Implementation of CollectionLookup for the database.
 ///
-/// Retained for backward compatibility. Prefer `DbDocPusher` for new code.
+/// Retained for backward compatibility. Prefer `DbTransportDocPusher` for new code.
 pub struct DbCollectionLookup<S: storage::corekv::Store> {
     db: Arc<db::DB<S>>,
 }

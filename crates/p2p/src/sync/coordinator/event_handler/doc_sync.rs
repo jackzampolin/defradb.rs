@@ -383,6 +383,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
             let limiter = self.runtime.dag_fetch_limiter.clone();
+            let diagnostics = self.manager.diagnostics();
             let source_peer = peer_id.clone();
             let explicit_replicator_collections =
                 self.access.replicators.get_collections(peer_id.as_str());
@@ -395,6 +396,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     let source_peer = source_peer.clone();
                     let explicit_replicator_collections = explicit_replicator_collections.clone();
                     let limiter = limiter.clone();
+                    let diagnostics = diagnostics.clone();
 
                     async move {
                         tracing::debug!(
@@ -418,6 +420,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                                     explicit_replicator_collections,
                                 ),
                             limiter,
+                            diagnostics,
                         )
                         .await;
                     }

@@ -21,13 +21,14 @@ jdk_root    := tooling / "jdk"
 
 # Pinned to what CI uses. ci.yml pins Go 1.25 (:449); Cargo.toml sets
 # rust-version 1.91; proofs/lean/lean-toolchain pins Lean v4.18.0; #1310 pins
-# TLC 1.8.0 by checksum.
+# TLC 1.7.4 by checksum. The upstream 1.8.0 pre-release asset is rolling and
+# cannot provide a reproducible clean-checkout gate.
 protoc_version := "35.1"
 go_version     := "1.25.12"
 jdk_release    := "jdk-21.0.12+8"
 jq_version     := "1.8.1"
-tla_version    := "1.8.0"
-tla_sha256     := "e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
+tla_version    := "1.7.4"
+tla_sha256     := "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 
 # Pinned to ci.yml's wasm-check job.
 firefox_version     := "153.0.3"
