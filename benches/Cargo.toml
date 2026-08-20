@@ -1,0 +1,22 @@
+[package]
+name = "benches"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+criterion.workspace = true
+
+cid.workspace = true
+defra-core = { path = "../crates/defra-core" }
+
+[[bench]]
+name = "block"
+harness = false
+
+[lints]
+workspace = true

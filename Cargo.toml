@@ -37,6 +37,7 @@ members = [
     "tools/ffi-test",
     "tools/integration-test",
     "proofs",
+    "benches",
 ]
 
 [workspace.package]
