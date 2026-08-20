@@ -12,9 +12,9 @@ use document::Document;
 use query::doc_stream::DocStream;
 use storage::corekv::{IterOptions, Store};
 
+use crate::collection::loader::get_collection_with_lazy_load;
+use crate::collection::stream::CollectionDocStream;
 use crate::collection::Collection;
-use crate::collection_loader::get_collection_with_lazy_load;
-use crate::collection_stream::CollectionDocStream;
 use datastore::NamespaceView;
 
 use super::LensedDocFetcher;
@@ -109,7 +109,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
 
         Ok(Box::new(LensedDocStream {
-            inner: Box::new(crate::collection_stream::ShortIdDocStream::new(
+            inner: Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection.clone(),
                 datastore.clone(),
                 systemstore,

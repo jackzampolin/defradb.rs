@@ -56,7 +56,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
         if bypass_dac {
             return Ok(true);
         }
-        db::collection_acp::check_doc_permission(
+        db::collection::acp::check_doc_permission(
             self.document_acp.as_ref(),
             identity,
             permission,
@@ -144,7 +144,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
         let doc_id = document.document.doc_id().to_string();
         let creator = identity.did().map_or("browser-sync", |did| did.as_str());
         if let Some(owner) = document.register_owner.as_ref() {
-            db::collection_acp::register_doc_if_needed(
+            db::collection::acp::register_doc_if_needed(
                 self.document_acp.as_ref(),
                 Some(owner),
                 document.collection.schema(),

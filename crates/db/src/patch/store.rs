@@ -55,7 +55,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Block unsafe policy transitions (protected→open, resource name change).
         // These transitions can silently expose previously protected documents.
-        crate::collection_acp::block_unsafe_policy_transition(
+        crate::collection::acp::block_unsafe_policy_transition(
             actual_name,
             old_schema.policy.as_ref(),
             new_schema.policy.as_ref(),

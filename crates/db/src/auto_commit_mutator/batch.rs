@@ -15,7 +15,7 @@ use super::helpers::{
     write_branchable_collection_block, write_local_create, write_local_update,
 };
 use crate::block_builder::{write_delete_block, write_document_blocks};
-use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
+use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;

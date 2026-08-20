@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use acp::{DocumentACP, DocumentPermission, Identity, LocalDocumentACP, MemoryAcpStore};
-use db::collection_acp::{
+use db::collection::acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
     register_collection_if_needed, register_doc_if_needed, warn_on_unsafe_policy_transition,
     AcpContext,

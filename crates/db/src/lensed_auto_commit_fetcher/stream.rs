@@ -18,8 +18,8 @@ use query::doc_stream::DocStream;
 use storage::corekv::{IterOptions, Store};
 use tracing::warn;
 
+use crate::collection::stream::CollectionDocStream;
 use crate::collection::Collection;
-use crate::collection_stream::CollectionDocStream;
 use crate::txn::DbTxn;
 
 use super::migration::MigrationWriteBack;
@@ -226,7 +226,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         })?;
 
         Ok(Box::new(LensedAutoCommitDocStream {
-            inner: Some(Box::new(crate::collection_stream::ShortIdDocStream::new(
+            inner: Some(Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection.clone(),
                 datastore,
                 systemstore,

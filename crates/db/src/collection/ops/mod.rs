@@ -12,9 +12,9 @@ mod lookup;
 mod resolve;
 mod version;
 
+use crate::collection::name::CollectionName;
+use crate::collection::snapshot::CollectionSnapshot;
 use crate::collection::{populate_collection_root_id, Collection};
-use crate::collection_name::CollectionName;
-use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 use datastore::NamespaceView;

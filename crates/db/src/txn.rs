@@ -4,8 +4,8 @@
 /// - Explicit/implicit transaction handling
 /// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
+use crate::collection::cache::CollectionCache;
 use crate::collection::{populate_collection_root_id, Collection};
-use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
 use async_lock::{MutexGuardArc, RwLockReadGuardArc, RwLockWriteGuardArc};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
@@ -67,7 +67,7 @@ impl PendingCollectionAcpRegistration {
 
         let result: acp::Result<()> = async {
             for schema in &self.schemas {
-                crate::collection_acp::register_collection_if_needed(
+                crate::collection::acp::register_collection_if_needed(
                     self.acp.as_ref(),
                     Some(&self.creator),
                     schema,

@@ -5,7 +5,7 @@ use query::runner::FetchByIdsResult;
 use storage::corekv::Store;
 use tracing::{debug, trace};
 
-use crate::collection_loader::get_collection_with_lazy_load;
+use crate::collection::loader::get_collection_with_lazy_load;
 
 use super::LensedDocFetcher;
 

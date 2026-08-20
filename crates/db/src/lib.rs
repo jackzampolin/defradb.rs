@@ -52,17 +52,7 @@ pub(crate) mod block_cleanup;
 pub mod block_reader;
 pub mod block_verify;
 pub mod collection;
-pub mod collection_acp;
-pub(crate) mod collection_cache;
-pub(crate) mod collection_loader;
-pub(crate) mod collection_locks;
-pub(crate) mod collection_name;
-pub(crate) mod collection_ops;
-pub(crate) mod collection_provider;
-mod collection_retriever;
-pub(crate) mod collection_snapshot;
-pub(crate) mod collection_stream;
-pub use collection_stream::BackfillSource;
+pub use collection::stream::BackfillSource;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
 #[cfg(test)]
@@ -112,18 +102,18 @@ pub(crate) mod view;
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
 pub use block_builder::{build_blocks_from_document, BlockResult};
-#[allow(deprecated)]
-pub use collection::{collection_short_id, Collection};
-pub use collection_acp::{
+pub use collection::acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
     register_collection_if_needed, register_doc_if_needed, unregister_doc_if_needed,
     warn_on_unsafe_policy_transition, AcpContext, PolicyTransitionCheck,
 };
-pub use collection_cache::CollectionCache;
-pub use collection_name::CollectionName;
-pub use collection_provider::DbCollectionProvider;
-pub use collection_retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
-pub use collection_snapshot::CollectionSnapshot;
+pub use collection::cache::CollectionCache;
+pub use collection::name::CollectionName;
+pub use collection::provider::DbCollectionProvider;
+pub use collection::retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
+pub use collection::snapshot::CollectionSnapshot;
+#[allow(deprecated)]
+pub use collection::{collection_short_id, Collection};
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{
     DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES,

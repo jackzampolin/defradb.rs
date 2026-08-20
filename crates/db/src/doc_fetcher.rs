@@ -10,7 +10,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
-use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
+use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::index_seek::apply_cursor_seek_to_iterator;
 use crate::txn::DbTxn;
@@ -140,7 +140,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        Ok(Box::new(crate::collection_stream::ShortIdDocStream::new(
+        Ok(Box::new(crate::collection::stream::ShortIdDocStream::new(
             collection,
             datastore,
             systemstore,
@@ -166,7 +166,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
         Ok(Box::new(
-            crate::collection_stream::CollectionDocStream::new(
+            crate::collection::stream::CollectionDocStream::new(
                 collection,
                 datastore,
                 systemstore,

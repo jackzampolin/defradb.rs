@@ -7,7 +7,7 @@ use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
 
-use crate::collection_loader::get_collection_with_lazy_load;
+use crate::collection::loader::get_collection_with_lazy_load;
 use crate::index_manager::IndexManager;
 use crate::index_seek::apply_cursor_seek_to_iterator;
 

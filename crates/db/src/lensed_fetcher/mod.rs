@@ -250,7 +250,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         field_name: &str,
         query: &str,
     ) -> query::error::Result<std::collections::HashMap<String, f64>> {
-        use crate::collection_loader::get_collection_with_lazy_load;
+        use crate::collection::loader::get_collection_with_lazy_load;
         use crate::index_manager::IndexManager;
 
         let (collection, datastore, systemstore) =
@@ -312,7 +312,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         effort: Option<usize>,
     ) -> query::error::Result<Vec<u64>> {
         let (collection, datastore, _) =
-            crate::collection_loader::get_collection_with_lazy_load(&self.txn, collection_name)
+            crate::collection::loader::get_collection_with_lazy_load(&self.txn, collection_name)
                 .await?;
 
         crate::vector_search::search_vector_index(

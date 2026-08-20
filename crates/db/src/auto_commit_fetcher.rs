@@ -14,7 +14,7 @@ use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
 use tracing::warn;
 
-use crate::collection_stream::CollectionDocStream;
+use crate::collection::stream::CollectionDocStream;
 use crate::database::DB;
 use crate::txn::DbTxn;
 use crate::versioned_fetcher::VersionedFetcher;
@@ -154,7 +154,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         })?;
 
         Ok(Box::new(AutoCommitDocStream {
-            inner: Some(Box::new(crate::collection_stream::ShortIdDocStream::new(
+            inner: Some(Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection,
                 datastore,
                 systemstore,

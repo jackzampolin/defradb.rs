@@ -10,10 +10,6 @@
 /// If the document write succeeds but the index update fails, the caller MUST discard the
 /// transaction (do not commit) to maintain consistency. The underlying transaction will
 /// roll back both operations when discarded.
-mod crud_datastore;
-mod index_ops;
-mod validation;
-
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use datastore::NamespaceView;
@@ -26,6 +22,20 @@ use schema::{
 use storage::corekv::{IterOptions, Key};
 use storage::keys::doc_id_index::encode_doc_short_id;
 use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
+
+pub mod acp;
+pub(crate) mod cache;
+mod crud_datastore;
+mod index_ops;
+pub(crate) mod loader;
+pub(crate) mod locks;
+pub(crate) mod name;
+pub(crate) mod ops;
+pub(crate) mod provider;
+pub(crate) mod retriever;
+pub(crate) mod snapshot;
+pub(crate) mod stream;
+mod validation;
 
 /// Derive the legacy short ID from a collection_id string.
 ///

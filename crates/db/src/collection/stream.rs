@@ -340,7 +340,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(Some(txn)));
         {
             let (collection, datastore, systemstore) =
-                crate::collection_loader::get_collection_with_lazy_load(&shared, collection_name)
+                crate::collection::loader::get_collection_with_lazy_load(&shared, collection_name)
                     .await
                     .unwrap();
             let entries = collection

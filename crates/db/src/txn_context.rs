@@ -10,7 +10,7 @@ use std::time::Duration;
 use storage::corekv::Store;
 use web_time::Instant;
 
-use crate::collection_provider::TxnCollectionProvider;
+use crate::collection::provider::TxnCollectionProvider;
 use crate::database::DB;
 use crate::doc_mutator::DbDocMutator;
 use crate::lensed_fetcher::LensedDocFetcher;
