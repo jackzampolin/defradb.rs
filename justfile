@@ -289,7 +289,8 @@ setup-sift:
 [doc("Vector index benchmarks (insert/update/delete/search/kernels).")]
 [group('test')]
 bench-vector *args:
-    cargo bench -p db {{ args }}
+    cargo bench -p benches --bench sift --bench vector_search \
+        --bench vector_mutations {{ args }}
 
 # Go, for the FFI compatibility harness and the Go-parity integration suites.
 [doc("Go, for the FFI harness and the Go-parity suites.")]

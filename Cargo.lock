@@ -1466,6 +1466,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "storage",
+ "tempfile",
  "tokio",
  "tower",
 ]
@@ -3407,7 +3408,6 @@ dependencies = [
  "ciborium",
  "cid",
  "crdt",
- "criterion 0.6.0",
  "crypto",
  "datastore",
  "defra-core",
@@ -11406,7 +11406,6 @@ dependencies = [
  "bm25",
  "chrono",
  "cid",
- "criterion 0.6.0",
  "crypto",
  "defra-core",
  "document",

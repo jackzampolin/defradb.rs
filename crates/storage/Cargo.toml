@@ -84,17 +84,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 
 [dev-dependencies]
 proptest.workspace = true
-criterion.workspace = true
 tempfile = "3.8"
-
-[[bench]]
-name = "transaction"
-harness = false
-required-features = ["redb"]
-
-[[bench]]
-name = "retry_markers"
-harness = false
 
 [lints]
 workspace = true

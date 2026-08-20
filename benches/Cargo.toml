@@ -8,6 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# Passthrough for the storage backends `transaction.rs` gates on. The cfgs in a
+# relocated bench resolve against this package, not against storage.
+#
+# redb is on by default because `transaction` is `required-features = ["redb"]`.
+# Before the fold that resolved against storage's own feature, which a workspace
+# bench run switched on through unification; here nothing would, and the target
+# would drop out of `cargo bench --workspace` unnoticed.
+[features]
+default = ["redb"]
+redb = ["storage/redb"]
+lark = ["storage/lark"]
+rocksdb = ["storage/rocksdb"]
+
 [dev-dependencies]
 criterion.workspace = true
 tokio = { workspace = true, features = [
@@ -25,6 +38,7 @@ lru.workspace = true
 multihash.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile = "3.8"
 tower = { workspace = true, features = ["util"] }
 
 blockstore = { path = "../crates/blockstore" }
@@ -76,7 +90,28 @@ name = "planner"
 harness = false
 
 [[bench]]
+name = "retry_markers"
+harness = false
+
+[[bench]]
+name = "sift"
+harness = false
+
+[[bench]]
+name = "transaction"
+harness = false
+required-features = ["redb"]
+
+[[bench]]
 name = "transport"
+harness = false
+
+[[bench]]
+name = "vector_mutations"
+harness = false
+
+[[bench]]
+name = "vector_search"
 harness = false
 
 [lints]
