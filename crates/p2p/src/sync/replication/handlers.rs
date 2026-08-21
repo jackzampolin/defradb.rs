@@ -60,6 +60,7 @@ fn recovered_metadata_error(cid: Cid, details: impl Into<String>) -> Replication
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn recover_metadata_for_block<H>(
     handler: &H,
     cid: Cid,
