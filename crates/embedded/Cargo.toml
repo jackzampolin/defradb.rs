@@ -11,6 +11,9 @@ description = "Reusable embedded/mobile DefraDB node assembly"
 [package.metadata.cargo-machete]
 ignored = ["bytes", "document", "lens", "serde", "serde_bytes", "serde_ipld_dagcbor", "thiserror"]
 
+[lib]
+bench = false
+
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }

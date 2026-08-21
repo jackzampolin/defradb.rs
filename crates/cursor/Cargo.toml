@@ -5,6 +5,9 @@ edition = "2021"
 description = "Opaque cursor token codec for GraphQL cursor pagination"
 license = "Apache-2.0 OR MIT"
 
+[lib]
+bench = false
+
 [dependencies]
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

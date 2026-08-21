@@ -20,6 +20,9 @@ rocksdb = ["storage/rocksdb"]
 fjall = ["storage/fjall"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
 
+[lib]
+bench = false
+
 [dependencies]
 web-time.workspace = true
 # Async runtime

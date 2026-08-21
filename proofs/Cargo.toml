@@ -8,6 +8,7 @@ publish = false
 autotests = false
 
 [lib]
+bench = false
 path = "src/lib.rs"
 
 [[test]]

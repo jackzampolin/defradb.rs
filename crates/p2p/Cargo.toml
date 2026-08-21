@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 description = "P2P networking for DefraDB using libp2p"
 
+[lib]
+bench = false
+
 [dependencies]
 # Internal crates
 defra-core = { path = "../defra-core" }

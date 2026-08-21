@@ -10,6 +10,9 @@ repository.workspace = true
 [package.metadata.cargo-machete]
 ignored = ["serde_ipld_dagcbor"]
 
+[lib]
+bench = false
+
 [dependencies]
 defra-core = { path = "../defra-core" }
 thiserror.workspace = true

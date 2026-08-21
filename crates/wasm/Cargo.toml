@@ -12,6 +12,7 @@ description = "DefraDB browser client - WASM build for browser-based application
 ignored = ["async-trait", "getrandom", "sha2"]
 
 [lib]
+bench = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

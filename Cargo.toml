@@ -206,13 +206,14 @@ strip = true
 panic = "abort"
 overflow-checks = true
 
-[profile.bench]
-opt-level = 3
+# `bench` inherits `release`, including its lto/codegen-units/strip/
+# overflow-checks. It carried an `opt-level = 3` that release already sets.
 
+# Symbols for profiling bench targets: `just bench-profile`.
 [profile.profile]
 inherits = "release"
 strip = false
-debug = 1
+debug = "line-tables-only"
 lto = "thin"
 
 # Fast release iteration for CI/dev: measured 1m40s cold vs 6m44s fat LTO

@@ -292,6 +292,37 @@ bench-vector *args:
     cargo bench -p benches --bench sift --bench vector_search \
         --bench vector_mutations {{ args }}
 
+# criterion writes results to target/criterion/<group>/<function>, keyed by
+# group and function name and never by binary. Its uniquifier is per-process, so
+# two targets sharing a group *and* function name overwrite each other silently.
+# Group names are distinct today; this keeps them that way.
+[doc("Fail if two bench targets share a criterion group name.")]
+[group('check')]
+bench-groups:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    dupes=""
+    for g in $(grep -ho 'benchmark_group("[^"]*")' benches/benches/*.rs | sort -u); do
+        n=$(grep -l -- "$g" benches/benches/*.rs | wc -l | tr -d ' ')
+        if [ "$n" -gt 1 ]; then dupes="$dupes  $g in $n targets"$'\n'; fi
+    done
+    if [ -n "$dupes" ]; then
+        echo "criterion group names collide across targets:" >&2
+        printf '%s' "$dupes" >&2
+        exit 1
+    fi
+    echo "criterion group names: no collisions across $(ls benches/benches/*.rs | wc -l | tr -d ' ') targets"
+
+# Profile one bench target with symbols. `[profile.bench]` inherits release's
+# `strip = true`, so a bench binary carries no symbols and a profiler resolves
+# nothing; `[profile.profile]` keeps them. criterion's own `--profile-time`
+# runs the benchmark without its sampling/analysis phases.
+[doc("Profile one bench target with symbols, under an external profiler.")]
+[group('test')]
+bench-profile target seconds="10" *args:
+    cargo bench --profile profile -p benches --bench {{ target }} -- \
+        --profile-time {{ seconds }} {{ args }}
+
 # Go, for the FFI compatibility harness and the Go-parity integration suites.
 [doc("Go, for the FFI harness and the Go-parity suites.")]
 [group('setup')]

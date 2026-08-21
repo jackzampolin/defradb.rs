@@ -35,7 +35,6 @@ async fn fixture(replicators: usize) -> Peerstore<MemoryStore> {
 fn bench_retry_markers(c: &mut Criterion) {
     let rt = runtime();
     let mut group = c.benchmark_group("sender_marker_registration");
-    group.sample_size(10);
 
     for documents in DOCUMENT_COUNTS {
         for replicators in REPLICATOR_COUNTS {

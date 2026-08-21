@@ -11,6 +11,7 @@ repository.workspace = true
 ignored = ["anyhow", "bytes", "futures", "getrandom", "rand", "serde_bytes", "serde_ipld_dagcbor"]
 
 [lib]
+bench = false
 name = "cli"
 path = "src/lib.rs"
 
