@@ -23,8 +23,10 @@ pub fn decode_neighbours(bytes: &[u8]) -> Result<Vec<NodeId>> {
         ));
     }
     Ok(bytes
-        .chunks_exact(8)
-        .map(|c| NodeId(u64::from_le_bytes(c.try_into().unwrap_or_default())))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| NodeId(u64::from_le_bytes(*chunk)))
         .collect())
 }
 
