@@ -71,7 +71,7 @@ pub async fn run_tests(
     let start = Instant::now();
 
     // Build environment variables
-    let env = build_env(ctx);
+    let env = build_env(ctx, package);
 
     // Build the go test command
     let mut cmd = Command::new("go");
@@ -286,8 +286,22 @@ fn test_execution_error(package_output: &[String], stderr: &str) -> String {
     }
 }
 
+/// Per-worktree, per-package Go build cache.
+///
+/// Without this every paired worktree shares one cgo cache and concurrent runs
+/// poison each other. Mirrors the Go Makefile's `gocache-$RUST_LIB-$PKG`.
+fn gocache_dir(rust_path: &std::path::Path, package: &str) -> std::path::PathBuf {
+    let worktree = rust_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+    let package = package.replace('/', "-");
+
+    std::env::temp_dir().join(format!("gocache-{worktree}-{package}"))
+}
+
 /// Build environment variables for Go test
-fn build_env(ctx: &WorktreeContext) -> HashMap<String, String> {
+fn build_env(ctx: &WorktreeContext, package: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
 
     // CGO flags
@@ -320,6 +334,14 @@ fn build_env(ctx: &WorktreeContext) -> HashMap<String, String> {
 
     // Enable file-based database tests (Go env var name; Rust uses redb for persistence)
     env.insert("DEFRA_BADGER_FILE".to_string(), "true".to_string());
+
+    // Isolate the cgo build cache per worktree and package
+    env.insert(
+        "GOCACHE".to_string(),
+        gocache_dir(&ctx.rust_path, package)
+            .to_string_lossy()
+            .into_owned(),
+    );
 
     // Pass through Go test framework configuration from the environment.
     // These control the test matrix: which ACP type, mutation type, etc.
@@ -443,5 +465,42 @@ mod tests {
         let package_failure = &results["query/simple (go test)"];
         assert_eq!(package_failure.status, TestStatus::Fail);
         assert_eq!(package_failure.output, ["package setup failed"]);
+    }
+
+    #[test]
+    fn each_worktree_and_package_gets_its_own_go_build_cache() {
+        let here = gocache_dir(
+            std::path::Path::new("/r/defradb.rs-ffi-port"),
+            "query/simple",
+        );
+        let other_worktree =
+            gocache_dir(std::path::Path::new("/r/defradb.rs-index"), "query/simple");
+        let other_package = gocache_dir(std::path::Path::new("/r/defradb.rs-ffi-port"), "acp/nac");
+
+        assert_ne!(
+            here, other_worktree,
+            "concurrent worktrees must not share a cgo cache"
+        );
+        assert_ne!(here, other_package);
+        assert!(here.to_string_lossy().contains("defradb.rs-ffi-port"));
+    }
+
+    #[test]
+    fn the_go_child_process_is_told_which_build_cache_to_use() {
+        let ctx = WorktreeContext {
+            rust_path: std::path::PathBuf::from("/r/defradb.rs-ffi-port"),
+            go_path: std::path::PathBuf::from("/r/defradb-ffi-port"),
+            suffix: "ffi-port".to_string(),
+            branch: "edjroz/1395-rustffi-port".to_string(),
+            commit: "0000000".to_string(),
+            dirty: false,
+        };
+
+        let env = build_env(&ctx, "query/simple");
+
+        assert_eq!(
+            env.get("GOCACHE").map(String::as_str),
+            gocache_dir(&ctx.rust_path, "query/simple").to_str()
+        );
     }
 }
