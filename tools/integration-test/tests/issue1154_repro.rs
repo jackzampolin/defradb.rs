@@ -62,6 +62,28 @@ async fn sender_retry_snapshot(cluster: &TestCluster) -> (usize, u64) {
     (markers, active_jobs)
 }
 
+fn log_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|value| value.strip_prefix(field))
+}
+
+/// Documents the hub durably registered before acknowledging their push.
+///
+/// `SyncManager::process_pushlog` commits the record and only then acks, so
+/// the ack destroyed the pusher's retry record for exactly these documents:
+/// after the kill the hub is their only remaining owner. An at-capacity push
+/// returns before this line is logged, so the set holds only registrations
+/// that really reached the store. Each document here is created once and
+/// never updated, so one document maps to at most one live root.
+fn registered_doc_ids(hub_log: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(hub_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("Persisted pending DAG registration"))
+        .filter_map(|line| log_field(line, "doc_id=").map(str::to_string))
+        .collect()
+}
+
 /// Pushers write continuously into a 1-slot hub while the test arranges a
 /// deterministic crash window: once a pending registration is observed, the
 /// pushers are SIGSTOPped (so Bitswap cannot resolve it), the registration is
@@ -76,7 +98,7 @@ async fn sender_retry_snapshot(cluster: &TestCluster) -> (usize, u64) {
 #[tokio::test]
 async fn hub_restart_recovers_success_acked_pending_dags() {
     std::env::set_var("DEFRA_P2P_MAX_PENDING_DAGS", "1");
-    std::env::set_var("RUST_LOG", "info");
+    std::env::set_var("RUST_LOG", "info,p2p::sync::restart_recovery=debug");
 
     // The hub must survive a restart with identity and state intact: the
     // harness defaults (memory store, no keyring => ephemeral peer key) would
@@ -193,6 +215,21 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
         }
     }
 
+    let hub_log = cluster.nodes[0]
+        .rootdir
+        .parent()
+        .expect("hub rootdir has a parent")
+        .join("logs/stdout.log");
+    let registered = registered_doc_ids(&hub_log);
+    assert!(
+        !registered.is_empty(),
+        "hub never durably registered a pending DAG before the kill"
+    );
+    eprintln!(
+        "issue1154_repro: {} durably registered documents at kill time",
+        registered.len()
+    );
+
     cluster.nodes[0].process.kill();
     stop_writers.store(true, Ordering::Relaxed);
 
@@ -223,11 +260,6 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     // Anti-vacuity for the recovery path: durable registrations must have
     // survived the kill and been re-driven. Without persistence this log
     // (emitted only when records were loaded) never appears.
-    let hub_log = cluster.nodes[0]
-        .rootdir
-        .parent()
-        .expect("hub rootdir has a parent")
-        .join("logs/stdout.log");
     let restore_deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let log = std::fs::read_to_string(&hub_log).unwrap_or_default();
@@ -241,13 +273,23 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    // The success-acked frozen-slot registration must merge on the restarted
-    // hub. The remaining roots were actionably nacked and retain sender
+    // Every document the hub durably registered must merge on the restarted
+    // hub. Those are the roots whose success ack destroyed the pusher's retry
+    // record, so a lost registration strands them with no owner at all -- the
+    // #1154 failure. The roots that were actionably nacked instead keep sender
     // markers on the Go-compatible 30s..32m ladder; with a one-slot receiver,
-    // requiring hundreds of those roots to traverse the ladder inside this
-    // test's four-minute bound would test wall-clock tuning rather than crash
-    // durability. Instead require exact ownership conservation for every
-    // committed document after witnessing a terminal receiver merge.
+    // requiring hundreds of those to traverse the ladder inside this test's
+    // four-minute bound would test wall-clock tuning rather than crash
+    // durability, so they are not required to arrive here.
+    //
+    // The aggregate below is a coverage smoke check only. It cannot carry the
+    // per-document claim: `merged` is a set of document ids, but the receiver
+    // and sender terms are opaque counts (root-CID cardinality and a
+    // `/rep/retry/doc/` prefix scan), so one unit of overlap would buy one
+    // unit of slack and hide exactly one orphan. Overlap is real here: the
+    // receiver commits its registration before acknowledging the push, so a
+    // hub killed in between leaves a document owned twice, by the restored
+    // obligation and by the sender marker its unacknowledged push retained.
     let hub = cluster.client(0);
     let converge_start = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(240);
@@ -295,31 +337,69 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
             .iter()
             .filter(|id| present.contains(id.as_str()))
             .count();
-        let balanced =
-            merged + receiver_obligations + sender_markers_after == expected_doc_ids.len();
-        if receiver_terminal_merges > 0 && sender_stable && receiver_stable && balanced {
+        let orphaned: Vec<&str> = registered
+            .iter()
+            .filter(|doc_id| !present.contains(doc_id.as_str()))
+            .map(String::as_str)
+            .collect();
+
+        // A dropped obligation must not pass as a merge: both of these retire
+        // a root without one, and no amount of further waiting recovers it.
+        let fetch_exhausted = hub_status_after["pending_dag_fetch_exhausted"]
+            .as_u64()
+            .expect("fetch exhausted count");
+        let quarantined = hub_status_after["pending_dag_terminal_quarantined"]
+            .as_u64()
+            .expect("terminal quarantine count");
+        assert_eq!(
+            (fetch_exhausted, quarantined),
+            (0, 0),
+            "restored registration retired without merging: exhausted={fetch_exhausted}, \
+             quarantined={quarantined}, orphaned={}/{}",
+            orphaned.len(),
+            registered.len()
+        );
+
+        let covered =
+            merged + receiver_obligations + sender_markers_after >= expected_doc_ids.len();
+        if orphaned.is_empty() && receiver_terminal_merges > 0 && sender_stable && receiver_stable {
+            assert!(
+                covered,
+                "committed documents lost their owner across the restart: merged={merged}, \
+                 receiver={receiver_obligations}, sender={sender_markers_after}, expected={}",
+                expected_doc_ids.len()
+            );
             eprintln!(
-                "issue1154_repro: receiver recovered; obligations balanced as \
+                "issue1154_repro: all {} durable registrations merged; \
                  merged={merged}, receiver={receiver_obligations}, sender={sender_markers_after} \
                  {:.1}s after restart",
+                registered.len(),
                 converge_start.elapsed().as_secs_f64()
             );
             break;
         }
         if Instant::now() >= next_progress_log {
             eprintln!(
-                "issue1154_repro: merged={merged}, receiver={receiver_obligations}, \
-                 sender={sender_markers_after}, terminal_merges={receiver_terminal_merges}, \
+                "issue1154_repro: orphaned={}/{}, merged={merged}, \
+                 receiver={receiver_obligations}, sender={sender_markers_after}, \
+                 terminal_merges={receiver_terminal_merges}, \
                  stable={sender_stable}/{receiver_stable} after {:.1}s",
+                orphaned.len(),
+                registered.len(),
                 converge_start.elapsed().as_secs_f64()
             );
             next_progress_log += Duration::from_secs(30);
         }
         assert!(
             Instant::now() < deadline,
-            "restart ownership did not balance: merged={merged}, receiver={receiver_obligations}, \
-             sender={sender_markers_after}, expected={}, terminal_merges={receiver_terminal_merges}, \
+            "durably registered documents never merged on the restarted hub: \
+             orphaned={}/{} {:?}, merged={merged}, receiver={receiver_obligations}, \
+             sender={sender_markers_after}, expected={}, \
+             terminal_merges={receiver_terminal_merges}, \
              stable={sender_stable}/{receiver_stable}",
+            orphaned.len(),
+            registered.len(),
+            orphaned.iter().take(8).collect::<Vec<_>>(),
             expected_doc_ids.len()
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
