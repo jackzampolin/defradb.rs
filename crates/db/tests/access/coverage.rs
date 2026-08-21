@@ -10,7 +10,8 @@
 //! actual enforcement is exercised end-to-end by `access/enforcement.rs`
 //! (DB-layer allow/deny) and the `integration-test` `nac`/`acp` suites.
 
-use acp::nac::NodePermission::{self, *};
+use acp::nac::NodePermission;
+use acp::nac::NodePermission::*;
 
 /// The operation's raw DB method(s) call `check_node_access`, so even a direct
 /// `DB<S>` handle holder is gated (no bypass). Verified locations:

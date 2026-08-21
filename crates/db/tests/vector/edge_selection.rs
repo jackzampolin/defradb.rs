@@ -1,11 +1,14 @@
 //! Edge selection: the diversity heuristic and SSG's angular pruning.
 
-use std::sync::Arc;
-
-use db::index::vector::core::{dot, Metric};
-use db::index::vector::engine::ann::{Candidate, EdgeSelector};
-use db::index::vector::engine::select::{Angular, Heuristic, DEFAULT_ANGLE_DEGREES};
+use db::index::vector::core::dot;
+use db::index::vector::core::Metric;
+use db::index::vector::engine::ann::Candidate;
+use db::index::vector::engine::ann::EdgeSelector;
+use db::index::vector::engine::select::Angular;
+use db::index::vector::engine::select::Heuristic;
+use db::index::vector::engine::select::DEFAULT_ANGLE_DEGREES;
 use db::index::vector::store::NodeId;
+use std::sync::Arc;
 
 fn candidate(id: u64, vector: &[f32], base: &[f32]) -> Candidate {
     Candidate {

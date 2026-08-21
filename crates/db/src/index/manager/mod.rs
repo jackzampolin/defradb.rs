@@ -5,7 +5,7 @@
 /// - Dropping indexes (with entry cleanup)
 /// - Loading index instances from schema
 /// - Maintaining indexes during document mutations
-mod value_extraction;
+pub mod value_extraction;
 
 use crate::index::error::{Error, Result};
 use datastore::NamespaceView;

@@ -1,5 +1,4 @@
 //! Database construction, action registry and at-rest encryption.
-
 #[path = "../common/mod.rs"]
 mod common;
 

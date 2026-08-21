@@ -4,7 +4,6 @@ use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn test_collection() -> Collection {
     Collection::new(CollectionVersion::new(

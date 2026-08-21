@@ -1,10 +1,4 @@
-//! Error type for the index manager.
-//!
-//! Narrow subset of what `crate::Error` covers — index_manager only
-//! produces storage errors, invalid-document errors, and generic
-//! index-validation errors. A `From<crate::index::Error> for crate::Error`
-//! impl lives in the `db` crate so callers that still thread errors
-//! through the broader hierarchy get automatic conversion.
+//! Errors raised by index maintenance.
 
 use thiserror::Error;
 

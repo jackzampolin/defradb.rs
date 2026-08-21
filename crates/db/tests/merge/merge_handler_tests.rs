@@ -1,20 +1,58 @@
-use super::hook::{CompositeMergeHook, CompositePostCommitAction};
-use super::*;
 use async_trait::async_trait;
-use blockstore::{Blockstore as _, DefraBlockstore};
+use blockstore::Blockstore as _;
+use blockstore::DefraBlockstore;
+use cid::Cid;
+use crdt::traits::Context;
+use crdt::traits::ReplicatedData;
+use crdt::traits::ValueReader;
+use crdt::Counter;
+use crdt::Lww;
+use crdt::LwwDelta;
+use crdt::NumericKind;
 use crypto::PrivateKey as _;
-use defra_core::block::{
-    Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
-    CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature,
-    SignatureHeader, SignatureType,
-};
-use events::{Bus, ChannelBus, EventName};
-use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use db::collection::Collection;
+use db::database::DB;
+use db::merge::merge_handler::hook::CompositeMergeHook;
+use db::merge::merge_handler::hook::CompositePostCommitAction;
+use db::merge::merge_handler::*;
+use db::DbTransactionRegistry;
+use defra_core::block::Block;
+use defra_core::block::CollectionDefinitionDeltaPayload;
+use defra_core::block::CollectionDeltaPayload;
+use defra_core::block::CompositeDeltaPayload;
+use defra_core::block::CounterDeltaPayload;
+use defra_core::block::CrdtDelta;
+use defra_core::block::DAGLink;
+use defra_core::block::Encryption;
+use defra_core::block::LwwDeltaPayload;
+use defra_core::block::Signature;
+use defra_core::block::SignatureHeader;
+use defra_core::block::SignatureType;
+use defra_core::merge::BlockMetadata;
+use defra_core::merge::MergeBlock;
+use defra_core::merge::MergeHandler;
+use defra_core::merge::MergeOutcome;
+use defra_core::types::DocId;
+use document::DocID;
+use document::Document;
+use document::NormalValue;
+use events::Bus;
+use events::ChannelBus;
+use events::EventName;
+use query::txn::TransactionRegistry;
+use schema::CType;
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
+use std::collections::HashSet;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::CollectionID;
-use tokio::time::{timeout, Duration};
+use tokio::time::timeout;
+use tokio::time::Duration;
 
 struct CountingBlockstore<B> {
     inner: Arc<B>,
@@ -93,15 +131,15 @@ async fn register_test_block_owner(
     doc_id: &str,
     cid: &Cid,
 ) {
-    let txn = handler.db.new_txn(false).await.unwrap();
+    let txn = handler.db().new_txn(false).await.unwrap();
     {
         let systemstore = txn.systemstore().unwrap();
         handler
-            .db
+            .db()
             .resolve_or_allocate_doc_short_id(&systemstore, collection_short_id, doc_id)
             .await
             .unwrap();
-        crate::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), doc_id)
+        db::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), doc_id)
             .await
             .unwrap();
     }
@@ -115,17 +153,17 @@ async fn create_doc_locally(
     collection: &Collection,
     doc: &mut Document,
     schema_version_id: &str,
-) -> (DocID, u64, crate::block::builder::BlockResult) {
-    let txn = handler.db.new_txn(false).await.unwrap();
+) -> (DocID, u64, db::block::builder::BlockResult) {
+    let txn = handler.db().new_txn(false).await.unwrap();
     let output = {
         let datastore = txn.datastore().unwrap();
         let headstore = txn.headstore().unwrap();
         let raw_blockstore = txn.blockstore().unwrap();
         let systemstore = txn.systemstore().unwrap();
-        let short_id = handler.db.next_doc_short_id().await.unwrap();
+        let short_id = handler.db().next_doc_short_id().await.unwrap();
         let identity =
-            crate::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), short_id);
-        let result = crate::block::builder::write_document_blocks(
+            db::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), short_id);
+        let result = db::block::builder::write_document_blocks(
             &raw_blockstore,
             &headstore,
             doc,
@@ -138,7 +176,7 @@ async fn create_doc_locally(
         )
         .await
         .unwrap();
-        crate::docid::map::set_doc_id_mapping(
+        db::docid::map::set_doc_id_mapping(
             &systemstore,
             collection.resolved_root_id(),
             short_id,
@@ -146,7 +184,7 @@ async fn create_doc_locally(
         )
         .await
         .unwrap();
-        crate::docid::map::set_block_doc_id_mapping(
+        db::docid::map::set_block_doc_id_mapping(
             &systemstore,
             &result.cid.to_string(),
             &result.doc_id,
@@ -154,7 +192,7 @@ async fn create_doc_locally(
         .await
         .unwrap();
         for field_cid in &result.field_cids {
-            crate::docid::map::set_block_doc_id_mapping(
+            db::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &field_cid.to_string(),
                 &result.doc_id,
@@ -296,7 +334,7 @@ async fn build_merge_block(
     doc.set("name", NormalValue::String(name.to_string()));
     doc.set("age", NormalValue::Int(age));
 
-    let result = crate::block::builder::build_blocks_from_document(&doc, "v1", blockstore)
+    let result = db::block::builder::build_blocks_from_document(&doc, "v1", blockstore)
         .await
         .unwrap();
 
@@ -836,7 +874,7 @@ async fn synced_collection_definition_persists_short_id_mapping() {
         .unwrap();
     assert_eq!(outcome, MergeOutcome::Merged);
 
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
     let mapping = systemstore
         .get(&CollectionID::new(cid.to_string()).bytes())
@@ -909,9 +947,6 @@ async fn read_counter_accumulation_store(
     doc_id: &str,
     field: &str,
 ) -> i64 {
-    use crdt::traits::ValueReader;
-    use crdt::{Counter, NumericKind};
-
     let txn = db.new_txn(true).await.expect("read txn");
     let datastore = txn.datastore().expect("datastore");
     let counter = Counter::new(
@@ -994,11 +1029,8 @@ async fn put_counter_delta_block(
 /// +5 lost) — both assertions (error + store==15) would fail.
 #[tokio::test]
 async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge() {
-    use crate::DbTransactionRegistry;
-    use query::txn::TransactionRegistry;
-
     let (handler, blockstore) = make_handler_with_counter_schema().await;
-    let db = Arc::clone(&handler.db);
+    let db = Arc::clone(handler.db());
     // Same DB / same MemoryStore => same ConflictTracker shared across the
     // interactive registry txn and the merge handler's own txn.
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
@@ -1158,7 +1190,7 @@ async fn handle_block_serializes_standalone_counter_by_doc_id() {
         false,
     );
 
-    let guard = handler.merge_queue.acquire(&doc_id_str).await;
+    let guard = handler.merge_queue().acquire(&doc_id_str).await;
     let merge = handler.handle_block(&cid, &block_data, metadata);
     tokio::pin!(merge);
 
@@ -1182,7 +1214,7 @@ async fn handle_block_serializes_standalone_counter_by_doc_id() {
 async fn counter_standalone_skips_already_merged_block() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-counters")
         .unwrap()
         .expect("counter collection should exist");
@@ -1229,7 +1261,7 @@ async fn counter_standalone_skips_already_merged_block() {
         .unwrap();
     assert!(outcome.is_terminal_skip());
 
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let stored = {
         let datastore = txn.datastore().unwrap();
         let systemstore = txn.systemstore().unwrap();
@@ -1283,10 +1315,10 @@ async fn shared_counter_block_is_applied_once_per_document() {
     }
 
     for (index, doc_id) in doc_ids.iter().enumerate() {
-        let txn = handler.db.new_txn(false).await.unwrap();
+        let txn = handler.db().new_txn(false).await.unwrap();
         let doc_short_id = {
             let systemstore = txn.systemstore().unwrap();
-            crate::docid::map::get_doc_ref(&systemstore, doc_id)
+            db::docid::map::get_doc_ref(&systemstore, doc_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1307,7 +1339,7 @@ async fn shared_counter_block_is_applied_once_per_document() {
                 )
                 .await
                 .unwrap();
-            assert!(result.applied);
+            assert!(result.applied());
         }
         txn.force_commit().await.unwrap();
         if index == 0 {
@@ -1317,7 +1349,7 @@ async fn shared_counter_block_is_applied_once_per_document() {
 
     for doc_id in &doc_ids {
         assert_eq!(
-            read_counter_accumulation_store(&handler.db, "v1", doc_id, "score").await,
+            read_counter_accumulation_store(handler.db(), "v1", doc_id, "score").await,
             5
         );
     }
@@ -1327,7 +1359,7 @@ async fn shared_counter_block_is_applied_once_per_document() {
 async fn composite_merge_skips_locally_merged_counter_parent() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-counters")
         .unwrap()
         .expect("counter collection should exist");
@@ -1403,7 +1435,7 @@ async fn composite_merge_skips_locally_merged_counter_parent() {
     assert_eq!(outcome, MergeOutcome::Merged);
 
     let stored = {
-        let txn = handler.db.new_txn(true).await.unwrap();
+        let txn = handler.db().new_txn(true).await.unwrap();
         let stored = {
             let datastore = txn.datastore().unwrap();
             let systemstore = txn.systemstore().unwrap();
@@ -1457,7 +1489,7 @@ async fn make_handler_with_immutable_schema() -> (
 async fn remote_composite_merge_rejects_immutable_field_change() {
     let (handler, blockstore) = make_handler_with_immutable_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-agentdocs")
         .unwrap()
         .expect("agentdocs collection should exist");
@@ -1549,7 +1581,7 @@ async fn remote_composite_merge_rejects_immutable_field_change() {
 
     // The locally-stored immutable value must be unchanged.
     let stored = {
-        let txn = handler.db.new_txn(true).await.unwrap();
+        let txn = handler.db().new_txn(true).await.unwrap();
         let stored = {
             let datastore = txn.datastore().unwrap();
             let systemstore = txn.systemstore().unwrap();
@@ -1575,7 +1607,7 @@ async fn remote_composite_merge_rejects_immutable_field_change() {
 async fn remote_composite_merge_rejects_immutable_field_clear() {
     let (handler, blockstore) = make_handler_with_immutable_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-agentdocs")
         .unwrap()
         .expect("agentdocs collection should exist");
@@ -1655,7 +1687,7 @@ async fn remote_composite_merge_rejects_immutable_field_clear() {
 async fn remote_merge_rejects_immutable_change_after_delete() {
     let (handler, blockstore) = make_handler_with_immutable_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-agentdocs")
         .unwrap()
         .expect("agentdocs collection should exist");
@@ -1781,7 +1813,7 @@ async fn remote_merge_rejects_immutable_change_after_delete() {
 async fn remote_merge_allows_partial_update_to_deleted_doc() {
     let (handler, blockstore) = make_handler_with_immutable_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-agentdocs")
         .unwrap()
         .expect("agentdocs collection should exist");
@@ -1890,7 +1922,7 @@ async fn remote_merge_allows_partial_update_to_deleted_doc() {
 async fn batch_merge_rejects_immutable_change_without_partial_write() {
     let (handler, blockstore) = make_handler_with_immutable_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-agentdocs")
         .unwrap()
         .expect("agentdocs collection should exist");
@@ -1981,7 +2013,7 @@ async fn batch_merge_rejects_immutable_change_without_partial_write() {
     );
     sibling.set("body", NormalValue::String("sibling".to_string()));
     let sibling_result =
-        crate::block::builder::build_blocks_from_document(&sibling, "v1", &blockstore)
+        db::block::builder::build_blocks_from_document(&sibling, "v1", &blockstore)
             .await
             .unwrap();
     let sibling_id = sibling_result.doc_id.clone();
@@ -2013,7 +2045,7 @@ async fn batch_merge_rejects_immutable_change_without_partial_write() {
 
     // No partial write: neither the immutable field NOR the benign body of the
     // rejected composite persisted; the sibling did.
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let (doc1, sibling_present) = {
         let datastore = txn.datastore().unwrap();
         let systemstore = txn.systemstore().unwrap();
@@ -2052,7 +2084,7 @@ async fn batch_merge_rejects_immutable_change_without_partial_write() {
 async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
     let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-users")
         .unwrap()
         .expect("users collection should exist");
@@ -2069,7 +2101,7 @@ async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
     let mut modified_fields = HashSet::new();
     modified_fields.insert("age".to_string());
     {
-        let txn = handler.db.new_txn(false).await.unwrap();
+        let txn = handler.db().new_txn(false).await.unwrap();
         {
             let datastore = txn.datastore().unwrap();
             let headstore = txn.headstore().unwrap();
@@ -2078,12 +2110,12 @@ async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
                 .save_with_datastore(&datastore, &doc, _doc_short_id)
                 .await
                 .unwrap();
-            crate::block::builder::write_document_blocks(
+            db::block::builder::write_document_blocks(
                 &raw_blockstore,
                 &headstore,
                 &doc,
                 "v1",
-                crate::block::builder::DocStorageIdentity::new(
+                db::block::builder::DocStorageIdentity::new(
                     collection.resolved_root_id(),
                     _doc_short_id,
                 ),
@@ -2110,7 +2142,7 @@ async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
     )
     .unwrap();
     {
-        let txn = handler.db.new_txn(false).await.unwrap();
+        let txn = handler.db().new_txn(false).await.unwrap();
         {
             let mut datastore = txn.datastore().unwrap();
             lww.merge(
@@ -2184,7 +2216,7 @@ async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
     assert_eq!(outcome, MergeOutcome::Merged);
 
     let stored = {
-        let txn = handler.db.new_txn(true).await.unwrap();
+        let txn = handler.db().new_txn(true).await.unwrap();
         let stored = {
             let datastore = txn.datastore().unwrap();
             let systemstore = txn.systemstore().unwrap();
@@ -2204,7 +2236,7 @@ async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
 async fn composite_parent_replay_updates_headstore_for_merged_parent() {
     let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-users")
         .unwrap()
         .expect("users collection should exist");
@@ -2301,11 +2333,11 @@ async fn composite_parent_replay_updates_headstore_for_merged_parent() {
         .unwrap();
     assert_eq!(outcome, MergeOutcome::Merged);
 
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let (head_keys, doc_short_id) = {
         let headstore = txn.headstore().unwrap();
         let systemstore = txn.systemstore().unwrap();
-        let doc_short_id = crate::docid::map::get_doc_ref(&systemstore, &doc_id_str)
+        let doc_short_id = db::docid::map::get_doc_ref(&systemstore, &doc_id_str)
             .await
             .unwrap()
             .expect("merged doc has a short-ID mapping")
@@ -2338,7 +2370,7 @@ async fn composite_parent_replay_updates_headstore_for_merged_parent() {
 async fn deep_composite_parent_chain_merges_on_worker_stack() {
     let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-users")
         .unwrap()
         .expect("users collection should exist");
@@ -2422,7 +2454,7 @@ async fn deep_composite_parent_chain_merges_on_worker_stack() {
     assert_eq!(outcome, MergeOutcome::Merged);
 
     let stored = {
-        let txn = handler.db.new_txn(true).await.unwrap();
+        let txn = handler.db().new_txn(true).await.unwrap();
         let stored = {
             let datastore = txn.datastore().unwrap();
             let systemstore = txn.systemstore().unwrap();
@@ -2483,7 +2515,7 @@ async fn deep_collection_parent_chain_merges_on_worker_stack() {
     assert!(outcome.is_terminal_skip());
     assert_eq!(
         handler
-            .merged_collections
+            .merged_collections()
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .len(),
@@ -2535,7 +2567,7 @@ async fn composite_access_denial_does_not_mark_unreadable_linked_counter_merged(
         signature: None,
     };
     let composite_cid = composite_block.generate_cid().unwrap();
-    let doc_id = crate::block::builder::derive_doc_id(&composite_cid);
+    let doc_id = db::block::builder::derive_doc_id(&composite_cid);
 
     let metadata = BlockMetadata::normal(
         &doc_id,
@@ -2562,16 +2594,16 @@ async fn composite_access_denial_does_not_mark_unreadable_linked_counter_merged(
         !blockstore.is_merged(&field_cid).await.unwrap(),
         "linked field block should stay unmerged when decryption fails and the field is skipped"
     );
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
-    let doc_short_id = crate::docid::map::get_doc_ref(&systemstore, &doc_id)
+    let doc_short_id = db::docid::map::get_doc_ref(&systemstore, &doc_id)
         .await
         .unwrap()
         .unwrap()
         .doc_short_id;
     for owned_cid in [field_cid, encryption_cid] {
         assert_eq!(
-            crate::docid::map::get_doc_ids_for_block(&systemstore, &owned_cid.to_string(),)
+            db::docid::map::get_doc_ids_for_block(&systemstore, &owned_cid.to_string(),)
                 .await
                 .unwrap(),
             vec![doc_id.clone()]
@@ -2719,7 +2751,7 @@ async fn composite_kms_unavailable_rolls_back_and_retries() {
         signature: None,
     };
     let composite_cid = composite_block.generate_cid().unwrap();
-    let doc_id = crate::block::builder::derive_doc_id(&composite_cid);
+    let doc_id = db::block::builder::derive_doc_id(&composite_cid);
     let metadata = BlockMetadata::normal(
         &doc_id,
         "col-users",
@@ -2744,9 +2776,9 @@ async fn composite_kms_unavailable_rolls_back_and_retries() {
     ));
 
     {
-        let txn = handler.db.new_txn(true).await.unwrap();
+        let txn = handler.db().new_txn(true).await.unwrap();
         let systemstore = txn.systemstore().unwrap();
-        assert!(crate::docid::map::get_doc_ref(&systemstore, &doc_id)
+        assert!(db::docid::map::get_doc_ref(&systemstore, &doc_id)
             .await
             .unwrap()
             .is_none());
@@ -2766,13 +2798,13 @@ async fn composite_kms_unavailable_rolls_back_and_retries() {
     assert_eq!(outcome, MergeOutcome::Merged);
 
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-users")
         .unwrap()
         .unwrap();
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
-    let doc_ref = crate::docid::map::get_doc_ref(&systemstore, &doc_id)
+    let doc_ref = db::docid::map::get_doc_ref(&systemstore, &doc_id)
         .await
         .unwrap()
         .expect("successful retry registers document identity");
@@ -2814,7 +2846,7 @@ async fn dek_prefetch_can_restart_after_completion() {
             loop {
                 let calls = kms.calls.load(std::sync::atomic::Ordering::SeqCst);
                 let finished = !handler
-                    .prefetched_dek_cids
+                    .prefetched_dek_cids()
                     .lock()
                     .unwrap()
                     .contains(&enc_cid);
@@ -2939,7 +2971,7 @@ async fn make_handler_with_unique_index_schema() -> (
 async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canonical_pick() {
     let (handler, blockstore) = make_handler_with_unique_index_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-sessions")
         .unwrap()
         .expect("sessions collection should exist");
@@ -2948,7 +2980,7 @@ async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canon
     let mut doc_a = Document::new();
     doc_a.set("name", NormalValue::String("Alice".to_string()));
     doc_a.set("session_id", NormalValue::String("dup-session".to_string()));
-    let result_a = crate::block::builder::build_blocks_from_document(&doc_a, "v1", &blockstore)
+    let result_a = db::block::builder::build_blocks_from_document(&doc_a, "v1", &blockstore)
         .await
         .unwrap();
     let doc_a_id = DocID::from_string(&result_a.doc_id).unwrap();
@@ -2972,7 +3004,7 @@ async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canon
     let mut doc_b = Document::new();
     doc_b.set("name", NormalValue::String("Bob".to_string()));
     doc_b.set("session_id", NormalValue::String("dup-session".to_string()));
-    let result_b = crate::block::builder::build_blocks_from_document(&doc_b, "v1", &blockstore)
+    let result_b = db::block::builder::build_blocks_from_document(&doc_b, "v1", &blockstore)
         .await
         .unwrap();
     let doc_b_id = DocID::from_string(&result_b.doc_id).unwrap();
@@ -3026,7 +3058,7 @@ async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canon
 async fn remote_composite_merge_with_corrupted_unique_index_entry_is_rejected() {
     let (handler, blockstore) = make_handler_with_unique_index_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-sessions")
         .unwrap()
         .expect("sessions collection should exist");
@@ -3036,7 +3068,7 @@ async fn remote_composite_merge_with_corrupted_unique_index_entry_is_rejected() 
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("Alice".to_string()));
     doc.set("session_id", NormalValue::String("dup-session".to_string()));
-    let result = crate::block::builder::build_blocks_from_document(&doc, "v1", &blockstore)
+    let result = db::block::builder::build_blocks_from_document(&doc, "v1", &blockstore)
         .await
         .unwrap();
     let metadata = BlockMetadata::normal(
@@ -3066,7 +3098,7 @@ async fn remote_composite_merge_with_corrupted_unique_index_entry_is_rejected() 
 }
 
 // The pure discrimination between a deterministic unique violation and
-// any other `crate::index::Error` (including other storage failures, which
+// any other `db::index::Error` (including other storage failures, which
 // must keep surfacing as `Err` so the caller retries) is independent of
 // collection/store state, so it is additionally covered directly at the
 // classification seam: see `composite_persist::classify_tests`
@@ -3081,7 +3113,7 @@ async fn build_session_merge_block(
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_string()));
     doc.set("session_id", NormalValue::String(session_id.to_string()));
-    let result = crate::block::builder::build_blocks_from_document(&doc, "v1", blockstore)
+    let result = db::block::builder::build_blocks_from_document(&doc, "v1", blockstore)
         .await
         .unwrap();
     let doc_id = DocID::from_string(&result.doc_id).unwrap();
@@ -3104,7 +3136,7 @@ async fn read_session_doc(
     collection: &Collection,
     doc_id: &DocID,
 ) -> Option<Document> {
-    let txn = handler.db.new_txn(true).await.unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
     let doc = {
         let datastore = txn.datastore().unwrap();
         let systemstore = txn.systemstore().unwrap();
@@ -3143,7 +3175,7 @@ async fn corrupt_unique_index_entry(
     )
     .try_bytes()
     .unwrap();
-    let write_txn = handler.db.new_txn(false).await.unwrap();
+    let write_txn = handler.db().new_txn(false).await.unwrap();
     {
         let datastore = write_txn.datastore().unwrap();
         datastore.set(&corrupted_key, &[]).await.unwrap();
@@ -3169,7 +3201,7 @@ async fn corrupt_unique_index_entry(
 async fn batch_merge_rejects_unique_violation_without_partial_write() {
     let (handler, blockstore) = make_handler_with_unique_index_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-sessions")
         .unwrap()
         .expect("sessions collection should exist");
@@ -3224,7 +3256,7 @@ async fn batch_merge_rejects_unique_violation_without_partial_write() {
 async fn batch_merge_unique_violation_first_still_merges_valid_sibling() {
     let (handler, blockstore) = make_handler_with_unique_index_schema().await;
     let collection = handler
-        .db
+        .db()
         .find_collection_by_id("col-sessions")
         .unwrap()
         .expect("sessions collection should exist");
@@ -3281,7 +3313,7 @@ async fn batch_composite_identity_observes_staged_parent_ownership() {
     };
     let genesis = Block::new(CrdtDelta::Composite(payload(1)), vec![], vec![]);
     let genesis_cid = genesis.generate_cid().unwrap();
-    let doc_id = crate::block::builder::derive_doc_id(&genesis_cid);
+    let doc_id = db::block::builder::derive_doc_id(&genesis_cid);
     let child = Block::new(CrdtDelta::Composite(payload(2)), vec![genesis_cid], vec![]);
     let child_cid = child.generate_cid().unwrap();
 
@@ -3338,7 +3370,7 @@ async fn batch_composite_identity_walk_is_linear_in_ancestry_depth() {
     }
 
     let (tip_cid, tip_block) = tip.expect("chain has a tip");
-    let doc_id = crate::block::builder::derive_doc_id(&genesis_cid.expect("chain has a genesis"));
+    let doc_id = db::block::builder::derive_doc_id(&genesis_cid.expect("chain has a genesis"));
     let results = handler
         .try_batch_merge(&[composite_merge_block(tip_cid, &tip_block, &doc_id)])
         .await
@@ -3378,8 +3410,8 @@ fn merge_depth_policy_accepts_last_supported_depth_and_rejects_limit() {
     ));
 
     let custom_handler = DbMergeHandler::new_with_max_merge_depth(
-        handler.db.clone(),
-        handler.blockstore.clone(),
+        handler.db().clone(),
+        handler.blockstore().clone(),
         17,
     );
     assert!(custom_handler.ensure_merge_depth(&cid, 16).is_ok());
@@ -3393,8 +3425,8 @@ fn merge_depth_policy_accepts_last_supported_depth_and_rejects_limit() {
 async fn composite_identity_uses_merge_depth_policy() {
     let (handler, blockstore) = make_handler();
     let handler = DbMergeHandler::new_with_max_merge_depth(
-        handler.db.clone(),
-        handler.blockstore.clone(),
+        handler.db().clone(),
+        handler.blockstore().clone(),
         17,
     );
     let payload = |priority| CompositeDeltaPayload {
@@ -3485,7 +3517,7 @@ fn resolve_composite_doc_id_walks_deep_ancestry_on_a_small_stack() {
                     .resolve_composite_doc_id(&parent_cid, &tip_block, 0)
                     .await
                     .expect("deep ancestry must resolve without overflowing the stack");
-                assert_eq!(resolved, crate::block::builder::derive_doc_id(&genesis_cid));
+                assert_eq!(resolved, db::block::builder::derive_doc_id(&genesis_cid));
             });
         })
         .unwrap()
@@ -3553,7 +3585,7 @@ async fn resolve_composite_doc_id_explores_first_head_before_probing_later_sibli
         .unwrap();
     assert_eq!(
         resolved,
-        crate::block::builder::derive_doc_id(&first_head_cid),
+        db::block::builder::derive_doc_id(&first_head_cid),
         "the first head's subtree must resolve before any later sibling is probed"
     );
 }

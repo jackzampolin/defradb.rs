@@ -1,7 +1,9 @@
 //! Tests for the multi-collection delete orchestrator (Go #4688 parity).
 
 use db::database::DB;
-use schema::{CollectionVersion, FieldDescription, FieldKind};
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
 use storage::backends::MemoryStore;
 
 fn user_schema() -> CollectionVersion {

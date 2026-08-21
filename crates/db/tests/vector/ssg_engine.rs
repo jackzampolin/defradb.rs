@@ -1,11 +1,16 @@
 //! The SSG engine: building from HNSW layer 0, and searching one flat layer.
 
 use db::index::vector::core::Metric;
-use db::index::vector::engine::ann::{EngineKind, VectorIndexEngine};
+use db::index::vector::engine::ann::EngineKind;
+use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
-use db::index::vector::engine::ssg::{Ssg, SsgParams};
-use db::index::vector::params::{Params, DEFAULT_M};
-use db::index::vector::store::{MemoryNodeStore, NodeId};
+use db::index::vector::engine::ssg::Ssg;
+use db::index::vector::engine::ssg::SsgParams;
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::NodeId;
+use std::collections::HashSet;
 
 const SEED: u64 = 0x0559_6EED;
 const DIMENSIONS: usize = 16;
@@ -130,8 +135,6 @@ async fn no_node_exceeds_the_degree_cap() {
 /// every node reachable from the entry point.
 #[tokio::test]
 async fn every_node_is_reachable_from_the_entry_point() {
-    use std::collections::HashSet;
-
     let mut corpus = crate::support::Corpus::new(SEED ^ 0x22);
     let vectors = corpus.clustered(300, DIMENSIONS, 8, 0.2);
     let mut index = filled(SsgParams::default(), &vectors).await;

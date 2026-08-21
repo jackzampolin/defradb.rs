@@ -1,9 +1,13 @@
 //! Metrics must be distances (smaller is closer), total (no error, no panic,
 //! for any input) and orderable (never NaN), at both element widths.
 
-use db::index::vector::core::{
-    norm, normalize, squared_norm, Element, Metric, MAX_COSINE_DISTANCE, NORM_THRESHOLD,
-};
+use db::index::vector::core::norm;
+use db::index::vector::core::normalize;
+use db::index::vector::core::squared_norm;
+use db::index::vector::core::Element;
+use db::index::vector::core::Metric;
+use db::index::vector::core::MAX_COSINE_DISTANCE;
+use db::index::vector::core::NORM_THRESHOLD;
 
 const METRICS: [Metric; 3] = [Metric::Cosine, Metric::Euclidean, Metric::NegativeDot];
 

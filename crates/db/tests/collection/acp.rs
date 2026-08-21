@@ -1,15 +1,26 @@
 //! Tests for collection_acp module.
 
-use std::sync::Arc;
-
-use acp::{DocumentACP, DocumentPermission, Identity, LocalDocumentACP, MemoryAcpStore};
-use db::collection::acp::{
-    block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
-    register_collection_if_needed, register_doc_if_needed, warn_on_unsafe_policy_transition,
-    AcpContext,
-};
+use acp::AcpStore;
+use acp::DocumentACP;
+use acp::DocumentPermission;
+use acp::Identity;
+use acp::LocalDocumentACP;
+use acp::MemoryAcpStore;
+use acp::RelationTuple;
+use acp::UPDATER_RELATION;
+use db::collection::acp::block_unsafe_policy_transition;
+use db::collection::acp::check_doc_permission;
+use db::collection::acp::check_policy_transition;
+use db::collection::acp::register_collection_if_needed;
+use db::collection::acp::register_doc_if_needed;
+use db::collection::acp::warn_on_unsafe_policy_transition;
+use db::collection::acp::AcpContext;
 use identity::Did;
-use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
+use schema::PolicyDescription;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
 
 fn test_did() -> Did {
@@ -891,7 +902,6 @@ async fn test_writer_relation_is_not_recognized() {
     // Go DefraDB uses only owner/reader/updater/deleter relations.
     // A "writer" relation (which used to be checked in local.rs) must not
     // grant Update or Read access.
-    use acp::{AcpStore, RelationTuple, UPDATER_RELATION};
 
     let store = Arc::new(MemoryAcpStore::new());
     let acp = LocalDocumentACP::new(store.clone());

@@ -41,14 +41,14 @@ impl CompositePostCommitAction for RegisterReplicatedDocAction {
     }
 }
 
-struct AcpCompositeMergeHook {
+pub struct AcpCompositeMergeHook {
     document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
     local_identity: Option<Identity>,
     strict_replicated_doc_access: AtomicBool,
 }
 
 impl AcpCompositeMergeHook {
-    fn new(local_identity: Option<Identity>) -> Self {
+    pub fn new(local_identity: Option<Identity>) -> Self {
         Self {
             document_acp: std::sync::OnceLock::new(),
             local_identity,
@@ -56,11 +56,11 @@ impl AcpCompositeMergeHook {
         }
     }
 
-    fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
+    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
         let _ = self.document_acp.set(acp);
     }
 
-    fn set_strict_replicated_doc_access(&self, strict: bool) {
+    pub fn set_strict_replicated_doc_access(&self, strict: bool) {
         self.strict_replicated_doc_access
             .store(strict, Ordering::Relaxed);
     }
@@ -284,59 +284,5 @@ where
         blocks: &[MergeBlock],
     ) -> Vec<Result<MergeOutcome, Self::Error>> {
         self.inner.handle_block_batch(blocks).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use acp::{LocalDocumentACP, MemoryAcpStore};
-    use schema::PolicyDescription;
-
-    fn protected_collection() -> CollectionVersion {
-        CollectionVersion::new("Users", "v1", "col1", vec![])
-            .with_policy(PolicyDescription::new("policy-1", "users"))
-    }
-
-    fn hook(strict: bool) -> AcpCompositeMergeHook {
-        let hook = AcpCompositeMergeHook::new(None);
-        hook.set_document_acp(Arc::new(LocalDocumentACP::new(Arc::new(
-            MemoryAcpStore::new(),
-        ))));
-        hook.set_strict_replicated_doc_access(strict);
-        hook
-    }
-
-    #[tokio::test]
-    async fn local_acp_allows_unregistered_encrypted_document() {
-        let result = hook(false)
-            .on_encrypted_link(
-                "doc1",
-                &protected_collection(),
-                &BlockMetadata::normal("doc1", "col1", "creator", Some("peer"), false),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn strict_acp_retries_unregistered_encrypted_document() {
-        let result = hook(true)
-            .on_encrypted_link(
-                "doc1",
-                &protected_collection(),
-                &BlockMetadata::normal("doc1", "col1", "creator", Some("peer"), false),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result,
-            Some(MergeOutcome::retryable_skip(
-                "encrypted replicated document is not yet registered in local ACP",
-            ))
-        );
     }
 }

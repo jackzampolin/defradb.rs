@@ -8,10 +8,8 @@
 //! - `write_document_blocks`: For FFI/local storage (uses transaction stores)
 
 mod build;
-mod collection;
+pub mod collection;
 mod compute;
-#[cfg(test)]
-mod tests;
 mod write;
 
 pub use build::build_blocks_from_document;
@@ -78,7 +76,7 @@ pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
 ///
 /// Pure function: returns `(sig_cid, sig_cbor_bytes)` for the caller to store.
 /// Returns `None` for field blocks with priority > 1 (not signed per Go behavior).
-pub(crate) fn compute_signature(
+pub fn compute_signature(
     block: &Block,
     signer: &SigningConfig,
 ) -> Result<Option<(Cid, Vec<u8>)>, String> {
@@ -211,7 +209,7 @@ pub struct BlockResult {
 }
 
 /// Encode a NormalValue as CBOR bytes.
-pub(crate) fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
+pub fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)
         .map_err(|e| format!("Failed to encode value as CBOR: {}", e))?;

@@ -1,17 +1,20 @@
 //! Tests for schema_loader module.
 
 use crate::common::fixture::new_txn;
-use std::sync::Arc;
-
 use datastore::BasicTxn;
 use db::database::DB;
 use db::definition::loader::load_active_collections;
 use db::txn::DbTxn;
-use lens::{LensConfig, LensModule};
-use schema::{CollectionVersion, ORPHAN_COLLECTION_ID};
+use lens::LensConfig;
+use lens::LensModule;
+use schema::CollectionVersion;
+use schema::ORPHAN_COLLECTION_ID;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
-use storage::keys::systemstore::{CollectionID, CollectionKey, CollectionNameKey};
+use storage::keys::systemstore::CollectionID;
+use storage::keys::systemstore::CollectionKey;
+use storage::keys::systemstore::CollectionNameKey;
 
 #[tokio::test]
 async fn test_load_empty_database() {

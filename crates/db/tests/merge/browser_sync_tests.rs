@@ -1,18 +1,26 @@
-use std::sync::Arc;
-
 use cid::Cid;
+use crypto::PrivateKey as _;
+use db::merge::browser_sync::BrowserSyncEngine;
+use db::merge::browser_sync::BrowserSyncError;
 use defra_core::block::generate_cid_from_bytes;
-use defra_core::browser_sync::{
-    BrowserSyncBlock, BrowserSyncDocument, MAX_SYNC_BLOCKS_PER_DOCUMENT,
-    MAX_SYNC_ROOTS_PER_DOCUMENT,
-};
-use defra_core::{Block, CrdtDelta, Signature, SignatureHeader, SignatureType};
-use document::{DocID, Document, NormalValue};
+use defra_core::browser_sync::BrowserSyncBlock;
+use defra_core::browser_sync::BrowserSyncDocument;
+use defra_core::browser_sync::MAX_SYNC_BLOCKS_PER_DOCUMENT;
+use defra_core::browser_sync::MAX_SYNC_ROOTS_PER_DOCUMENT;
+use defra_core::Block;
+use defra_core::CrdtDelta;
+use defra_core::Signature;
+use defra_core::SignatureHeader;
+use defra_core::SignatureType;
+use document::DocID;
+use document::Document;
+use document::NormalValue;
 use query::mutator::DocMutator;
-use schema::{CollectionVersion, FieldDescription, FieldKind};
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
-
-use super::{BrowserSyncEngine, BrowserSyncError};
 
 fn users_schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -62,7 +70,7 @@ fn replace_wire_block(document: &mut BrowserSyncDocument, old_cid: &str, block: 
 
 #[test]
 fn validation_distinguishes_empty_and_over_limit_counts() {
-    let database = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     let sync = BrowserSyncEngine::new(database);
     let block = BrowserSyncBlock {
         cid: "cid".into(),
@@ -102,14 +110,14 @@ fn validation_distinguishes_empty_and_over_limit_counts() {
 
 #[tokio::test]
 async fn document_round_trip_uses_crdt_blocks() {
-    let source = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     source.create_collection(users_schema()).await.unwrap();
     target.create_collection(users_schema()).await.unwrap();
 
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(source.clone())
+    let created = db::AutoCommitMutator::new(source.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -148,11 +156,11 @@ async fn document_round_trip_uses_crdt_blocks() {
 
 #[tokio::test]
 async fn rejects_forged_document_id_before_merge() {
-    let source = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     source.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(source.clone())
+    let created = db::AutoCommitMutator::new(source.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -171,11 +179,11 @@ async fn rejects_forged_document_id_before_merge() {
 
 #[tokio::test]
 async fn alias_lookup_uses_canonical_document_id() {
-    let database = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(database.clone())
+    let created = db::AutoCommitMutator::new(database.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -184,14 +192,14 @@ async fn alias_lookup_uses_canonical_document_id() {
     let canonical_ref = sync.document_ref(&canonical_doc_id).await.unwrap().unwrap();
 
     let txn = sync.database().new_txn(false).await.unwrap();
-    crate::docid::map::set_doc_id_alias(
+    db::docid::map::set_doc_id_alias(
         &txn.systemstore().unwrap(),
         sync.database()
             .get_collection("Users")
             .unwrap()
             .unwrap()
             .resolved_root_id(),
-        canonical_ref.doc_short_id,
+        canonical_ref.doc_short_id(),
         "legacy-user-id",
     )
     .await
@@ -205,12 +213,12 @@ async fn alias_lookup_uses_canonical_document_id() {
 
 #[tokio::test]
 async fn rejects_field_block_from_another_collection() {
-    let database = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     database.create_collection(admins_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(database.clone())
+    let created = db::AutoCommitMutator::new(database.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -235,7 +243,7 @@ async fn rejects_field_block_from_another_collection() {
     root.links.as_mut().unwrap()[0].link = field_cid;
     let root_cid = replace_wire_block(&mut wire_document, &old_root, &root);
     wire_document.roots[0] = root_cid.to_string();
-    wire_document.doc_id = crate::block::builder::derive_doc_id(&root_cid);
+    wire_document.doc_id = db::block::builder::derive_doc_id(&root_cid);
 
     let Err(error) = sync.validate_document(&wire_document) else {
         panic!("cross-collection field block was accepted");
@@ -245,11 +253,11 @@ async fn rejects_field_block_from_another_collection() {
 
 #[tokio::test]
 async fn rejects_field_link_name_mismatch() {
-    let database = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(database.clone())
+    let created = db::AutoCommitMutator::new(database.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -266,7 +274,7 @@ async fn rejects_field_link_name_mismatch() {
     root.links.as_mut().unwrap()[0].name = "email".into();
     let root_cid = replace_wire_block(&mut wire_document, &old_root, &root);
     wire_document.roots[0] = root_cid.to_string();
-    wire_document.doc_id = crate::block::builder::derive_doc_id(&root_cid);
+    wire_document.doc_id = db::block::builder::derive_doc_id(&root_cid);
 
     let Err(error) = sync.validate_document(&wire_document) else {
         panic!("mismatched field link was accepted");
@@ -276,11 +284,11 @@ async fn rejects_field_link_name_mismatch() {
 
 #[tokio::test]
 async fn validation_accepts_reachable_signature_blocks() {
-    let database = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(database.clone())
+    let created = db::AutoCommitMutator::new(database.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -292,7 +300,6 @@ async fn validation_accepts_reachable_signature_blocks() {
         .unwrap();
     let mut wire_document = sync.load_document(&document_ref).await.unwrap().unwrap();
 
-    use crypto::PrivateKey as _;
     let old_root = wire_document.roots[0].clone();
     let root = wire_document
         .blocks
@@ -319,7 +326,7 @@ async fn validation_accepts_reachable_signature_blocks() {
     root.cid = root_cid.to_string();
     root.data = hex::encode(root_data);
     wire_document.roots[0] = root_cid.to_string();
-    wire_document.doc_id = crate::block::builder::derive_doc_id(&root_cid);
+    wire_document.doc_id = db::block::builder::derive_doc_id(&root_cid);
     wire_document.blocks.push(BrowserSyncBlock {
         cid: signature_cid.to_string(),
         data: hex::encode(signature_data),
@@ -335,11 +342,11 @@ async fn validation_accepts_reachable_signature_blocks() {
 
 #[tokio::test]
 async fn validation_rejects_forged_genesis_signature() {
-    let database = Arc::new(crate::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
-    let created = crate::AutoCommitMutator::new(database.clone())
+    let created = db::AutoCommitMutator::new(database.clone())
         .create("Users", document)
         .await
         .unwrap();
@@ -367,7 +374,7 @@ async fn validation_rejects_forged_genesis_signature() {
     root.cid = root_cid.to_string();
     root.data = hex::encode(root_data);
     wire_document.roots[0] = root_cid.to_string();
-    wire_document.doc_id = crate::block::builder::derive_doc_id(&root_cid);
+    wire_document.doc_id = db::block::builder::derive_doc_id(&root_cid);
     wire_document.blocks.push(BrowserSyncBlock {
         cid: signature_cid.to_string(),
         data: hex::encode(signature_data),

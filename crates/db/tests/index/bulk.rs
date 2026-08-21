@@ -1,15 +1,23 @@
 //! Backfill pulls one document at a time.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use db::database::DB;
 use db::index::error::Result;
-use db::index::manager::{DocumentSource, SliceSource};
+use db::index::manager::DocumentSource;
+use db::index::manager::SliceSource;
 use db::index::IndexManager;
-use document::{Document, NormalValue};
-use schema::{CollectionVersion, FieldDescription, FieldKind, IndexedFieldDescription};
+use db::BackfillSource;
+use db::DbDocMutator;
+use document::Document;
+use document::NormalValue;
+use query::mutator::DocMutator;
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
+use schema::IndexedFieldDescription;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
 
 fn schema() -> CollectionVersion {
@@ -175,10 +183,6 @@ async fn an_empty_source_indexes_nothing() {
 /// `BackfillSource` over a real collection: the path index creation uses.
 #[tokio::test]
 async fn the_collection_source_streams_every_live_document() {
-    use db::{BackfillSource, DbDocMutator};
-    use query::mutator::DocMutator;
-    use std::sync::Arc;
-
     let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
     db.create_collection(schema()).await.unwrap();
 

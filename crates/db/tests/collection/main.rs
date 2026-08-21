@@ -1,5 +1,4 @@
 //! Collection CRUD, caching, naming, ACP and deletion.
-
 #[path = "../common/mod.rs"]
 mod common;
 

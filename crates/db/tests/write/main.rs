@@ -1,5 +1,4 @@
 //! The write path: mutators and the document write queue.
-
 #[path = "../common/mod.rs"]
 mod common;
 

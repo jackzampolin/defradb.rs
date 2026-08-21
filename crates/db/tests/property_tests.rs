@@ -8,10 +8,15 @@
 mod common;
 
 use crate::common::fixture::next_test_doc_short_id;
-use db::{IndexManager, DB};
-use document::{Document, NormalValue};
+use db::IndexManager;
+use db::DB;
+use document::Document;
+use document::NormalValue;
 use proptest::prelude::*;
-use schema::{CollectionVersion, FieldDescription, FieldKind, IndexedFieldDescription};
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
+use schema::IndexedFieldDescription;
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
 

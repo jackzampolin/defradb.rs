@@ -108,7 +108,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
     ///
     /// If any block fails, the entire transaction is rolled back and the caller
     /// should fall back to per-block processing.
-    pub(crate) async fn try_batch_merge(
+    pub async fn try_batch_merge(
         &self,
         blocks: &[MergeBlock],
     ) -> Result<Vec<Result<MergeOutcome, MergeError>>, MergeError> {

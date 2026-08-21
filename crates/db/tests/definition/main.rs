@@ -1,5 +1,4 @@
 //! Schema loading, patching, lens migration and index format.
-
 #[path = "../common/mod.rs"]
 mod common;
 

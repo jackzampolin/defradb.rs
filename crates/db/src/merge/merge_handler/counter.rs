@@ -2,7 +2,7 @@ use super::*;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Counter delta from a block (standalone, with its own transaction).
-    pub(crate) async fn process_counter_delta(
+    pub async fn process_counter_delta(
         &self,
         cid: &Cid,
         payload: &defra_core::block::CounterDeltaPayload,
@@ -178,7 +178,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Counter delta within an existing transaction, returning the merge result
     /// and the accumulated value for document reconstruction.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn process_counter_delta_in_txn(
+    pub async fn process_counter_delta_in_txn(
         &self,
         datastore: &mut NamespaceView,
         headstore: &NamespaceView,

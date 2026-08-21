@@ -32,6 +32,13 @@ pub struct BrowserSyncDocumentRef {
     doc_short_id: u64,
 }
 
+impl BrowserSyncDocumentRef {
+    /// Node-local short id of the referenced document.
+    pub fn doc_short_id(&self) -> u64 {
+        self.doc_short_id
+    }
+}
+
 pub struct ValidatedBrowserSyncDocument {
     doc_id: String,
     collection_id: String,
@@ -328,6 +335,3 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             .map_err(|error| BrowserSyncError::Storage(error.to_string()))
     }
 }
-
-#[cfg(test)]
-mod tests;

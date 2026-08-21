@@ -1,9 +1,13 @@
 //! The index's private blob space, over both store implementations.
 
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::store::{MemoryNodeStore, Node, NodeId, VectorNodeStore};
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::Node;
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use storage::backends::MemoryStore;
-use storage::corekv::{Store, Txn};
+use storage::corekv::Store;
+use storage::corekv::Txn;
 
 const COLLECTION: u32 = 41;
 const INDEX: u32 = 9;

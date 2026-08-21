@@ -1,5 +1,4 @@
 //! The read path: fetchers, seeks, lens-applied reads and vector routing.
-
 #[path = "../common/mod.rs"]
 mod common;
 

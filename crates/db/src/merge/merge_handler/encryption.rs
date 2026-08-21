@@ -33,7 +33,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// (proofs/tests/behavioral/kms.rs). The prefetch runs detached so the
     /// merge path never blocks on it; on success the reply handler caches the
     /// key in the local store.
-    pub(crate) fn spawn_dek_prefetch(&self, enc_cid: Cid, metadata: &BlockMetadata<'_>) {
+    pub fn spawn_dek_prefetch(&self, enc_cid: Cid, metadata: &BlockMetadata<'_>) {
         let Some(kms) = self.kms() else {
             return;
         };
@@ -84,7 +84,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         }
     }
 
-    pub(crate) async fn decrypt_block_data(
+    pub async fn decrypt_block_data(
         &self,
         data: &[u8],
         encryption_cid: Option<&Cid>,

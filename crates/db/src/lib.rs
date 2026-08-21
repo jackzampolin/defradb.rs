@@ -21,7 +21,7 @@
 /// # Example
 ///
 /// ```ignore
-/// use crate::{DB, Collection};
+/// use db::{DB, Collection};
 /// use document::Document;
 /// use storage::backends::MemoryStore;
 ///
@@ -42,9 +42,6 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
-// Backup extracted to standalone db-backup crate (#789). Callers now
-// import directly from `crate::backup::*`.
-// Block builder extracted to standalone db-blocks crate for parallel compilation.
 pub mod access;
 pub mod backup;
 pub mod block;
@@ -53,7 +50,6 @@ pub use collection::stream::BackfillSource;
 pub mod database;
 // Definition validation moved to the `schema` crate (was #791 substitute
 // slice) — see `schema::definition_validation`.
-// dense_search and embedding extracted to standalone db-search crate (Phase 6 of #796).
 pub mod definition;
 pub mod docid;
 pub mod downsample;
@@ -61,18 +57,24 @@ pub mod error;
 pub mod event;
 pub mod index;
 pub use event::emission::{TxnBroadcastEvent, TxnBroadcaster};
-// Index manager extracted to standalone db-index crate.
 pub mod merge;
 pub mod nac;
 pub mod read;
 pub mod search;
-// NAC extracted to standalone db-nac crate.
 pub mod txn;
 pub(crate) mod view;
 pub mod write;
 
 // Re-export commonly used types
 pub use crate::block::builder::{build_blocks_from_document, BlockResult};
+pub use crate::search::{
+    embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,
+    DenseHybridSearchRequest, DenseHybridSearchResponse,
+};
+pub use access::kms::{
+    DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
+};
+pub use access::node::{node_access_checker, NodeAccessChecker};
 pub use collection::acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
     register_collection_if_needed, register_doc_if_needed, unregister_doc_if_needed,
@@ -89,28 +91,17 @@ pub use database::{
     DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES,
     DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE,
 };
-pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
-pub use defra_core::{Action, ActionExecution, ActionStatus};
-pub use read::autocommit::AutoCommitFetcher;
-pub use read::commits::{CommitsFetcher, CommitsQueryOptions};
-pub use write::autocommit::AutoCommitMutator;
-pub use write::queue::DocWriteQueue;
-// dense_search items re-exported transparently from db-search
-pub use crate::search::{
-    embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,
-    DenseHybridSearchRequest, DenseHybridSearchResponse,
-};
-pub use access::kms::{
-    DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
-};
-pub use access::node::{node_access_checker, NodeAccessChecker};
 pub use definition::loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,
 };
+pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
+pub use defra_core::{Action, ActionExecution, ActionStatus};
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index::{BulkIndexResult, IndexManager};
+pub use read::autocommit::AutoCommitFetcher;
+pub use read::commits::{CommitsFetcher, CommitsQueryOptions};
 pub use read::doc::DbDocFetcher;
 pub use read::lensed::autocommit::LensedAutoCommitFetcher;
 pub use read::lensed::fetcher::LensedDocFetcher;
@@ -122,10 +113,9 @@ pub use txn::registry::{
 };
 pub use txn::DbTxn;
 pub use view::ops::{is_refreshable_view, RefreshViewsOptions};
+pub use write::autocommit::AutoCommitMutator;
 pub use write::doc::DbDocMutator;
-
-// P2P merge/sync extracted to standalone db-merge crate.
-// Consumer crates (cli, embedded, defra-node, ffi) should depend on db-merge directly.
+pub use write::queue::DocWriteQueue;
 
 // NAC exports
 #[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]

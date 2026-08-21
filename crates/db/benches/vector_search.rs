@@ -1,7 +1,7 @@
 //! Query cost across every vector index kind, and the kernels underneath.
 //!
 //! ```text
-//! cargo bench -p db-index --bench vector_search
+//! cargo bench -p db --bench vector_search
 //! ```
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

@@ -3,7 +3,11 @@
 //! run depends on the machine: `Tier::is_available` decides, and every failure
 //! message names the tier it came from.
 
-use db::index::vector::core::{dot, squared_euclidean, Element, Tier, ALL_TIERS};
+use db::index::vector::core::dot;
+use db::index::vector::core::squared_euclidean;
+use db::index::vector::core::Element;
+use db::index::vector::core::Tier;
+use db::index::vector::core::ALL_TIERS;
 
 /// Runs `check` for every physical width a vector field can hold.
 macro_rules! for_every_width {

@@ -648,19 +648,3 @@ pub async fn write_delete_block(
         encryption_cids: vec![],
     })
 }
-
-#[cfg(test)]
-#[path = "write_encryption_tests.rs"]
-mod encryption_derivation_tests;
-
-#[cfg(test)]
-#[path = "write_kms_tests.rs"]
-mod kms_write_tests;
-
-#[cfg(test)]
-#[path = "write_counter_tests.rs"]
-mod counter_write_tests;
-
-#[cfg(test)]
-#[path = "write_priority_tests.rs"]
-mod priority_write_tests;

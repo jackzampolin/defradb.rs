@@ -63,7 +63,9 @@ fn read_fvecs(path: &Path) -> Option<Vec<Vec<f32>>> {
         }
         out.push(
             bytes[at..end]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect(),
         );
@@ -85,7 +87,9 @@ fn read_ivecs(path: &Path) -> Option<Vec<Vec<u32>>> {
         }
         out.push(
             bytes[at..end]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect(),
         );

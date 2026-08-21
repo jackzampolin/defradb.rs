@@ -10,7 +10,7 @@
 //! as `BroadcastStatus::Failed` instead of silently dropping delivery ownership.
 
 mod batch;
-pub(crate) mod broadcast;
+pub mod broadcast;
 
 use async_trait::async_trait;
 use blockstore::Blockstore;

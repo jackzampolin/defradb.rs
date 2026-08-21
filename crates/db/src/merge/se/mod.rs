@@ -26,14 +26,14 @@
 //!
 //! This implementation matches Go DefraDB's `internal/se/` package.
 
-mod artifact_gen;
+pub mod artifact_gen;
 #[cfg(not(target_arch = "wasm32"))]
-mod coordinator;
+pub mod coordinator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod receiver;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod serve;
-mod storage;
+pub mod storage;
 pub mod validate;
 
 #[allow(unused_imports)]

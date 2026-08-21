@@ -7,13 +7,13 @@ use super::MergeError;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub(crate) trait CompositePostCommitAction: MaybeSend {
+pub trait CompositePostCommitAction: MaybeSend {
     async fn run(self: Box<Self>) -> Result<(), MergeError>;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub(crate) trait CompositeMergeHook: MaybeSendSync {
+pub trait CompositeMergeHook: MaybeSendSync {
     async fn on_protected_composite(
         &self,
         _doc_id: &str,

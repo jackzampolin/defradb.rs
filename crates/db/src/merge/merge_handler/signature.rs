@@ -14,7 +14,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// - `Ok(Some(identity))` -- signature valid, identity is the verified signer
     /// - `Ok(None)` -- unsigned block or BLS (unsupported), proceed with warning
     /// - `Err(SignatureVerificationFailed)` -- invalid signature, block MUST be rejected
-    pub(crate) async fn verify_block_signature(
+    pub async fn verify_block_signature(
         &self,
         cid: &Cid,
         block: &Block,

@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! just setup-sift
-//! cargo bench -p db-index --bench sift
+//! cargo bench -p db --bench sift
 //! ```
 //!
 //! Recall is printed rather than asserted, because a benchmark is not a gate.

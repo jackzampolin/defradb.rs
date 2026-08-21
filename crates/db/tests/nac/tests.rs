@@ -3,8 +3,8 @@ mod unit_tests {
     use acp::nac::{NacStatus, NodePermission};
     use identity::Did;
 
-    use super::super::factory::create_memory_nac_manager;
-    use super::super::NacConfig;
+    use db::nac::factory::create_memory_nac_manager;
+    use db::nac::NacConfig;
 
     fn test_did() -> Did {
         Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()

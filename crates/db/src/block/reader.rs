@@ -1,7 +1,4 @@
-//! Block reading utilities that depend on the DB type.
-//!
-//! These functions are kept in the `db` crate (not `db-blocks`) because they
-//! need access to `DB` and `DbTxn` which would create a circular dependency.
+//! Reading committed blocks and their deltas through `DB` / `DbTxn`.
 
 use crate::block::builder::{get_all_field_heads, BlockResult};
 use document::{DocID, Document};

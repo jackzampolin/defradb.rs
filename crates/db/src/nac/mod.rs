@@ -1,19 +1,7 @@
-//! Node Access Control (NAC) state management.
-//!
-//! This crate provides the NAC manager that wraps the `NodeACP` from the `acp` crate
-//! and adds config-aware behavior for the database layer.
-//!
-//! # NAC Lifecycle
-//!
-//! 1. Node starts with NAC disabled (default) - all operations allowed
-//! 2. Admin enables NAC with `--node-acp-enable` flag
-//! 3. Owner identity is bootstrapped from keyring
-//! 4. NAC enforces permissions for node operations
+//! Node Access Control state, factory and trait wiring.
 
 pub mod error;
 pub mod factory;
-#[cfg(test)]
-mod tests;
 mod trait_impl;
 
 pub use error::{Error, Result};

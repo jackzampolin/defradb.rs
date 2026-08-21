@@ -1,7 +1,4 @@
-//! P2P merge, broadcast, and document pushing for DefraDB.
-//!
-//! This crate contains all P2P-related database logic that was previously
-//! behind `#[cfg(feature = "p2p")]` in the `db` crate.
+//! P2P merge, broadcast, document push and searchable-encryption artifacts.
 
 pub mod acp_merge_handler;
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,9 +13,9 @@ pub mod peer_identity;
 pub mod push_docs;
 pub mod push_docs_common;
 #[cfg(not(target_arch = "wasm32"))]
-mod push_docs_creator;
+pub mod push_docs_creator;
 #[cfg(not(target_arch = "wasm32"))]
-mod push_docs_replay;
+pub mod push_docs_replay;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod replication;
 pub mod se;

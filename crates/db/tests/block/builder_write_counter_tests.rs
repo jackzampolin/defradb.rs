@@ -1,6 +1,10 @@
-use super::*;
-use datastore::{NamespaceView, SharedTxn};
+use cid::Cid;
+use datastore::NamespaceView;
+use datastore::SharedTxn;
+use db::block::builder::*;
 use document::CType;
+use document::Document;
+use document::NormalValue;
 use std::collections::HashSet;
 use storage::backends::MemoryStore;
 use storage::corekv::Store;

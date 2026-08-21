@@ -7,8 +7,10 @@
 //! name plus `get_inactive` reach an inactive version at all. A single flat
 //! AND over the four selectors gets both wrong.
 
-use db::{is_refreshable_view, RefreshViewsOptions};
-use schema::{CollectionVersion, QuerySource};
+use db::is_refreshable_view;
+use db::RefreshViewsOptions;
+use schema::CollectionVersion;
+use schema::QuerySource;
 
 fn view(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
     CollectionVersion::new(name, version_id, collection_id, vec![])

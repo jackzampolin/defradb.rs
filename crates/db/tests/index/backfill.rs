@@ -7,10 +7,14 @@ use crate::common::schema::COLLECTION_SHORT_ID;
 use crate::common::schema::DIMENSIONS;
 use db::database::DB;
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::store::{NodeId, VectorNodeStore};
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use db::index::IndexManager;
-use document::{Document, NormalValue};
+use document::Document;
+use document::NormalValue;
 use schema::IndexedFieldDescription;
+use sha2::Digest;
+use sha2::Sha256;
 use storage::backends::MemoryStore;
 
 /// A spread of directions, so no two documents collapse onto one point.
@@ -243,7 +247,6 @@ async fn merged_documents_are_indexed() {
 /// Merged documents carry ids from the writing node; any stable distinct id
 /// serves here.
 fn merge_doc_id(short_id: u64) -> document::DocID {
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(format!("merged-{short_id}").as_bytes());
     let mh: multihash::Multihash<64> =

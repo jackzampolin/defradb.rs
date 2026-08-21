@@ -2,9 +2,16 @@
 //!
 //! Split out of `write.rs` to keep that file within the repo's size guidance.
 
-use super::*;
-use datastore::{NamespaceView, SharedTxn};
+use cid::Cid;
+use datastore::NamespaceView;
+use datastore::SharedTxn;
+use db::block::builder::encode_value_as_cbor;
+use db::block::builder::*;
+use defra_core::block::Block;
+use defra_core::block::CrdtDelta;
 use defra_core::encryption::EncryptionConfig;
+use document::Document;
+use document::NormalValue;
 use std::collections::HashSet;
 use storage::backends::MemoryStore;
 use storage::corekv::Store;

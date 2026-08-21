@@ -3,14 +3,18 @@
 use db::index::vector::engine::ann::EngineKind;
 use db::index::vector::index::VectorIndex;
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::store::{NodeId, VectorNodeStore};
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use document::NormalValue;
-use schema::{
-    DistanceMetric, HnswParams, IndexDescription, IndexedFieldDescription, VectorAlgorithm,
-    VectorIndexDescription,
-};
+use schema::DistanceMetric;
+use schema::HnswParams;
+use schema::IndexDescription;
+use schema::IndexedFieldDescription;
+use schema::VectorAlgorithm;
+use schema::VectorIndexDescription;
 use storage::backends::MemoryStore;
-use storage::corekv::{Store, Txn};
+use storage::corekv::Store;
+use storage::corekv::Txn;
 use storage::index::CollectionIndex;
 
 const COLLECTION: u32 = 21;

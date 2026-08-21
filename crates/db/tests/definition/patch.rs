@@ -1,6 +1,9 @@
 use db::database::DB;
-use lens::{LensConfig, LensModule, TransformId};
-use schema::{FieldKind, ScalarArrayKind};
+use lens::LensConfig;
+use lens::LensModule;
+use lens::TransformId;
+use schema::FieldKind;
+use schema::ScalarArrayKind;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::LensConfigKey;

@@ -1,8 +1,18 @@
-use super::*;
-use blockstore::{Blockstore, DefraBlockstore};
+use blockstore::Blockstore;
+use blockstore::DefraBlockstore;
+use cid::Cid;
 use crypto::keys::Key;
+use crypto::PrivateKey;
+use db::block::builder::compute_signature;
+use db::block::builder::*;
+use defra_core::block::Block;
+use defra_core::block::CompositeDeltaPayload;
+use defra_core::block::CrdtDelta;
 use defra_core::encryption::EncryptionConfig;
-use std::sync::{Arc, Mutex};
+use document::Document;
+use document::NormalValue;
+use std::sync::Arc;
+use std::sync::Mutex;
 use storage::backends::MemoryStore;
 
 fn make_test_blockstore() -> Arc<DefraBlockstore<MemoryStore>> {

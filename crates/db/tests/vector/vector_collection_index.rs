@@ -2,14 +2,19 @@
 //! to the graph.
 
 use db::index::vector::index::VectorIndex;
+use db::index::vector::kv_store::KvNodeStore;
 use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use document::NormalValue;
-use schema::{
-    DistanceMetric, HnswParams, IndexDescription, IndexedFieldDescription, VectorAlgorithm,
-    VectorIndexDescription,
-};
+use schema::DistanceMetric;
+use schema::HnswParams;
+use schema::IndexDescription;
+use schema::IndexedFieldDescription;
+use schema::VectorAlgorithm;
+use schema::VectorIndexDescription;
 use storage::backends::MemoryStore;
-use storage::corekv::{Store, Txn};
+use storage::corekv::Store;
+use storage::corekv::Txn;
 use storage::index::CollectionIndex;
 
 const COLLECTION: u32 = 7;
@@ -59,9 +64,6 @@ fn narrow(values: &[f32]) -> Vec<NormalValue> {
 
 /// How many live nodes the index holds, read back through a fresh transaction.
 async fn live_ids(store: &MemoryStore, index: &VectorIndex) -> Vec<NodeId> {
-    use db::index::vector::kv_store::KvNodeStore;
-    use db::index::vector::store::VectorNodeStore;
-
     let mut read = txn(store).await;
     let kv = KvNodeStore::new(&mut read, COLLECTION, index.description().id, 0);
     let mut ids = Vec::new();
@@ -117,8 +119,6 @@ async fn every_element_width_indexes_identically() {
         index.save(&mut write, 1, &values).await.unwrap();
         write.commit().await.unwrap();
 
-        use db::index::vector::kv_store::KvNodeStore;
-        use db::index::vector::store::VectorNodeStore;
         let mut read = txn(&store).await;
         let kv = KvNodeStore::new(&mut read, COLLECTION, 3, 0);
         stored.push(kv.get_node(NodeId(1)).await.unwrap().unwrap().vector);
@@ -133,9 +133,6 @@ async fn every_element_width_indexes_identically() {
 /// peer can send an integer vector and this must index it, not refuse it.
 #[tokio::test]
 async fn an_integer_vector_is_accepted() {
-    use db::index::vector::kv_store::KvNodeStore;
-    use db::index::vector::store::VectorNodeStore;
-
     let store = MemoryStore::new();
     let index = index();
     let mut write = txn(&store).await;
@@ -167,9 +164,6 @@ async fn an_integer_vector_is_accepted() {
 /// wrong and enormous, so the whole array must reach the index intact.
 #[tokio::test]
 async fn a_vector_is_indexed_whole_not_per_component() {
-    use db::index::vector::kv_store::KvNodeStore;
-    use db::index::vector::store::VectorNodeStore;
-
     let store = MemoryStore::new();
     let index = index();
     let mut write = txn(&store).await;
@@ -298,9 +292,6 @@ async fn clearing_a_vector_on_update_removes_the_node() {
 
 #[tokio::test]
 async fn dropping_the_index_removes_every_key() {
-    use db::index::vector::kv_store::KvNodeStore;
-    use db::index::vector::store::VectorNodeStore;
-
     let store = MemoryStore::new();
     let index = index();
 

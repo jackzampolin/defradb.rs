@@ -7,20 +7,38 @@
 //! and belongs in the plan's status table, not in an assertion that would turn
 //! a quality figure into a pass mark.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use defra_core::thread_bounds::MaybeSend;
-
-use db::index::error::{Error, Result};
+use crate::support::build;
+use crate::support::flat;
+use crate::support::graph;
+use crate::support::scored;
+use crate::support::Corpus;
+use crate::support::CORPUS_SEED;
+use crate::support::GRAPH_SEED;
+use crate::support::QUERY_SEED;
+use db::index::error::Error;
+use db::index::error::Result;
 use db::index::vector::core::Metric;
-use db::index::vector::engine::ann::{AdmitAll, EngineKind, VectorIndexEngine};
+use db::index::vector::engine::ann::AdmitAll;
+use db::index::vector::engine::ann::EngineKind;
+use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
-use db::index::vector::engine::hnsw::{Hnsw, LevelSampler};
-use db::index::vector::params::{
-    Params, DEFAULT_EF_CONSTRUCTION, DEFAULT_EF_SEARCH, DEFAULT_M, MAX_EF_CONSTRUCTION,
-    MAX_EF_SEARCH, MAX_M,
-};
-use db::index::vector::store::{MemoryNodeStore, Meta, Node, NodeId, VectorNodeStore};
+use db::index::vector::engine::hnsw::Hnsw;
+use db::index::vector::engine::hnsw::LevelSampler;
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_EF_CONSTRUCTION;
+use db::index::vector::params::DEFAULT_EF_SEARCH;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::params::MAX_EF_CONSTRUCTION;
+use db::index::vector::params::MAX_EF_SEARCH;
+use db::index::vector::params::MAX_M;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::Meta;
+use db::index::vector::store::Node;
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
+use defra_core::thread_bounds::MaybeSend;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 /// Counts node reads, so a recall figure can be reported next to how much of
 /// the graph the walk actually touched. A recall of 1.0 means very little if
@@ -85,8 +103,6 @@ impl<S: VectorNodeStore> VectorNodeStore for Counting<S> {
         self.inner.iterate_aux(kind, key_prefix, visit).await
     }
 }
-
-use crate::support::{build, flat, graph, scored, Corpus, CORPUS_SEED, GRAPH_SEED, QUERY_SEED};
 
 #[tokio::test]
 async fn an_empty_graph_searches_without_error() {

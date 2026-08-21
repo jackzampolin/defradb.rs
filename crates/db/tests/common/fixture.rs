@@ -8,6 +8,8 @@ use document::NormalValue;
 use events::Bus;
 use events::ChannelBus;
 use query::mutator::DocMutator;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use storage::backends::MemoryStore;
 
@@ -16,7 +18,6 @@ pub fn new_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
 }
 
 pub fn next_test_doc_short_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }

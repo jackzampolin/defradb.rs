@@ -2,7 +2,8 @@
 
 use db::index::vector::core::squared_euclidean;
 use db::index::vector::engine::ann::Quantizer;
-use db::index::vector::quantize::{KMeans, ProductQuantizer};
+use db::index::vector::quantize::KMeans;
+use db::index::vector::quantize::ProductQuantizer;
 
 const DIMENSIONS: usize = 16;
 const M: usize = 4;

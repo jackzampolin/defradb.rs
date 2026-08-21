@@ -9,14 +9,25 @@
 //! source cannot drift these, because they are its output.
 
 use db::index::error::Error;
-use db::index::vector::codec::{decode_meta, decode_node, encode_meta, encode_node};
+use db::index::vector::codec::decode_meta;
+use db::index::vector::codec::decode_node;
+use db::index::vector::codec::encode_meta;
+use db::index::vector::codec::encode_node;
 use db::index::vector::core::Metric;
 use db::index::vector::engine::hnsw::Hnsw;
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::params::{Params, DEFAULT_M};
-use db::index::vector::store::{Meta, Node, NodeId, VectorNodeStore};
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::store::Meta;
+use db::index::vector::store::Node;
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use storage::backends::MemoryStore;
-use storage::corekv::{Key, Reader, Store, Txn, Writer};
+use storage::corekv::Key;
+use storage::corekv::Reader;
+use storage::corekv::Store;
+use storage::corekv::Txn;
+use storage::corekv::Writer;
 use storage::keys::datastore::VectorIndexKey;
 
 const COLLECTION: u32 = 7;

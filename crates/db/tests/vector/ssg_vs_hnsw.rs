@@ -7,10 +7,8 @@
 //! per node read** so a win bought by reading more of the corpus does not count.
 //!
 //! ```text
-//! cargo test --release -p db-index --test ssg_vs_hnsw -- --ignored --nocapture
+//! cargo test --release -p db --test vector -- ssg_vs_hnsw --ignored --nocapture
 //! ```
-
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use db::index::error::Result;
@@ -18,10 +16,18 @@ use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::hnsw::Hnsw;
-use db::index::vector::engine::ssg::{Ssg, SsgParams};
-use db::index::vector::params::{Params, DEFAULT_M};
-use db::index::vector::store::{MemoryNodeStore, Meta, Node, NodeId, VectorNodeStore};
+use db::index::vector::engine::ssg::Ssg;
+use db::index::vector::engine::ssg::SsgParams;
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::Meta;
+use db::index::vector::store::Node;
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use defra_core::thread_bounds::MaybeSend;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 const SEED: u64 = 0x0559_C0DE;
 const K: usize = 10;

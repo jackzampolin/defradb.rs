@@ -9,7 +9,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// owner when unambiguous, otherwise derive it from the block itself —
     /// a genesis composite's CID is the DocID seed, an update inherits it
     /// from the genesis reached through its heads.
-    pub(crate) async fn resolve_composite_doc_id(
+    pub async fn resolve_composite_doc_id(
         &self,
         cid: &Cid,
         block: &Block,

@@ -5,7 +5,7 @@
 //! reproducible rather than being a claim nobody can re-derive:
 //!
 //! ```text
-//! cargo test --release -p db-index --test vector_recall_baseline -- --ignored --nocapture
+//! cargo test --release -p db --test vector -- vector_recall_baseline --ignored --nocapture
 //! ```
 //!
 //! The fast gate lives in `vector_engine.rs`. What this adds is scale and the
@@ -15,15 +15,19 @@
 //! number from uniform random data as though it were a recall result would be
 //! the fabrication this repo's honesty rules exist to prevent.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use defra_core::thread_bounds::MaybeSend;
-
 use db::index::error::Result;
 use db::index::vector::core::Metric;
 use db::index::vector::engine::hnsw::Hnsw;
-use db::index::vector::params::{Params, DEFAULT_M};
-use db::index::vector::store::{MemoryNodeStore, Meta, Node, NodeId, VectorNodeStore};
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::Meta;
+use db::index::vector::store::Node;
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
+use defra_core::thread_bounds::MaybeSend;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 const CORPUS_SEED: u64 = 0x5EED_C0FF_EE00_1234;
 const GRAPH_SEED: u64 = 0x0000_1234_5678_9ABC;

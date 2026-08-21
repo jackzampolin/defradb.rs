@@ -102,9 +102,16 @@ pub(crate) struct LwwMergeResult {
 
 /// Result of processing a Counter delta, including whether it was applied
 /// and the accumulated value for document reconstruction.
-pub(crate) struct CounterMergeResult {
+pub struct CounterMergeResult {
     /// Whether the merge was applied (vs skipped due to nonce)
     pub(crate) applied: bool,
     /// The accumulated counter value after merge
     pub(crate) value: Option<NormalValue>,
+}
+
+impl CounterMergeResult {
+    /// True when the delta was applied rather than skipped on nonce.
+    pub fn applied(&self) -> bool {
+        self.applied
+    }
 }

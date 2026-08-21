@@ -6,7 +6,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// When a peer receives collection definition blocks via Bitswap sync, this method
     /// reconstructs the `CollectionVersion` from the definition deltas and stores it
     /// in systemstore so `set_active_collection_version` can find and activate it.
-    pub(crate) async fn process_collection_definition_delta(
+    pub async fn process_collection_definition_delta(
         &self,
         cid: &Cid,
         block: &Block,

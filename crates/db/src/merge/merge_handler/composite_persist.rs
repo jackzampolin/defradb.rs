@@ -262,29 +262,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 /// transient storage failure during merge-time index maintenance. Only this
 /// case should be converted into `MergeOutcome::Rejected`; every other
 /// `crate::index::Error` must keep surfacing as `Err` so transient failures retry.
-fn is_unique_constraint_violation(e: &crate::index::Error) -> bool {
+pub fn is_unique_constraint_violation(e: &crate::index::Error) -> bool {
     matches!(e, crate::index::Error::Storage(se) if se.is_unique_constraint_violation())
-}
-
-#[cfg(test)]
-mod classify_tests {
-    use super::is_unique_constraint_violation;
-
-    #[test]
-    fn unique_constraint_violation_is_classified() {
-        let e = crate::index::Error::Storage(storage::Error::UniqueConstraintViolation);
-        assert!(is_unique_constraint_violation(&e));
-    }
-
-    #[test]
-    fn non_unique_storage_error_is_not_classified() {
-        let e = crate::index::Error::Storage(storage::Error::Other("disk full".to_string()));
-        assert!(!is_unique_constraint_violation(&e));
-    }
-
-    #[test]
-    fn non_storage_index_error_is_not_classified() {
-        let e = crate::index::Error::Other("index misconfigured".to_string());
-        assert!(!is_unique_constraint_violation(&e));
-    }
 }

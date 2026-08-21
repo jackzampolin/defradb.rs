@@ -3,12 +3,11 @@
 //! Proves the at-rest value-encryption wrapper composes with the complete DB
 //! stack (systemstore + datastore through transactions and iterators).
 
-use std::sync::Arc;
-
 use db::database::DB;
 use db::AutoCommitMutator;
 use document::Document;
 use query::mutator::DocMutator;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
 use storage::encrypted_store::EncryptedStore;
 

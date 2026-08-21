@@ -1,15 +1,17 @@
 //! Tests for DbTxn struct.
 
 use crate::common::fixture::new_txn;
-use std::sync::Arc;
-
 use datastore::BasicTxn;
 use db::collection::ensure_persisted_collection_short_id;
 use db::txn::DbTxn;
 use db::Error;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
-use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
+use storage::keys::systemstore::CollectionID;
+use storage::keys::systemstore::CollectionIDSequenceKey;
 
 fn new_explicit_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
     DbTxn::new_explicit(basic_txn)
@@ -182,8 +184,6 @@ async fn test_db_txn_accessor_returns_all_stores() {
 
 #[tokio::test]
 async fn test_db_txn_callbacks_executed_on_commit() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let mut txn = new_txn(basic_txn);
@@ -201,8 +201,6 @@ async fn test_db_txn_callbacks_executed_on_commit() {
 
 #[tokio::test]
 async fn test_db_txn_callbacks_executed_on_discard() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let mut txn = new_txn(basic_txn);

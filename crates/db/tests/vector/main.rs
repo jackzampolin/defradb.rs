@@ -1,7 +1,5 @@
 //! Vector index engines, quantization and recall gates.
 
-mod support;
-
 mod edge_selection;
 mod ivfpq_engine;
 mod ivfpq_recall_baseline;
@@ -11,6 +9,7 @@ mod quantize_pq;
 mod quantize_sample;
 mod ssg_engine;
 mod ssg_vs_hnsw;
+mod support;
 mod vector_aux_store;
 mod vector_collection_index;
 mod vector_dimensions;

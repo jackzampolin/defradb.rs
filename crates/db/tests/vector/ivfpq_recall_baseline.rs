@@ -4,7 +4,7 @@
 //! so the numbers there stay reproducible:
 //!
 //! ```text
-//! cargo test --release -p db-index --test ivfpq_recall_baseline -- --ignored --nocapture
+//! cargo test --release -p db --test vector -- ivfpq_recall_baseline --ignored --nocapture
 //! ```
 //!
 //! Two errors compound here and the table separates them. Probing fewer than
@@ -15,8 +15,10 @@
 use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
-use db::index::vector::engine::ivfpq::{IvfPq, IvfPqParams};
-use db::index::vector::store::{MemoryNodeStore, NodeId};
+use db::index::vector::engine::ivfpq::IvfPq;
+use db::index::vector::engine::ivfpq::IvfPqParams;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::NodeId;
 
 const SEED: u64 = 0x01F4_9C0D;
 const K: usize = 10;

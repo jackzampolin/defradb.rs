@@ -6,13 +6,17 @@
 
 use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
-use db::index::vector::engine::ivfpq::{IvfPq, IvfPqParams};
-use db::index::vector::engine::ssg::{Ssg, SsgParams};
+use db::index::vector::engine::ivfpq::IvfPq;
+use db::index::vector::engine::ivfpq::IvfPqParams;
+use db::index::vector::engine::ssg::Ssg;
+use db::index::vector::engine::ssg::SsgParams;
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::params::{Params, DEFAULT_M};
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_M;
 use db::index::vector::store::NodeId;
 use storage::backends::MemoryStore;
-use storage::corekv::{Store, Txn};
+use storage::corekv::Store;
+use storage::corekv::Txn;
 
 const COLLECTION: u32 = 51;
 const INDEX: u32 = 3;

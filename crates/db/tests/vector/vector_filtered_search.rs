@@ -4,16 +4,28 @@
 //! what may be *traversed*, and `k` results still come back whenever `k`
 //! admitted nodes exist.
 
-use crate::support::{build, flat, graph, Corpus, CORPUS_SEED, GRAPH_SEED, QUERY_SEED};
-
+use crate::support::build;
+use crate::support::flat;
+use crate::support::graph;
+use crate::support::Corpus;
+use crate::support::CORPUS_SEED;
+use crate::support::GRAPH_SEED;
+use crate::support::QUERY_SEED;
 use db::index::vector::core::Metric;
-use db::index::vector::engine::ann::{AdmitAll, VectorIndexEngine};
+use db::index::vector::engine::ann::AdmitAll;
+use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::hnsw::Hnsw;
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::params::{Params, DEFAULT_EF_SEARCH, DEFAULT_M};
-use db::index::vector::store::{MemoryNodeStore, NodeId};
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_EF_SEARCH;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::NodeId;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use storage::backends::MemoryStore;
-use storage::corekv::{Store, Txn};
+use storage::corekv::Store;
+use storage::corekv::Txn;
 
 const K: usize = 10;
 
@@ -458,8 +470,6 @@ async fn filtering_works_against_a_persisted_graph() {
 /// all-admitting one, because it cannot stop as early.
 #[tokio::test]
 async fn the_filter_is_applied_during_the_walk() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     let mut corpus = Corpus::new(CORPUS_SEED);
     let vectors = corpus.vectors(1000, 16);
     let mut index = Hnsw::new(

@@ -1,7 +1,7 @@
 //! Insert, update and delete across every vector index kind.
 //!
 //! ```text
-//! cargo bench -p db-index --bench vector_mutations
+//! cargo bench -p db --bench vector_mutations
 //! ```
 //!
 //! An index is rebuilt for every measured batch rather than mutated in place,

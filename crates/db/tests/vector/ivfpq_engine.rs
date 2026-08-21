@@ -1,10 +1,13 @@
 //! The IVF-PQ engine and its train-on-threshold lifecycle.
 
 use db::index::vector::core::Metric;
-use db::index::vector::engine::ann::{EngineKind, VectorIndexEngine};
+use db::index::vector::engine::ann::EngineKind;
+use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
-use db::index::vector::engine::ivfpq::{IvfPq, IvfPqParams};
-use db::index::vector::store::{MemoryNodeStore, NodeId};
+use db::index::vector::engine::ivfpq::IvfPq;
+use db::index::vector::engine::ivfpq::IvfPqParams;
+use db::index::vector::store::MemoryNodeStore;
+use db::index::vector::store::NodeId;
 
 const SEED: u64 = 0x01F4_9C0D;
 const DIMENSIONS: usize = 16;

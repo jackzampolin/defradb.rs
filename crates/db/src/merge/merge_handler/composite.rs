@@ -13,7 +13,7 @@ impl CompositeMergeMode {
     }
 }
 
-pub(crate) struct CompositeMergeContext<'a, 'b> {
+pub struct CompositeMergeContext<'a, 'b> {
     pub(crate) cid: &'a Cid,
     pub(crate) block: &'a Block,
     pub(crate) payload: &'a defra_core::block::CompositeDeltaPayload,
@@ -50,7 +50,7 @@ impl<'a, 'b> CompositeMergeContext<'a, 'b> {
 }
 
 #[derive(Default)]
-pub(crate) struct CompositeMergeState {
+pub struct CompositeMergeState {
     pub(crate) field_values: HashMap<String, NormalValue>,
     pub(crate) any_field_applied: bool,
     pub(crate) encrypted_policy_checked: bool,
@@ -96,7 +96,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// a collection-level sync (BranchableSync). The caller (`process_collection_delta`)
     /// handles collection headstore updates, so we skip creating local collection blocks
     /// to avoid race conditions with _commits queries.
-    pub(crate) async fn process_composite_delta(
+    pub async fn process_composite_delta(
         &self,
         cid: &Cid,
         block: &Block,

@@ -3,10 +3,16 @@
 //!
 //! Split out of `write.rs` to keep that file within the repo's size guidance.
 
-use super::*;
 use async_trait::async_trait;
-use datastore::{NamespaceView, SharedTxn};
+use cid::Cid;
+use datastore::NamespaceView;
+use datastore::SharedTxn;
+use db::block::builder::*;
+use defra_core::block::generate_cid_from_bytes;
+use defra_core::block::Block;
 use defra_core::encryption::EncryptionConfig;
+use document::Document;
+use document::NormalValue;
 use std::sync::Arc;
 use storage::backends::MemoryStore;
 use storage::corekv::Store;

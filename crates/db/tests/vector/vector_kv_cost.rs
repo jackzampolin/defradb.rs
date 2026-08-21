@@ -1,28 +1,35 @@
 //! What a search and an insert actually cost against storage.
 //!
 //! `#[ignore]`: a measurement, not a check. Run with
-//! `cargo test --release -p db-index --test vector_kv_cost -- --ignored --nocapture`.
+//! `cargo test --release -p db --test vector -- vector_kv_cost --ignored --nocapture`.
 //!
 //! The in-memory baseline counts node reads; this counts **key reads against a
 //! real KV store**, which is the number that matters for a persisted index and
 //! which the honesty table has carried as unmeasured since the KV adapter
 //! landed.
 
-use crate::support::{Corpus, CORPUS_SEED, GRAPH_SEED, QUERY_SEED};
-
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-
+use crate::support::Corpus;
+use crate::support::CORPUS_SEED;
+use crate::support::GRAPH_SEED;
+use crate::support::QUERY_SEED;
 use db::index::error::Result;
 use db::index::vector::core::Metric;
 use db::index::vector::engine::hnsw::Hnsw;
 use db::index::vector::kv_store::KvNodeStore;
-use db::index::vector::params::{Params, DEFAULT_M};
-use db::index::vector::store::{Meta, Node, NodeId, VectorNodeStore};
+use db::index::vector::params::Params;
+use db::index::vector::params::DEFAULT_M;
+use db::index::vector::store::Meta;
+use db::index::vector::store::Node;
+use db::index::vector::store::NodeId;
+use db::index::vector::store::VectorNodeStore;
 use defra_core::thread_bounds::MaybeSend;
+use std::collections::HashSet;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use storage::backends::MemoryStore;
-use storage::corekv::{Store, Txn};
+use storage::corekv::Store;
+use storage::corekv::Txn;
 
 /// Counts every key read and write reaching the store.
 #[derive(Debug, Default)]

@@ -76,7 +76,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// 1. Process parent collection blocks from `heads`, oldest first
     /// 2. Process each linked document composite via `process_composite_delta`
     /// 3. Update the collection headstore with the new head CID
-    pub(crate) async fn process_collection_delta(
+    pub async fn process_collection_delta(
         &self,
         cid: &Cid,
         block: &Block,

@@ -259,7 +259,7 @@ impl<S: Store> crate::database::DB<S> {
         )))
     }
 
-    /// Substitute field names for indices in paths like /Fields/<name>.
+    /// Substitute field names for indices in paths like `/Fields/<name>.`
     /// Go DefraDB allows using field names as array indices in patches.
     pub(crate) fn substitute_field_name_in_path(
         path: &str,

@@ -6,20 +6,20 @@
 mod authorization;
 mod batch;
 mod collection;
-mod composite;
+pub mod composite;
 mod composite_fields;
 mod composite_heads;
-mod composite_persist;
+pub mod composite_persist;
 mod counter;
 mod definition;
 mod dispatch;
 mod doc_identity;
 mod encryption;
 pub(crate) mod error;
-pub(crate) mod hook;
+pub mod hook;
 mod lww;
 mod recovery;
-pub(crate) mod se_merge;
+pub mod se_merge;
 mod signature;
 
 pub use error::MergeError;
@@ -36,8 +36,6 @@ use datastore::NamespaceView;
 use defra_core::block::{
     Block, CollectionDefinitionDeltaPayload, CrdtDelta, FieldDefinitionDeltaPayload,
 };
-#[cfg(test)]
-use defra_core::merge::MergeBlock;
 use defra_core::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
@@ -116,6 +114,26 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
 }
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    /// The database handle this merge handler writes through.
+    pub fn db(&self) -> &Arc<DB<S>> {
+        &self.db
+    }
+
+    /// The per-document write queue serialising merges.
+    pub fn merge_queue(&self) -> &Arc<crate::DocWriteQueue> {
+        &self.merge_queue
+    }
+
+    /// Collection-definition blocks already merged in this process.
+    pub fn merged_collections(&self) -> &std::sync::Mutex<HashSet<Cid>> {
+        &self.merged_collections
+    }
+
+    /// DEK block CIDs whose prefetch has already been spawned.
+    pub fn prefetched_dek_cids(&self) -> &Arc<std::sync::Mutex<HashSet<Cid>>> {
+        &self.prefetched_dek_cids
+    }
+
     /// Create a new database merge handler.
     pub fn new(db: Arc<DB<S>>, blockstore: Arc<B>) -> Self {
         Self::new_with_max_merge_depth(db, blockstore, DEFAULT_MAX_MERGE_DEPTH)
@@ -143,7 +161,11 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     }
 
     /// Enforce the same parent-chain depth policy for every merge traversal.
-    fn ensure_merge_depth(&self, cid: &Cid, depth: usize) -> std::result::Result<(), MergeError> {
+    pub fn ensure_merge_depth(
+        &self,
+        cid: &Cid,
+        depth: usize,
+    ) -> std::result::Result<(), MergeError> {
         if depth >= self.max_merge_depth {
             return Err(MergeError::depth_exceeded(cid, depth));
         }
@@ -151,7 +173,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     }
 
     /// Set the composite merge hook after construction.
-    pub(crate) fn set_composite_merge_hook(&self, hook: Arc<dyn CompositeMergeHook>) {
+    pub fn set_composite_merge_hook(&self, hook: Arc<dyn CompositeMergeHook>) {
         let _ = self.composite_merge_hook.set(hook);
     }
 
@@ -184,6 +206,3 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         &self.blockstore
     }
 }
-
-#[cfg(test)]
-mod tests;
