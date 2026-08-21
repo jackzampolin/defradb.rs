@@ -1,7 +1,7 @@
 //! SE artifact storage and retrieval.
 //!
 //! Handles storing and querying SE artifacts in the datastore.
-//! Artifacts are stored at: /se/<collectionID>/<indexID>/<searchTag>/<docID>
+//! Artifacts are stored at: `/se/<collectionID>/<indexID>/<searchTag>/<docID>`
 //!
 //! Matches Go's internal/se/se.go storeArtifacts and fetchDocIDs.
 

@@ -1,8 +1,10 @@
 # db-nac — Formal-Modelability Survey
 
+> **Now a module, not a crate.** `db-nac` was folded into `db` as `crates/db/src/nac/`. The slice below is unchanged; only its location moved.
+
 ## Purpose
 
-`crates/db-nac/` is a thin **config-aware wrapper** around `acp::nac::NodeACP`.
+`crates/db (nac)/` is a thin **config-aware wrapper** around `acp::nac::NodeACP`.
 It adds three things to the DB layer: (1) a `NacConfig` (enabled / dev_mode /
 data_path) struct, (2) a startup `initialize()` routine that drives the NAC
 lifecycle off config, and (3) an **authorization layer** on lifecycle

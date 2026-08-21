@@ -69,7 +69,7 @@ These are the **#1044 IMPLEMENTED** symbols, anchored to the landed code.
 | per-doc guard (`lockOwner`), `acquire` | `crates/db/src/write/queue.rs:61` `DocWriteQueue::acquire` | per-doc `OwnedMutexGuard`; same key blocks, different keys parallel |
 | arbitrary-order incremental acquire (batch actor `BAcquire`) | `crates/db/src/write/autocommit/batch.rs` (`BatchMutator`, `ensure_doc_guard` per mutation) | the irreducibly-incremental multi-doc acquirer the **gate** protects against: it discovers docs one mutation at a time so it **cannot** pre-sort — modeled as arbitrary-order acquire. NOTE: `try_batch_merge` (`merge_handler/batch.rs`, `sort()`+`dedup()` before acquire) and `create_many` (`write/autocommit/create.rs`, sorted upfront) are **sorted** acquirers protected by the same gate — they are NOT what `BAcquire` models |
 | idle reaper bound (~600s) the RED hold is exposed to | `crates/db/src/txn/registry/mod.rs:48` `DEFAULT_TRANSACTION_IDLE_TIMEOUT = 600s`, `crates/db/src/txn/registry/cleanup.rs:20` cleanup | why an across-lifetime gate hold is a node-wide stall: it can persist for the whole idle window |
-| single-doc merge (`mPhase`, `MAcquire`/`MRelease`) | `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta`, `self.merge_queue.acquire(&doc_id_str)`) | a same-doc merge contending on the per-doc guard (no gate) |
+| single-doc merge (`mPhase`, `MAcquire`/`MRelease`) | `crates/db/src/merge/merge_handler/counter.rs` (`process_counter_delta`, `self.merge_queue.acquire(&doc_id_str)`) | a same-doc merge contending on the per-doc guard (no gate) |
 
 ## Invariants
 

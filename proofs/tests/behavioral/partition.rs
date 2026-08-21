@@ -277,7 +277,7 @@ async fn convergence_partition_both_directions_merge() {
 /// priority 1; a restart then clears the in-memory `merged_composites` dedup and
 /// re-walks the create composite, whose `city=NYC` (priority 1) ties the stale
 /// datastore entry and wins the lexicographic tie-break. Fixed in
-/// `crates/db-merge/src/merge_handler/lww.rs` `seed_lww_from_existing_doc`: it
+/// `crates/db/src/merge/merge_handler/lww.rs` `seed_lww_from_existing_doc`: it
 /// now re-seeds the datastore LWW from the authoritative materialized doc + head
 /// priority whenever the headstore is ahead, so the merge resolves against the
 /// true current state. Verified: rust<->rust, go<->go, and go<->rust all converge.
@@ -621,7 +621,7 @@ async fn poll_mixed_dags_full_mesh(
 /// document by replication first already has an initialized accumulation store, so
 /// a remote delta re-materializes the blob from that stale store and silently
 /// drops the node's own increment — converging to 45 instead of 90. Fixed in
-/// `crates/db-merge/src/merge_handler/counter.rs` by reconciling the store up to
+/// `crates/db/src/merge/merge_handler/counter.rs` by reconciling the store up to
 /// the committed blob before every merge (`Counter::reconcile_int64`). Verified:
 /// rust<->rust, go<->go, and rust<->go all converge to 90.
 #[tokio::test]

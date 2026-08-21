@@ -2,8 +2,8 @@
 \* Per-document write serialization + bounded conflict-retry, abstracting
 \* crates/db/src/write/queue.rs (DocWriteQueue, owned by the DB and shared by
 \* BOTH the local-write path and the db-merge merge handler — #1021) and
-\* crates/db-merge/src/merge_handler/batch.rs (merge_blocks_individually retry loop).
-\* (Was crates/db-merge/src/merge_handler/queue.rs before #1021 unified local
+\* crates/db/src/merge/merge_handler/batch.rs (merge_blocks_individually retry loop).
+\* (Was crates/db/src/merge/merge_handler/queue.rs before #1021 unified local
 \* writes and merges onto one per-doc lock.) Anchors are in MergeQueue_DESIGN.md.
 \*
 \* The property: one P2P merge writer owns the shared mutable index transaction at a

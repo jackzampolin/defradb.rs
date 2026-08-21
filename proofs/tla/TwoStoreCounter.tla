@@ -1,6 +1,6 @@
 ---- MODULE TwoStoreCounter ----
 \* Counter materialization under concurrent local-write vs remote-merge, abstracting
-\* crates/db-merge/src/merge_handler/counter.rs (process_counter_delta /
+\* crates/db/src/merge/merge_handler/counter.rs (process_counter_delta /
 \* process_counter_delta_in_txn: reconcile_int64(blob) -> merge(+delta) -> blob:=acc)
 \* and the local-write path in the `db` crate's doc_mutator. Anchors in the
 \* TwoStoreCounter_DESIGN.md (and project memory same_doc_merge_storm_undercount).

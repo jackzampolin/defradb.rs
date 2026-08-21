@@ -1,7 +1,7 @@
 //! IVF-PQ: coarse lists of product-quantized codes.
 //!
 //! An index accepts writes from the first document and answers them exactly by
-//! exhaustive scan, exactly as [`Flat`](super::flat::Flat) does, because that is
+//! exhaustive scan, exactly as [`Flat`] does, because that is
 //! what it is until it has enough vectors to fit centroids. Once the threshold
 //! is reached it trains from a byte-bounded sample, writes centroids, codebooks
 //! and inverted lists, and answers from those instead.

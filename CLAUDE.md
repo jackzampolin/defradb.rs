@@ -63,14 +63,10 @@ crates/
 │                       #   txn/ (the transaction seam), read/, write/,
 │                       #   collection/, block/, definition/, access/,
 │                       #   database/, docid/, downsample/, view/,
-│                       #   event/, error/. src/ holds only lib.rs;
-│                       #   every test lives in db/tests/.
-├── db-backup/          # Database export/import (backup)
-├── db-blocks/          # IPLD block builder for document mutations
-├── db-index/           # Secondary index manager for collections
-├── db-merge/           # P2P merge, broadcast, and document pushing
-├── db-nac/             # Node Access Control state management
-├── db-search/          # Vector search, embeddings, hybrid BM25+dense retrieval
+│                       #   event/, error/, plus the folded former crates:
+│                       #   backup/, block/builder/, index/, merge/, nac/,
+│                       #   search/. src/ holds only lib.rs; every test
+│                       #   lives in db/tests/.
 ├── defra-core/         # Core types and traits
 ├── defra-node/         # Reusable embedded node builder
 ├── defra-version/      # Version metadata and Go compat tracking

@@ -63,8 +63,8 @@ not an empty one.
 | `IsAdminLive` (permissive while ≠ Enabled) | `is_admin()` returns `Ok(true)` for everyone when `status != Enabled` | `crates/acp/src/nac/node_acp/operations.rs:72-79` |
 | `IsAdminGT` (persisted oracle) | `is_admin_persisted()` checks stored relations regardless of status | `crates/acp/src/nac/node_acp/operations.rs:87-104` |
 | write-block while disabled | `add_admin`/`remove_admin`/`add_permission_grant`/`remove_permission_grant` reject with `InvalidPolicy` when `status == DisabledTemporarily` | `operations.rs:110-117, 179-186, 238-250, 307-319` |
-| `Disable` auth via LIVE check | `NacManager::disable()` uses `is_admin` | `crates/db-nac/src/lib.rs:235-244` |
-| `ReEnable` auth via PERSISTED check | `NacManager::re_enable()` uses `is_admin_persisted` — **the crux** | `crates/db-nac/src/lib.rs:247-256` |
+| `Disable` auth via LIVE check | `NacManager::disable()` uses `is_admin` | `crates/db/src/nac/lib.rs:235-244` |
+| `ReEnable` auth via PERSISTED check | `NacManager::re_enable()` uses `is_admin_persisted` — **the crux** | `crates/db/src/nac/lib.rs:247-256` |
 
 ### Go (origin/develop — the live upstream, not the stale checkout)
 

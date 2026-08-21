@@ -23,7 +23,7 @@ is NOT the #1021 bug modeled here and is NOT fixed by this PR.)
 |---|---|
 | `blob` (materialized value, queries read it; local writes RMW it) | the CBOR document blob written by `db` crate `doc_mutator` (local increments) and by `db-merge` composite materialization |
 | `acc` (accumulation store) | the counter `value_key` in `crates/crdt/src/counter.rs` |
-| `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta` / `process_counter_delta_in_txn`) |
+| `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db/src/merge/merge_handler/counter.rs` (`process_counter_delta` / `process_counter_delta_in_txn`) |
 | `MergeCommit` (`acc += δ; blob := acc`) | `counter.merge(+delta)` then blob re-materialization |
 | `LocalApply` (`blob += 1`, no lock, no `acc`) | local increment via the `db` crate; in the Split (pre-#1021) abstraction it does NOT acquire the shared per-doc guard |
 | `MergeRedeliver` (re-delivery; inline `Dedup` branch) | a delta delivered twice; `is_merged(cid)` merged-set guard in `counter.rs`/`composite.rs` (suppresses when `Dedup="On"`) |

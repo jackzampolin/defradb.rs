@@ -154,7 +154,7 @@ jobs:
       - run: cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
       - run: cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
       - run: cargo check -p p2p --no-default-features --features iroh-transport
-      - run: cargo check -p db-merge --no-default-features --features native
+      - run: cargo check -p db --no-default-features --features native
 
       # Dead-dependency gate (#1329). Matches `just machete`; ignores live in
       # each crate's [package.metadata.cargo-machete] for known false positives.

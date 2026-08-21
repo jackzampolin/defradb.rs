@@ -16,26 +16,26 @@ Only the conjunction of the last two is sufficient for merge.
 
 ## Source Grounding
 
-- `crates/db-merge/src/merge_handler/signature.rs:17` defines
+- `crates/db/src/merge/merge_handler/signature.rs:17` defines
   `verify_block_signature`.
-- `crates/db-merge/src/merge_handler/signature.rs:23` returns `Ok(None)` for an
+- `crates/db/src/merge/merge_handler/signature.rs:23` returns `Ok(None)` for an
   unsigned block; invalid or malformed signature material returns
   `SignatureVerificationFailed`.
-- `crates/db-merge/src/merge_handler/signature.rs:65` serializes the block with
+- `crates/db/src/merge/merge_handler/signature.rs:65` serializes the block with
   the signature field removed, so verification is over the block content, not
   over the signature CID itself.
-- `crates/db-merge/src/merge_handler/signature.rs:91` calls
+- `crates/db/src/merge/merge_handler/signature.rs:91` calls
   `pub_key.verify(&signed_bytes, &signature.value)`.
-- `crates/db-merge/src/merge_handler/signature.rs:96` derives the verified
+- `crates/db/src/merge/merge_handler/signature.rs:96` derives the verified
   signer's DID from the public key.
-- `crates/db-merge/src/merge_handler/mod.rs:514` verifies normal P2P blocks
+- `crates/db/src/merge/merge_handler/mod.rs:514` verifies normal P2P blocks
   before CRDT-specific merge dispatch and stores the result in
   `metadata.verified_creator`.
-- `crates/db-merge/src/merge_handler/batch.rs:269` applies the same signature
+- `crates/db/src/merge/merge_handler/batch.rs:269` applies the same signature
   verification on the batch path.
 - `crates/p2p/src/sync/merge.rs:247` makes `effective_creator()` prefer
   `verified_creator` over self-reported `creator`.
-- `crates/db-merge/src/peer_identity.rs:69` maps libp2p peer keys to DIDs for
+- `crates/db/src/merge/peer_identity.rs:69` maps libp2p peer keys to DIDs for
   peer identity, but peer identity is not a substitute for block author
   signature verification.
 
