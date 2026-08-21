@@ -100,7 +100,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         use std::collections::HashMap;
 
         // Load each touched collection once (keyed by name) and build its index manager.
-        let mut collections: HashMap<String, (Collection, crate::index_manager::IndexManager)> =
+        let mut collections: HashMap<String, (Collection, crate::index::IndexManager)> =
             HashMap::new();
         for op in ops {
             if collections.contains_key(&op.collection_name) {
@@ -112,7 +112,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                     query::error::QueryError::collection_not_found(&op.collection_name)
                 })?;
             let short_id = collection.resolved_root_id();
-            let index_manager = crate::index_manager::IndexManager::from_indexes(
+            let index_manager = crate::index::IndexManager::from_indexes(
                 short_id,
                 collection.schema(),
                 collection.write_indexes(),

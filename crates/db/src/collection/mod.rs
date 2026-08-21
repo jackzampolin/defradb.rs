@@ -11,7 +11,7 @@
 /// transaction (do not commit) to maintain consistency. The underlying transaction will
 /// roll back both operations when discarded.
 use crate::error::{Error, Result};
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 use datastore::NamespaceView;
 use defra_core::ActionStatus;
 use document::{DocID, Document, NormalValue};

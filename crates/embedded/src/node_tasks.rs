@@ -111,7 +111,7 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
                     if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
                         // Stores artifacts AND sends the signed ack Go's push waits for.
-                        let doc_ids = db_merge::se::serve::handle_artifacts_push(
+                        let doc_ids = db::merge::se::serve::handle_artifacts_push(
                             store.as_ref(),
                             &handle,
                             pid,
@@ -136,7 +136,7 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 }
                 p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
                     let transport = p2p::Libp2pTransport::new(handle.clone());
-                    db_merge::se::serve::handle_query_request(
+                    db::merge::se::serve::handle_query_request(
                         store.as_ref(),
                         &transport,
                         peer_id,
@@ -270,7 +270,7 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                 p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
                     // Serve SE queries over iroh: byte-match the pushed artifacts
                     // and return a signed reply (mirrors the libp2p loop, #976).
-                    db_merge::se::serve::handle_query_request(
+                    db::merge::se::serve::handle_query_request(
                         store.as_ref(),
                         &se_transport,
                         peer_id,
@@ -353,7 +353,7 @@ async fn handle_se_artifacts_received<S: storage::corekv::Store + 'static>(
         }
     };
 
-    let result = match db_merge::se::receive_and_store(&mut txn, &data).await {
+    let result = match db::merge::se::receive_and_store(&mut txn, &data).await {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(peer_id = %peer_id, error = %error, "failed to receive SE artifacts");

@@ -14,12 +14,12 @@ use super::helpers::{
     ensure_collection_is_active, register_block_doc_id_mappings, register_created_doc,
     write_branchable_collection_block, write_local_create, write_local_update,
 };
-use crate::block_builder::{write_delete_block, write_document_blocks};
+use crate::block::builder::DocStorageIdentity;
+use crate::block::builder::{write_delete_block, write_document_blocks};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
-use db_blocks::DocStorageIdentity;
 use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
@@ -188,7 +188,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
-        db_search::set_embedding(
+        crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
@@ -300,7 +300,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
-        let generated = db_search::set_embedding(
+        let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             false,

@@ -274,7 +274,7 @@ async fn add_placeholder_version(db: &Arc<DB<MemoryStore>>, field_name: &str) ->
 
 async fn seed_old_user(db: &Arc<DB<MemoryStore>>, version_id: &str, name: &str) -> document::DocID {
     let collection = db.get_collection("Users").unwrap().unwrap();
-    let index_manager = db::index_manager::IndexManager::from_collection(
+    let index_manager = db::index::IndexManager::from_collection(
         collection.resolved_root_id(),
         collection.schema(),
     )
@@ -316,7 +316,7 @@ async fn seed_old_user(db: &Arc<DB<MemoryStore>>, version_id: &str, name: &str) 
 
 async fn verified_index_count(db: &Arc<DB<MemoryStore>>) -> usize {
     let collection = db.get_collection("Users").unwrap().unwrap();
-    let index_manager = db::index_manager::IndexManager::from_collection(
+    let index_manager = db::index::IndexManager::from_collection(
         collection.resolved_root_id(),
         collection.schema(),
     )

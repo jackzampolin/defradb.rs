@@ -184,7 +184,7 @@ async fn close_joins_inner_close_error_with_persist_error() {
     .unwrap();
 
     let collection = db.get_collection("Users").unwrap().unwrap();
-    let index_manager = db::index_manager::IndexManager::from_collection(
+    let index_manager = db::index::IndexManager::from_collection(
         collection.resolved_root_id(),
         collection.schema(),
     )

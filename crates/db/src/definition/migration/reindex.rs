@@ -7,7 +7,7 @@ use tracing::{instrument, warn};
 use super::helpers::{cache_document_version, cache_migrated_document, lens_doc_to_document};
 use crate::definition::loader::get_collections_by_collection_id;
 use crate::error::{Error, Result};
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 use crate::DB;
 
 impl<S: Store> DB<S> {

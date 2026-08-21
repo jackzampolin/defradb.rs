@@ -4,9 +4,9 @@ use super::helpers::{
 };
 use super::*;
 
-use db_blocks::DocStorageIdentity;
+use crate::block::builder::DocStorageIdentity;
 
-use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
+use crate::block::builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -30,7 +30,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Generate embeddings before blocks (embedding values affect the genesis CID)
         let embedding_config = self.db.options().embedding_config();
-        db_search::set_embedding(
+        crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
@@ -259,7 +259,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
         for mut doc in docs {
-            db_search::set_embedding(
+            crate::search::set_embedding(
                 &collection.schema().vector_embeddings,
                 &mut doc,
                 true,

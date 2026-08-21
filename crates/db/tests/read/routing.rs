@@ -9,8 +9,8 @@ use crate::common::schema::docs_schema;
 use crate::common::schema::vector_kind;
 use crate::common::schema::COLLECTION_SHORT_ID;
 use db::database::DB;
-use db::index_manager::IndexManager;
-use db_index::vector::core::Metric;
+use db::index::vector::core::Metric;
+use db::index::IndexManager;
 use document::Document;
 use document::NormalValue;
 use schema::IndexedFieldDescription;
@@ -82,7 +82,7 @@ async fn routed_and_exact(documents: usize, query: &[f64], k: usize) -> (Vec<u64
 
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
-    let index = db_index::vector::index::VectorIndex::try_new(
+    let index = db::index::vector::index::VectorIndex::try_new(
         COLLECTION_SHORT_ID,
         manager
             .get_index("by_embedding")

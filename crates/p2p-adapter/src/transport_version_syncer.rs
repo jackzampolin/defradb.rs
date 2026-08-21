@@ -21,7 +21,7 @@ pub trait TransportVersionSyncer: Send + Sync {
 /// Database-backed version syncer that fetches schema blocks via transport.
 pub struct DbTransportVersionSyncer<S: storage::corekv::Store, B: Blockstore, T: P2PTransport> {
     blockstore: Arc<B>,
-    merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
+    merge_handler: Arc<db::merge::DbMergeHandler<S, B>>,
     db: Arc<db::DB<S>>,
     transport: T,
 }
@@ -31,7 +31,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static, T: P2PTranspo
 {
     pub fn new(
         blockstore: Arc<B>,
-        merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
+        merge_handler: Arc<db::merge::DbMergeHandler<S, B>>,
         db: Arc<db::DB<S>>,
         transport: T,
     ) -> Self {
@@ -45,7 +45,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static, T: P2PTranspo
 
     pub fn new_arc(
         blockstore: Arc<B>,
-        merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
+        merge_handler: Arc<db::merge::DbMergeHandler<S, B>>,
         db: Arc<db::DB<S>>,
         transport: T,
     ) -> Arc<dyn TransportVersionSyncer> {

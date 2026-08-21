@@ -1,7 +1,7 @@
 //! The one vector-index lookup every `DocFetcher` shares.
 
+use crate::index::vector::index::VectorIndex;
 use datastore::NamespaceView;
-use db_index::vector::index::VectorIndex;
 
 use crate::collection::Collection;
 

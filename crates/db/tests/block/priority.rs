@@ -1,5 +1,5 @@
+use db::block::builder::write_document_blocks;
 use db::block::priority::*;
-use db::block_builder::write_document_blocks;
 use db::read::commits::CommitsFetcher;
 use db::txn::DbTxn;
 use db::DB;
@@ -96,7 +96,7 @@ async fn test_backfill_commit_priority_index_rebuilds_field_and_composite_histor
             let headstore = write_txn.headstore().unwrap();
             let systemstore = write_txn.systemstore().unwrap();
 
-            let identity = db_blocks::DocStorageIdentity::new(1, 1);
+            let identity = db::block::builder::DocStorageIdentity::new(1, 1);
             let mut doc = Document::new();
             doc.set("name", NormalValue::String("Alice".to_string()));
             doc.set("age", NormalValue::Int(30));
@@ -246,7 +246,7 @@ async fn test_backfill_commit_priority_index_repairs_partial_index_without_marke
             let blockstore = write_txn.blockstore().unwrap();
             let headstore = write_txn.headstore().unwrap();
 
-            let identity = db_blocks::DocStorageIdentity::new(1, 1);
+            let identity = db::block::builder::DocStorageIdentity::new(1, 1);
             let mut doc = Document::new();
             doc.set("name", NormalValue::String("Alice".to_string()));
             doc.set("age", NormalValue::Int(30));

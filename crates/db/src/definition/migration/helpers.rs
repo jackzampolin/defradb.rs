@@ -7,7 +7,7 @@ use schema::{CollectionVersion, FieldKind, ORPHAN_COLLECTION_ID};
 
 use crate::collection::Collection;
 use crate::error::{Error, Result};
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 
 /// Create an orphan placeholder collection version.
 ///

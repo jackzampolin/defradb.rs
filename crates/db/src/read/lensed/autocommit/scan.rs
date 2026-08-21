@@ -7,7 +7,7 @@ use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
 
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 use crate::read::seek::apply_cursor_seek_to_iterator;
 
 use super::LensedAutoCommitFetcher;

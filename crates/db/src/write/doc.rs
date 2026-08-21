@@ -8,14 +8,14 @@ use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
 
-use crate::block_builder::{write_delete_block, write_document_blocks};
+use crate::block::builder::DocStorageIdentity;
+use crate::block::builder::{write_delete_block, write_document_blocks};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use crate::write::autocommit::helpers::write_branchable_collection_block;
-use db_blocks::DocStorageIdentity;
 use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 

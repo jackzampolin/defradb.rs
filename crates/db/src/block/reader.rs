@@ -3,7 +3,7 @@
 //! These functions are kept in the `db` crate (not `db-blocks`) because they
 //! need access to `DB` and `DbTxn` which would create a circular dependency.
 
-use db_blocks::{get_all_field_heads, BlockResult};
+use crate::block::builder::{get_all_field_heads, BlockResult};
 use document::{DocID, Document};
 
 /// Read a committed document by ID from a collection, in a `Send`-safe way.

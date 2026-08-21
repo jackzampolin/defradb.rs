@@ -253,7 +253,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         query: &str,
     ) -> query::error::Result<std::collections::HashMap<String, f64>> {
         use crate::collection::loader::get_collection_with_lazy_load;
-        use crate::index_manager::IndexManager;
+        use crate::index::IndexManager;
 
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
@@ -268,7 +268,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
                 ))
             })?;
 
-        let idx_name = crate::index_manager::fulltext_index_name(field_name);
+        let idx_name = crate::index::fulltext_index_name(field_name);
         let ft_index = index_manager
             .get_index(&idx_name)
             .and_then(|idx| idx.as_fulltext())

@@ -8,7 +8,7 @@ use crdt::traits::ValueReader;
 use crdt::Counter;
 use crdt::NumericKind;
 use db::database::DB;
-use db::index_manager::IndexManager;
+use db::index::IndexManager;
 use db::txn::registry::DbTransactionRegistry;
 use db::write::doc::*;
 use document::DocID;

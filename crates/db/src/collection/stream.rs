@@ -251,15 +251,15 @@ impl BackfillSource {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl db_index::index_manager::DocumentSource for BackfillSource {
-    async fn next(&mut self) -> db_index::error::Result<Option<(u64, Document)>> {
+impl crate::index::manager::DocumentSource for BackfillSource {
+    async fn next(&mut self) -> crate::index::error::Result<Option<(u64, Document)>> {
         use query::doc_stream::DocStream;
 
         let Some((doc, _)) = self
             .inner
             .next()
             .await
-            .map_err(|e| db_index::error::Error::Other(e.to_string()))?
+            .map_err(|e| crate::index::error::Error::Other(e.to_string()))?
         else {
             return Ok(None);
         };

@@ -127,18 +127,18 @@ impl From<lens::Error> for Error {
     }
 }
 
-impl From<db_index::Error> for Error {
-    fn from(err: db_index::Error) -> Self {
+impl From<crate::index::Error> for Error {
+    fn from(err: crate::index::Error) -> Self {
         match err {
-            db_index::Error::Storage(e) => Error::Storage(e),
-            db_index::Error::InvalidDocument(msg) => Error::InvalidDocument(msg),
-            other @ db_index::Error::VectorEntryPointNotFound { .. } => {
+            crate::index::Error::Storage(e) => Error::Storage(e),
+            crate::index::Error::InvalidDocument(msg) => Error::InvalidDocument(msg),
+            other @ crate::index::Error::VectorEntryPointNotFound { .. } => {
                 Error::Other(other.to_string())
             }
-            other @ db_index::Error::VectorDimensionMismatch { .. } => {
+            other @ crate::index::Error::VectorDimensionMismatch { .. } => {
                 Error::InvalidDocument(other.to_string())
             }
-            db_index::Error::Other(msg) => Error::Other(msg),
+            crate::index::Error::Other(msg) => Error::Other(msg),
         }
     }
 }

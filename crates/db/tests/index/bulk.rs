@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use db::database::DB;
-use db::index_manager::IndexManager;
-use db_index::error::Result;
-use db_index::index_manager::{DocumentSource, SliceSource};
+use db::index::error::Result;
+use db::index::manager::{DocumentSource, SliceSource};
+use db::index::IndexManager;
 use document::{Document, NormalValue};
 use schema::{CollectionVersion, FieldDescription, FieldKind, IndexedFieldDescription};
 use storage::backends::MemoryStore;
@@ -54,10 +54,10 @@ impl DocumentSource for CountingSource {
     }
 }
 
-async fn indexed<F, Fut>(run: F) -> db_index::index_manager::BulkIndexResult
+async fn indexed<F, Fut>(run: F) -> db::index::manager::BulkIndexResult
 where
     F: FnOnce(IndexManager, datastore::NamespaceView, CollectionVersion) -> Fut,
-    Fut: std::future::Future<Output = db_index::index_manager::BulkIndexResult>,
+    Fut: std::future::Future<Output = db::index::manager::BulkIndexResult>,
 {
     let db = DB::new(MemoryStore::new()).unwrap();
     let txn = db.new_txn(false).await.unwrap();

@@ -16,7 +16,7 @@ use storage::keys::{
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 
 const DOC_SHORT_ID_MIGRATION_MARKER: &[u8] = b"/migration/doc-short-id/v1";
 
@@ -295,7 +295,7 @@ async fn resolve_legacy_block_graph(
         )));
     }
     let genesis_cid = *genesis.iter().next().expect("length checked");
-    Ok((db_blocks::derive_doc_id(&genesis_cid), visited))
+    Ok((crate::block::builder::derive_doc_id(&genesis_cid), visited))
 }
 
 async fn migrate_document_keys(

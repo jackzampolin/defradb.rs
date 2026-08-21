@@ -245,7 +245,7 @@ pub struct DatastoreConfig {
 }
 
 fn default_max_merge_depth() -> usize {
-    db_merge::DEFAULT_MAX_MERGE_DEPTH
+    db::merge::DEFAULT_MAX_MERGE_DEPTH
 }
 
 impl Default for DatastoreConfig {

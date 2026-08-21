@@ -10,7 +10,7 @@ use crate::NacManagerApi;
 use cid::Cid;
 use datastore::BasicTxn;
 // EmbeddingClientConfig extracted to standalone db-search crate (Phase 6 of #796).
-pub use db_search::EmbeddingClientConfig;
+pub use crate::search::EmbeddingClientConfig;
 use events::Bus;
 use identity::{Identity, RawIdentity};
 use lens::TransformStore;

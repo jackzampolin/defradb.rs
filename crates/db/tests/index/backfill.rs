@@ -6,9 +6,9 @@ use crate::common::schema::vector_kind;
 use crate::common::schema::COLLECTION_SHORT_ID;
 use crate::common::schema::DIMENSIONS;
 use db::database::DB;
-use db::index_manager::IndexManager;
-use db_index::vector::kv_store::KvNodeStore;
-use db_index::vector::store::{NodeId, VectorNodeStore};
+use db::index::vector::kv_store::KvNodeStore;
+use db::index::vector::store::{NodeId, VectorNodeStore};
+use db::index::IndexManager;
 use document::{Document, NormalValue};
 use schema::IndexedFieldDescription;
 use storage::backends::MemoryStore;
@@ -312,7 +312,7 @@ async fn an_index_can_be_cleared_and_rebuilt() {
         );
 
         // And it still answers.
-        let vector_index = db_index::vector::index::VectorIndex::try_new(
+        let vector_index = db::index::vector::index::VectorIndex::try_new(
             COLLECTION_SHORT_ID,
             index.description().clone(),
         )

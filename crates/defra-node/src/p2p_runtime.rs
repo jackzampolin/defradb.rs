@@ -222,7 +222,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
 
     // Failure channel (required by replication loop)
-    let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
+    let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let failure_recorder_task =
         defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
 
@@ -232,7 +232,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         .await;
 
     if config.load_persisted_collections {
-        db_merge::load_persisted_collections(&coordinator)
+        db::merge::load_persisted_collections(&coordinator)
             .await
             .ok();
     } else {
@@ -240,7 +240,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     }
 
     // 8. Merge handler
-    let replication = db_merge::create_replication_stack(
+    let replication = db::merge::create_replication_stack(
         database.clone(),
         sync_blockstore.clone(),
         coordinator.clone(),

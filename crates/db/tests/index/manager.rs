@@ -2,7 +2,7 @@
 
 use crate::common::fixture::next_test_doc_short_id;
 use db::database::DB;
-use db::index_manager::{Error, IndexManager};
+use db::index::{Error, IndexManager};
 use document::{Document, NormalValue};
 use schema::{
     CollectionVersion, FieldDescription, FieldKind, FullTextIndexDescription, IndexDescription,
@@ -1479,7 +1479,7 @@ async fn test_unique_constraint_violation_returns_error() {
         assert!(
             matches!(
                 error,
-                db_index::Error::Storage(storage::Error::UniqueConstraintViolation)
+                db::index::Error::Storage(storage::Error::UniqueConstraintViolation)
             ),
             "duplicate value should preserve typed unique constraint error: {error}"
         );

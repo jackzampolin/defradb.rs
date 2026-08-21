@@ -1,10 +1,10 @@
 use super::*;
 
+use crate::block::builder::BlockResult;
 use crate::collection::Collection;
 use crdt::traits::{Context, ValueReader};
 use crdt::{Counter, CounterDelta, NumericKind};
 use datastore::NamespaceView;
-use db_blocks::BlockResult;
 use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};

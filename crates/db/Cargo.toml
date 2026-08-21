@@ -15,7 +15,7 @@ ignored = ["anyhow", "bytes", "libp2p", "multihash", "p2p", "rand", "serde", "se
 default = ["p2p", "native", "wasmtime-runtime"]
 p2p = ["dep:p2p", "dep:libp2p", "p2p/libp2p-transport"]
 native = ["dep:tokio", "events/channel", "acp/native"]
-redb = ["storage/redb", "acp/redb", "db-nac/redb"]
+redb = ["storage/redb", "acp/redb"]
 rocksdb = ["storage/rocksdb"]
 fjall = ["storage/fjall"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
@@ -68,11 +68,15 @@ libp2p = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "fs", "sync", "time"], optional = true }
 parking_lot.workspace = true
 
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "charset",
+    "http2",
+    "system-proxy",
+    "rustls-tls-native-roots",
+] }
+
 # Internal crates
-db-blocks = { path = "../db-blocks" }
-db-index = { path = "../db-index" }
-db-nac = { path = "../db-nac", default-features = false }
-db-search = { path = "../db-search" }
 storage = { path = "../storage" }
 datastore = { path = "../datastore" }
 schema = { path = "../schema" }
@@ -87,9 +91,21 @@ acp = { path = "../acp", default-features = false }
 crdt = { path = "../crdt" }
 events = { path = "../events", default-features = false }
 lens = { path = "../lens", default-features = false }
+telemetry = { path = "../telemetry" }
 
 # P2P (optional)
-p2p = { path = "../p2p", optional = true }
+
+# p2p pulls tokio with features unsupported on wasm32, and every module that
+# uses it is already `cfg(not(target_arch = "wasm32"))`. This mirrors how
+# db-merge declared it before the fold.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+p2p = { path = "../p2p", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -97,6 +113,28 @@ proptest.workspace = true
 blst = "0.3"
 getrandom = "0.2"
 tempfile = "3"
+criterion.workspace = true
+ed25519-dalek.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "block_write"
+harness = false
+
+[[bench]]
+name = "merge_dag"
+harness = false
+
+[[bench]]
+name = "vector_mutations"
+harness = false
+
+[[bench]]
+name = "vector_search"
+harness = false
+
+[[bench]]
+name = "sift"
+harness = false

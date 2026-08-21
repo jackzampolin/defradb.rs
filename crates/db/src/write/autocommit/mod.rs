@@ -21,10 +21,10 @@ use std::sync::{Arc, OnceLock};
 use storage::corekv::Store;
 use tracing::warn;
 
-use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
+use crate::block::builder::{write_collection_block, write_delete_block, write_document_blocks};
 use crate::collection::Collection;
 use crate::database::DB;
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 use crate::read::lensed::fetcher::LensedDocFetcher;
 
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,

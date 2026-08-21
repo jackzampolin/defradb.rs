@@ -13,7 +13,7 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 use tracing::{error, warn};
 
 use crate::collection::{populate_collection_root_id, Collection};
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 use crate::txn::DbTxn;
 
 /// Load a collection from the systemstore by name.

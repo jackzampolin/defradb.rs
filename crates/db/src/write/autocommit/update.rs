@@ -4,7 +4,7 @@ use super::helpers::{
 };
 use super::*;
 
-use db_blocks::DocStorageIdentity;
+use crate::block::builder::DocStorageIdentity;
 use query::runner::DocFetcher;
 
 #[allow(clippy::type_complexity)]
@@ -34,7 +34,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut modified_fields = modified_fields;
         let embedding_config = self.db.options().embedding_config();
 
-        let generated = db_search::set_embedding(
+        let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             false,

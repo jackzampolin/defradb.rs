@@ -128,14 +128,14 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()> {
-        db_merge::push_existing_docs(
+        db::merge::push_existing_docs(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
             peer_id,
             collections,
             filters,
-            db_merge::PushExistingDocsSeOptions {
+            db::merge::PushExistingDocsSeOptions {
                 encryption_key: se_key,
                 identity_pubkey: se_identity_pubkey,
             },
@@ -160,7 +160,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
                 .unwrap_or_default(),
             _ => p2p::ReplicationFilters::new(),
         };
-        db_merge::retry_doc(
+        db::merge::retry_doc(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -180,7 +180,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         peer_id: &PeerId,
         collection_id: &str,
     ) -> P2PResult<()> {
-        db_merge::retry_collection_commit(
+        db::merge::retry_collection_commit(
             &self.transport,
             &self.db,
             peer_id,
@@ -192,7 +192,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     }
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
-        db_merge::load_document_head_blocks(&self.db, doc_id)
+        db::merge::load_document_head_blocks(&self.db, doc_id)
             .await
             .map_err(P2PError::internal)
     }

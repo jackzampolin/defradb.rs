@@ -561,7 +561,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let (_collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
-        let idx_name = crate::index_manager::fulltext_index_name(field_name);
+        let idx_name = crate::index::fulltext_index_name(field_name);
         let ft_index = index_manager
             .get_index(&idx_name)
             .and_then(|idx| idx.as_fulltext())
