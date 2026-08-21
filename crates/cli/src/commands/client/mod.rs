@@ -9,7 +9,7 @@ mod document;
 mod dump;
 mod encrypted_index;
 pub mod http_client;
-mod index;
+pub mod index;
 mod lens;
 mod node_identity;
 mod p2p;
@@ -17,7 +17,7 @@ mod purge;
 mod query;
 mod tx;
 mod validation;
-mod view;
+pub mod view;
 
 use std::path::PathBuf;
 

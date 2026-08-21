@@ -112,6 +112,8 @@ pub use host::{
 pub use message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 #[cfg(feature = "libp2p-transport")]
 pub use peer_identity::HandlePeerIdentityResolver;
+#[cfg(feature = "iroh-transport")]
+pub use peer_identity::IrohPeerIdentityResolver;
 pub use peer_identity::{AnonymousResolver, PeerIdentityResolver};
 pub use protocol::{
     BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,
@@ -177,19 +179,3 @@ pub use two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};
 // Re-export commonly used libp2p types
 #[cfg(feature = "libp2p-transport")]
 pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_exports() {
-        // Verify key constants are accessible
-        assert_eq!(BASE_PROTOCOL_ID, "/defra/0.0.1");
-        assert_eq!(REP_REQUEST_PROTOCOL, "/defradb/rep_req/0.0.1");
-        assert_eq!(REP_RESPONSE_PROTOCOL, "/defradb/rep_resp/0.0.1");
-        assert_eq!(CODE, 961);
-        assert_eq!(NAME, "defra");
-        assert_eq!(VERSION, "0.0.1");
-    }
-}

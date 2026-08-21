@@ -5,7 +5,7 @@ overlay consistency — a txn-local ACP projection gates reads exactly as the co
 would; fail-closed across commit/rollback.*
 
 This slice models the **deferred-ACP overlay** in
-`crates/query-plan/src/txn/context.rs`: a `DeferredAcpMutations` object that an explicit
+`crates/query/src/txn/primitives/context.rs`: a `DeferredAcpMutations` object that an explicit
 DefraDB transaction uses to (a) maintain a txn-LOCAL `projected_registrations` map and (b)
 buffer the real ACP register/unregister writes as commit-time hooks. Access checks within
 the txn consult the projection FIRST (`check_doc_access_with_overlay`); the buffered hooks
@@ -56,7 +56,7 @@ states, so the invariants hold over a non-trivial space:
 
 | Symbol in model | Code | Anchor |
 |---|---|---|
-| `Reg(o)` / `Unreg` (`ProjectedDocRegistration::Registered{owner}` / `Unregistered`) | `enum ProjectedDocRegistration` | `crates/query-plan/src/txn/context.rs:30-34` |
+| `Reg(o)` / `Unreg` (`ProjectedDocRegistration::Registered{owner}` / `Unregistered`) | `enum ProjectedDocRegistration` | `crates/query/src/txn/primitives/context.rs:30-34` |
 | `proj[t]` (txn-local `projected_registrations`) | `DeferredAcpState.projected_registrations` | `context.rs:48-52` |
 | one `DeferredAcpMutations` per txn (isolation by construction) | `Arc::new(DeferredAcpMutations::new())` at `begin()` | `crates/db/src/txn_registry.rs:721-722, 749-756` |
 | `proj[t][d] := Reg(o)` + buffer hook (`Register` action) | `schedule_register_doc_object` | `context.rs:120-158` (projection insert 131-137; hook push 141-157) |

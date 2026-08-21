@@ -1,6 +1,10 @@
-//! Per-peer selective CAR grants for outbound pushes and post-ack recovery.
+//! Per-peer selective CAR grant cache for outbound pushes.
+//!
+//! The cache closes the pre-send race. Post-ack/restart recovery does not rely
+//! on its lifetime: the CAR serve path re-derives exact-root authority from the
+//! durable replicator configuration and DB-backed root classification.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,11 +17,12 @@ use crate::transport::PeerId;
 /// Covers the receiver's worst-case bounded DAG fetch retry budget (roughly
 /// seven minutes with four providers) after it has acknowledged the PushLog.
 const POST_ACK_RECOVERY_WINDOW: Duration = Duration::from_secs(10 * 60);
+const MAX_SELECTIVE_CAR_GRANTS: usize = 65_536;
+const MAX_SELECTIVE_CAR_GRANTS_PER_PEER: usize = 4096;
 
 #[derive(Debug)]
 struct PushGrant {
     root_cid: Cid,
-    cids: HashSet<Cid>,
     /// Active pushes have no expiry. Dropping the registration starts the
     /// bounded post-ack recovery window instead of revoking access immediately.
     expires_at: Option<Instant>,
@@ -45,37 +50,47 @@ impl SelectiveCarAccess {
         self: &Arc<Self>,
         peer_id: PeerId,
         root_cid: Cid,
-        pushed_cids: impl IntoIterator<Item = Cid>,
-    ) -> SelectiveCarAccessGuard {
-        let mut cids: HashSet<Cid> = pushed_cids.into_iter().collect();
-        cids.insert(root_cid);
+    ) -> Option<SelectiveCarAccessGuard> {
         let grant_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let mut grants = self.grants.lock();
         Self::remove_expired(&mut grants, Instant::now());
+        let peer_grants = grants.get(&peer_id).map_or(0, HashMap::len);
+        let total_grants: usize = grants.values().map(HashMap::len).sum();
+        if peer_grants >= MAX_SELECTIVE_CAR_GRANTS_PER_PEER
+            || total_grants >= MAX_SELECTIVE_CAR_GRANTS
+        {
+            tracing::warn!(
+                peer_id = %peer_id,
+                root_cid = %root_cid,
+                peer_grants,
+                total_grants,
+                "Selective CAR authority capacity reached; retaining durable head marker"
+            );
+            return None;
+        }
         grants.entry(peer_id.clone()).or_default().insert(
             grant_id,
             PushGrant {
                 root_cid,
-                cids,
                 expires_at: None,
             },
         );
 
-        SelectiveCarAccessGuard {
+        Some(SelectiveCarAccessGuard {
             access: Arc::clone(self),
             peer_id,
             grant_id,
-        }
+        })
     }
 
-    pub(super) fn allows(&self, peer_id: &PeerId, root_cid: &Cid, wanted_cid: &Cid) -> bool {
+    pub(super) fn allows_root(&self, peer_id: &PeerId, root_cid: &Cid) -> bool {
         let mut grants = self.grants.lock();
         Self::remove_expired(&mut grants, Instant::now());
         grants.get(peer_id).is_some_and(|peer_grants| {
             peer_grants
                 .values()
-                .any(|grant| grant.root_cid == *root_cid && grant.cids.contains(wanted_cid))
+                .any(|grant| grant.root_cid == *root_cid)
         })
     }
 
@@ -108,6 +123,29 @@ impl SelectiveCarAccess {
     }
 }
 
+/// Cloneable capability used by replay/retry senders outside the coordinator.
+/// Holding a grant proves that a head hint cannot be emitted before its rooted
+/// selective-CAR authority is installed.
+#[derive(Clone)]
+pub struct HeadHintCarAuthority {
+    access: Arc<SelectiveCarAccess>,
+}
+
+impl HeadHintCarAuthority {
+    pub(super) fn new(access: Arc<SelectiveCarAccess>) -> Self {
+        Self { access }
+    }
+
+    pub fn register(&self, peer_id: PeerId, root_cid: Cid) -> Option<HeadHintCarGrant> {
+        self.access
+            .register(peer_id, root_cid)
+            .map(HeadHintCarGrant)
+    }
+}
+
+#[must_use = "the CAR grant must cover the corresponding PushLog attempt"]
+pub struct HeadHintCarGrant(#[allow(dead_code)] SelectiveCarAccessGuard);
+
 pub(super) struct SelectiveCarAccessGuard {
     access: Arc<SelectiveCarAccess>,
     peer_id: PeerId,
@@ -139,13 +177,13 @@ mod tests {
         let child = cid(b"child");
         let unrelated = cid(b"unrelated");
 
-        let guard = access.register(peer.clone(), root, [root, child]);
+        let guard = access.register(peer.clone(), root).unwrap();
         drop(guard);
 
-        assert!(access.allows(&peer, &root, &child));
-        assert!(!access.allows(&peer, &root, &unrelated));
-        assert!(!access.allows(&peer, &child, &root));
-        assert!(!access.allows(&other_peer, &root, &child));
+        assert!(access.allows_root(&peer, &root));
+        assert!(!access.allows_root(&peer, &unrelated));
+        assert!(!access.allows_root(&peer, &child));
+        assert!(!access.allows_root(&other_peer, &root));
     }
 
     #[test]
@@ -153,13 +191,11 @@ mod tests {
         let access = Arc::new(SelectiveCarAccess::with_recovery_window(Duration::ZERO));
         let peer = PeerId::new("peer".to_string());
         let root = cid(b"root");
-        let child = cid(b"child");
-
-        let guard = access.register(peer.clone(), root, [root, child]);
-        assert!(access.allows(&peer, &root, &child));
+        let guard = access.register(peer.clone(), root).unwrap();
+        assert!(access.allows_root(&peer, &root));
 
         drop(guard);
-        assert!(!access.allows(&peer, &root, &child));
+        assert!(!access.allows_root(&peer, &root));
     }
 
     #[test]
@@ -167,14 +203,25 @@ mod tests {
         let access = Arc::new(SelectiveCarAccess::with_recovery_window(Duration::ZERO));
         let peer = PeerId::new("peer".to_string());
         let root = cid(b"root");
-        let child = cid(b"child");
-
-        let first = access.register(peer.clone(), root, [root, child]);
-        let second = access.register(peer.clone(), root, [root, child]);
+        let first = access.register(peer.clone(), root).unwrap();
+        let second = access.register(peer.clone(), root).unwrap();
         drop(first);
-        assert!(access.allows(&peer, &root, &child));
+        assert!(access.allows_root(&peer, &root));
 
         drop(second);
-        assert!(!access.allows(&peer, &root, &child));
+        assert!(!access.allows_root(&peer, &root));
+    }
+
+    #[test]
+    fn active_authority_is_bounded_and_overflow_is_actionable() {
+        let access = Arc::new(SelectiveCarAccess::default());
+        let peer = PeerId::new("peer".to_string());
+        let root = cid(b"root");
+        let mut grants = Vec::new();
+        for _ in 0..MAX_SELECTIVE_CAR_GRANTS_PER_PEER {
+            grants.push(access.register(peer.clone(), root).unwrap());
+        }
+        assert!(access.register(peer, root).is_none());
+        assert_eq!(grants.len(), MAX_SELECTIVE_CAR_GRANTS_PER_PEER);
     }
 }

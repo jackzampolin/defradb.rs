@@ -236,7 +236,7 @@ mod tests {
 
     /// A DateTime field reindexed through a lens migration must produce
     /// `NormalValue::Time`, matching the encoding that fresh document indexing
-    /// uses (`encode_time_*`, nanoseconds). Returning `NormalValue::String`
+    /// uses (`encode_time_*`). Returning `NormalValue::String`
     /// here re-encodes the index entries as RFC3339 strings, which diverges
     /// from freshly-built entries and from cursor seek keys (Time-encoded),
     /// breaking index-seek pagination after a reindex.
@@ -314,6 +314,30 @@ mod tests {
         assert_eq!(
             json_to_native_value(&serde_json::json!("hi"), "name", &coll),
             document::NormalValue::String("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn blob_field_remains_hex_text_after_lens_materialization() {
+        let collection = Collection::new(CollectionVersion::new(
+            "Files",
+            "v2",
+            "files",
+            vec![FieldDescription::new("1", "data", FieldKind::blob())],
+        ));
+        let mut lens_doc = LensDoc::new();
+        lens_doc.insert("data".to_string(), serde_json::json!("00ff"));
+
+        let migrated = lens_doc_to_document(lens_doc, &Document::new(), &collection);
+        assert_eq!(
+            migrated.get("data"),
+            Some(&document::NormalValue::String("00ff".to_string()))
+        );
+
+        let persisted = Document::from_cbor(&migrated.to_cbor().unwrap()).unwrap();
+        assert_eq!(
+            persisted.get("data"),
+            Some(&document::NormalValue::String("00ff".to_string()))
         );
     }
 

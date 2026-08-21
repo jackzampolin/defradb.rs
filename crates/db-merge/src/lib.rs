@@ -12,15 +12,13 @@ pub mod head_provider;
 pub mod merge_handler;
 #[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
 pub mod peer_identity;
-#[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod push_docs;
 pub mod push_docs_common;
 #[cfg(not(target_arch = "wasm32"))]
 mod push_docs_creator;
 #[cfg(not(target_arch = "wasm32"))]
 mod push_docs_replay;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod push_docs_transport;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod replication;
 pub mod se;
@@ -44,18 +42,13 @@ pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
-#[cfg(all(not(target_arch = "wasm32"), feature = "libp2p-transport"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub use push_docs::{
     push_existing_docs, push_existing_docs_with_config, retry_collection_commit, retry_doc,
     PushExistingDocsSeOptions,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use push_docs_replay::ReplayPushConfig;
-#[cfg(not(target_arch = "wasm32"))]
-pub use push_docs_transport::{
-    push_existing_docs_via_transport, push_existing_docs_via_transport_with_config,
-    retry_collection_commit_via_transport, retry_doc_via_transport,
-};
 #[cfg(not(target_arch = "wasm32"))]
 pub use replication::{
     attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,

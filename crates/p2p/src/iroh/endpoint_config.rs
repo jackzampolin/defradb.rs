@@ -2,6 +2,7 @@
 
 use iroh::endpoint::BindOpts;
 use iroh::SecretKey;
+use std::sync::Arc;
 
 use super::config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 use super::gossip_heal::GossipHealConfig;
@@ -12,6 +13,10 @@ const MIN_CONCURRENT_MULTIPATH_PATHS: u32 = 9;
 /// Configuration for creating an `IrohEndpoint`.
 pub struct IrohEndpointConfig {
     pub secret_key: SecretKey,
+    /// Optional Defra identity used for the Go-compatible peer identity
+    /// challenge. The QUIC endpoint authenticates the requester; the returned
+    /// token binds this DID to that requester's endpoint ID.
+    pub node_identity: Option<Arc<identity::RawIdentity>>,
     /// Relay behavior for this endpoint.
     pub relay_mode: IrohRelayModeConfig,
     /// Address publishing / lookup behavior for this endpoint.
@@ -33,6 +38,7 @@ impl Default for IrohEndpointConfig {
     fn default() -> Self {
         Self {
             secret_key: SecretKey::generate(),
+            node_identity: None,
             relay_mode: IrohRelayModeConfig::default(),
             discovery: IrohDiscoveryConfig::default(),
             bind_port: None,

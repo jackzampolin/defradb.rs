@@ -8,14 +8,11 @@ use crate::node::{
     EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback, WireKmsCallback,
 };
 use crate::node_recovery::{restore_libp2p_documents, restore_libp2p_replicators};
-use crate::node_tasks::{
-    spawn_failure_recorder, spawn_libp2p_event_handler, spawn_libp2p_retry_loop,
-    spawn_replication_loop,
-};
+use crate::node_tasks::{spawn_libp2p_event_handler, spawn_replication_loop};
 use crate::{Libp2pConfig, ManagedP2PSystem, TransportKind};
 use defra_p2p_adapter::{
-    DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter, ReplicatorPushOptions,
-    ReplicatorPushOptionsState,
+    DbTransportDocPusher, DbVersionSyncer, P2PAdapter, ReplicatorPushOptions,
+    ReplicatorPushOptionsState, TransportDocPusher,
 };
 
 pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
@@ -233,11 +230,16 @@ where
         replication.merge_handler.clone(),
         event_bus.clone(),
     );
-    let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
+    let failure_recorder_task =
+        defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
 
-    let doc_pusher_impl = Arc::new(DbDocPusher::new(database.clone()));
+    let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
+        database.clone(),
+        p2p::Libp2pTransport::new(handle.clone()),
+        coordinator.head_hint_car_authority(),
+    ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
-    let doc_pusher: Arc<dyn DocPusher> = doc_pusher_impl;
+    let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_impl;
     let version_syncer = Some(DbVersionSyncer::new_arc(
         blockstore.clone(),
         replication.merge_handler_inner.clone(),
@@ -245,14 +247,14 @@ where
     ));
     let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
     let retry_store = store.clone();
-    let retry_handle = handle.clone();
+    let retry_transport = p2p::Libp2pTransport::new(handle.clone());
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
-    let retry_loop_task = spawn_libp2p_retry_loop(
+    let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
         store.clone(),
-        handle.clone(),
+        p2p::Libp2pTransport::new(handle.clone()),
         doc_pusher.clone(),
-        se_repusher,
+        Some(se_repusher),
     );
 
     let restore_peerstore = storage::stores::Peerstore::new(store.clone());
@@ -316,15 +318,15 @@ where
     ));
     system.set_retry_replicators(Arc::new(move || {
         let store = retry_store.clone();
-        let handle = retry_handle.clone();
+        let transport = retry_transport.clone();
         let doc_pusher = retry_doc_pusher.clone();
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
-            crate::node_tasks::run_libp2p_retry_pass(
+            defra_p2p_adapter::run_retry_pass(
                 &store,
-                &handle,
+                &transport,
                 &doc_pusher,
-                &se_repusher,
+                Some(&se_repusher),
                 true,
             )
             .await;
@@ -402,6 +404,7 @@ pub(crate) async fn setup_iroh<S>(
     event_bus: Arc<dyn events::Bus>,
     config: &crate::IrohConfig,
     sync_config: SyncConfig,
+    node_identity: Option<Arc<identity::RawIdentity>>,
 ) -> Result<P2PSetup<S>>
 where
     S: storage::corekv::Store + 'static,
@@ -412,12 +415,13 @@ where
     use storage::stores::Peerstore;
 
     use crate::node_recovery::{restore_iroh_documents, restore_iroh_replicators};
-    use crate::node_tasks::{spawn_iroh_event_handler, spawn_iroh_retry_loop};
+    use crate::node_tasks::spawn_iroh_event_handler;
 
     let secret_key =
         p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?;
     let iroh_config = p2p::iroh::IrohEndpointConfig {
         secret_key: secret_key.clone(),
+        node_identity,
         relay_mode: config.relay_mode.clone(),
         discovery: config.discovery.clone(),
         bind_port: config.bind_port,
@@ -519,11 +523,13 @@ where
         replication.merge_handler.clone(),
         event_bus.clone(),
     );
-    let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
+    let failure_recorder_task =
+        defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
 
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
         transport.clone(),
+        coordinator.head_hint_car_authority(),
     ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
     let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_impl;
@@ -535,9 +541,15 @@ where
     ));
     let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
     let retry_store = store.clone();
+    let retry_transport = transport.clone();
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
-    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone(), se_repusher);
+    let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
+        store.clone(),
+        transport.clone(),
+        doc_pusher.clone(),
+        Some(se_repusher),
+    );
 
     let restore_peerstore = Peerstore::new(store.clone());
     restore_iroh_replicators(&coordinator, &restore_peerstore).await;
@@ -597,10 +609,18 @@ where
     ));
     system.set_retry_replicators(Arc::new(move || {
         let store = retry_store.clone();
+        let transport = retry_transport.clone();
         let doc_pusher = retry_doc_pusher.clone();
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
-            crate::node_tasks::run_iroh_retry_pass(&store, &doc_pusher, &se_repusher, true).await;
+            defra_p2p_adapter::run_retry_pass(
+                &store,
+                &transport,
+                &doc_pusher,
+                Some(&se_repusher),
+                true,
+            )
+            .await;
         })
     }));
 
@@ -627,7 +647,7 @@ where
         })),
         wire_document_acp: Some(Box::new(move |acp| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
-                resolver: Arc::new(p2p::AnonymousResolver),
+                resolver: Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
                 gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
                     acp.clone(),
                     database_for_acp.node_did(),

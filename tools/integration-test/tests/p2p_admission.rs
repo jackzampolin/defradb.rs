@@ -20,12 +20,16 @@ const DOCS_PER_PUSHER: usize = 8;
 /// The #1088 M1 invariant under test: **no document may be success-acked on a
 /// pusher while unmerged and unregistered on the hub.** Before the W1 fix the
 /// hub acked success on overflow and the pusher deleted its retry record, so
-/// overflowed documents never merged — this test fails on that behavior. With
-/// overflow nacked (`RATE_LIMITED_MESSAGE`), the pushers' backoff and
-/// persisted retry ladder re-push until every document lands, so eventual
-/// hub-side completeness is exactly the observable form of the invariant:
-/// a dropped registration can only ever complete through a re-push, and
-/// re-pushes only happen when the hub refuses to launder the drop as success.
+/// the finite-run obligation balance fell below the number of committed docs.
+///
+/// Stage 3 intentionally replaced immediate per-request nack retries with the
+/// Go-compatible durable 30s..32m peer ladder. With 64 obligations racing for
+/// one receiver slot, complete convergence is therefore not a meaningful
+/// three-minute assertion: only one sender can win each synchronized retry
+/// wave. This fence instead checks the actual safety boundary, then witnesses
+/// forward progress through that durable retry path: every committed doc is
+/// either merged, durably registered at the receiver, or retained as a sender
+/// scope marker.
 #[tokio::test]
 async fn fan_in_pushlog_admission_no_silent_divergence() {
     std::env::set_var("DEFRA_P2P_MAX_PENDING_DAGS", "1");
@@ -139,12 +143,44 @@ async fn fan_in_pushlog_admission_no_silent_divergence() {
     assert!(status["single_flight_suppressed"].is_u64());
     assert!(status["already_merged_fast_path"].is_u64());
 
-    // M1: every success-acked document must eventually merge on the hub.
-    // Overflowed pushes are nacked, kept in the pushers' retry ladders, and
-    // re-pushed until the hub admits them — so completeness within the
-    // deadline is the invariant. On pre-fix code the overflowed documents are
-    // success-acked, their retry records deleted, and they never arrive.
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // Wait for the first live-send wave to drain so the next merge must come
+    // from the durable sender ladder rather than a still-queued initial hint.
+    let settle_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut settled = true;
+        for pusher in 1..=PUSHERS {
+            let status: serde_json::Value = reqwest::get(format!(
+                "{}/api/v0/p2p/sync/status",
+                cluster.api_url(pusher)
+            ))
+            .await
+            .expect("pusher sync status request")
+            .json()
+            .await
+            .expect("pusher sync status json");
+            settled &= status["push_backlog"]["active_jobs"].as_u64() == Some(0)
+                && status["push_backlog"]["queued_items"].as_u64() == Some(0);
+        }
+        if settled {
+            break;
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "initial head-hint wave did not drain"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let initial_result = hub
+        .query("query { User { _docID } }")
+        .expect("query initial hub Users");
+    let initially_merged = initial_result["User"].as_array().map_or(0, Vec::len);
+
+    // M1: wait for at least one later retry to merge, then require exact
+    // obligation conservation across sender markers, durable receiver roots,
+    // and merged documents. The 90s bound covers the first two production
+    // ladder rungs without weakening their Go-compatible timing.
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let result = hub
             .query("query { User { _docID } }")
@@ -158,20 +194,51 @@ async fn fan_in_pushlog_admission_no_silent_divergence() {
             })
             .unwrap_or_default();
 
-        let missing: Vec<&String> = expected_doc_ids
-            .iter()
-            .filter(|id| !present.contains(id.as_str()))
-            .collect();
-        if missing.is_empty() {
+        let hub_status: serde_json::Value =
+            reqwest::get(format!("{}/api/v0/p2p/sync/status", cluster.api_url(0)))
+                .await
+                .expect("hub sync status request")
+                .json()
+                .await
+                .expect("hub sync status json");
+        let receiver_obligations = hub_status["persisted_pending_dags"]
+            .as_u64()
+            .expect("persisted_pending_dags counter") as usize;
+
+        let mut sender_markers = 0usize;
+        let mut sender_jobs = 0u64;
+        for pusher in 1..=PUSHERS {
+            let status: serde_json::Value = reqwest::get(format!(
+                "{}/api/v0/p2p/sync/status",
+                cluster.api_url(pusher)
+            ))
+            .await
+            .expect("pusher sync status request")
+            .json()
+            .await
+            .expect("pusher sync status json");
+            sender_markers += status["push_retry_markers"]["document_markers"]
+                .as_u64()
+                .expect("document marker count") as usize;
+            sender_jobs += status["push_backlog"]["active_jobs"]
+                .as_u64()
+                .expect("active job count");
+        }
+
+        let balanced =
+            present.len() + receiver_obligations + sender_markers == expected_doc_ids.len();
+        if present.len() > initially_merged && sender_jobs == 0 && balanced {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "{} of {} documents were success-acked on pushers but never merged on the hub \
-             (silent divergence, #1088 M1): {:?}",
-            missing.len(),
+            "fan-in obligations did not remain balanced while the durable retry ladder made \
+             progress: merged={}, receiver={}, sender={}, expected={}, initially_merged={}",
+            present.len(),
+            receiver_obligations,
+            sender_markers,
             expected_doc_ids.len(),
-            missing
+            initially_merged,
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

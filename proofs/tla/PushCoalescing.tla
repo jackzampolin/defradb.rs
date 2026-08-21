@@ -1,10 +1,11 @@
 ---- MODULE PushCoalescing ----
 \* Latest-head retirement for outbound PushLog work (#1102).
 \*
-\* One document per peer is sufficient to expose the race: head 1 may become
+\* One document or collection scope per peer is sufficient to expose the race: head 1 may become
 \* active, head 2 arrives and retires every queued/persisted predecessor, then
 \* head 1 fails.  The failure path must observe that it is stale and must not
-\* recreate a persisted retry for head 1.
+\* recreate a persisted retry for head 1. `persisted` is a ghost witness for
+\* the head that dirtied a scope; Rust stores only a presence marker.
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -95,7 +96,7 @@ Spec == Init /\ [][Next]_vars
 INV_TypeOK == TypeOK
 
 \* Safety: neither in-memory admission nor durable retry contains two heads
-\* for one (document, peer).
+\* for one (scope, peer).
 INV_OneLiveHead == \A p \in Peers : Cardinality(queued[p]) <= 1
 INV_OnePersistedHead == \A p \in Peers : Cardinality(persisted[p]) <= 1
 

@@ -201,6 +201,9 @@ pub enum TransportEvent<ResponseToken> {
         token: Option<ResponseToken>,
     },
     CarFetchResponse {
+        /// Query correlation for transport-owned selective CAR recovery.
+        /// Direct and legacy rooted CAR responses have no query ID.
+        query_id: Option<QueryId>,
         peer_id: PeerId,
         root_cid: Cid,
         car_data: Vec<u8>,
@@ -237,16 +240,40 @@ pub enum TransportEvent<ResponseToken> {
 }
 
 impl<ResponseToken> TransportEvent<ResponseToken> {
-    /// Returns true when this event mutates peer/subscription state that must
-    /// be observed before later data-plane events from the same transport.
-    pub fn requires_inline_ordering(&self) -> bool {
-        matches!(
-            self,
-            Self::PeerConnected(_)
-                | Self::PeerDisconnected(_)
-                | Self::PeerSubscribed { .. }
-                | Self::PeerUnsubscribed { .. }
-        )
+    /// Stable operation label for transport-event diagnostics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::PeerConnected(_) => "peer_connected",
+            Self::PeerDisconnected(_) => "peer_disconnected",
+            Self::PushLogRequest { .. } => "pushlog_request",
+            Self::GossipMessage { .. } => "gossip_message",
+            Self::GossipRawMessage { .. } => "gossip_raw_message",
+            Self::PeerSubscribed { .. } => "peer_subscribed",
+            Self::PeerUnsubscribed { .. } => "peer_unsubscribed",
+            Self::BitswapProgress { .. } => "bitswap_progress",
+            Self::BitswapComplete { .. } => "bitswap_complete",
+            Self::BitswapBlockReceived { .. } => "bitswap_block_received",
+            Self::TwoStreamRequest { .. } => "two_stream_request",
+            Self::DocSyncRequest { .. } => "doc_sync_request",
+            Self::DocSyncReply { .. } => "doc_sync_reply",
+            Self::BranchableSyncRequest { .. } => "branchable_sync_request",
+            Self::BranchableSyncReply { .. } => "branchable_sync_reply",
+            Self::CarFetchRequest { .. } => "car_fetch_request",
+            Self::CarFetchResponse { .. } => "car_fetch_response",
+            Self::SEArtifactsReceived { .. } => "se_artifacts_received",
+            Self::SEQueryRequest { .. } => "se_query_request",
+            Self::SEQueryReply { .. } => "se_query_reply",
+            Self::ManageRequest { .. } => "manage_request",
+            Self::ManageReply { .. } => "manage_reply",
+            Self::ManageQueryRequest { .. } => "manage_query_request",
+            Self::ManageQueryReply { .. } => "manage_query_reply",
+            Self::Listening(_) => "listening",
+        }
+    }
+
+    /// Assign every transport event to the shared bounded scheduler.
+    pub fn dispatch_class(&self) -> crate::sync::DispatchClass {
+        crate::sync::classify_p2p_event!(self, TransportEvent)
     }
 }
 
@@ -467,6 +494,13 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
         missing: Vec<Cid>,
     ) -> Result<QueryId>;
 
+    /// Whether `sync_blocks(root, providers, [])` is a cancellable recursive
+    /// CAR request.  The iroh transport provides that contract; libp2p's
+    /// implementation is exact-CID Bitswap, where an empty set is a no-op.
+    fn supports_cancellable_rooted_sync(&self) -> bool {
+        false
+    }
+
     async fn cancel_sync(&self, query_id: QueryId) -> Result<bool>;
 
     // ---- Replicators ----
@@ -492,61 +526,4 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     // ---- Lifecycle ----
 
     async fn shutdown(&self) -> Result<()>;
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-    use cid::Cid;
-
-    use super::{MessageId, PeerId, TransportEvent};
-    use crate::message::PushLogBroadcast;
-    use crate::QueryId;
-
-    #[test]
-    fn control_plane_events_require_inline_ordering() {
-        let peer = PeerId::new("peer".to_string());
-        let topic = "topic".to_string();
-
-        assert!(TransportEvent::<()>::PeerConnected(peer.clone()).requires_inline_ordering());
-        assert!(TransportEvent::<()>::PeerDisconnected(peer.clone()).requires_inline_ordering());
-        assert!(TransportEvent::<()>::PeerSubscribed {
-            peer_id: peer.clone(),
-            topic: topic.clone(),
-        }
-        .requires_inline_ordering());
-        assert!(TransportEvent::<()>::PeerUnsubscribed {
-            peer_id: peer,
-            topic,
-        }
-        .requires_inline_ordering());
-    }
-
-    #[test]
-    fn data_plane_events_do_not_require_inline_ordering() {
-        let peer = PeerId::new("peer".to_string());
-        let cid =
-            Cid::try_from("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
-        let message = PushLogBroadcast {
-            doc_id: "doc".to_string(),
-            cid: cid.to_bytes().into(),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            block: Bytes::from_static(b"block"),
-        };
-
-        assert!(!TransportEvent::<()>::GossipMessage {
-            propagation_source: peer.clone(),
-            message_id: MessageId::new("msg".to_string()),
-            topic: "topic".to_string(),
-            message,
-        }
-        .requires_inline_ordering());
-        assert!(!TransportEvent::<()>::BitswapBlockReceived {
-            query_id: QueryId(1),
-            cid,
-            data: vec![1, 2, 3],
-        }
-        .requires_inline_ordering());
-    }
 }

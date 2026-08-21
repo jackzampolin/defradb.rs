@@ -21,6 +21,8 @@ pub use write::{write_delete_block, write_document_blocks};
 
 use std::collections::HashMap;
 
+use tracing::warn;
+
 use cid::Cid;
 use crypto::PrivateKey;
 use datastore::NamespaceView;
@@ -88,31 +90,36 @@ pub(crate) fn compute_signature(
         return Ok(None);
     }
 
-    // Only secp256k1, Ed25519, and BLS are supported for block signing.
-    // secp256k1 and Ed25519 match Go's internal/core/block/signing.go:74-79
-    // and signature.go:186-193. BLS is a Rust-specific extension wired
-    // through a remote signer (Orbis ring); the local-signing match below
-    // still rejects local BLS with a clearer error.
-    match signer.key_type {
-        defra_core::signing::SigningKeyType::Secp256k1
-        | defra_core::signing::SigningKeyType::Ed25519
-        | defra_core::signing::SigningKeyType::Bls => {}
-        other => {
-            return Err(format!(
-                "unsupported key type for signing. KeyType: {}",
-                other
-            ));
-        }
-    }
-
     // Serialize the block (without signature) to get the bytes to sign
     let block_bytes = block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode block for signing: {}", e))?;
 
-    // Determine signature type and sign. Remote signers can back any supported
-    // key type so mobile/TEE and Orbis-backed identities use the same path.
     let sig_type: defra_core::block::SignatureType = signer.key_type.into();
+
+    // A Go peer refuses a signature type it cannot map to a key type, so a block
+    // signed with a Rust-only type replicates between Rust nodes and is rejected
+    // by Go ones. Emitting one is a deployment decision, so it is refused unless
+    // the node has said it accepts a partitioned network.
+    if !sig_type.is_go_verifiable()
+        && !defra_core::block::go_verifiable_policy::non_go_verifiable_signing_allowed()
+    {
+        return Err(format!(
+            "refusing to sign a block with {sig_type:?} ({}): Go peers cannot verify it and \
+             will reject the block during replication. Set {}=1 to allow it on this node.",
+            signer.key_type,
+            defra_core::block::go_verifiable_policy::ALLOW_ENV,
+        ));
+    }
+    if !sig_type.is_go_verifiable() {
+        warn!(
+            signature_type = ?sig_type,
+            key_type = %signer.key_type,
+            "signing a block Go peers cannot verify; it will be rejected when \
+             replicating to a Go node"
+        );
+    }
+
     let sig_bytes = if let Some(remote) = signer.remote_signer.as_ref() {
         remote.sign_sync(&block_bytes, signer.signing_authorization.as_ref())?
     } else {
@@ -134,6 +141,13 @@ pub(crate) fn compute_signature(
             }
             defra_core::signing::SigningKeyType::Bls => {
                 return Err("BLS signing requires a remote signer".to_string());
+            }
+            defra_core::signing::SigningKeyType::Secp256r1 => {
+                return Err(
+                    "secp256r1 signing requires a remote signer: a Secure Enclave key cannot be \
+                     exported"
+                        .to_string(),
+                );
             }
             other => {
                 return Err(format!("Unsupported key type for signing: {}", other));

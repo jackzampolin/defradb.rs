@@ -6,6 +6,8 @@ mod commits_collection_id;
 mod commits_height_filter;
 #[path = "query/continuous_rollup.rs"]
 mod continuous_rollup;
+#[path = "query/datetime_index_range.rs"]
+mod datetime_index_range;
 #[path = "query/default_values_v1.rs"]
 mod default_values_v1;
 #[path = "query/downsample.rs"]
@@ -16,6 +18,8 @@ mod downsample_gc;
 mod exhaustive_orphans_4454;
 #[path = "query/explain_nested.rs"]
 mod explain_nested;
+#[path = "query/go_view_paths.rs"]
+mod go_view_paths;
 #[path = "query/gql_list_args.rs"]
 mod gql_list_args;
 #[path = "query/index_fallback_4633.rs"]

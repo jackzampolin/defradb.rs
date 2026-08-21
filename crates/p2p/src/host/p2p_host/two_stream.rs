@@ -51,16 +51,14 @@ impl<S: Store> P2PHost<S> {
                     doc_id = %request.doc_id,
                     "Host received PushLog request via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::TwoStreamRequest {
+                if !self
+                    .forward_event(HostEvent::TwoStreamRequest {
                         peer_id,
                         request,
                         is_explicit_replicator,
                         explicit_replay_authorization,
                     })
                     .await
-                    .is_err()
                 {
                     error!(
                         peer_id = %peer_id,
@@ -77,11 +75,9 @@ impl<S: Store> P2PHost<S> {
                     doc_ids = ?request.doc_ids,
                     "Host received DocSync request via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::DocSyncRequest { peer_id, request })
+                if !self
+                    .forward_event(HostEvent::DocSyncRequest { peer_id, request })
                     .await
-                    .is_err()
                 {
                     error!(
                         peer_id = %peer_id,
@@ -98,11 +94,9 @@ impl<S: Store> P2PHost<S> {
                     results_count = reply.results.len(),
                     "Host received DocSync reply via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::DocSyncReply { peer_id, reply })
+                if !self
+                    .forward_event(HostEvent::DocSyncReply { peer_id, reply })
                     .await
-                    .is_err()
                 {
                     error!(
                         peer_id = %peer_id,
@@ -119,11 +113,9 @@ impl<S: Store> P2PHost<S> {
                     collection_id = %request.collection_id,
                     "Host received BranchableSync request via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::BranchableSyncRequest { peer_id, request })
+                if !self
+                    .forward_event(HostEvent::BranchableSyncRequest { peer_id, request })
                     .await
-                    .is_err()
                 {
                     error!(
                         peer_id = %peer_id,
@@ -139,11 +131,9 @@ impl<S: Store> P2PHost<S> {
                     heads_count = reply.heads.len(),
                     "Host received BranchableSync reply via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::BranchableSyncReply { peer_id, reply })
+                if !self
+                    .forward_event(HostEvent::BranchableSyncReply { peer_id, reply })
                     .await
-                    .is_err()
                 {
                     error!(
                         peer_id = %peer_id,
@@ -177,7 +167,7 @@ impl<S: Store> P2PHost<S> {
                     Ok(()) => {
                         let handler = self.two_stream_handler.clone();
                         self.spawned_tasks.spawn(async move {
-                            let mut h = handler.lock().await;
+                            let mut h = handler.lock().await.clone();
                             if let Err(error) = h.send_identity_response(peer_id, reply).await {
                                 warn!(peer_id = %peer_id, error = %error, "Failed to send identity response");
                             }
@@ -215,11 +205,9 @@ impl<S: Store> P2PHost<S> {
                     root_cid = %root_cid,
                     "Host received CAR fetch request"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::CarFetchRequest { peer_id, root_cid })
+                if !self
+                    .forward_event(HostEvent::CarFetchRequest { peer_id, root_cid })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send CarFetchRequest event");
                 }
@@ -235,15 +223,13 @@ impl<S: Store> P2PHost<S> {
                     car_bytes = car_data.len(),
                     "Host received CAR fetch response"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::CarFetchResponse {
+                if !self
+                    .forward_event(HostEvent::CarFetchResponse {
                         peer_id,
                         root_cid,
                         car_data,
                     })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send CarFetchResponse event");
                 }
@@ -258,11 +244,9 @@ impl<S: Store> P2PHost<S> {
                 // Re-encode to CBOR for the db layer receiver
                 match defra_core::cbor::to_vec(&request) {
                     Ok(data) => {
-                        if self
-                            .event_tx
-                            .send(HostEvent::SEArtifactsReceived { peer_id, data })
+                        if !self
+                            .forward_event(HostEvent::SEArtifactsReceived { peer_id, data })
                             .await
-                            .is_err()
                         {
                             error!(peer_id = %peer_id, "Failed to send SEArtifactsReceived event");
                         }
@@ -284,11 +268,9 @@ impl<S: Store> P2PHost<S> {
                     query_count = request.queries.len(),
                     "Host received SE query request via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::SEQueryRequest { peer_id, request })
+                if !self
+                    .forward_event(HostEvent::SEQueryRequest { peer_id, request })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send SEQueryRequest event");
                 }
@@ -300,11 +282,9 @@ impl<S: Store> P2PHost<S> {
                     doc_count = reply.doc_ids.len(),
                     "Host received SE query reply via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::SEQueryReply { peer_id, reply })
+                if !self
+                    .forward_event(HostEvent::SEQueryReply { peer_id, reply })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send SEQueryReply event");
                 }
@@ -322,11 +302,9 @@ impl<S: Store> P2PHost<S> {
                     message_id = %request.message_id,
                     "Host received manage request via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::ManageRequest { peer_id, request })
+                if !self
+                    .forward_event(HostEvent::ManageRequest { peer_id, request })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send ManageRequest event");
                 }
@@ -337,11 +315,9 @@ impl<S: Store> P2PHost<S> {
                     message_id = %reply.message_id,
                     "Host received manage reply via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::ManageReply { peer_id, reply })
+                if !self
+                    .forward_event(HostEvent::ManageReply { peer_id, reply })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send ManageReply event");
                 }
@@ -352,11 +328,9 @@ impl<S: Store> P2PHost<S> {
                     message_id = %request.message_id,
                     "Host received manage query request via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::ManageQueryRequest { peer_id, request })
+                if !self
+                    .forward_event(HostEvent::ManageQueryRequest { peer_id, request })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send ManageQueryRequest event");
                 }
@@ -367,11 +341,9 @@ impl<S: Store> P2PHost<S> {
                     message_id = %reply.message_id,
                     "Host received manage query reply via two-stream protocol"
                 );
-                if self
-                    .event_tx
-                    .send(HostEvent::ManageQueryReply { peer_id, reply })
+                if !self
+                    .forward_event(HostEvent::ManageQueryReply { peer_id, reply })
                     .await
-                    .is_err()
                 {
                     error!(peer_id = %peer_id, "Failed to send ManageQueryReply event");
                 }

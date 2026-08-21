@@ -35,6 +35,7 @@ mod json_path;
 mod json_traverse;
 mod normal;
 mod normal_conversions;
+pub mod rfc3339;
 mod value;
 
 pub use doc_id::{validate_doc_ids, DocID, DOC_ID_V0, SDN_NAMESPACE_V0};
@@ -45,6 +46,7 @@ pub use json_leaf::{JsonLeafValue, JsonScalarValue};
 pub use json_path::{JsonPath, JsonPathPart};
 pub use json_traverse::{index_traverse_options, traverse_json, TraverseOptions};
 pub use normal::NormalValue;
+pub use rfc3339::{is_leap_second, is_valid_rfc3339, parse_rfc3339};
 pub use value::FieldValue;
 
 // Re-export schema types commonly used with documents

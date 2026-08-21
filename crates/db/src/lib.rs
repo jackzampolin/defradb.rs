@@ -93,7 +93,7 @@ pub(crate) mod lensed_auto_commit_fetcher;
 pub(crate) mod lensed_fetcher;
 #[cfg(test)]
 mod limit_pushdown_tests;
-pub(crate) mod migration;
+pub mod migration;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
 mod nac_guard;
@@ -106,6 +106,7 @@ pub mod txn;
 pub(crate) mod txn_context;
 pub(crate) mod txn_lens_store;
 pub(crate) mod txn_registry;
+pub(crate) mod vector_search;
 pub(crate) mod versioned_fetcher;
 pub(crate) mod view_ops;
 
@@ -160,7 +161,7 @@ pub use txn_registry::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
 };
 pub use versioned_fetcher::VersionedFetcher;
-pub use view_ops::RefreshViewsOptions;
+pub use view_ops::{is_refreshable_view, RefreshViewsOptions};
 
 // P2P merge/sync extracted to standalone db-merge crate.
 // Consumer crates (cli, embedded, defra-node, ffi) should depend on db-merge directly.

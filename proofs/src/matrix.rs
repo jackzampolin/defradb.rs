@@ -14,6 +14,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "DAG convergence (partition / eviction / restart)",
     "CRDT merge laws",
     "Replicator lifecycle (no-loss / resume)",
+    "Sync ownership transfer (head hint / receiver pull)",
     "Multi-instance claim",
     "Block integrity / signatures",
     "KMS key distribution",

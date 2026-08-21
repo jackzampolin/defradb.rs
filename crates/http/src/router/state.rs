@@ -8,10 +8,19 @@ use query::QueryLimits;
 
 use super::{
     AcpOperations, BackupOperations, BlockOperations, BrowserSyncOperations,
-    CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
-    EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
-    P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    CollectionManagementOperations, CollectionVersionOperations, DocumentAcpOperations,
+    DumpOperations, EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester,
+    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
+
+struct CollectionVersionsFromManagement(Arc<dyn CollectionManagementOperations>);
+
+#[async_trait::async_trait]
+impl CollectionVersionOperations for CollectionVersionsFromManagement {
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        self.0.get_all_collections().await
+    }
+}
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -29,6 +38,7 @@ pub struct AppState {
     pub schema: Option<Arc<dyn SchemaOperations>>,
     pub lens: Option<Arc<dyn LensOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
+    pub collection_versions: Option<Arc<dyn CollectionVersionOperations>>,
     pub collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     pub doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     pub view: Option<Arc<dyn ViewOperations>>,
@@ -76,6 +86,13 @@ impl std::fmt::Debug for AppState {
             )
             .field("lens", &self.lens.as_ref().map(|_| "<LensOperations>"))
             .field("nac", &self.nac.as_ref().map(|_| "<NodeAcpOperations>"))
+            .field(
+                "collection_versions",
+                &self
+                    .collection_versions
+                    .as_ref()
+                    .map(|_| "<CollectionVersionOperations>"),
+            )
             .field(
                 "collection_mgmt",
                 &self
@@ -206,6 +223,17 @@ impl AppState {
         })
     }
 
+    /// Get read-only collection-version operations or return ServiceUnavailable.
+    pub fn require_collection_versions(
+        &self,
+    ) -> Result<&Arc<dyn CollectionVersionOperations>, crate::error::HttpError> {
+        self.collection_versions.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Collection version observation is not enabled.".into(),
+            )
+        })
+    }
+
     /// Get document ACP operations or return ServiceUnavailable error.
     pub fn require_doc_acp(
         &self,
@@ -267,6 +295,7 @@ pub struct AppStateBuilder {
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
+    collection_versions: Option<Arc<dyn CollectionVersionOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     view: Option<Arc<dyn ViewOperations>>,
@@ -297,6 +326,7 @@ impl AppStateBuilder {
             schema: None,
             lens: None,
             nac: None,
+            collection_versions: None,
             collection_mgmt: None,
             doc_acp: None,
             view: None,
@@ -391,7 +421,21 @@ impl AppStateBuilder {
         mut self,
         collection_mgmt: Arc<dyn CollectionManagementOperations>,
     ) -> Self {
+        self.collection_versions.get_or_insert_with(|| {
+            Arc::new(CollectionVersionsFromManagement(Arc::clone(
+                &collection_mgmt,
+            )))
+        });
         self.collection_mgmt = Some(collection_mgmt);
+        self
+    }
+
+    /// Set read-only collection-version operations.
+    pub fn with_collection_versions(
+        mut self,
+        collection_versions: Arc<dyn CollectionVersionOperations>,
+    ) -> Self {
+        self.collection_versions = Some(collection_versions);
         self
     }
 
@@ -471,6 +515,7 @@ impl AppStateBuilder {
             schema: self.schema,
             lens: self.lens,
             nac: self.nac,
+            collection_versions: self.collection_versions,
             collection_mgmt: self.collection_mgmt,
             doc_acp: self.doc_acp,
             view: self.view,

@@ -85,7 +85,6 @@ zeroize = "1"
 base64 = { workspace = true }
 
 # IPLD
-cid = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 serde_bytes = { workspace = true }
 

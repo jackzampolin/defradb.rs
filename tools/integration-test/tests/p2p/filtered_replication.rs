@@ -2663,7 +2663,7 @@ async fn rust_filtered_replication_composite_and_iroh() {
 /// Iroh transport variant of `rust_filtered_replication_backfill_respects_filter`:
 /// documents created BEFORE the replicator is added must be backfilled over Iroh,
 /// respecting the filter. This exercises the iroh backfill path
-/// (`push_existing_docs_via_transport`) with a predicate — the matching doc must
+/// (`push_existing_docs`) with a predicate — the matching doc must
 /// arrive while the non-matching doc stays absent.
 #[tokio::test]
 async fn rust_filtered_replication_backfill_iroh() {

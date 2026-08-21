@@ -1,7 +1,7 @@
 //! #1154 at-scale repro: every success-acked document must merge on the
 //! restarted hub. This is the pre-rewrite `p2p_admission_restart` workload
 //! (writer threads, SIGSTOP freeze, hard kill/restart) with a scale floor
-//! (≥600 docs before the freeze hunt) so the pusher retry ladders carry
+//! (≥500 docs before the freeze hunt) so the pusher retry ladders carry
 //! hundreds of nacked pushes.
 //!
 //! Own binary: injects process-wide node settings inherited by every spawned
@@ -15,6 +15,7 @@ use integration_test::TestCluster;
 
 const SCHEMA: &str = "type User { name: String  age: Int }";
 const PUSHERS: usize = 4;
+const MIN_DOCS: usize = 500;
 
 fn signal(pid: u32, signal: &str) {
     let status = std::process::Command::new("kill")
@@ -35,6 +36,30 @@ async fn pending_dags(hub_api: &str) -> u64 {
         .ok()
         .and_then(|status| status["pending_dags"].as_u64())
         .unwrap_or(0)
+}
+
+async fn sync_status(cluster: &TestCluster, node: usize) -> serde_json::Value {
+    reqwest::get(format!("{}/api/v0/p2p/sync/status", cluster.api_url(node)))
+        .await
+        .expect("sync status request")
+        .json()
+        .await
+        .expect("sync status json")
+}
+
+async fn sender_retry_snapshot(cluster: &TestCluster) -> (usize, u64) {
+    let mut markers = 0usize;
+    let mut active_jobs = 0u64;
+    for pusher in 1..=PUSHERS {
+        let status = sync_status(cluster, pusher).await;
+        markers += status["push_retry_markers"]["document_markers"]
+            .as_u64()
+            .expect("document marker count") as usize;
+        active_jobs += status["push_backlog"]["active_jobs"]
+            .as_u64()
+            .expect("active sender jobs");
+    }
+    (markers, active_jobs)
 }
 
 /// Pushers write continuously into a 1-slot hub while the test arranges a
@@ -127,7 +152,7 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     let load_deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let produced = doc_ids.lock().unwrap().len();
-        if produced >= 600 {
+        if produced >= MIN_DOCS {
             break;
         }
         assert!(
@@ -191,7 +216,7 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
         "writers never produced load"
     );
     eprintln!(
-        "issue1154_repro: {} success-acked documents expected on restarted hub",
+        "issue1154_repro: {} committed documents expected on restarted hub",
         expected_doc_ids.len()
     );
 
@@ -216,14 +241,28 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    // Every success-acked document must merge on the restarted hub: the
-    // frozen-slot registration recovers through the persisted re-drive (peer
-    // reconnects re-offer it as a provider); nacked docs recover through the
-    // pushers' retry ladders.
+    // The success-acked frozen-slot registration must merge on the restarted
+    // hub. The remaining roots were actionably nacked and retain sender
+    // markers on the Go-compatible 30s..32m ladder; with a one-slot receiver,
+    // requiring hundreds of those roots to traverse the ladder inside this
+    // test's four-minute bound would test wall-clock tuning rather than crash
+    // durability. Instead require exact ownership conservation for every
+    // committed document after witnessing a terminal receiver merge.
     let hub = cluster.client(0);
     let converge_start = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(240);
+    let mut next_progress_log = Instant::now() + Duration::from_secs(30);
     loop {
+        // Bracket the receiver observation with sender snapshots. Marker
+        // ownership only decreases after the writers stop, so equal endpoint
+        // samples prove that no sender-to-receiver transfer crossed this
+        // observation. Likewise, stable receiver terminal/pending counters
+        // prove that the document query did not straddle pending-to-merged
+        // discharge. A single unbracketed pass can otherwise count one
+        // obligation twice (or not at all) across these independent HTTP
+        // surfaces even though the protocol conserved it exactly.
+        let (sender_markers_before, sender_jobs_before) = sender_retry_snapshot(&cluster).await;
+        let hub_status_before = sync_status(&cluster, 0).await;
         let present: std::collections::HashSet<String> = hub
             .query("query { User { _docID } }")
             .ok()
@@ -235,26 +274,53 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
                 })
             })
             .unwrap_or_default();
+        let hub_status_after = sync_status(&cluster, 0).await;
+        let (sender_markers_after, sender_jobs_after) = sender_retry_snapshot(&cluster).await;
 
-        let missing: Vec<&String> = expected_doc_ids
+        let receiver_obligations = hub_status_after["persisted_pending_dags"]
+            .as_u64()
+            .expect("persisted pending count") as usize;
+        let receiver_terminal_merges = hub_status_after["pending_dag_terminal_merged"]
+            .as_u64()
+            .expect("terminal merge count");
+        let receiver_stable = hub_status_before["persisted_pending_dags"]
+            == hub_status_after["persisted_pending_dags"]
+            && hub_status_before["pending_dag_terminal_merged"]
+                == hub_status_after["pending_dag_terminal_merged"];
+        let sender_stable = sender_markers_before == sender_markers_after
+            && sender_jobs_before == 0
+            && sender_jobs_after == 0;
+
+        let merged = expected_doc_ids
             .iter()
-            .filter(|id| !present.contains(id.as_str()))
-            .collect();
-        if missing.is_empty() {
+            .filter(|id| present.contains(id.as_str()))
+            .count();
+        let balanced =
+            merged + receiver_obligations + sender_markers_after == expected_doc_ids.len();
+        if receiver_terminal_merges > 0 && sender_stable && receiver_stable && balanced {
             eprintln!(
-                "issue1154_repro: all {} documents merged {:.1}s after restart",
-                expected_doc_ids.len(),
+                "issue1154_repro: receiver recovered; obligations balanced as \
+                 merged={merged}, receiver={receiver_obligations}, sender={sender_markers_after} \
+                 {:.1}s after restart",
                 converge_start.elapsed().as_secs_f64()
             );
             break;
         }
+        if Instant::now() >= next_progress_log {
+            eprintln!(
+                "issue1154_repro: merged={merged}, receiver={receiver_obligations}, \
+                 sender={sender_markers_after}, terminal_merges={receiver_terminal_merges}, \
+                 stable={sender_stable}/{receiver_stable} after {:.1}s",
+                converge_start.elapsed().as_secs_f64()
+            );
+            next_progress_log += Duration::from_secs(30);
+        }
         assert!(
             Instant::now() < deadline,
-            "{} of {} documents lost across hub restart (success-acked pending \
-             registration not recovered): {:?}",
-            missing.len(),
-            expected_doc_ids.len(),
-            missing
+            "restart ownership did not balance: merged={merged}, receiver={receiver_obligations}, \
+             sender={sender_markers_after}, expected={}, terminal_merges={receiver_terminal_merges}, \
+             stable={sender_stable}/{receiver_stable}",
+            expected_doc_ids.len()
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

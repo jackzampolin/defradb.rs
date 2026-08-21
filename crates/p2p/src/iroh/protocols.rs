@@ -23,6 +23,9 @@ pub const ALPN_CAR: &[u8] = b"/defra-iroh/car/0.1";
 /// ALPN for CAR block transfer response.
 pub const ALPN_CAR_RESP: &[u8] = b"/defra-iroh/car/0.1/resp";
 
+/// ALPN for audience-bound Defra peer identity resolution.
+pub const ALPN_IDENTITY: &[u8] = b"/defra-iroh/identity/0.1";
+
 /// ALPN for searchable encryption artifacts.
 pub const ALPN_SE: &[u8] = b"/defra-iroh/se/0.1";
 
@@ -59,6 +62,7 @@ pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_BRANCHABLE_RESP,
     ALPN_CAR,
     ALPN_CAR_RESP,
+    ALPN_IDENTITY,
     ALPN_SE,
     ALPN_SE_QUERY_REQ,
     ALPN_SE_QUERY_RESP,

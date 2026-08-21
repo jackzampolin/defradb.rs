@@ -119,7 +119,7 @@ mod tests {
             EncodedType::Bytes
         );
         assert_eq!(
-            peek_type(&encode_time_ascending(vec![], 12345)),
+            peek_type(&encode_time_ascending(vec![], 12345, 0)),
             EncodedType::Time
         );
         assert_eq!(peek_type(&[]), EncodedType::Unknown);

@@ -20,7 +20,7 @@ use crate::collection;
 use crate::database::DB;
 use crate::txn::DbTxn;
 
-/// Wrapper around Arc<DB> that implements CollectionProvider.
+/// Wrapper around `Arc<DB>` that implements `CollectionProvider`.
 ///
 /// This enables the QueryRunner to resolve collections from the database
 /// at query time, ensuring newly added schemas are immediately available.

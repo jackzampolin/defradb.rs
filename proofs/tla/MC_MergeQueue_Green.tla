@@ -1,6 +1,7 @@
 ---- MODULE MC_MergeQueue_Green ----
 EXTENDS MergeQueue
-\* GREEN: correct mechanism -- per-doc async mutex (LockMode="PerDoc") + fail-closed
+\* GREEN: correct mechanism -- one P2P merge writer (LockMode="GlobalMerge") plus
+\* per-doc local-write exclusion and fail-closed
 \* exhaustion (FailMode="Closed") + the #1021 shared guard on local writes
 \* (UserWriteMode="PerDoc": a local user-write acquires the SAME per-doc guard the merge
 \* takes). Three workers over two docs, including a DUPLICATE delivery (b2 is a re-delivery
@@ -11,7 +12,7 @@ EXTENDS MergeQueue
 \* invariant is falsified only by REMOVING the shared guard (LockMode="None" with
 \* UserWriteMode="PerDoc"; RED-anchored by MC_MergeQueue_Red_LocalMergeInterleave), NOT by
 \* lock-free user-writes (UserWriteMode="LockFree" never sets uwInCrit, so it is vacuous
-\* there).
+\* there). The writer may represent an ordered multi-root batch; it is still one owner.
 
 mcBlocks  == {"b1", "b2", "b3"}
 mcDocs    == {"d1", "d2"}

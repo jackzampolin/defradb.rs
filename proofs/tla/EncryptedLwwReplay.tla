@@ -11,8 +11,9 @@
 \* Source anchors:
 \* - crates/db-merge/src/merge_handler/composite_fields.rs propagates transient
 \*   KMS failures so the merge remains pending;
-\* - crates/db-merge/src/push_docs{,_transport}.rs replay composite heads whose
-\*   DAG completion fetches linked encrypted LWW blocks;
+\* - crates/db-merge/src/push_docs.rs replays composite heads and
+\*   crates/p2p/src/sync/coordinator/selective_car_access.rs authorizes fetching
+\*   their linked encrypted LWW blocks;
 \* - crates/p2p/src/sync/pending_store.rs persists acknowledged pending DAGs;
 \* - crates/crdt/src/lww.rs selects the greatest (priority, value) version.
 EXTENDS Naturals
