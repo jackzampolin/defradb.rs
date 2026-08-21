@@ -11,9 +11,6 @@ pub struct WorktreeContext {
     pub rust_path: PathBuf,
     /// Path to the paired Go worktree root
     pub go_path: PathBuf,
-    /// Worktree suffix (empty for main worktree)
-    #[allow(dead_code)]
-    pub suffix: String,
     /// Current git branch
     pub branch: String,
     /// Current git commit SHA (short)
@@ -44,7 +41,7 @@ impl WorktreeContext {
         let rust_path = find_git_root(path).await?;
 
         // Resolve the Go checkout: explicit path, then environment, then worktree pairing
-        let (go_path, suffix) = resolve_go_path(&rust_path, explicit_go_path, go_path_from_env)?;
+        let go_path = resolve_go_path(&rust_path, explicit_go_path, go_path_from_env)?;
 
         // Validate Go worktree exists
         if !go_path.exists() {
@@ -61,7 +58,6 @@ impl WorktreeContext {
         Ok(WorktreeContext {
             rust_path,
             go_path,
-            suffix,
             branch,
             commit,
             dirty,
@@ -117,16 +113,12 @@ fn resolve_go_path(
     rust_path: &Path,
     explicit: Option<PathBuf>,
     from_env: Option<PathBuf>,
-) -> Result<(PathBuf, String)> {
+) -> Result<PathBuf> {
     match explicit.or(from_env) {
         // An override names the Go checkout outright, so neither side has to
         // follow the paired naming convention.
-        Some(path) => Ok((path, String::new())),
-        None => {
-            let suffix = extract_suffix(rust_path)?;
-            let go_path = derive_go_path(rust_path, &suffix)?;
-            Ok((go_path, suffix))
-        }
+        Some(path) => Ok(path),
+        None => derive_go_path(rust_path, &extract_suffix(rust_path)?),
     }
 }
 
@@ -405,8 +397,7 @@ mod tests {
                 Some(PathBuf::from("/elsewhere/go-checkout")),
                 Some(PathBuf::from("/from/env")),
             )
-            .unwrap()
-            .0,
+            .unwrap(),
             Path::new("/elsewhere/go-checkout")
         );
     }
@@ -416,9 +407,7 @@ mod tests {
         let rust_path = Path::new("/home/user/source/defradb.rs-feature");
 
         assert_eq!(
-            resolve_go_path(rust_path, None, Some(PathBuf::from("/from/env")))
-                .unwrap()
-                .0,
+            resolve_go_path(rust_path, None, Some(PathBuf::from("/from/env"))).unwrap(),
             Path::new("/from/env")
         );
     }
@@ -428,7 +417,7 @@ mod tests {
         let rust_path = Path::new("/home/user/source/defradb.rs-feature");
 
         assert_eq!(
-            resolve_go_path(rust_path, None, None).unwrap().0,
+            resolve_go_path(rust_path, None, None).unwrap(),
             Path::new("/home/user/source/defradb-feature")
         );
     }
@@ -469,7 +458,7 @@ mod tests {
 
         // the suffix is only needed to derive a paired path; with an override
         // there is nothing to derive, so the name must not matter
-        let (path, _) = resolve_go_path(odd, explicit, None).unwrap();
+        let path = resolve_go_path(odd, explicit, None).unwrap();
 
         assert_eq!(path, PathBuf::from("/go/checkout"));
         assert!(

@@ -490,7 +490,6 @@ mod tests {
         let ctx = WorktreeContext {
             rust_path: std::path::PathBuf::from("/r/defradb.rs-ffi-port"),
             go_path: std::path::PathBuf::from("/r/defradb-ffi-port"),
-            suffix: "ffi-port".to_string(),
             branch: "edjroz/1395-rustffi-port".to_string(),
             commit: "0000000".to_string(),
             dirty: false,
