@@ -6,6 +6,9 @@ pub const RUST_WORKTREE_PREFIX: &str = "defradb.rs";
 /// Go worktree prefix
 pub const GO_WORKTREE_PREFIX: &str = "defradb";
 
+/// Environment variable naming the Go DefraDB checkout
+pub const GO_REPO_ENV: &str = "DEFRADB_GO_REPO";
+
 /// Report retention count per branch+package
 pub const REPORT_RETENTION_COUNT: usize = 10;
 

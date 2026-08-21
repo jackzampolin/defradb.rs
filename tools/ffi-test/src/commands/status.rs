@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use colored::Colorize;
 
@@ -7,11 +8,16 @@ use crate::report::{load_all_for_branch, load_all_reports, Report};
 use crate::worktree::{list_rust_worktrees, WorktreeContext};
 
 /// Show status of FFI tests
-pub async fn execute(all: bool, depth: usize, filter: Option<&str>) -> Result<()> {
+pub async fn execute(
+    all: bool,
+    depth: usize,
+    filter: Option<&str>,
+    go_path: Option<PathBuf>,
+) -> Result<()> {
     if all {
         show_all_worktrees().await
     } else {
-        show_current_worktree(depth, filter).await
+        show_current_worktree(depth, filter, go_path).await
     }
 }
 
@@ -32,8 +38,12 @@ fn max_depth(packages: &[&String]) -> usize {
         .unwrap_or(1)
 }
 
-async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()> {
-    let ctx = WorktreeContext::detect().await?;
+async fn show_current_worktree(
+    depth: usize,
+    filter: Option<&str>,
+    go_path: Option<PathBuf>,
+) -> Result<()> {
+    let ctx = WorktreeContext::detect_with(go_path).await?;
 
     // Special case: if on main, show latest from ALL worktrees
     let is_main = ctx.branch == "main" || ctx.branch == "master";

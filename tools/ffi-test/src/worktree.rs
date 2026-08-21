@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::config::{GO_WORKTREE_PREFIX, RUST_WORKTREE_PREFIX};
+use crate::config::{GO_REPO_ENV, GO_WORKTREE_PREFIX, RUST_WORKTREE_PREFIX};
 use crate::error::{FfiTestError, Result};
 
 /// Information about the current worktree context
@@ -23,22 +23,31 @@ pub struct WorktreeContext {
 }
 
 impl WorktreeContext {
-    /// Detect the current worktree context from the current directory
-    pub async fn detect() -> Result<Self> {
+    /// Detect the current worktree context, preferring an explicitly supplied Go checkout
+    pub async fn detect_with(go_path_override: Option<PathBuf>) -> Result<Self> {
         let cwd = std::env::current_dir()?;
-        Self::from_path(&cwd).await
+        let from_env = std::env::var_os(GO_REPO_ENV).map(PathBuf::from);
+        Self::from_path_with(&cwd, go_path_override, from_env).await
     }
 
-    /// Detect worktree context from a given path
+    /// Detect worktree context from a given path, pairing it with the Go worktree beside it
     pub async fn from_path(path: &Path) -> Result<Self> {
+        Self::from_path_with(path, None, None).await
+    }
+
+    async fn from_path_with(
+        path: &Path,
+        explicit_go_path: Option<PathBuf>,
+        go_path_from_env: Option<PathBuf>,
+    ) -> Result<Self> {
         // Find the git root
         let rust_path = find_git_root(path).await?;
 
         // Extract suffix from path
         let suffix = extract_suffix(&rust_path)?;
 
-        // Derive Go worktree path
-        let go_path = derive_go_path(&rust_path, &suffix)?;
+        // Resolve the Go checkout: explicit path, then environment, then worktree pairing
+        let go_path = resolve_go_path(&rust_path, &suffix, explicit_go_path, go_path_from_env)?;
 
         // Validate Go worktree exists
         if !go_path.exists() {
@@ -110,6 +119,19 @@ fn extract_suffix(rust_path: &Path) -> Result<String> {
     };
 
     Ok(suffix)
+}
+
+/// Resolve the Go checkout: explicit path first, then `DEFRADB_GO_REPO`, then worktree pairing
+fn resolve_go_path(
+    rust_path: &Path,
+    suffix: &str,
+    explicit: Option<PathBuf>,
+    from_env: Option<PathBuf>,
+) -> Result<PathBuf> {
+    match explicit.or(from_env) {
+        Some(path) => Ok(path),
+        None => derive_go_path(rust_path, suffix),
+    }
 }
 
 /// Derive Go worktree path from suffix
@@ -376,6 +398,42 @@ pub async fn remove_worktree_pair(suffix: &str, force: bool, delete_branch: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_go_path_beats_the_environment_and_the_pairing() {
+        let rust_path = Path::new("/home/user/source/defradb.rs-feature");
+
+        assert_eq!(
+            resolve_go_path(
+                rust_path,
+                "feature",
+                Some(PathBuf::from("/elsewhere/go-checkout")),
+                Some(PathBuf::from("/from/env")),
+            )
+            .unwrap(),
+            Path::new("/elsewhere/go-checkout")
+        );
+    }
+
+    #[test]
+    fn the_environment_beats_the_pairing_when_no_path_was_passed() {
+        let rust_path = Path::new("/home/user/source/defradb.rs-feature");
+
+        assert_eq!(
+            resolve_go_path(rust_path, "feature", None, Some(PathBuf::from("/from/env"))).unwrap(),
+            Path::new("/from/env")
+        );
+    }
+
+    #[test]
+    fn the_pairing_still_resolves_when_neither_is_set() {
+        let rust_path = Path::new("/home/user/source/defradb.rs-feature");
+
+        assert_eq!(
+            resolve_go_path(rust_path, "feature", None, None).unwrap(),
+            Path::new("/home/user/source/defradb-feature")
+        );
+    }
 
     #[test]
     fn derives_go_worktree_next_to_rust_worktree() {

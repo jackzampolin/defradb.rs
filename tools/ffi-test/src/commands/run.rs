@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use colored::Colorize;
 
 use crate::builder::build_ffi;
@@ -13,9 +15,10 @@ pub async fn execute(
     test_filter: Option<&str>,
     verbose: bool,
     skip_build: bool,
+    go_path: Option<PathBuf>,
 ) -> Result<()> {
     // Detect worktree context
-    let ctx = WorktreeContext::detect().await?;
+    let ctx = WorktreeContext::detect_with(go_path).await?;
 
     println!(
         "{} {} @ {}{}",

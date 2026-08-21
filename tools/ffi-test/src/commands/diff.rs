@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use colored::Colorize;
 
@@ -8,8 +9,8 @@ use crate::runner::TestStatus;
 use crate::worktree::WorktreeContext;
 
 /// Show diff between two test runs
-pub async fn execute(package: &str) -> Result<()> {
-    let ctx = WorktreeContext::detect().await?;
+pub async fn execute(package: &str, go_path: Option<PathBuf>) -> Result<()> {
+    let ctx = WorktreeContext::detect_with(go_path).await?;
 
     println!(
         "{} {} - {}",

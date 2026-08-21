@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 mod builder;
@@ -14,6 +16,10 @@ mod worktree;
 #[command(about = "FFI compatibility testing tool for defradb.rs")]
 #[command(version)]
 struct Cli {
+    /// Path to the Go DefraDB checkout (overrides DEFRADB_GO_REPO and worktree pairing)
+    #[arg(long, global = true, value_name = "PATH")]
+    go_path: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -117,32 +123,34 @@ enum WorktreeCommands {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let Cli { go_path, command } = Cli::parse();
 
-    let result = match cli.command {
+    let result = match command {
         Commands::Run {
             package,
             test,
             verbose,
             skip_build,
-        } => commands::run::execute(&package, test.as_deref(), verbose, skip_build).await,
+        } => commands::run::execute(&package, test.as_deref(), verbose, skip_build, go_path).await,
 
         Commands::Status {
             package,
             all,
             depth,
-        } => commands::status::execute(all, depth, package.as_deref()).await,
+        } => commands::status::execute(all, depth, package.as_deref(), go_path).await,
 
-        Commands::Diff { package } => commands::diff::execute(&package).await,
+        Commands::Diff { package } => commands::diff::execute(&package, go_path).await,
 
         Commands::Logs {
             package,
             test,
             failed,
             all,
-        } => commands::logs::execute(&package, test.as_deref(), failed, all).await,
+        } => commands::logs::execute(&package, test.as_deref(), failed, all, go_path).await,
 
-        Commands::Packages { package } => commands::packages::execute(package.as_deref()).await,
+        Commands::Packages { package } => {
+            commands::packages::execute(package.as_deref(), go_path).await
+        }
 
         Commands::Worktree { command } => match command {
             WorktreeCommands::List => commands::worktree::list().await,
@@ -158,5 +166,33 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("\x1b[31mError:\x1b[0m {}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn go_path_of(args: &[&str]) -> Option<PathBuf> {
+        Cli::try_parse_from(args).map(|cli| cli.go_path).unwrap()
+    }
+
+    #[test]
+    fn go_path_is_accepted_before_and_after_the_subcommand() {
+        let expected = Some(PathBuf::from("/elsewhere/defradb"));
+
+        assert_eq!(
+            go_path_of(&["ffi-test", "--go-path", "/elsewhere/defradb", "packages"]),
+            expected
+        );
+        assert_eq!(
+            go_path_of(&["ffi-test", "packages", "--go-path", "/elsewhere/defradb"]),
+            expected
+        );
+    }
+
+    #[test]
+    fn go_path_is_absent_when_not_passed() {
+        assert_eq!(go_path_of(&["ffi-test", "packages"]), None);
     }
 }
