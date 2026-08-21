@@ -558,8 +558,13 @@ integration-all:
 
 # TLA+, Lean, and both conformance axes. This is proofs/verify-all.sh.
 [group('proofs')]
-proofs:
+proofs: check-anchors
     proofs/verify-all.sh
+
+# Every *.rs filename named in proofs/ or SURVEY.md resolves to a tracked file.
+[group('proofs')]
+check-anchors:
+    bash .github/scripts/check-proof-anchors.sh
 
 # TLC over every model, checked against the expected red/green oracle.
 [group('proofs')]

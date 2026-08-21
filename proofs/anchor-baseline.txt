@@ -1,0 +1,23 @@
+# Filenames named in proofs/ or SURVEY.md that do not resolve to a tracked file.
+#
+# These predate the anchor check and belong to other crates' proof slices, not
+# to the db compartmentalization that introduced the check. Each needs its own
+# triage; none is a db anchor.
+#
+# claim.rs, transition.rs, watcher.rs   -> Claim slice (proofs/tla/Claim_DESIGN.md)
+# delegate.rs, subagent_request.rs,
+# subscription_source.rs                -> proofs/tla/DESIGN.md worked examples
+# hub.rs                                -> proofs/survey/sourcehub.md
+# p2p_doc_pusher.rs                     -> proofs/survey/cli.md
+# push_docs_transport.rs                -> EncryptedLwwReplay slice
+# defradb.rs                            -> the repository name, not a source file
+claim.rs
+defradb.rs
+delegate.rs
+hub.rs
+p2p_doc_pusher.rs
+push_docs_transport.rs
+subagent_request.rs
+subscription_source.rs
+transition.rs
+watcher.rs
