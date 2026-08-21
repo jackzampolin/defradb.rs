@@ -37,7 +37,7 @@ property about the missing gate, not about CRDT merge details.
   `crates/query/src/runner/commits.rs:654`, calling
   `check_doc_access_with_overlay(..., DocumentPermission::Read, ...)` at
   `crates/query/src/runner/commits.rs:792`.
-- P2P merge-side ACP filtering is in `crates/db-merge/src/acp_merge_handler.rs:71`: with
+- P2P merge-side ACP filtering is in `crates/db/src/merge/acp_merge_handler.rs:71`: with
   strict replicated-doc access enabled, protected composites require local
   `DocumentPermission::Read` before merge.
 - Embedded setup wires that strict merge-side mode for SourceHub-backed ACP in

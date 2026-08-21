@@ -10,19 +10,19 @@ algebra all live in dependency crates (`crdt`, `db-merge`, `db-blocks`, `acp`,
 `db-nac`) that have their own slices.
 
 ## State machines
-- **Explicit/implicit txn lifecycle** (`txn.rs`): `Some(txn)`→committed/discarded
+- **Explicit/implicit txn lifecycle** (`txn/mod.rs`): `Some(txn)`→committed/discarded
   (`None`); explicit txns reject `commit()`/`discard()` (must `force_*`). Plumbing.
-- **Stale-txn registry cleanup** (`txn_registry.rs` `cleanup_stale_transactions`):
+- **Stale-txn registry cleanup** (`txn/registry/cleanup.rs` `cleanup_stale_transactions`):
   collect candidates under read lock → re-check idle under per-ctx action lock →
   remove under write lock with `Arc::ptr_eq` + final idle re-check. A real
   concurrency protocol guarding against evicting a transaction a concurrent
   request just touched. NOT covered by an existing slice.
-- **Schema patch / version transition** (`patch/`, `migration/`): old→new
+- **Schema patch / version transition** (`definition/patch/`, `definition/migration/`): old→new
   version_id, IsActive-only vs Transform-only vs structural; rejects unsafe
   multi-active states. Validation logic; integration-test territory.
-- **block_verify** (`block_verify.rs`): verify-then-merge + dual-path ACP read
+- **block_verify** (`block/verify.rs`): verify-then-merge + dual-path ACP read
   gate — already modeled (Integrity, Commits slices).
-- **Schema version_id CID** (`patch/version_id.rs`): content-addressed schema
+- **Schema version_id CID** (`definition/patch/version.rs`): content-addressed schema
   version from field CIDs — a content-addressing instance.
 
 ## Candidates

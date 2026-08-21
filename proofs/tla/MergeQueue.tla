@@ -1,9 +1,9 @@
 ---- MODULE MergeQueue ----
 \* Per-document write serialization + bounded conflict-retry, abstracting
-\* crates/db/src/doc_write_queue.rs (DocWriteQueue, owned by the DB and shared by
+\* crates/db/src/write/queue.rs (DocWriteQueue, owned by the DB and shared by
 \* BOTH the local-write path and the db-merge merge handler — #1021) and
-\* crates/db-merge/src/merge_handler/batch.rs (merge_blocks_individually retry loop).
-\* (Was crates/db-merge/src/merge_handler/queue.rs before #1021 unified local
+\* crates/db/src/merge/merge_handler/batch.rs (merge_blocks_individually retry loop).
+\* (Was crates/db/src/merge/merge_handler/queue.rs before #1021 unified local
 \* writes and merges onto one per-doc lock.) Anchors are in MergeQueue_DESIGN.md.
 \*
 \* The property: one P2P merge writer owns the shared mutable index transaction at a
@@ -145,7 +145,7 @@ UserWrite(d) ==
 
 \* ---- #1021 fix: a local user-write that ACQUIRES the shared per-doc guard -------------
 \* update_impl/create_impl take the SAME per-doc DocWriteQueue guard the merge handler
-\* takes (crates/db/src/doc_write_queue.rs, shared by both paths). The write is performed
+\* takes (crates/db/src/write/queue.rs, shared by both paths). The write is performed
 \* INSIDE the critical section and the guard is released afterwards, so a local write and a
 \* same-doc merge are mutually excluded — never interleaved in the critical section. The
 \* merge worker's CanAcquire already refuses while lockOwner = UserTok, and vice-versa.

@@ -44,7 +44,7 @@ what makes "save wins" recover every `new` tuple even if it was just deleted.
 
 ## Source anchors
 
-Rust (`crates/db-index`, this worktree):
+Rust (`crates/db (index)`, this worktree):
 * `src/index_manager/mod.rs:412` `on_document_update` — the headline op.
   - `:427-428` compute `old_value_sets` / `new_value_sets` via `extract_index_values`.
   - `:430` guard `if old_value_sets != new_value_sets` (the no-op-on-equal short circuit).

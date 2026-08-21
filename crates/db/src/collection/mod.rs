@@ -10,12 +10,8 @@
 /// If the document write succeeds but the index update fails, the caller MUST discard the
 /// transaction (do not commit) to maintain consistency. The underlying transaction will
 /// roll back both operations when discarded.
-mod crud_datastore;
-mod index_ops;
-mod validation;
-
 use crate::error::{Error, Result};
-use crate::index_manager::IndexManager;
+use crate::index::IndexManager;
 use datastore::NamespaceView;
 use defra_core::ActionStatus;
 use document::{DocID, Document, NormalValue};
@@ -26,6 +22,20 @@ use schema::{
 use storage::corekv::{IterOptions, Key};
 use storage::keys::doc_id_index::encode_doc_short_id;
 use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
+
+pub mod acp;
+pub mod cache;
+mod crud;
+mod index;
+pub mod loader;
+pub(crate) mod locks;
+pub mod name;
+pub(crate) mod ops;
+pub(crate) mod provider;
+pub mod retriever;
+pub mod snapshot;
+pub mod stream;
+pub mod validation;
 
 /// Derive the legacy short ID from a collection_id string.
 ///
@@ -230,7 +240,7 @@ impl Collection {
     /// collection is allocation (insertion) order, matching Go v1.0.0's
     /// short-ID-keyed datastore (#4838). Delegates to the shared key helper
     /// so the write, merge, and index layers agree on the layout (#1111).
-    pub(crate) fn doc_key(&self, doc_short_id: u64) -> Vec<u8> {
+    pub fn doc_key(&self, doc_short_id: u64) -> Vec<u8> {
         storage::keys::doc_key(&self.def.collection_id, doc_short_id)
     }
 
@@ -268,12 +278,12 @@ impl Collection {
     ///
     /// Returns `None` for unknown documents or documents belonging to a
     /// different collection.
-    pub(crate) async fn resolve_doc_short_id(
+    pub async fn resolve_doc_short_id(
         &self,
         systemstore: &NamespaceView,
         doc_id: &DocID,
     ) -> Result<Option<u64>> {
-        crate::doc_id_map::get_doc_short_id(
+        crate::docid::map::get_doc_short_id(
             systemstore,
             self.resolved_root_id(),
             &doc_id.to_string(),
@@ -291,7 +301,7 @@ impl Collection {
         let Some(doc_short_id) = self.resolve_doc_short_id(systemstore, doc_id).await? else {
             return Ok(None);
         };
-        let canonical = crate::doc_id_map::get_doc_id(systemstore, doc_short_id)
+        let canonical = crate::docid::map::get_doc_id(systemstore, doc_short_id)
             .await?
             .ok_or_else(|| {
                 Error::InvalidDocument(format!(

@@ -15,7 +15,7 @@ requests, ACP config plumbing (`node_acp`), and a large benchmark harness
   start/abort ordering of transport, coordinator, and five background tasks. This is
   task-teardown ordering, not a protocol state machine.
 - **Iroh retry loop** (`spawn_iroh_retry_loop`): polls `storage::stores::RetryInfo`
-  backoff and calls `db_merge::retry_doc_via_transport`, flipping
+  backoff and calls `db::merge::retry_doc_via_transport`, flipping
   `p2p::ReplicatorStatus`. The replicator backfill/live/resume/backoff state machine
   itself lives in `p2p`/`storage`, not here.
 - **Document ACP selection** (`node_acp.rs`): a two-arm match (Local vs SourceHub);

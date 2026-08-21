@@ -36,7 +36,7 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             .transpose()
             .map_err(|error| format!("invalid caller DID: {error}"))?;
         let caller_identity: acp::Identity = caller_did.into();
-        db::block_verify::authorized_signed_block_bytes(
+        db::block::verify::authorized_signed_block_bytes(
             &self.database,
             self.document_acp.as_ref(),
             cid,
@@ -65,7 +65,7 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             .map_err(|error| format!("invalid caller DID: {error}"))?;
         let caller_identity: acp::Identity = caller_did.into();
 
-        db::block_verify::verify_block_signature(
+        db::block::verify::verify_block_signature(
             &self.database,
             self.document_acp.as_ref(),
             cid,

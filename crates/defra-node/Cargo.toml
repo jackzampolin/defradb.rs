@@ -31,14 +31,14 @@ p2p = [
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
 # Native host (tokio, event channel). Default-on.
-native = ["db/native", "db-merge/native"]
+native = ["db/native", ]
 # SourceHub / hub.rs on-chain document ACP. Default-on; omit for local-only ACP.
 sourcehub = ["dep:sourcehub"]
 # Lens WASM execution. Default-on; without it set_migration fails explicitly.
 # Weak-dep `?` forwards onto the optional adapter only when `p2p` enabled it.
 wasmtime-runtime = [
     "db/wasmtime-runtime",
-    "db-merge/wasmtime-runtime",
+    
     "lens/wasmtime-runtime",
     "defra-p2p-adapter?/wasmtime-runtime",
 ]
@@ -49,7 +49,6 @@ otel = ["telemetry/otlp"]
 
 [dependencies]
 db = { path = "../db", default-features = false }
-db-merge = { path = "../db-merge", default-features = false }
 replication-filter = { path = "../replication-filter" }
 storage = { path = "../storage" }
 query = { path = "../query" }

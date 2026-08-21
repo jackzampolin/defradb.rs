@@ -34,7 +34,7 @@
 \*             add_permission_grant / remove_permission_grant: each REJECTS
 \*             with InvalidPolicy when status == DisabledTemporarily
 \*             ("cannot modify relationships while NAC is disabled").
-\*   crates/db-nac/src/lib.rs
+\*   crates/db/src/nac/lib.rs
 \*     :235-244 NacManager::disable(): auth via is_admin (LIVE).
 \*     :247-256 NacManager::re_enable(): auth via is_admin_persisted (STORED).
 \*             ** This asymmetry is the security crux: while disabled, live

@@ -25,7 +25,7 @@ pub(super) struct P2PSetup {
     pub(super) wire_doc_pusher_acp: WireDocumentAcp,
     /// Hook for forwarding committed `/tx` writes to P2P peers. `Some` when the
     /// P2P stack is up; `None` for the non-P2P fallback path.
-    pub(super) txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
+    pub(super) txn_broadcaster: Option<Arc<dyn db::event::emission::TxnBroadcaster>>,
     /// Type-erased KMS transport for this node's P2P system. server.rs adds it
     /// to the DefraKms transports list and installs the serve handler. `None`
     /// on the non-P2P fallback path.

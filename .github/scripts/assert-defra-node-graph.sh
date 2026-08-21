@@ -9,7 +9,7 @@
 # CLI's libp2p into every tree.
 set -euo pipefail
 
-# Always `-p defra-node`, `-p cli`, or `-p db-merge`. Workspace trees are forbidden.
+# Always `-p defra-node`, `-p cli`, or `-p db`. Workspace trees are forbidden.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 assert_present() {
@@ -78,9 +78,9 @@ assert_present cli libp2p
 # Default defra-node (no p2p feature) must not resolve libp2p / libp2p-*.
 assert_no_libp2p defra-node
 
-# Isolated db-merge native graph must not resolve the optional libp2p dep.
+# Isolated db native graph must not resolve the optional libp2p dep.
 # cargo tree -i libp2p often exits 0 with empty stdout — still absent.
-assert_absent db-merge libp2p --no-default-features --features native
+assert_absent db libp2p --no-default-features --features native
 
 # Lean local-ACP + native host. No SourceHub, no Wasmtime, no libp2p.
 assert_absent defra-node sourcehub --no-default-features --features lark,redb,native

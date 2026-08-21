@@ -19,18 +19,18 @@ All in `crates/db/src/`:
 
 | Symbol in model | Rust code | Anchor |
 |---|---|---|
-| `cleanup_stale_transactions` (the sweep) | `DbTransactionRegistry::cleanup_stale_transactions` | `txn_registry.rs:266-348` |
-| Phase 1 `Collect` (read-lock candidate collection) | `self.transactions.read()` + `filter(idle_for(now) > max_idle_age)` | `txn_registry.rs:275-285` |
-| Phase 2 `ProcessCandidate` (write-locked re-check + remove) | `self.transactions.write()` + `Arc::ptr_eq && current.idle_for(now) > max_idle_age => guard.remove` | `txn_registry.rs:300-318` |
-| `RemoveDecision` w/ `Recheck="WriteLocked"` | the `current.idle_for(Instant::now()) > max_idle_age` guard | `txn_registry.rs:311-312` |
-| `Touch` (get / get_ctx refresh) | `get_ctx`: `read()` then `ctx.touch()` | `txn_registry.rs:192-199` |
-| `Touch` (trait `get`) | `get`: `read()` then `ctx.touch()` | `txn_registry.rs:766-784` |
-| `lastSeen` write | `DbTransactionContext::touch` → `*last_request_seen = Instant::now()` | `txn_context.rs:65-75` |
-| `IdleFor` | `DbTransactionContext::idle_for` → `now.duration_since(last_request_seen())` | `txn_context.rs:86-88` |
-| read/write-lock exclusion | `transactions: RwLock<HashMap<..>>` (`std::sync::RwLock`) | `txn_registry.rs:88` |
-| `IsStale` threshold | `idle_for(now) > max_idle_age`; default `max_idle_age = 600s` | `txn_registry.rs:39`, `:282`, `:293`, `:312` |
+| `cleanup_stale_transactions` (the sweep) | `DbTransactionRegistry::cleanup_stale_transactions` | `txn/registry/cleanup.rs:20-102` |
+| Phase 1 `Collect` (read-lock candidate collection) | `self.transactions.read()` + `filter(idle_for(now) > max_idle_age)` | `txn/registry/cleanup.rs:30-40` |
+| Phase 2 `ProcessCandidate` (write-locked re-check + remove) | `self.transactions.write()` + `Arc::ptr_eq && current.idle_for(now) > max_idle_age => guard.remove` | `txn/registry/cleanup.rs:55-72` |
+| `RemoveDecision` w/ `Recheck="WriteLocked"` | the `current.idle_for(Instant::now()) > max_idle_age` guard | `txn/registry/cleanup.rs:65-66` |
+| `Touch` (get / get_ctx refresh) | `get_ctx`: `read()` then `ctx.touch()` | `txn/registry/mod.rs:157-165` |
+| `Touch` (trait `get`) | `get`: `read()` then `ctx.touch()` | `txn/registry/lifecycle.rs:282-290` |
+| `lastSeen` write | `DbTransactionContext::touch` → `*last_request_seen = Instant::now()` | `txn/context.rs:68-77` |
+| `IdleFor` | `DbTransactionContext::idle_for` → `now.duration_since(last_request_seen())` | `txn/context.rs:89-91` |
+| read/write-lock exclusion | `transactions: RwLock<HashMap<..>>` (`std::sync::RwLock`) | `txn/registry/mod.rs:97` |
+| `IsStale` threshold | `idle_for(now) > max_idle_age`; default `max_idle_age = 600s` | `txn/registry/mod.rs:48`, `txn/registry/cleanup.rs:36`, `:47`, `:66` |
 
-The load-bearing invariant in the code is the comment at `txn_registry.rs:305-308`:
+The load-bearing invariant in the code is the comment at `txn/registry/cleanup.rs:59-62`:
 holding the registry **write** lock blocks new `get()`/`get_ctx()` touches (which take
 the **read** lock) while the final idle re-check + remove runs. The model encodes that
 RwLock exclusion (`NoReadLock`/`NoWriteLock` guards on `TouchAcquire` and
@@ -51,7 +51,7 @@ stored in a `sync.Map` and removed only on explicit commit/discard:
 A repo-wide search of `origin/develop` for a txn reaper/idle-timeout/sweep returns
 nothing. Consequence: in Go an orphaned HTTP txn handle leaks until process exit. The
 Rust registry **adds** a periodic sweep (`start_stale_transaction_cleanup`,
-`txn_registry.rs:357-400`) that Go lacks. So this slice models a **Rust-specific
+`txn/registry/cleanup.rs:111-155`) that Go lacks. So this slice models a **Rust-specific
 hardening**, and the race it guards against does not exist in Go because Go never evicts.
 The proof's value is confirming the Rust addition is correct (no live-txn loss), not Go
 parity — Go is the trivial "never evict" case (which the model's GREEN run also covers:
@@ -123,15 +123,15 @@ The real code's write-locked re-check (step 5 under `"WriteLocked"`) re-reads
   the read- and write-locked critical sections; `Tick` is disallowed while a lock is held,
   matching that the real `idle_for`/`touch`/re-check each read `Instant::now()` once inside
   a held lock. The model does **not** capture sub-instant time skew within a single locked
-  section (the real code calls `Instant::now()` twice in phase 2, `:292` and `:312`; both
+  section (the real code calls `Instant::now()` twice in phase 2, `txn/registry/cleanup.rs:46` and `:66`; both
   are after the candidate's own action lock is held, so no touch can intervene — the model
   collapses them to one `clock` read, which is the conservative, faithful abstraction).
-- **`Arc::ptr_eq` guard (`:311`):** modeled implicitly — `present[t]` membership plus
+- **`Arc::ptr_eq` guard (`txn/registry/cleanup.rs:65`):** modeled implicitly — `present[t]` membership plus
   single-sweep `candidates` means a removed-then-reinserted id cannot be confused; the
   ptr_eq check guards the (here unmodeled) id-reuse case. The id counter is monotonic
-  (`txn_registry.rs:714`), so id reuse does not occur in practice; ptr_eq is belt-and-
+  (`txn/registry/lifecycle.rs:206`), so id reuse does not occur in practice; ptr_eq is belt-and-
   suspenders and out of this slice's scope.
-- **Per-context action lock (`:289-290`):** the real phase-2 first takes the candidate's
+- **Per-context action lock (`txn/registry/cleanup.rs:43-44`):** the real phase-2 first takes the candidate's
   async action lock, then the registry write lock. The model folds the action lock into the
   write-locked section; this only *removes* interleavings (strictly fewer races), so it
   cannot hide a counterexample the real code would have — and the RED run shows the

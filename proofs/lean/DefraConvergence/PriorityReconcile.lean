@@ -15,7 +15,7 @@ merge then resolves a re-walked ancestor delta against the stale `view`, the
 field can drop BELOW its committed priority — and the two replicas diverge. This
 is the bug found by the conformance harness
 (`proofs/tests/behavioral/partition.rs`) and fixed in
-`crates/db-merge/src/merge_handler/lww.rs` (`seed_lww_from_existing_doc`).
+`crates/db/src/merge/merge_handler/lww.rs` (`seed_lww_from_existing_doc`).
 
 This models the fix: `reconcile` raises `view` to `committed` before merging, and
 we prove that the merge can then never drop the field below its committed

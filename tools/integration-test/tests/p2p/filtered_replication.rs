@@ -2881,7 +2881,7 @@ async fn rust_filtered_replication_acp_composite_controlled_mode() {
 /// #1038 Gap 1: the filter must hold on the push-RETRY/recovery path, not only on
 /// the live push. A push to a down replicator fails and is recorded in the
 /// peerstore retry queue; the server's retry-drain loop later re-pushes via
-/// `db_merge::retry_doc`, which re-loads the document and re-applies
+/// `db::merge::retry_doc`, which re-loads the document and re-applies
 /// `document_matches_filter` (so a non-matching queued doc is skipped at retry
 /// time). This drives that path by killing node1 while node0 enqueues both a
 /// matching and a non-matching doc, then restarts node1 and asserts recovery

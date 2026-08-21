@@ -23,7 +23,7 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// Forwards committed `/tx` writes to P2P peers; mirrors what the CLI
     /// `P2PSetup` exposes. Without this, transactional writes commit locally
     /// but never replicate.
-    pub txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
+    pub txn_broadcaster: Arc<dyn db::event::emission::TxnBroadcaster>,
     /// Type-erased KMS transport for this node's P2P system. node.rs adds it
     /// to the DefraKms transports list and installs the serve handler.
     pub kms_transport: Arc<dyn kms::KeyTransport>,
@@ -134,7 +134,7 @@ where
     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
     let head_provider: Arc<dyn DocumentHeadProvider> =
-        Arc::new(db_merge::create_head_provider(database.clone()));
+        Arc::new(db::merge::create_head_provider(database.clone()));
     let (mut coordinator, sync_events_rx) =
         p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
             p2p::Libp2pTransport::new(handle.clone()),
@@ -151,7 +151,7 @@ where
         .await
         .map_err(|error| anyhow!("failed to create sync coordinator: {error}"))?;
 
-    let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
+    let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
     coordinator
         .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
@@ -171,7 +171,7 @@ where
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
     });
-    let replication = db_merge::create_replication_stack(
+    let replication = db::merge::create_replication_stack(
         database.clone(),
         blockstore.clone(),
         coordinator.clone(),
@@ -191,7 +191,7 @@ where
     coordinator.install_kms_transport(kms_transport.clone());
     let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
-    match db_merge::load_persisted_collections(&coordinator).await {
+    match db::merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
         Ok(_) => {}
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
@@ -245,7 +245,7 @@ where
         replication.merge_handler_inner.clone(),
         database.clone(),
     ));
-    let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
+    let se_repusher: Arc<dyn db::merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
     let retry_store = store.clone();
     let retry_transport = p2p::Libp2pTransport::new(handle.clone());
     let retry_doc_pusher = doc_pusher.clone();
@@ -280,17 +280,17 @@ where
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     // Lazy SE-key handle: teed by the callback below (runtime provisioning),
     // read by the owner/querier transport at query time (#976).
-    let se_key_handle = db_merge::empty_se_key_handle();
+    let se_key_handle = db::merge::empty_se_key_handle();
     let se_key_handle_for_callback = se_key_handle.clone();
     let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
         tee_se_key(&se_key_handle_for_callback, &options);
-        broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
+        broadcast_mutator_for_se.set_se_options(db::merge::BroadcastSeOptions {
             encryption_key: options.se_encryption_key,
             identity_pubkey: options.se_identity_pubkey,
         })
     });
     let se_transport: Option<Arc<dyn query::SeQueryTransport>> =
-        Some(Arc::new(db_merge::DbMergeSeQueryTransport::new(
+        Some(Arc::new(db::merge::DbMergeSeQueryTransport::new(
             p2p::Libp2pTransport::new(handle.clone()),
             se_correlator_for_transport,
             coordinator.replicators().clone(),
@@ -376,12 +376,12 @@ where
 
 /// Tee the SE key material from runtime `set_se_options` into the lazy handle
 /// read by the owner/querier transport. Skips non-32-byte keys (#976).
-fn tee_se_key(handle: &db_merge::SeKeyHandle, options: &ReplicatorPushOptions) {
+fn tee_se_key(handle: &db::merge::SeKeyHandle, options: &ReplicatorPushOptions) {
     match &options.se_encryption_key {
         Some(key_bytes) => match <[u8; 32]>::try_from(key_bytes.as_slice()) {
-            Ok(key) => db_merge::store_se_key(
+            Ok(key) => db::merge::store_se_key(
                 handle,
-                Some(db_merge::SeKeyMaterial::new(
+                Some(db::merge::SeKeyMaterial::new(
                     key,
                     options.se_identity_pubkey.clone(),
                 )),
@@ -393,7 +393,7 @@ fn tee_se_key(handle: &db_merge::SeKeyHandle, options: &ReplicatorPushOptions) {
                 );
             }
         },
-        None => db_merge::store_se_key(handle, None),
+        None => db::merge::store_se_key(handle, None),
     }
 }
 
@@ -441,7 +441,7 @@ where
     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
     let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-        Arc::new(db_merge::create_head_provider(database.clone()));
+        Arc::new(db::merge::create_head_provider(database.clone()));
     let (mut coordinator, sync_events_rx) =
         p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
             transport.clone(),
@@ -458,7 +458,7 @@ where
         .await
         .map_err(|error| anyhow!("failed to create iroh sync coordinator: {error}"))?;
 
-    let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
+    let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
     coordinator
         .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
@@ -478,7 +478,7 @@ where
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
     });
-    let replication = db_merge::create_replication_stack(
+    let replication = db::merge::create_replication_stack(
         database.clone(),
         blockstore.clone(),
         coordinator.clone(),
@@ -495,7 +495,7 @@ where
     coordinator.install_kms_transport(kms_transport.clone());
     let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
-    match db_merge::load_persisted_collections(&coordinator).await {
+    match db::merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
         Ok(_) => {}
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
@@ -539,7 +539,7 @@ where
         database.clone(),
         transport.clone(),
     ));
-    let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
+    let se_repusher: Arc<dyn db::merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
     let retry_store = store.clone();
     let retry_transport = transport.clone();
     let retry_doc_pusher = doc_pusher.clone();
@@ -571,17 +571,17 @@ where
     let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
-    let se_key_handle = db_merge::empty_se_key_handle();
+    let se_key_handle = db::merge::empty_se_key_handle();
     let se_key_handle_for_callback = se_key_handle.clone();
     let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
         tee_se_key(&se_key_handle_for_callback, &options);
-        broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
+        broadcast_mutator_for_se.set_se_options(db::merge::BroadcastSeOptions {
             encryption_key: options.se_encryption_key,
             identity_pubkey: options.se_identity_pubkey,
         })
     });
     let se_transport: Option<Arc<dyn query::SeQueryTransport>> =
-        Some(Arc::new(db_merge::DbMergeSeQueryTransport::new(
+        Some(Arc::new(db::merge::DbMergeSeQueryTransport::new(
             transport.clone(),
             se_correlator_for_transport,
             coordinator.replicators().clone(),

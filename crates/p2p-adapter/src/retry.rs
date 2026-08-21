@@ -157,7 +157,7 @@ pub async fn run_retry_pass<S, T>(
     store: &Arc<S>,
     transport: &T,
     doc_pusher: &Arc<dyn TransportDocPusher>,
-    se_repusher: Option<&Arc<dyn db_merge::SeArtifactRepusher>>,
+    se_repusher: Option<&Arc<dyn db::merge::SeArtifactRepusher>>,
     force: bool,
 ) where
     S: storage::corekv::Store + 'static,
@@ -291,7 +291,7 @@ pub fn spawn_retry_loop<S, T>(
     store: Arc<S>,
     transport: T,
     doc_pusher: Arc<dyn TransportDocPusher>,
-    se_repusher: Option<Arc<dyn db_merge::SeArtifactRepusher>>,
+    se_repusher: Option<Arc<dyn db::merge::SeArtifactRepusher>>,
 ) -> tokio::task::JoinHandle<()>
 where
     S: storage::corekv::Store + 'static,

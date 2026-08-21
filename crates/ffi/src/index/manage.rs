@@ -157,7 +157,7 @@ pub unsafe extern "C" fn delete_index(
                     .map_err(|e| format!("failed to get datastore: {}", e))?;
 
                 // Create the index manager
-                let mut index_manager = db::index_manager::IndexManager::from_collection(
+                let mut index_manager = db::index::IndexManager::from_collection(
                     collection.schema().resolved_root_id(),
                     collection.schema(),
                 )
