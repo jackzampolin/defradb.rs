@@ -1,5 +1,6 @@
-use super::*;
-use crate::event::Update;
+//! Integration tests for the channel-backed event bus
+
+use events::{Bus, ChannelBus, ChannelBusConfig, EventName, MergeCompleteData, Message, Update};
 
 #[tokio::test]
 async fn test_channel_bus_publish_subscribe() {
@@ -35,7 +36,7 @@ async fn test_channel_bus_wildcard() {
 
     // Publish different events
     bus.publish(Message::merge());
-    bus.publish(Message::merge_complete(crate::MergeCompleteData {
+    bus.publish(Message::merge_complete(MergeCompleteData {
         doc_id: "test-doc".to_string(),
         subject_doc_id: None,
         cid: cid::Cid::default(),
