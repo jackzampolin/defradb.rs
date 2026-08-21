@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, MethodRouter},
     Router,
 };
 
@@ -36,15 +36,43 @@ pub fn create_router_with_rest(
 ///
 /// This allows configuring all optional components (REST, P2P, ACP, Index, Backup).
 pub fn create_router_with_state(state: AppState) -> Router {
-    create_router_with_state_and_sync_body_limit(
-        state,
-        defra_core::browser_sync::MAX_SYNC_BODY_BYTES,
-    )
+    create_router_with_state_and_body_limits(state, BodyLimits::unlimited())
 }
 
-pub(crate) fn create_router_with_state_and_sync_body_limit(
+/// Per-route request body caps, in bytes.
+///
+/// `None` leaves a route bound only by the global limit `server.rs` applies to
+/// the whole router. Callers are responsible for clamping these against that
+/// global limit -- a route-level cap overrides the global one rather than
+/// intersecting with it, so a looser value here would raise the effective cap.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BodyLimits {
+    pub sync: usize,
+    pub schema: Option<usize>,
+    pub backup_import: Option<usize>,
+}
+
+impl BodyLimits {
+    pub(crate) fn unlimited() -> Self {
+        Self {
+            sync: defra_core::browser_sync::MAX_SYNC_BODY_BYTES,
+            schema: None,
+            backup_import: None,
+        }
+    }
+}
+
+/// Apply a body cap to a single method handler, or leave it uncapped.
+fn capped(route: MethodRouter<AppState>, limit: Option<usize>) -> MethodRouter<AppState> {
+    match limit {
+        Some(bytes) => route.layer(DefaultBodyLimit::max(bytes)),
+        None => route,
+    }
+}
+
+pub(crate) fn create_router_with_state_and_body_limits(
     state: AppState,
-    sync_body_limit: usize,
+    limits: BodyLimits,
 ) -> Router {
     // Health check at root level (matches Go DefraDB)
     let root_routes = Router::new().route("/health-check", get(handlers::health_check));
@@ -63,7 +91,10 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
             "/{id}/collections",
             get(handlers::txn_ops::get_collections_in_txn),
         )
-        .route("/{id}/schema", post(handlers::txn_ops::add_schema_in_txn));
+        .route(
+            "/{id}/schema",
+            capped(post(handlers::txn_ops::add_schema_in_txn), limits.schema),
+        );
 
     // Collection routes (REST API)
     // Static routes must come before parametric `:name` routes
@@ -71,9 +102,11 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
         .route(
             "/",
             get(handlers::list_collections)
-                .post(handlers::schema::add_schema)
                 .patch(handlers::patch_collection)
-                .delete(handlers::delete_collections_by_names),
+                .delete(handlers::delete_collections_by_names)
+                // Merged rather than chained so the cap binds only the schema
+                // POST, not the sibling patch/delete methods on this path.
+                .merge(capped(post(handlers::schema::add_schema), limits.schema)),
         )
         .route("/default", post(handlers::set_active))
         .route(
@@ -192,7 +225,10 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
     // Backup routes (POST for both to match Go DefraDB)
     let backup_routes = Router::new()
         .route("/export", post(handlers::backup::export))
-        .route("/import", post(handlers::backup::import));
+        .route(
+            "/import",
+            capped(post(handlers::backup::import), limits.backup_import),
+        );
 
     // Block routes
     let block_routes = Router::new()
@@ -240,7 +276,10 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
     // /views is Rust's original mount and carries the Rust-only /gc route.
     // Deriving it from the Go set keeps the two mounts from drifting.
     let go_view_routes = Router::new()
-        .route("/", post(handlers::views::add_view))
+        // A view is defined by an SDL block, which Go parses with the same
+        // `ParseSDL` as a schema add (`internal/db/view.go:47` vs
+        // `internal/db/collection.go:276`), so it is a schema request body.
+        .route("/", capped(post(handlers::views::add_view), limits.schema))
         .route("/refresh", post(handlers::views::refresh_views));
     let view_routes = go_view_routes
         .clone()
@@ -256,12 +295,15 @@ pub(crate) fn create_router_with_state_and_sync_body_limit(
             axum::routing::any(handlers::graphql_ws_handler),
         )
         .route("/schema", get(handlers::schema))
-        .route("/schema", post(handlers::schema::add_schema))
+        .route(
+            "/schema",
+            capped(post(handlers::schema::add_schema), limits.schema),
+        )
         .route("/version", get(handlers::version))
         .route("/actions", get(handlers::actions::list_actions))
         .route(
             "/sync",
-            post(handlers::browser_sync::sync).layer(DefaultBodyLimit::max(sync_body_limit)),
+            post(handlers::browser_sync::sync).layer(DefaultBodyLimit::max(limits.sync)),
         )
         // Transaction endpoints
         .nest("/tx", tx_routes)
