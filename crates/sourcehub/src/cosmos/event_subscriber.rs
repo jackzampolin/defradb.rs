@@ -102,6 +102,7 @@ fn retry_delay_after_session(current: Duration, session_duration: Option<Duratio
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn consume<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
     cache: &AccessCache,
