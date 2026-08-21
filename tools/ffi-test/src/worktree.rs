@@ -51,14 +51,8 @@ impl WorktreeContext {
 
         // Validate Go worktree exists
         if !go_path.exists() {
-            let branch = if suffix.is_empty() {
-                "jack/ffi-rust-compat".to_string()
-            } else {
-                format!("ffi/{}", suffix)
-            };
             return Err(FfiTestError::GoWorktreeNotFound {
                 path: go_path.display().to_string(),
-                branch,
             });
         }
 
@@ -442,6 +436,25 @@ mod tests {
         assert_eq!(
             derive_go_path(rust_path, "feature").unwrap(),
             Path::new("/home/user/source/defradb-feature")
+        );
+    }
+
+    #[test]
+    fn the_missing_go_worktree_hint_names_the_client_branch() {
+        let hint = FfiTestError::GoWorktreeNotFound {
+            path: "/r/defradb-ffi-port".to_string(),
+        }
+        .to_string();
+
+        assert!(
+            hint.contains("jack/ffi-rust-compat"),
+            "names the branch carrying the client: {hint}"
+        );
+        // the path may have come from --go-path or DEFRADB_GO_REPO, where
+        // `git worktree add` is the wrong mechanism entirely
+        assert!(
+            !hint.contains("worktree add"),
+            "must not prescribe a mechanism that only fits pairing: {hint}"
         );
     }
 }
