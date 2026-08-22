@@ -22,13 +22,13 @@ The model proves:
 | `lwwState_merge_comm`, `lwwState_merge_assoc`, `lwwState_merge_idem` | LWW is a join over the deterministic priority/value key. | `crates/crdt/src/lww.rs` |
 | `word64Add_comm`, `word64Add_assoc` | Int64 counter accumulation is order-independent under wrapping addition. | `crates/crdt/src/counter.rs` |
 | `word64Add_not_idempotent` | Raw counter merge is not idempotent. Duplicate suppression is not local to `Counter::merge`. | `crates/crdt/src/counter.rs` |
-| `appliedSet_merge_*` | The durable merged-CID/applied set is the idempotent layer used for duplicate suppression. | `crates/db-merge/src/merge_handler/counter.rs` |
+| `appliedSet_merge_*` | The durable merged-CID/applied set is the idempotent layer used for duplicate suppression. | `crates/db/src/merge/merge_handler/counter.rs` |
 | `composite_merge_*` | Composite local state merges componentwise from the LWW and applied-set components. | `crates/crdt/src/composite.rs` |
 | `CrdtField.swap` / `two_converge` / `three_converge` | Generic reusable core (`DefraConvergence/CrdtField.lean`): for ANY commutative-associative merge, the fold is order-independent (replicas applying the same multiset converge). | — (field-agnostic) |
 | `CrdtField.dup_absorb` / `nonidem_has_dup_witness` | Idempotence is the dedup dividing line: idempotent ⇒ re-delivery-safe (no dedup); ¬idempotent ⇒ a duplicate changes the result (must dedup). | — |
 | `CounterReconcile.counterCM` + `counter_not_idempotent`; `PriorityReconcile.lwwCM` + `lww_idempotent` | Both fields fully instantiate the core: the counter (op-based, `Int +`, **not** idempotent ⇒ must apply each delta once — the algebraic root of the #4935 double-apply) and LWW (state-based join, **idempotent** ⇒ re-delivery-safe). | `crates/crdt/src/{counter,lww}.rs` |
 | `MixedField.mixedCM` + `mixed_two_converge` / `mixed_three_converge` + `mixed_not_idempotent` | Same-document `Counter × LWW` is a componentwise product of the two #1041 field instances. It converges when both components receive the same operations, but the product is still non-idempotent because the counter component still needs exactly-once dedup. The cross-field stale whole-document materialization hazard is modeled red/green by `MixedFieldMaterialization.tla`. | `crates/crdt/src/composite.rs`; `crates/crdt/src/{counter,lww}.rs` |
-| `DocumentMaterialization.active_age_after_delete_keeps_deleted` / `delete_active_age_converge` | Document status is a component of materialization: active field rematerialization may update retained bytes, but cannot clear a tombstone. | `crates/db-merge/src/merge_handler/composite_persist.rs`; `crates/crdt/src/composite.rs` |
+| `DocumentMaterialization.active_age_after_delete_keeps_deleted` / `delete_active_age_converge` | Document status is a component of materialization: active field rematerialization may update retained bytes, but cannot clear a tombstone. | `crates/db/src/merge/merge_handler/composite_persist.rs`; `crates/crdt/src/composite.rs` |
 
 `#print axioms` status checked with Lean 4.18:
 
@@ -124,7 +124,7 @@ instance (`DefraConvergence/MixedField.lean`):
    and supply the field's own convergence predicate (a last-writer-wins assertion,
    componentwise equality, etc.) in place of the numeric exact-sum oracle.
 6. **Code plug-point.** The new field's local-write handling plugs into
-   `crates/db/src/auto_commit_mutator/helpers.rs` — `apply_local_counter_deltas`
+   `crates/db/src/write/autocommit/helpers.rs` — `apply_local_counter_deltas`
    (update path) and `init_counter_stores_on_create` (create path) are the counter
    exemplars — reached through the single `write_local_update` / `write_local_create`
    chokepoint that ALL local-write mutators (auto-commit, batch, explicit-txn) call.
@@ -139,4 +139,4 @@ shows that re-seeding the view to the committed priority before merging
 guarantees no delta can drop the field below its committed priority (no clobber);
 `unreconciled_merge_can_clobber` is the constructive witness that, without the
 reconcile, the bug is reachable — the live repro, encoded in Lean. The fix lives
-in `crates/db-merge/src/merge_handler/lww.rs` (`seed_lww_from_existing_doc`).
+in `crates/db/src/merge/merge_handler/lww.rs` (`seed_lww_from_existing_doc`).

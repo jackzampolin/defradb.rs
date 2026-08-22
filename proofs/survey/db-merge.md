@@ -1,5 +1,7 @@
 # db-merge — formal-modelability survey
 
+> **Now a module, not a crate.** `db-merge` was folded into `db` as `crates/db/src/merge/`. The slice below is unchanged; only its location moved.
+
 ## Purpose
 DB-side implementation of P2P merge/broadcast/push, formerly behind `#[cfg(p2p)]` in
 `db`. Implements the `MergeHandler` trait: decode IPLD blocks, verify signatures,

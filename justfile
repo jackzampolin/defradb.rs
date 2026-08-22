@@ -289,7 +289,7 @@ setup-sift:
 [doc("Vector index benchmarks (insert/update/delete/search/kernels).")]
 [group('test')]
 bench-vector *args:
-    cargo bench -p db-index {{ args }}
+    cargo bench -p db {{ args }}
 
 # Go, for the FFI compatibility harness and the Go-parity integration suites.
 [doc("Go, for the FFI harness and the Go-parity suites.")]
@@ -558,8 +558,13 @@ integration-all:
 
 # TLA+, Lean, and both conformance axes. This is proofs/verify-all.sh.
 [group('proofs')]
-proofs:
+proofs: check-anchors
     proofs/verify-all.sh
+
+# Every *.rs filename named in proofs/ or SURVEY.md resolves to a tracked file.
+[group('proofs')]
+check-anchors:
+    bash .github/scripts/check-proof-anchors.sh
 
 # TLC over every model, checked against the expected red/green oracle.
 [group('proofs')]
@@ -618,7 +623,7 @@ lint:
     cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
     cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
     cargo check -p p2p --no-default-features --features iroh-transport
-    cargo check -p db-merge --no-default-features --features native
+    cargo check -p db --no-default-features --features native
     just check-node-graph
 
 # Feature-graph contracts for defra-node (#1398–#1400). Not a size check.

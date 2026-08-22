@@ -12,12 +12,12 @@ use defra_http::router::{BrowserSyncError, BrowserSyncOperations, BrowserSyncRes
 use storage::corekv::Store;
 
 pub struct BrowserSyncAdapter<S: Store + 'static> {
-    engine: db_merge::BrowserSyncEngine<S>,
+    engine: db::merge::BrowserSyncEngine<S>,
     document_acp: Arc<dyn acp::DocumentACP>,
 }
 
 struct PendingSyncDocument {
-    document: db_merge::ValidatedBrowserSyncDocument,
+    document: db::merge::ValidatedBrowserSyncDocument,
     collection: db::Collection,
     register_owner: Option<identity::Did>,
 }
@@ -28,7 +28,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
         document_acp: Arc<dyn acp::DocumentACP>,
     ) -> Arc<dyn BrowserSyncOperations> {
         Arc::new(Self {
-            engine: db_merge::BrowserSyncEngine::new(database),
+            engine: db::merge::BrowserSyncEngine::new(database),
             document_acp,
         })
     }
@@ -56,7 +56,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
         if bypass_dac {
             return Ok(true);
         }
-        db::collection_acp::check_doc_permission(
+        db::collection::acp::check_doc_permission(
             self.document_acp.as_ref(),
             identity,
             permission,
@@ -144,7 +144,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
         let doc_id = document.document.doc_id().to_string();
         let creator = identity.did().map_or("browser-sync", |did| did.as_str());
         if let Some(owner) = document.register_owner.as_ref() {
-            db::collection_acp::register_doc_if_needed(
+            db::collection::acp::register_doc_if_needed(
                 self.document_acp.as_ref(),
                 Some(owner),
                 document.collection.schema(),
@@ -239,7 +239,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
                 // position — every retry re-reads the same document — so skip
                 // past it and keep the page moving. Storage errors are not
                 // included: those are transient and must still fail the page.
-                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
+                Err(error @ db::merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
                     tracing::warn!(
                         doc_id = %document_ref.doc_id,
                         collection_id = %document_ref.collection_id,
@@ -354,12 +354,12 @@ impl<S: Store + 'static> BrowserSyncOperations for BrowserSyncAdapter<S> {
     }
 }
 
-fn map_engine_error(error: db_merge::BrowserSyncError) -> BrowserSyncError {
+fn map_engine_error(error: db::merge::BrowserSyncError) -> BrowserSyncError {
     match error {
-        db_merge::BrowserSyncError::Invalid(message)
-        | db_merge::BrowserSyncError::TooLarge(message)
-        | db_merge::BrowserSyncError::Merge(message) => BrowserSyncError::InvalidInput(message),
-        db_merge::BrowserSyncError::Storage(message) => BrowserSyncError::Internal(message),
+        db::merge::BrowserSyncError::Invalid(message)
+        | db::merge::BrowserSyncError::TooLarge(message)
+        | db::merge::BrowserSyncError::Merge(message) => BrowserSyncError::InvalidInput(message),
+        db::merge::BrowserSyncError::Storage(message) => BrowserSyncError::Internal(message),
         other => BrowserSyncError::Internal(other.to_string()),
     }
 }

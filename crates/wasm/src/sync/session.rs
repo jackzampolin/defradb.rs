@@ -47,7 +47,7 @@ pub(crate) async fn start(
     auth_token: Option<String>,
 ) -> Result<SyncTask> {
     let session = Rc::new(SyncSession {
-        engine: db_merge::BrowserSyncEngine::new(database),
+        engine: db::merge::BrowserSyncEngine::new(database),
         http: SyncHttpClient::new(server_url, auth_token)?,
         exchange_lock: Mutex::new(()),
         full_sync_lock: Mutex::new(()),
@@ -85,7 +85,7 @@ pub(crate) async fn start(
 }
 
 struct SyncSession {
-    engine: db_merge::BrowserSyncEngine<LevelDbStore>,
+    engine: db::merge::BrowserSyncEngine<LevelDbStore>,
     http: SyncHttpClient,
     exchange_lock: Mutex<()>,
     full_sync_lock: Mutex<()>,
@@ -109,7 +109,7 @@ impl SyncSession {
                 // many blocks or roots — so it can never be pushed. Failing
                 // here would abort the whole push and leave recover_full_sync
                 // retrying forever; skip it like the request-size check below.
-                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
+                Err(error @ db::merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
                     warn(&format!(
                         "browser sync skipped document {} because it cannot be represented as a sync payload: {error}",
                         document_ref.doc_id
@@ -199,7 +199,7 @@ impl SyncSession {
             match self.engine.load_document(&document_ref).await {
                 Ok(Some(document)) => documents.push(document),
                 Ok(None) => {}
-                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
+                Err(error @ db::merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
                     warn(&format!(
                         "browser sync skipped document {doc_id} because it cannot be represented as a sync payload: {error}"
                     ));
@@ -317,7 +317,7 @@ fn collect_local_update(message: &events::Message, doc_ids: &mut BTreeSet<String
     }
 }
 
-fn engine_error(error: db_merge::BrowserSyncError) -> WasmError {
+fn engine_error(error: db::merge::BrowserSyncError) -> WasmError {
     WasmError::Sync(error.to_string())
 }
 

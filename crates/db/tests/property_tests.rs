@@ -4,21 +4,21 @@
 //! important invariants like consistency and correct behavior under
 //! various inputs.
 
-use db::{IndexManager, DB};
-use document::{Document, NormalValue};
+#[path = "common/mod.rs"]
+mod common;
+
+use crate::common::fixture::next_test_doc_short_id;
+use db::IndexManager;
+use db::DB;
+use document::Document;
+use document::NormalValue;
 use proptest::prelude::*;
-use schema::{CollectionVersion, FieldDescription, FieldKind, IndexedFieldDescription};
+use schema::CollectionVersion;
+use schema::FieldDescription;
+use schema::FieldKind;
+use schema::IndexedFieldDescription;
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
-
-/// Allocate a distinct doc short ID for index-layer tests. Index entries are
-/// keyed by node-local short IDs; these tests only need identity, not the
-/// full allocation/mapping flow of the create path.
-fn next_test_doc_short_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
 
 /// Generate a test schema with common fields.
 fn test_schema() -> CollectionVersion {

@@ -89,7 +89,7 @@ async fn create_document(
         .await
         .unwrap();
     let doc_id = created.doc_id.to_string();
-    let engine = db_merge::BrowserSyncEngine::new(database.clone());
+    let engine = db::merge::BrowserSyncEngine::new(database.clone());
     let document_ref = engine.document_ref(&doc_id).await.unwrap().unwrap();
     engine.load_document(&document_ref).await.unwrap().unwrap()
 }
@@ -373,7 +373,7 @@ async fn invalid_batch_is_rejected_before_any_document_is_written() {
         .await
         .is_err());
 
-    assert!(db_merge::BrowserSyncEngine::new(target)
+    assert!(db::merge::BrowserSyncEngine::new(target)
         .document_ref(&valid_doc_id)
         .await
         .unwrap()
@@ -403,7 +403,7 @@ async fn duplicate_document_batch_is_rejected_before_merge() {
         .await
         .is_err());
 
-    assert!(db_merge::BrowserSyncEngine::new(target)
+    assert!(db::merge::BrowserSyncEngine::new(target)
         .document_ref(&doc_id)
         .await
         .unwrap()
@@ -492,7 +492,7 @@ async fn concurrent_changes_converge_through_push_pull_exchange() {
 
     update_document(&browser, &doc_id, "name", "Alice Browser").await;
     update_document(&server, &doc_id, "email", "alice@example.com").await;
-    let browser_engine = db_merge::BrowserSyncEngine::new(browser.clone());
+    let browser_engine = db::merge::BrowserSyncEngine::new(browser.clone());
     let browser_ref = browser_engine.document_ref(&doc_id).await.unwrap().unwrap();
     let browser_update = browser_engine
         .load_document(&browser_ref)
@@ -630,11 +630,11 @@ async fn pull_skips_a_block_heavy_document_and_keeps_paginating() {
         update_document(&database, &heavy, "name", &format!("v{index}")).await;
     }
 
-    let engine = db_merge::BrowserSyncEngine::new(database.clone());
+    let engine = db::merge::BrowserSyncEngine::new(database.clone());
     let heavy_ref = engine.document_ref(&heavy).await.unwrap().unwrap();
     let load_error = engine.load_document(&heavy_ref).await.unwrap_err();
     assert!(
-        matches!(load_error, db_merge::BrowserSyncError::TooLarge(ref m) if m.contains("block count")),
+        matches!(load_error, db::merge::BrowserSyncError::TooLarge(ref m) if m.contains("block count")),
         "fixture must trip the block-count limit, got {load_error:?}"
     );
 

@@ -23,7 +23,7 @@ is NOT the #1021 bug modeled here and is NOT fixed by this PR.)
 |---|---|
 | `blob` (materialized value, queries read it; local writes RMW it) | the CBOR document blob written by `db` crate `doc_mutator` (local increments) and by `db-merge` composite materialization |
 | `acc` (accumulation store) | the counter `value_key` in `crates/crdt/src/counter.rs` |
-| `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta` / `process_counter_delta_in_txn`) |
+| `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db/src/merge/merge_handler/counter.rs` (`process_counter_delta` / `process_counter_delta_in_txn`) |
 | `MergeCommit` (`acc += δ; blob := acc`) | `counter.merge(+delta)` then blob re-materialization |
 | `LocalApply` (`blob += 1`, no lock, no `acc`) | local increment via the `db` crate; in the Split (pre-#1021) abstraction it does NOT acquire the shared per-doc guard |
 | `MergeRedeliver` (re-delivery; inline `Dedup` branch) | a delta delivered twice; `is_merged(cid)` merged-set guard in `counter.rs`/`composite.rs` (suppresses when `Dedup="On"`) |
@@ -92,7 +92,7 @@ one directional invariant their bug violates.
 
 **Landed (#1021).** Rust's counter value behaves as one store under concurrency: local
 increments and merges serialize on the shared per-doc write guard
-(`crates/db/src/doc_write_queue.rs`, taken by BOTH the local-write path and the db-merge
+(`crates/db/src/write/queue.rs`, taken by BOTH the local-write path and the db-merge
 merge handler — see `MergeQueue.tla`), and reconcile is init-if-absent (PCounter
 migrate-via-max), so a local write and a same-doc merge never interleave their store RMW.
 Validated by the asserting in-suite test

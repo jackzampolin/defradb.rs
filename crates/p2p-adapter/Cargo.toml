@@ -15,7 +15,6 @@ ignored = ["hex", "serde"]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
 db = { path = "../db", default-features = false }
-db-merge = { path = "../db-merge", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 document = { path = "../document" }
@@ -44,15 +43,14 @@ zeroize = "1"
 [dev-dependencies]
 crypto = { path = "../crypto" }
 data-encoding = "2"
-db-nac = { path = "../db-nac" }
 iroh.workspace = true
 
 [features]
 default = ["native", "wasmtime-runtime", "iroh", "libp2p"]
-native = ["db/native", "db-merge/native"]
-wasmtime-runtime = ["db/wasmtime-runtime", "db-merge/wasmtime-runtime", "lens/wasmtime-runtime"]
+native = ["db/native", ]
+wasmtime-runtime = ["db/wasmtime-runtime", "lens/wasmtime-runtime"]
 iroh = ["p2p/iroh-transport"]
-libp2p = ["dep:libp2p", "p2p/libp2p-transport", "db-merge/libp2p-transport"]
+libp2p = ["dep:libp2p", "p2p/libp2p-transport", "db/p2p"]
 
 [lints]
 workspace = true

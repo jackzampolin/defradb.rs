@@ -26,7 +26,7 @@ impl Node {
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-            Arc::new(db_merge::create_head_provider(database.clone()));
+            Arc::new(db::merge::create_head_provider(database.clone()));
 
         let iroh_secret_key = Self::iroh_secret_key(peer_keypair.as_ref())?;
         let (command_tx, iroh_events, replicator_registry, host_task) =
@@ -78,7 +78,7 @@ impl Node {
             .await
             .map_err(Error::P2P)?;
 
-        let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
+        let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         coordinator
             .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
@@ -97,7 +97,7 @@ impl Node {
                 .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
         coordinator.install_kms_transport(kms_transport.clone());
 
-        match db_merge::load_persisted_collections(&coordinator).await {
+        match db::merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
                 if count > 0 {
                     info!("Loaded {} persisted P2P collection subscription(s)", count);
@@ -115,7 +115,7 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let replication = db_merge::create_replication_stack_with_max_merge_depth(
+        let replication = db::merge::create_replication_stack_with_max_merge_depth(
             database.clone(),
             merge_blockstore,
             coordinator.clone(),
@@ -135,7 +135,7 @@ impl Node {
             if let Err(e) =
                 replication
                     .broadcast_mutator
-                    .set_se_options(db_merge::BroadcastSeOptions {
+                    .set_se_options(db::merge::BroadcastSeOptions {
                         encryption_key: Some(zeroize::Zeroizing::new(key.to_vec())),
                         identity_pubkey: None,
                     })
@@ -220,7 +220,7 @@ impl Node {
                 }
                 let event = match event {
                     p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
-                        let doc_ids = db_merge::se::serve::handle_artifacts_received(
+                        let doc_ids = db::merge::se::serve::handle_artifacts_received(
                             se_store.as_ref(),
                             &peer_id.to_string(),
                             &data,
@@ -234,7 +234,7 @@ impl Node {
                         return;
                     }
                     p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
-                        db_merge::se::serve::handle_query_request(
+                        db::merge::se::serve::handle_query_request(
                             se_store.as_ref(),
                             &se_transport_serve,
                             peer_id,
@@ -409,11 +409,11 @@ impl Node {
         // None to match the write side (iroh SE options use identity_pubkey:
         // None), so write-tags and query-tags agree.
         let se_transport: Option<Arc<dyn query::SeQueryTransport>> = se_key.map(|key| {
-            Arc::new(db_merge::DbMergeSeQueryTransport::new(
+            Arc::new(db::merge::DbMergeSeQueryTransport::new(
                 transport.clone(),
                 se_correlator,
                 se_replicator_registry,
-                db_merge::filled_se_key_handle(key, None),
+                db::merge::filled_se_key_handle(key, None),
             )) as Arc<dyn query::SeQueryTransport>
         });
 

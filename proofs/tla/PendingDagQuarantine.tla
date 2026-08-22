@@ -5,7 +5,7 @@
 \* whether a registration survives; this one asks what happens when its
 \* merge is retried and DETERMINISTICALLY REJECTED on the block's own
 \* content (e.g. a unique-index violation) rather than failing transiently.
-\* Abstracts crates/db-merge/src/merge_handler/composite.rs
+\* Abstracts crates/db/src/merge/merge_handler/composite.rs
 \* (UniqueConstraintViolation -> MergeOutcome::Rejected, composite.rs:261-284;
 \* MergeOutcome::Rejected itself at crates/p2p/src/sync/merge.rs:89-97),
 \* crates/p2p/src/sync/replication/handlers.rs (Ok(MergeOutcome::Rejected)

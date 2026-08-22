@@ -17,15 +17,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["native", "wasmtime-runtime", "lark", "redb", "rocksdb"]
 lark = ["embedded/lark", "storage/lark"]
-native = ["db/native", "db-backup/native", "db-merge/native", "db-merge/libp2p-transport", "embedded/native"]
+native = ["db/native", "db/p2p", "embedded/native"]
 redb = ["db/redb", "embedded/redb", "storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
-    "db-backup/wasmtime-runtime",
-    "db-merge/wasmtime-runtime",
+    
+    
     "embedded/wasmtime-runtime",
     "lens/wasmtime-runtime",
 ]
@@ -65,8 +65,6 @@ hex.workspace = true
 # Internal crates
 crypto = { path = "../crypto" }
 db = { path = "../db", default-features = false }
-db-backup = { path = "../db-backup", default-features = false }
-db-merge = { path = "../db-merge", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 document = { path = "../document" }

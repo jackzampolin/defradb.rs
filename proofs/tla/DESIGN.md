@@ -42,7 +42,7 @@ status (2026-07-27)* below the table.
 | **No** schema/ACP immutability constraint on `agent_did` (just `String @index`) | `agent_request.graphql:3` | ⚠️ assumption is unguaranteed (2026-06-02; since closed — that line is now `String @index @immutable`, see *Post-design status*) |
 | Multiple agent instances can share one `agent_did`; claim safety is **CRDT CAS** (`update where status=pending`), not FIFO/lock | `watcher.rs:102`, `lifecycle/claim.rs:258-310` | ✅ eventual-consistent claim |
 | Cross-request refs (`caused_by_parent_request_id`, `retry_parent_request`, `retry_root_request`, `superseded_by_request`) are bare `String @index` scalars, **not** `@relation` | `gents:crates/gents-schemas/schemas/agent/agent_request.graphql:7-9,33` | ✅ scalar FKs |
-| Merge handler **never** dereferences a cross-doc ref; relations resolved only at query time; dangling ref → graceful "absent" | Rust `crates/db-merge/src/merge_handler/mod.rs:69`; Go `internal/db/merge.go:343`; `client/document.go:238` (format-only validation) | ✅ no merge dependency |
+| Merge handler **never** dereferences a cross-doc ref; relations resolved only at query time; dangling ref → graceful "absent" | Rust `crates/db/src/merge/merge_handler/mod.rs:69`; Go `internal/db/merge.go:343`; `client/document.go:238` (format-only validation) | ✅ no merge dependency |
 | Delta-DAG is **per-document**; `Heads` links within-document; no cross-doc causal edges | Go `internal/core/block/block.go`; Rust `merge_handler/` | ✅ confirmed |
 | `#2721` hole = **branching + partial sync within one doc**; shipped fix = "walk the entire graph before merging" (Model A), already done in Rust | Go `#2721`, `merge_test.go:143` `TestMerge_DualBranchWithOneIncomplete_CouldNotFindCID`; Rust `coordinator/dag_fetcher.rs` | ✅ Model A is the proven fix |
 | Field-level filtering is a **future GraphSync** feature, not today's reality | Go `block.go` `DAGLink.Name` comment | ✅ future |
@@ -54,7 +54,7 @@ Recommendation 3 has since been implemented. `agent_did` is
 (`gents:crates/gents-schemas/schemas/agent/agent_request.graphql:3`), and
 defradb.rs enforces `@immutable` on the paths this design demanded: local
 updates (`crates/db/src/collection/validation.rs`), peer-authored deltas at
-merge time — the E1 shape (`crates/db-merge/src/merge_handler/composite_fields.rs`)
+merge time — the E1 shape (`crates/db/src/merge/merge_handler/composite_fields.rs`)
 — and replication filters, which require every referenced field to be
 `@immutable` (`crates/replication-filter/src/lib.rs`). The Axis-2 "Mutable"
 scenarios and Recommendation 3 below are the 2026-06-02 analysis that motivated

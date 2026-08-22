@@ -1,0 +1,340 @@
+use super::helpers::{
+    ensure_collection_is_active, register_block_doc_id_mappings, write_branchable_collection_block,
+    write_local_update,
+};
+use super::*;
+
+use crate::block::builder::DocStorageIdentity;
+use query::runner::DocFetcher;
+
+#[allow(clippy::type_complexity)]
+impl<S: Store + 'static> AutoCommitMutator<S> {
+    pub(super) async fn update_impl(
+        &self,
+        collection_name: &str,
+        expected: Option<Document>,
+        doc: Document,
+        modified_fields: std::collections::HashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .await
+            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+
+        let collection = self.get_collection_or_err(collection_name)?;
+        let _collection_guard = self
+            .db
+            .collection_read_guard(collection.collection_id())
+            .await
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
+
+        // Generate embeddings if source fields were modified
+        let mut doc = doc;
+        let mut modified_fields = modified_fields;
+        let embedding_config = self.db.options().embedding_config();
+
+        let generated = crate::search::set_embedding(
+            &collection.schema().vector_embeddings,
+            &mut doc,
+            false,
+            Some(&modified_fields),
+            &embedding_config,
+        )
+        .await
+        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+
+        for field in generated {
+            modified_fields.insert(field);
+        }
+
+        let input_doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
+        let canonical_lock_id = {
+            let identity_txn = self.db.new_txn(true).await.map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create identity transaction: {e}"
+                ))
+            })?;
+            let canonical = {
+                let systemstore = identity_txn.systemstore().map_err(|e| {
+                    query::error::QueryError::execution(format!("failed to get systemstore: {e}"))
+                })?;
+                collection
+                    .require_doc_identity(&systemstore, &input_doc_id)
+                    .await
+                    .map_err(|e| match e {
+                        crate::error::Error::DocumentNotFound(id) => {
+                            query::error::QueryError::document_not_found(id)
+                        }
+                        other => query::error::QueryError::execution(other.to_string()),
+                    })?
+                    .1
+            };
+            identity_txn.discard().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to discard identity transaction: {e}"
+                ))
+            })?;
+            canonical
+        };
+        doc.set_id(canonical_lock_id.clone());
+
+        // Serialize this write against concurrent merges (and other local writes)
+        // touching the same document. Local counter increments and P2P merges both
+        // read-modify-write the CRDT accumulation store; without this per-doc lock
+        // their txns can race in a way the store's optimistic-conflict detection
+        // does not always catch, dropping increments (#1021). The guard is held
+        // across the whole write + commit.
+        let _doc_guard = self
+            .db
+            .doc_write_queue()
+            .acquire(&canonical_lock_id.to_string())
+            .await;
+
+        // The query plan materializes `doc` before this mutator acquires the
+        // per-document write guard. A concurrent update can commit while this
+        // call is waiting, leaving `doc` stale. Reload through the lensed
+        // fetcher under the guard and rebase only the caller's declared patch;
+        // otherwise an unrelated field from the concurrent update is silently
+        // replaced by the stale snapshot.
+        let fresh_fetcher =
+            crate::LensedAutoCommitFetcher::new_without_write_back(Arc::clone(&self.db));
+        let canonical_id = canonical_lock_id.to_string();
+        let mut current_doc = fresh_fetcher
+            .get_by_ids(collection_name, std::slice::from_ref(&canonical_id))
+            .await?
+            .into_docs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| query::error::QueryError::document_not_found(canonical_id))?;
+        if let Some(expected) = expected {
+            let values_unchanged = expected.values().len() == current_doc.values().len()
+                && expected
+                    .values()
+                    .iter()
+                    .all(|(field_name, expected_value)| {
+                        current_doc.get(field_name) == Some(expected_value.value())
+                    });
+            if expected.id() != current_doc.id()
+                || expected.is_deleted() != current_doc.is_deleted()
+                || !values_unchanged
+            {
+                return Err(query::error::QueryError::transaction_conflict(
+                    "transaction conflict. Please retry",
+                ));
+            }
+        }
+        for field_name in &modified_fields {
+            if let Some(delta) = doc.get_counter_delta(field_name).cloned() {
+                // Counter inputs are deltas computed from the stale
+                // materialization. Carry the delta, not its provisional
+                // accumulated value; `write_local_update` applies it to the
+                // authoritative value below.
+                current_doc.set_counter_delta(field_name.clone(), delta);
+            } else if let Some(value) = doc.get(field_name).cloned() {
+                current_doc.set(field_name.clone(), value);
+            }
+        }
+        doc = current_doc;
+
+        // Create a write transaction
+        let txn = self.db.new_txn(false).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        // Acquire store views up front (dropped before commit); the mutation
+        // itself runs in an async block so errors fall through to the discard.
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        let result: query::error::Result<u64> = async {
+            // Create an IndexManager for index maintenance
+            let short_id = collection.resolved_root_id();
+            let index_manager = IndexManager::from_indexes(
+                short_id,
+                collection.schema(),
+                collection.write_indexes(),
+            )
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
+
+            let (doc_short_id, canonical_doc_id) = collection
+                .require_doc_identity(&systemstore, &input_doc_id)
+                .await
+                .map_err(|e| match e {
+                    crate::error::Error::DocumentNotFound(id) => {
+                        query::error::QueryError::document_not_found(id)
+                    }
+                    other => query::error::QueryError::execution(other.to_string()),
+                })?;
+            doc.set_id(canonical_doc_id);
+
+            self.db
+                .validate_downsample_write(
+                    &datastore,
+                    &systemstore,
+                    collection.schema(),
+                    &doc,
+                    Some(&modified_fields),
+                )
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+            // Bundle the counter RMW (#1021) with the doc blob + index write so
+            // the authoritative CRDT accumulation store always advances before the
+            // blob is persisted — enforced by construction in `write_local_update`.
+            write_local_update(
+                &datastore,
+                &collection,
+                &mut doc,
+                doc_short_id,
+                &index_manager,
+            )
+            .await?;
+            Ok(doc_short_id)
+        }
+        .await;
+
+        drop(datastore);
+        drop(systemstore);
+
+        match result {
+            Ok(doc_short_id) => {
+                // Build blocks and write to blockstore/headstore in a scoped block
+                // This enables _commits queries to find the document's version history
+                // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
+                let commit_result: CommitArtifacts = {
+                    let blockstore = txn.blockstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get blockstore: {}",
+                            e
+                        ))
+                    })?;
+                    let headstore = txn.headstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get headstore: {}",
+                            e
+                        ))
+                    })?;
+
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
+                    // Explicit config from the mutation only. A document created
+                    // encrypted keeps its encryption because the block writer
+                    // inherits it from the previous block, matching Go's
+                    // determineBlockEncryption.
+                    let enc_config = get_encryption_config();
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
+
+                    let identity =
+                        DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
+
+                    // For update operations, pass the modified fields to only create blocks
+                    // for the fields that actually changed
+                    let block_result = write_document_blocks(
+                        &blockstore,
+                        &headstore,
+                        &doc,
+                        schema_version_id,
+                        identity,
+                        Some(&modified_fields),
+                        enc_config.as_ref(),
+                        sign_config.as_ref(),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to write document blocks for update on collection {}: {}",
+                            collection_name, e
+                        ))
+                    })?;
+
+                    if let Some(doc_id) = doc.id() {
+                        let systemstore = txn.systemstore().map_err(|e| {
+                            query::error::QueryError::execution(format!(
+                                "failed to get systemstore: {}",
+                                e
+                            ))
+                        })?;
+                        register_block_doc_id_mappings(
+                            &systemstore,
+                            &block_result,
+                            &doc_id.to_string(),
+                        )
+                        .await?;
+                    }
+
+                    let col_block_data = write_branchable_collection_block(
+                        collection_name,
+                        &collection,
+                        &blockstore,
+                        &headstore,
+                        block_result.cid,
+                        sign_config.as_ref(),
+                    )
+                    .await?;
+
+                    (block_result.cid, block_result.block, col_block_data)
+                }; // blockstore and headstore dropped here
+
+                // Commit the transaction (all store references now dropped)
+                if let Err(e) = txn.commit().await {
+                    warn!(
+                        collection = %collection_name,
+                        error = %e,
+                        "Failed to commit transaction after update"
+                    );
+                    return Err(crate::error::commit_query_error(e));
+                }
+
+                if let Some(doc_id) = doc.id() {
+                    let (cid, block, col_data) = &commit_result;
+                    self.emit_update_events(
+                        &collection,
+                        &doc_id.to_string(),
+                        *cid,
+                        block.clone(),
+                        col_data.clone(),
+                    );
+                }
+
+                // Count modified fields
+                let fields_modified = doc.values().len();
+                let (cid, block, col_data) = commit_result;
+                let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
+                if let Some((col_cid, col_bytes)) = col_data {
+                    result.broadcast_cid = Some(col_cid);
+                    result.broadcast_block = Some(col_bytes);
+                }
+                Ok(result)
+            }
+            Err(e) => {
+                // Discard the transaction on error
+                if let Err(discard_err) = txn.discard() {
+                    warn!(
+                        collection = %collection_name,
+                        error = %discard_err,
+                        "Failed to discard transaction after update error"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+}

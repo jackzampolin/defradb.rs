@@ -9,9 +9,9 @@
 \* the key request.
 \*
 \* Source anchors:
-\* - crates/db-merge/src/merge_handler/composite_fields.rs propagates transient
+\* - crates/db/src/merge/merge_handler/composite_fields.rs propagates transient
 \*   KMS failures so the merge remains pending;
-\* - crates/db-merge/src/push_docs.rs replays composite heads and
+\* - crates/db/src/merge/push_docs.rs replays composite heads and
 \*   crates/p2p/src/sync/coordinator/selective_car_access.rs authorizes fetching
 \*   their linked encrypted LWW blocks;
 \* - crates/p2p/src/sync/pending_store.rs persists acknowledged pending DAGs;

@@ -32,7 +32,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?tag=defra-harness%2F2026-08-14-restart-port-guard#03a8deeb0c19e33b1022c2547b0418de15d886b6"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -2085,8 +2085,6 @@ dependencies = [
  "clap",
  "crypto",
  "db",
- "db-backup",
- "db-merge",
  "defra-core",
  "defra-http",
  "defra-p2p-adapter",
@@ -3384,14 +3382,12 @@ dependencies = [
  "ciborium",
  "cid",
  "crdt",
+ "criterion 0.6.0",
  "crypto",
  "datastore",
- "db-blocks",
- "db-index",
- "db-nac",
- "db-search",
  "defra-core",
  "document",
+ "ed25519-dalek 2.2.0",
  "events",
  "futures",
  "getrandom 0.2.17",
@@ -3406,148 +3402,21 @@ dependencies = [
  "proptest",
  "query",
  "rand 0.8.5",
+ "reqwest 0.12.28",
  "schema",
  "serde",
  "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "storage",
+ "telemetry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wasm-bindgen-futures",
  "web-time",
  "zeroize",
-]
-
-[[package]]
-name = "db-backup"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "db",
- "document",
- "query",
- "schema",
- "serde_json",
- "storage",
-]
-
-[[package]]
-name = "db-blocks"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "blockstore",
- "bytes",
- "ciborium",
- "cid",
- "criterion 0.6.0",
- "crypto",
- "datastore",
- "defra-core",
- "document",
- "ed25519-dalek 2.2.0",
- "hex",
- "kms",
- "multihash",
- "rand 0.8.5",
- "serde",
- "sha2 0.10.9",
- "storage",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "db-index"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "criterion 0.6.0",
- "datastore",
- "defra-core",
- "document",
- "schema",
- "serde",
- "storage",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "db-merge"
-version = "0.5.0"
-dependencies = [
- "acp",
- "async-lock",
- "async-trait",
- "blockstore",
- "blst",
- "bytes",
- "ciborium",
- "cid",
- "crdt",
- "criterion 0.6.0",
- "crypto",
- "datastore",
- "db",
- "db-blocks",
- "defra-core",
- "document",
- "events",
- "futures",
- "getrandom 0.2.17",
- "hex",
- "identity",
- "kms",
- "libp2p",
- "p2p",
- "parking_lot 0.12.5",
- "query",
- "schema",
- "serde",
- "serde_bytes",
- "serde_json",
- "storage",
- "telemetry",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "wasm-bindgen-futures",
- "zeroize",
-]
-
-[[package]]
-name = "db-nac"
-version = "0.5.0"
-dependencies = [
- "acp",
- "async-trait",
- "defra-core",
- "identity",
- "serde",
- "storage",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "db-search"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "document",
- "query",
- "reqwest 0.12.28",
- "schema",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -3619,7 +3488,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=defra-harness%2F2026-08-14-restart-port-guard#03a8deeb0c19e33b1022c2547b0418de15d886b6"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
 dependencies = [
  "eyre",
  "futures",
@@ -3685,7 +3554,6 @@ dependencies = [
  "blockstore",
  "crypto",
  "db",
- "db-merge",
  "defra-core",
  "defra-http",
  "defra-p2p-adapter",
@@ -3724,8 +3592,6 @@ dependencies = [
  "crypto",
  "data-encoding",
  "db",
- "db-merge",
- "db-nac",
  "defra-core",
  "defra-http",
  "document",
@@ -3765,8 +3631,6 @@ dependencies = [
  "console_error_panic_hook",
  "crypto",
  "db",
- "db-index",
- "db-merge",
  "defra-core",
  "document",
  "events",
@@ -4183,7 +4047,6 @@ dependencies = [
  "cid",
  "crypto",
  "db",
- "db-merge",
  "defra-core",
  "defra-http",
  "defra-p2p-adapter",
@@ -4472,8 +4335,6 @@ dependencies = [
  "cid",
  "crypto",
  "db",
- "db-backup",
- "db-merge",
  "defra-core",
  "defra-http",
  "document",
@@ -5413,7 +5274,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=defra-harness%2F2026-08-14-restart-port-guard#03a8deeb0c19e33b1022c2547b0418de15d886b6"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11384,7 +11245,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=defra-harness%2F2026-08-14-restart-port-guard#03a8deeb0c19e33b1022c2547b0418de15d886b6"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -11913,7 +11774,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=defra-harness%2F2026-08-14-restart-port-guard#03a8deeb0c19e33b1022c2547b0418de15d886b6"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
 dependencies = [
  "eyre",
  "futures",

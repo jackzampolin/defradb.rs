@@ -16,7 +16,7 @@ state).** Neither half alone is convergence.
 
 Status of the effort across the 40-crate surface, from the per-crate survey in
 [`survey/`](survey/) (full index, incl. out-of-scope rationale, in
-[`survey/INDEX.md`](survey/INDEX.md)). Of 40 crates, **12 are model-worthy**; the other 28
+[`survey/INDEX.md`](survey/INDEX.md)). Of 34 crates, **12 are model-worthy**; the other 22
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
@@ -107,7 +107,7 @@ Transaction & merge-queue concurrency, is now both — a Behavioral no-loss/no-d
 storm leg plus a Boundary internal-serialization leg). One
 of these (`partition::convergence_concurrent_same_doc_writes_merge`) found a real
 Rust-specific CRDT convergence bug — divergent materialization on identical DAGs
-after a restart — which is now **fixed** in `crates/db-merge/.../lww.rs`
+after a restart — which is now **fixed** in `crates/db (merge)/.../lww.rs`
 (`seed_lww_from_existing_doc` re-seeds the datastore LWW from the authoritative
 headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 

@@ -102,10 +102,11 @@ fn retry_delay_after_session(current: Duration, session_duration: Option<Duratio
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn consume<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
     cache: &AccessCache,
-) -> Result<(), Box<tokio_tungstenite::tungstenite::Error>>
+) -> Result<(), tokio_tungstenite::tungstenite::Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {

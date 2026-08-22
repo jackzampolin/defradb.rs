@@ -24,7 +24,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 
 [dev-dependencies]
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "defra-harness/2026-08-14-restart-port-guard" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "f04e9b0716977705494ec40d17fa5f20d29cbfcf" }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 serial_test = "3"
 

@@ -7,7 +7,7 @@ use crate::nac_check::check_nac_for_node;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
 
-use db::auto_commit_mutator::AutoCommitMutator;
+use db::write::autocommit::AutoCommitMutator;
 use document::DocID;
 
 /// Delete multiple documents by their docIDs.

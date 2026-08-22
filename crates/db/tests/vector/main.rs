@@ -1,0 +1,26 @@
+//! Vector index engines, quantization and recall gates.
+
+mod edge_selection;
+mod ivfpq_engine;
+mod ivfpq_recall_baseline;
+mod ivfpq_recall_gate;
+mod quantize_kmeans;
+mod quantize_pq;
+mod quantize_sample;
+mod ssg_engine;
+mod ssg_vs_hnsw;
+mod support;
+mod vector_aux_store;
+mod vector_collection_index;
+mod vector_dimensions;
+mod vector_dot_metric;
+mod vector_engine;
+mod vector_filtered_search;
+mod vector_flat_algorithm;
+mod vector_kernel;
+mod vector_kv_built_state;
+mod vector_kv_cost;
+mod vector_kv_store;
+mod vector_metric;
+mod vector_recall_baseline;
+mod vector_recall_gate;

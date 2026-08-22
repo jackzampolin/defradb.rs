@@ -117,7 +117,7 @@ pub use router::{
     PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,
     ReplicatorInfo, TransactionOperations, ViewOperations, MANAGE_UNAUTHORIZED,
 };
-pub use server::{Server, ServerConfig};
+pub use server::{Server, ServerConfig, DEFAULT_MAX_BACKUP_SIZE};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use mock::{

@@ -14,10 +14,10 @@ or `StateMachine` returns nothing. The modules that *look* stateful are pure
 forwarders:
 - `version_syncer.rs` / `transport_version_syncer.rs` — recursive CID ancestry
   walk (`VecDeque` + `HashSet`), but the merge decision lives in
-  `db_merge::DbMergeHandler`; this is the same walk B3 abstracts from
+  `db::merge::DbMergeHandler`; this is the same walk B3 abstracts from
   `dag_fetcher.rs`.
 - `p2p_doc_pusher.rs` / `transport_doc_pusher.rs` — one-line delegation to
-  `db_merge::push_existing_docs`.
+  `db::merge::push_existing_docs`.
 - `acp_adapter.rs`, `doc_acp_adapter.rs`, `nac_adapter.rs`, `txn_adapter.rs`,
   etc. — trait impls over `acp` / `db` calls.
 

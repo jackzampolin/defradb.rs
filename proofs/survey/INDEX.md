@@ -1,6 +1,6 @@
 # Formal-Modelability Survey — Coverage Index
 
-Consolidated map of all 40 per-crate surveys in `proofs/survey/`. Three sections:
+Consolidated map of all 34 per-crate surveys in `proofs/survey/`. Three sections:
 already-modeled candidates (cross-check), the proposed-new backlog (prioritized),
 and out-of-scope crates (covered by integration tests).
 

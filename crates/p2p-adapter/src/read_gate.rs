@@ -30,7 +30,7 @@ impl<S: Store + 'static> DbBlockClassifier<S> {
                 return None;
             }
         };
-        let doc_ids = db::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block)
+        let doc_ids = db::docid::map::resolve_block_doc_ids(&systemstore, cid, block)
             .await
             .ok()
             .flatten();
@@ -202,7 +202,7 @@ mod tests {
         let txn = db.new_txn(false).await.unwrap();
         {
             let systemstore = txn.systemstore().unwrap();
-            db::doc_id_map::set_block_doc_id_mapping(
+            db::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &cid.to_string(),
                 "doc-from-index",

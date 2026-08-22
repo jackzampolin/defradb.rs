@@ -1460,10 +1460,10 @@ impl NodeBuilder {
             db::DbCollectionProvider::new_arc(database.clone());
 
         #[cfg(feature = "p2p")]
-        let txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>> =
+        let txn_broadcaster: Option<Arc<dyn db::event::emission::TxnBroadcaster>> =
             p2p_result.as_ref().map(|r| r.txn_broadcaster.clone());
         #[cfg(not(feature = "p2p"))]
-        let txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>> = None;
+        let txn_broadcaster: Option<Arc<dyn db::event::emission::TxnBroadcaster>> = None;
 
         let registry = Arc::new(match txn_broadcaster {
             Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),

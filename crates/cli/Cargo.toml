@@ -34,8 +34,6 @@ defra-http = { path = "../http" }
 query = { path = "../query" }
 replication-filter = { path = "../replication-filter" }
 db = { path = "../db" }
-db-backup = { path = "../db-backup" }
-db-merge = { path = "../db-merge" }
 schema = { path = "../schema" }
 events = { path = "../events" }
 lens = { path = "../lens" }
@@ -78,7 +76,7 @@ getrandom = "0.2"
 # Hex encoding/decoding
 hex = "0.4"
 
-# Zeroizing wrapper for the searchable-encryption key passed to db-merge
+# Zeroizing wrapper for the searchable-encryption key passed to db::merge
 zeroize = "1"
 
 # Base64 encoding/decoding (JWK export/import)

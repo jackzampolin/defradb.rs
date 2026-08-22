@@ -310,6 +310,10 @@ impl LarkStoreOptions {
         self.durability
     }
 
+    pub fn target_file_size(&self) -> u64 {
+        self.target_file_size
+    }
+
     /// Build options from `LARK_*` environment variables, falling back to defaults.
     ///
     /// | Env Var | Field | Unit / Values |
