@@ -4,6 +4,7 @@
 //! It provides collection listing and document CRUD operations separate from GraphQL.
 
 mod error;
+mod gql;
 mod operations;
 mod trait_def;
 

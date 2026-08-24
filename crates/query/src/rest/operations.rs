@@ -11,35 +11,8 @@ use crate::runner::QueryRunner;
 use crate::txn::TransactionRegistry;
 
 use super::error::{RestError, RestResult};
+use super::gql;
 use super::trait_def::{CollectionDocIdsPage, CollectionDocIdsPagination, RestOperations};
-
-/// Convert a JSON value to GraphQL input syntax.
-///
-/// Object keys are bare identifiers (GraphQL input objects), not JSON-quoted keys.
-/// String leaves use JSON string encoding, which is a valid GraphQL `StringValue`
-/// and matches Go DefraDB's test harness (`valueToGQL` → `encoding/json.Marshal`),
-/// including `\b`, `\f`, and `\uXXXX` for other controls.
-pub(super) fn json_to_graphql_input(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => "null".to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::String(s) => {
-            serde_json::to_string(s).expect("serializing a string to JSON cannot fail")
-        }
-        JsonValue::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_to_graphql_input).collect();
-            format!("[{}]", items.join(", "))
-        }
-        JsonValue::Object(obj) => {
-            let fields: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, json_to_graphql_input(v)))
-                .collect();
-            format!("{{{}}}", fields.join(", "))
-        }
-    }
-}
 
 /// Production implementation of REST operations using QueryRunner.
 ///
@@ -52,76 +25,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     /// Create a new REST operations implementation.
     pub fn new(runner: Arc<QueryRunner<F, R>>) -> Self {
         Self { runner }
-    }
-
-    fn build_list_ids_query(
-        &self,
-        collection: &str,
-        pagination: Option<CollectionDocIdsPagination>,
-    ) -> String {
-        match pagination {
-            Some(pagination) => format!(
-                r#"{{ {collection}(limit: {limit}, offset: {offset}) {{ _docID }} }}"#,
-                collection = collection,
-                limit = pagination.limit,
-                offset = pagination.offset
-            ),
-            None => format!(
-                r#"{{ {collection} {{ _docID }} }}"#,
-                collection = collection
-            ),
-        }
-    }
-
-    fn build_count_query(&self, collection: &str) -> String {
-        format!(
-            r#"{{ total: COUNT({collection}: {{}}) }}"#,
-            collection = collection
-        )
-    }
-
-    fn build_create_mutation(&self, collection: &str, data: &JsonValue) -> String {
-        let graphql_data = json_to_graphql_input(data);
-        format!(
-            r#"mutation {{ add_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
-            collection = collection,
-            graphql_data = graphql_data
-        )
-    }
-
-    fn build_create_many_mutation(&self, collection: &str, docs: &[JsonValue]) -> String {
-        let inputs: Vec<String> = docs.iter().map(json_to_graphql_input).collect();
-        format!(
-            r#"mutation {{ add_{collection}(input: [{inputs}]) {{ _docID }} }}"#,
-            collection = collection,
-            inputs = inputs.join(", ")
-        )
-    }
-
-    fn build_update_mutation(&self, collection: &str, doc_id: &str, patch: &JsonValue) -> String {
-        let graphql_patch = json_to_graphql_input(patch);
-        format!(
-            r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {graphql_patch}) {{ _docID }} }}"#,
-            collection = collection,
-            doc_id = doc_id,
-            graphql_patch = graphql_patch
-        )
-    }
-
-    fn build_delete_mutation(&self, collection: &str, doc_id: &str) -> String {
-        format!(
-            r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
-            collection = collection,
-            doc_id = doc_id
-        )
-    }
-
-    fn build_filtered_delete_mutation(&self, collection: &str, filter: &JsonValue) -> String {
-        format!(
-            r#"mutation {{ delete_{collection}(filter: {filter}) {{ _docID }} }}"#,
-            collection = collection,
-            filter = json_to_graphql_input(filter)
-        )
     }
 
     /// Pull the `_docID` list out of a `<op>_<Collection>` mutation result.
@@ -299,7 +202,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let query = self.build_list_ids_query(collection, None);
+        let query = gql::build_list_ids_query(collection, None);
         let result = self
             .runner
             .execute_query_with_identity(&query, identity.cloned())
@@ -322,7 +225,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let count_query = self.build_count_query(collection);
+        let count_query = gql::build_count_query(collection);
         let count_result = self
             .runner
             .execute_query_with_identity(&count_query, identity.cloned())
@@ -338,7 +241,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             });
         }
 
-        let query = self.build_list_ids_query(collection, Some(pagination));
+        let query = gql::build_list_ids_query(collection, Some(pagination));
         let result = self
             .runner
             .execute_query_with_identity(&query, identity.cloned())
@@ -386,7 +289,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let mutation = self.build_create_mutation(collection, &data);
+        let mutation = gql::build_create_mutation(collection, &data)?;
         let result = self
             .runner
             .execute_mutation_with_identity(&mutation, identity.cloned())
@@ -417,7 +320,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let mutation = self.build_create_many_mutation(collection, &data);
+        let mutation = gql::build_create_many_mutation(collection, &data)?;
         let result = self
             .runner
             .execute_mutation_with_identity(&mutation, identity.cloned())
@@ -455,7 +358,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::document_not_found(doc_id));
         }
 
-        let mutation = self.build_update_mutation(collection, doc_id, &patch);
+        let mutation = gql::build_update_mutation(collection, doc_id, &patch)?;
         self.runner
             .execute_mutation_with_identity(&mutation, identity.cloned())
             .await?;
@@ -487,7 +390,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Ok(false);
         }
 
-        let mutation = self.build_delete_mutation(collection, doc_id);
+        let mutation = gql::build_delete_mutation(collection, doc_id);
         let result = self
             .runner
             .execute_mutation_with_identity(&mutation, identity.cloned())
@@ -515,7 +418,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let mutation = self.build_filtered_delete_mutation(collection, filter);
+        let mutation = gql::build_filtered_delete_mutation(collection, filter)?;
         let result = self
             .runner
             .execute_mutation_with_identity(&mutation, identity.cloned())
