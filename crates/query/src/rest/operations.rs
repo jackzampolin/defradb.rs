@@ -426,4 +426,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
 
         self.mutation_doc_ids(&result, collection, "delete")
     }
+
+    async fn update_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        updater: &JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        let mutation = gql::build_filtered_update_mutation(collection, filter, updater)?;
+        let result = self
+            .runner
+            .execute_mutation_with_identity(&mutation, identity.cloned())
+            .await?;
+
+        self.mutation_doc_ids(&result, collection, "update")
+    }
 }

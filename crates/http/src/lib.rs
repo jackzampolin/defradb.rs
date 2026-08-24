@@ -26,6 +26,7 @@
 //! - `GET /api/v1/collections` - List all collections
 //! - `POST /api/v1/collections/{name}` - Create document(s)
 //! - `GET /api/v1/collections/{name}` - List collection document IDs
+//! - `PATCH /api/v1/collections/{name}` - Update documents matching a filter
 //! - `DELETE /api/v1/collections/{name}` - Delete documents matching a filter
 //! - `GET /api/v1/collections/{name}/document/{docID}` - Get document
 //! - `PATCH /api/v1/collections/{name}/document/{docID}` - Update document

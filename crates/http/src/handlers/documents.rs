@@ -276,6 +276,36 @@ fn required_filter(request: &JsonValue) -> Result<JsonValue, HttpError> {
     }
 }
 
+/// Read the `updater` patch.
+///
+/// Go types this as a `string` holding JSON (`UpdateCollectionRequest`,
+/// `http/handler_collection.go:36-39`), so a string is parsed as JSON. An
+/// object is accepted as-is because a hand-written client is likelier to send
+/// one than to double-encode, and refusing it would buy nothing.
+fn required_updater(request: &JsonValue) -> Result<JsonValue, HttpError> {
+    let updater = match request.get("updater") {
+        Some(JsonValue::Null) | None => {
+            return Err(HttpError::BadRequest(
+                "'updater' is required; send the update to apply".into(),
+            ))
+        }
+        Some(updater) => updater,
+    };
+
+    let parsed = match updater {
+        JsonValue::String(encoded) => serde_json::from_str(encoded)
+            .map_err(|e| HttpError::BadRequest(format!("'updater' is not valid JSON: {e}")))?,
+        other => other.clone(),
+    };
+
+    if !parsed.is_object() {
+        return Err(HttpError::BadRequest(
+            "'updater' must be a JSON object of fields to update".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
 /// Delete every document matching a filter.
 ///
 /// DELETE /api/v0/collections/{name}
@@ -314,6 +344,50 @@ pub async fn delete_documents_with_filter(
                 collection = %collection,
                 error = %e,
                 "Failed to delete documents with filter"
+            );
+            Err(e.into())
+        }
+    }
+}
+
+/// Apply an update to every document matching a filter.
+///
+/// PATCH /api/v0/collections/{name}
+///
+/// This is Go's `UpdateDocumentsWithFilter` (`http/handler_collection.go:510`),
+/// which its own client reaches by `PATCH`ing this path with
+/// `{"filter": ..., "updater": "..."}` (`http/client_document.go:263-296`).
+/// Rust registered no `PATCH` here, so the request answered 405 and filtered
+/// update had no HTTP-level equivalent at all.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
+pub async fn update_documents_with_filter(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(collection): Path<String>,
+    body: Bytes,
+) -> Result<Json<DocumentsResult>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
+    let request = request_body(&body)?;
+    let filter = required_filter(&request)?;
+    let updater = required_updater(&request)?;
+
+    let rest = state
+        .rest
+        .as_ref()
+        .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
+
+    match rest
+        .update_documents_with_filter(&collection, &filter, &updater, identity.did())
+        .await
+    {
+        Ok(doc_ids) => Ok(Json(doc_ids.into())),
+        Err(e) => {
+            tracing::warn!(
+                collection = %collection,
+                error = %e,
+                "Failed to update documents with filter"
             );
             Err(e.into())
         }

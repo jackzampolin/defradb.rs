@@ -1,4 +1,6 @@
-use super::gql::{build_filtered_delete_mutation, json_to_graphql_input};
+use super::gql::{
+    build_filtered_delete_mutation, build_filtered_update_mutation, json_to_graphql_input,
+};
 use super::*;
 use crate::error::QueryError;
 use serde_json::json;
@@ -323,5 +325,21 @@ fn a_filtered_delete_refuses_a_hostile_filter_key() {
     assert_eq!(
         build_filtered_delete_mutation("Users", &ordinary).unwrap(),
         r#"mutation { delete_Users(filter: {name: {_eq: "Alice"}}) { _docID } }"#
+    );
+}
+
+/// The update carries two caller-supplied objects, so both the filter and the
+/// updater have to be refused when they could escape the document.
+#[test]
+fn a_filtered_update_refuses_a_hostile_key_in_either_half() {
+    let hostile = json!({"a) { _docID } } mutation { delete_Other(filter: {": 1});
+    let ordinary = json!({"name": {"_eq": "Alice"}});
+    let patch = json!({"age": 31});
+
+    assert!(build_filtered_update_mutation("Users", &hostile, &patch).is_err());
+    assert!(build_filtered_update_mutation("Users", &ordinary, &hostile).is_err());
+    assert_eq!(
+        build_filtered_update_mutation("Users", &ordinary, &patch).unwrap(),
+        r#"mutation { update_Users(filter: {name: {_eq: "Alice"}}, input: {age: 31}) { _docID } }"#
     );
 }
