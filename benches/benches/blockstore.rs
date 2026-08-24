@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use blockstore::{Blockstore, DefraBlockstore};
 use cid::Cid;
@@ -10,10 +10,7 @@ use sha2::{Digest, Sha256};
 use std::hint::black_box;
 use storage::backends::MemoryStore;
 
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap())
-}
+mod common;
 
 fn cid_from_data(data: &[u8]) -> Cid {
     let mut hasher = Sha256::new();
@@ -66,12 +63,12 @@ fn bench_txn_creation(c: &mut Criterion) {
     let payload = make_payload(1024, 43);
     let cid = cid_from_data(&payload);
 
-    runtime().block_on(async {
+    common::shared_runtime().block_on(async {
         blockstore.put(&cid, &payload).await.unwrap();
     });
 
     c.bench_function("txn_creation_only", |b| {
-        b.to_async(runtime()).iter(|| async {
+        b.to_async(common::shared_runtime()).iter(|| async {
             let txn = blockstore.new_store_txn(true).await.unwrap();
             black_box(txn);
         })
@@ -86,7 +83,7 @@ fn bench_blockstore(c: &mut Criterion) {
         ("put_4kb", make_payload(4096, 11)),
     ] {
         group.bench_function(BenchmarkId::from_parameter(name), |b| {
-            b.to_async(runtime()).iter_batched(
+            b.to_async(common::shared_runtime()).iter_batched(
                 || {
                     let blockstore = make_blockstore();
                     let cid = cid_from_data(&payload);
@@ -103,13 +100,13 @@ fn bench_blockstore(c: &mut Criterion) {
     let hit_payload = make_payload(1024, 19);
     let hit_blockstore = make_blockstore();
     let hit_cid = cid_from_data(&hit_payload);
-    runtime().block_on(async {
+    common::shared_runtime().block_on(async {
         hit_blockstore.put(&hit_cid, &hit_payload).await.unwrap();
         black_box(hit_blockstore.get(&hit_cid).await.unwrap());
     });
 
     group.bench_function(BenchmarkId::from_parameter("get_cache_hit"), |b| {
-        b.to_async(runtime()).iter(|| async {
+        b.to_async(common::shared_runtime()).iter(|| async {
             black_box(hit_blockstore.get(&hit_cid).await.unwrap());
         });
     });
@@ -118,13 +115,13 @@ fn bench_blockstore(c: &mut Criterion) {
     let miss_store = Arc::new(MemoryStore::new());
     let miss_writer = DefraBlockstore::new(miss_store.clone(), false);
     let miss_cid = cid_from_data(&miss_payload);
-    runtime().block_on(async {
+    common::shared_runtime().block_on(async {
         miss_writer.put(&miss_cid, &miss_payload).await.unwrap();
     });
 
     group.bench_function(BenchmarkId::from_parameter("get_cache_miss"), |b| {
         let miss_store = miss_store.clone();
-        b.to_async(runtime()).iter_batched(
+        b.to_async(common::shared_runtime()).iter_batched(
             || DefraBlockstore::new(miss_store.clone(), false),
             |blockstore| async move {
                 black_box(blockstore.get(&miss_cid).await.unwrap());
@@ -137,13 +134,13 @@ fn bench_blockstore(c: &mut Criterion) {
     let has_store = Arc::new(MemoryStore::new());
     let has_writer = DefraBlockstore::new(has_store.clone(), false);
     let has_cid = cid_from_data(&has_payload);
-    runtime().block_on(async {
+    common::shared_runtime().block_on(async {
         has_writer.put(&has_cid, &has_payload).await.unwrap();
     });
 
     group.bench_function(BenchmarkId::from_parameter("has_check"), |b| {
         let has_store = has_store.clone();
-        b.to_async(runtime()).iter_batched(
+        b.to_async(common::shared_runtime()).iter_batched(
             || DefraBlockstore::new(has_store.clone(), false),
             |blockstore| async move {
                 black_box(blockstore.has(&has_cid).await.unwrap());
@@ -160,7 +157,7 @@ fn bench_blockstore(c: &mut Criterion) {
             })
             .collect();
 
-        b.to_async(runtime()).iter_batched(
+        b.to_async(common::shared_runtime()).iter_batched(
             || (make_blockstore(), blocks.clone()),
             |(blockstore, blocks)| async move {
                 for (cid, payload) in &blocks {

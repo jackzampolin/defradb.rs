@@ -11,6 +11,9 @@ description = "DefraDB P2P adapters for HTTP-facing operations"
 [package.metadata.cargo-machete]
 ignored = ["hex", "serde"]
 
+[lib]
+bench = false
+
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }

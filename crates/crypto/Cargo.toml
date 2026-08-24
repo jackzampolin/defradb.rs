@@ -10,6 +10,9 @@ repository.workspace = true
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]
 
+[lib]
+bench = false
+
 [dependencies]
 # Core dependencies
 defra-core = { path = "../defra-core" }

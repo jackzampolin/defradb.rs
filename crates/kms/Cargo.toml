@@ -24,6 +24,9 @@ threshold = ["dep:orbis"]
 # SourceHub-attested release policy. M4.
 sourcehub = ["dep:sourcehub"]
 
+[lib]
+bench = false
+
 [dependencies]
 ciborium.workspace = true
 defra-core = { path = "../defra-core" }

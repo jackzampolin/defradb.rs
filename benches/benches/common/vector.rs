@@ -2,8 +2,6 @@
 
 #![allow(dead_code)]
 
-pub mod sift;
-
 use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;

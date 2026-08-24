@@ -13,22 +13,17 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use db::index::vector::store::NodeId;
 use std::hint::black_box;
-use tokio::runtime::Runtime;
 
 mod common;
 
 use common::sift::{skip_notice, SiftSmall};
-use common::{Index, ALL_KINDS};
+use common::vector::{Index, ALL_KINDS};
 use db::index::vector::core::Metric;
 
 /// SIFT's ground truth is Euclidean.
 const METRIC: Metric = Metric::Euclidean;
 
 const K: usize = 10;
-
-fn runtime() -> Runtime {
-    Runtime::new().expect("a tokio runtime")
-}
 
 /// Recall against the corpus's own ground truth, which is the whole reason to
 /// use it: every other number in this crate is measured against an oracle over
@@ -38,7 +33,7 @@ fn recall(c: &mut Criterion) {
         skip_notice("sift/recall");
         return;
     };
-    let rt = runtime();
+    let rt = common::owned_runtime();
 
     println!(
         "\nSIFT-small: {} base vectors, {} dimensions, {} queries, recall@{K} against published ground truth",
@@ -102,7 +97,7 @@ fn bulk_load(c: &mut Criterion) {
         skip_notice("sift/bulk_load");
         return;
     };
-    let rt = runtime();
+    let rt = common::owned_runtime();
 
     let mut group = c.benchmark_group("sift/bulk_load");
     group.sample_size(10);
@@ -128,7 +123,7 @@ fn insert(c: &mut Criterion) {
         skip_notice("sift/insert");
         return;
     };
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let incoming = &sift.queries;
     let existing = sift.base.len();
 

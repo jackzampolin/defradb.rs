@@ -12,11 +12,10 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use db::index::vector::store::NodeId;
 use std::hint::black_box;
-use tokio::runtime::Runtime;
 
 mod common;
 
-use common::{Corpus, Index, Kind, ALL_KINDS, SEED};
+use common::vector::{Corpus, Index, Kind, ALL_KINDS, SEED};
 
 /// Every kind in every state a mutation can hit. A batch-built kind behaves
 /// like a flat scan until it is built, so measuring only that state would
@@ -36,14 +35,10 @@ const DIMENSIONS: usize = 128;
 const CORPUS: usize = 2_000;
 const BATCH: usize = 100;
 
-fn runtime() -> Runtime {
-    Runtime::new().expect("a tokio runtime")
-}
-
 /// Inserting into an index that already holds `CORPUS` vectors, which is what
 /// a write to a populated collection costs.
 fn insert(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut corpus = Corpus::new(SEED);
     let existing = corpus.clustered(CORPUS, DIMENSIONS, 32, 0.2);
     let incoming = corpus.clustered(BATCH, DIMENSIONS, 32, 0.2);
@@ -78,7 +73,7 @@ fn insert(c: &mut Criterion) {
 /// is replaced and its own links rebuilt, while links pointing *at* it stay
 /// valid because the id is what they name.
 fn update(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut corpus = Corpus::new(SEED ^ 0x11);
     let existing = corpus.clustered(CORPUS, DIMENSIONS, 32, 0.2);
     let replacements = corpus.clustered(BATCH, DIMENSIONS, 32, 0.2);
@@ -110,7 +105,7 @@ fn update(c: &mut Criterion) {
 /// Deletes are tombstones on every kind, so this measures the write and the
 /// read that precedes it, not a graph repair.
 fn delete(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut corpus = Corpus::new(SEED ^ 0x22);
     let existing = corpus.clustered(CORPUS, DIMENSIONS, 32, 0.2);
 
@@ -138,7 +133,7 @@ fn delete(c: &mut Criterion) {
 /// Building the whole index from scratch: what creating an index on a
 /// populated collection costs.
 fn bulk_load(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut corpus = Corpus::new(SEED ^ 0x33);
     let vectors = corpus.clustered(CORPUS, DIMENSIONS, 32, 0.2);
 
@@ -163,7 +158,7 @@ fn bulk_load(c: &mut Criterion) {
 /// enough. The graph kinds have no equivalent, so they are absent rather than
 /// reported as zero.
 fn build(c: &mut Criterion) {
-    let rt = runtime();
+    let rt = common::owned_runtime();
     let mut corpus = Corpus::new(SEED ^ 0x44);
     let vectors = corpus.clustered(CORPUS, DIMENSIONS, 32, 0.2);
 

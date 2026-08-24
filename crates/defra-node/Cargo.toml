@@ -47,6 +47,9 @@ wasmtime-runtime = [
 # who want OTel must opt in.
 otel = ["telemetry/otlp"]
 
+[lib]
+bench = false
+
 [dependencies]
 db = { path = "../db", default-features = false }
 replication-filter = { path = "../replication-filter" }

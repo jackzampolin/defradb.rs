@@ -39,11 +39,10 @@ impl SiftSmall {
     }
 }
 
-/// `.tooling/sift/siftsmall`, resolved from this crate rather than the working
-/// directory so it does not matter where cargo was invoked.
+/// `.tooling/sift/siftsmall`, resolved from this package rather than the
+/// working directory so it does not matter where cargo was invoked.
 fn root() -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
         .parent()?
         .join(".tooling/sift/siftsmall");
     path.is_dir().then_some(path)

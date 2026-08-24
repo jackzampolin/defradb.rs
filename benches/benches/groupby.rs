@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use query::mapper::GroupBy;
@@ -8,12 +6,9 @@ use query::{Doc, DocumentMapping, PlanNode};
 use serde_json::Value as JsonValue;
 use std::hint::black_box;
 
-const GROUP_INDEX: usize = 4;
+mod common;
 
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap())
-}
+const GROUP_INDEX: usize = 4;
 
 #[derive(Clone)]
 struct GroupByCase {
@@ -185,7 +180,7 @@ impl PlanNode for VecPlanNode {
 }
 
 fn execute_groupby(node: &mut GroupByNode) {
-    runtime().block_on(async {
+    common::shared_runtime().block_on(async {
         node.init().await.unwrap();
         let mut yielded = 0usize;
         while node.next().await.unwrap() {

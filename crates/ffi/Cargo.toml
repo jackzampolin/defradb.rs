@@ -12,6 +12,7 @@ description = "FFI bindings for DefraDB Rust implementation"
 ignored = ["cid", "libp2p", "serde_bytes", "serde_ipld_dagcbor", "serde_yaml", "sha2", "thiserror"]
 
 [lib]
+bench = false
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]

@@ -10,6 +10,9 @@ repository.workspace = true
 [package.metadata.cargo-machete]
 ignored = ["tracing"]
 
+[lib]
+bench = false
+
 [dependencies]
 # Error handling
 thiserror.workspace = true
@@ -49,13 +52,8 @@ tokio = { workspace = true, features = ["rt"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [dev-dependencies]
-criterion.workspace = true
 futures.workspace = true
 multihash-codetable.workspace = true
-
-[[bench]]
-name = "block"
-harness = false
 
 [lints]
 workspace = true
