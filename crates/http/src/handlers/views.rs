@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::error::{http_error_from_backend_message, HttpError};
+use crate::handlers::collection_selector::CollectionSelectorQuery;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -29,35 +30,6 @@ pub struct AddViewRequest {
 pub struct ViewNamesRequest {
     #[serde(rename = "Names", default)]
     pub names: Option<Vec<String>>,
-}
-
-/// Query selectors for refreshing views, matching Go's `RefreshViews` client.
-#[derive(Debug, Default, serde::Deserialize)]
-pub struct RefreshViewsQuery {
-    pub name: Option<String>,
-    pub version_id: Option<String>,
-    pub collection_id: Option<String>,
-    pub get_inactive: Option<bool>,
-}
-
-impl RefreshViewsQuery {
-    /// Combine the query selectors with the optional body's name list.
-    pub fn into_options(self, body_names: Option<Vec<String>>) -> db::RefreshViewsOptions {
-        let mut names = body_names;
-        if let Some(name) = self.name {
-            let names = names.get_or_insert_with(Vec::new);
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-
-        db::RefreshViewsOptions {
-            names,
-            version_id: self.version_id,
-            collection_id: self.collection_id,
-            get_inactive: self.get_inactive.unwrap_or(false),
-        }
-    }
 }
 
 /// Add a view.
@@ -117,7 +89,7 @@ fn view_names_from_body(body: &Bytes) -> Result<Option<Vec<String>>, HttpError> 
 pub async fn refresh_views(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<RefreshViewsQuery>,
+    Query(query): Query<CollectionSelectorQuery>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewRefresh).await?;
@@ -125,7 +97,7 @@ pub async fn refresh_views(
     let view_ops = state.require_view()?;
 
     view_ops
-        .refresh_views(query.into_options(view_names_from_body(&body)?))
+        .refresh_views(query.into_selector_with(view_names_from_body(&body)?))
         .await
         .map_err(http_error_from_backend_message)?;
 

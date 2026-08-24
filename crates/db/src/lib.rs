@@ -84,6 +84,7 @@ pub use collection::cache::CollectionCache;
 pub use collection::name::CollectionName;
 pub use collection::provider::DbCollectionProvider;
 pub use collection::retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
+pub use collection::selector::CollectionSelector;
 pub use collection::snapshot::CollectionSnapshot;
 #[allow(deprecated)]
 pub use collection::{collection_short_id, Collection};
@@ -112,7 +113,7 @@ pub use txn::registry::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
 };
 pub use txn::DbTxn;
-pub use view::ops::{is_refreshable_view, RefreshViewsOptions};
+pub use view::ops::is_refreshable_view;
 pub use write::autocommit::AutoCommitMutator;
 pub use write::doc::DbDocMutator;
 pub use write::queue::DocWriteQueue;

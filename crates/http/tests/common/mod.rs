@@ -33,7 +33,7 @@ pub const POLICY: &str = "name: test\nresources:\n  doc:\n    permissions:\n";
 #[derive(Debug, Default)]
 pub struct RecordingViewOps {
     pub add_view_transform: std::sync::Mutex<Option<Option<String>>>,
-    pub refresh: std::sync::Mutex<Option<db::RefreshViewsOptions>>,
+    pub refresh: std::sync::Mutex<Option<db::CollectionSelector>>,
 }
 
 #[async_trait]
@@ -48,7 +48,7 @@ impl ViewOperations for RecordingViewOps {
         Ok(vec![])
     }
 
-    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String> {
+    async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String> {
         *self.refresh.lock().unwrap() = Some(options);
         Ok(())
     }

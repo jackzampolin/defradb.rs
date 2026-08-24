@@ -960,7 +960,7 @@ pub trait ViewOperations: Send + Sync {
     ///
     /// The options select which views to refresh, mirroring Go's collection
     /// lookup. Default options refresh every materialized view.
-    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String>;
+    async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String>;
 
     /// Run manual downsample history GC.
     ///

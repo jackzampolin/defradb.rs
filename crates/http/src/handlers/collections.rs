@@ -16,6 +16,7 @@ use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
 use serde::Serialize;
 
 use crate::error::{http_error_from_backend_message, HttpError};
+use crate::handlers::collection_selector::CollectionSelectorQuery;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -83,17 +84,37 @@ fn parse_collection_doc_ids_pagination(
     Ok(CollectionDocIdsPagination { limit, offset })
 }
 
-/// List all collection names.
+/// List collection names, narrowed by Go's selectors.
 ///
-/// GET /api/v0/collections
+/// GET /api/v0/collections?name=Users&version_id=..&collection_id=..&get_inactive=true
+///
+/// The selectors are Go's `GetCollectionsOptions` (`http/client.go:422-448`)
+/// and resolve through the shared `db::CollectionSelector`, the same lookup
+/// `POST /view/refresh` uses. Ignoring them, as this handler used to, answers
+/// a request for one collection with every collection and gives the caller no
+/// way to tell.
+///
+/// The response is still a name list. Go returns full collection definitions
+/// here; that shape difference is tracked separately, and `GET
+/// /collections/versions` already serves version-level detail.
 ///
 /// Requires `CollectionGet` permission when NAC is enabled.
 pub async fn list_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    Query(query): Query<CollectionSelectorQuery>,
 ) -> Result<Json<CollectionsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
+    let selector = query.into_selector();
+    if !selector.is_unfiltered() {
+        return list_selected_collections(&state, &selector).await;
+    }
+
+    // The unnarrowed listing stays on the REST path because that one honours a
+    // transaction-scoped collection provider, where the system store below
+    // does not. Narrowing needs per-version fields the name list does not
+    // carry, so it has to read the versions.
     let rest = state
         .rest
         .as_ref()
@@ -106,6 +127,32 @@ pub async fn list_collections(
             Err(e.into())
         }
     }
+}
+
+/// Apply the selectors to the stored collection versions.
+///
+/// Fails loudly when the version store is not configured rather than falling
+/// back to the unnarrowed listing: silently answering a narrowed request with
+/// everything is the bug this handler is fixing.
+async fn list_selected_collections(
+    state: &AppState,
+    selector: &db::CollectionSelector,
+) -> Result<Json<CollectionsResponse>, HttpError> {
+    let versions = state
+        .require_collection_versions()?
+        .get_all_collections()
+        .await
+        .map_err(http_error_from_backend_message)?;
+
+    let mut collections: Vec<String> = versions
+        .into_iter()
+        .filter(|version| selector.selects(version))
+        .map(|version| version.name)
+        .collect();
+    collections.sort();
+    collections.dedup();
+
+    Ok(Json(CollectionsResponse { collections }))
 }
 
 /// Get document IDs in a collection.
