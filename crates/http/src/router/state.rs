@@ -20,6 +20,10 @@ impl CollectionVersionOperations for CollectionVersionsFromManagement {
     async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
         self.0.get_all_collections().await
     }
+
+    async fn get_active_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        self.0.get_active_collections().await
+    }
 }
 
 /// Application state shared across handlers.

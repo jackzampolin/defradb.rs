@@ -106,7 +106,7 @@ pub async fn list_collections(
 ) -> Result<Json<CollectionsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let selector = query.into_selector();
+    let selector = query.into_selector()?;
     if !selector.is_unfiltered() {
         return list_selected_collections(&state, &selector).await;
     }
@@ -138,11 +138,17 @@ async fn list_selected_collections(
     state: &AppState,
     selector: &db::CollectionSelector,
 ) -> Result<Json<CollectionsResponse>, HttpError> {
-    let versions = state
-        .require_collection_versions()?
-        .get_all_collections()
-        .await
-        .map_err(http_error_from_backend_message)?;
+    // The same branch `refresh_views` makes on the same selector: inactive
+    // versions cost a scan of every stored version, and a selector that does
+    // not ask for them is answerable from the active listing alone. Two
+    // surfaces sharing one selector have to decide this the same way.
+    let collection_versions = state.require_collection_versions()?;
+    let versions = if selector.needs_all_versions() {
+        collection_versions.get_all_collections().await
+    } else {
+        collection_versions.get_active_collections().await
+    }
+    .map_err(http_error_from_backend_message)?;
 
     let mut collections: Vec<String> = versions
         .into_iter()

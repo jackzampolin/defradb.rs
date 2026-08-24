@@ -23,13 +23,20 @@ use defra_http::router::{AppStateBuilder, CollectionVersionOperations};
 use defra_http::{MockQueryExecutor, MockRestOperations};
 use query::rest::RestOperations;
 use schema::CollectionVersion;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
 
 /// The stored versions, covering every branch of Go's candidate switch:
 /// a collection with both an active and an inactive version, a plain active
 /// one, and a wholly inactive one.
-#[derive(Debug)]
-struct Versions;
+///
+/// Counts which listing the handler asked for, so the cheap path can be
+/// asserted rather than assumed.
+#[derive(Debug, Default)]
+struct Versions {
+    all_calls: AtomicUsize,
+    active_calls: AtomicUsize,
+}
 
 fn version(name: &str, version_id: &str, collection_id: &str, active: bool) -> CollectionVersion {
     let mut version = CollectionVersion::new(name, version_id, collection_id, vec![]);
@@ -37,22 +44,38 @@ fn version(name: &str, version_id: &str, collection_id: &str, active: bool) -> C
     version
 }
 
-#[async_trait]
-impl CollectionVersionOperations for Versions {
-    async fn get_all_collections(&self) -> Result<Vec<CollectionVersion>, String> {
-        Ok(vec![
+impl Versions {
+    fn stored() -> Vec<CollectionVersion> {
+        vec![
             version("Users", "users-v2", "users-c", true),
             version("Users", "users-v1", "users-c", false),
             version("Books", "books-v1", "books-c", true),
             version("Orders", "orders-v1", "orders-c", false),
-        ])
+        ]
+    }
+}
+
+#[async_trait]
+impl CollectionVersionOperations for Versions {
+    async fn get_all_collections(&self) -> Result<Vec<CollectionVersion>, String> {
+        self.all_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Self::stored())
+    }
+
+    async fn get_active_collections(&self) -> Result<Vec<CollectionVersion>, String> {
+        self.active_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Self::stored().into_iter().filter(|v| v.is_active).collect())
     }
 }
 
 fn router() -> Router {
+    router_with(Arc::new(Versions::default()))
+}
+
+fn router_with(versions: Arc<Versions>) -> Router {
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
-        .with_collection_versions(Arc::new(Versions))
+        .with_collection_versions(versions)
         .build();
     defra_http::create_router_with_state(state)
 }
@@ -188,4 +211,60 @@ async fn a_narrowed_request_without_a_version_store_is_an_error() {
 async fn an_unparseable_selector_is_refused() {
     let (status, _) = get(router(), "?get_inactive=maybe").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A selector sent with an empty value is refused rather than quietly meaning
+/// "everything" or "nothing". Both of those hand the caller something other
+/// than what it asked for, which is the bug this handling exists to fix.
+#[tokio::test]
+async fn an_empty_selector_value_is_refused() {
+    for query in [
+        "?name=",
+        "?version_id=",
+        "?collection_id=",
+        "?name=%20",
+        "?name=&get_inactive=true",
+    ] {
+        let (status, body) = get(router(), query).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{query} should be refused, got {body}"
+        );
+    }
+}
+
+/// Inactive versions cost a scan of every stored version. A selector that does
+/// not ask for them must take the active listing, the same branch
+/// `refresh_views` makes on the same selector.
+#[tokio::test]
+async fn a_selector_that_needs_no_inactive_versions_takes_the_cheap_listing() {
+    let versions = Arc::new(Versions::default());
+    let (status, body) = get(router_with(versions.clone()), "?name=Users").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert_eq!(versions.active_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        versions.all_calls.load(Ordering::SeqCst),
+        0,
+        "an active-only selector must not scan every stored version"
+    );
+}
+
+/// The converse: asking for inactive versions, or for a version by id, does
+/// need the full listing.
+#[tokio::test]
+async fn a_selector_that_needs_inactive_versions_takes_the_full_listing() {
+    for query in ["?get_inactive=true", "?version_id=users-v1"] {
+        let versions = Arc::new(Versions::default());
+        let (status, body) = get(router_with(versions.clone()), query).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+
+        assert_eq!(
+            versions.all_calls.load(Ordering::SeqCst),
+            1,
+            "{query} needs every stored version"
+        );
+        assert_eq!(versions.active_calls.load(Ordering::SeqCst), 0, "{query}");
+    }
 }

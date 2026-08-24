@@ -97,7 +97,7 @@ pub async fn refresh_views(
     let view_ops = state.require_view()?;
 
     view_ops
-        .refresh_views(query.into_selector_with(view_names_from_body(&body)?))
+        .refresh_views(query.into_selector_with(view_names_from_body(&body)?)?)
         .await
         .map_err(http_error_from_backend_message)?;
 
