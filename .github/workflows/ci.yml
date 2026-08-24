@@ -692,10 +692,10 @@ jobs:
           "$CACHE_DIR/defradb" version --format json
 
       # Guards against silent drift between the committed Go-parity hex
-      # constants in `crates/p2p/src/**` and what upstream Go actually
+      # constants in `crates/p2p/**/*.rs` and what upstream Go actually
       # emits. Both generators print hex to stdout (no files written);
       # every `(N bytes): <hex>` or `(N): <hex>` line is checked against
-      # the Rust source tree. If upstream reorders a struct field the
+      # the Rust crate. If upstream reorders a struct field the
       # hex changes, the grep misses, and the job fails — instead of
       # Rust tests passing against stale constants.
       - name: Verify Go fixtures still match Rust constants
@@ -717,13 +717,13 @@ jobs:
           fi
           STALE=0
           while IFS= read -r H; do
-            if ! grep -qR --include='*.rs' -F "$H" crates/p2p/src/; then
-              echo "::error::Go fixture hex not found in crates/p2p/src/**: $H" >&2
+            if ! grep -qR --include='*.rs' -F "$H" crates/p2p/; then
+              echo "::error::Go fixture hex not found in crates/p2p/**/*.rs: $H" >&2
               STALE=1
             fi
           done <<< "$HEXES"
           if [ "$STALE" -ne 0 ]; then
-            echo "::error::Go fixture drift detected — regenerate Rust constants by running the generators locally and updating crates/p2p/src/message/pubsub.rs, crates/p2p/src/pubsub_rpc/envelope.rs, and crates/p2p/src/sync/coordinator/pubsub_services.rs" >&2
+            echo "::error::Go fixture drift detected — regenerate the Rust fixture constants under crates/p2p" >&2
             exit 1
           fi
 

@@ -1,7 +1,9 @@
-use super::*;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use cid::Cid;
+use p2p::{PeerStateTracker, DOC_SYNC_TOPIC};
 
 fn test_peer_id() -> String {
     static NEXT_PEER_ID: AtomicU64 = AtomicU64::new(0);
@@ -102,7 +104,7 @@ pub fn test_data_subscription_excludes_system_topics() {
     let tracker = PeerStateTracker::new();
     let peer = test_peer_id();
 
-    tracker.peer_subscribed(&peer, crate::topics::DOC_SYNC_TOPIC.to_string());
+    tracker.peer_subscribed(&peer, DOC_SYNC_TOPIC.to_string());
     assert!(!tracker.peer_has_data_subscription(&peer));
 
     tracker.peer_subscribed(&peer, "users".to_string());
