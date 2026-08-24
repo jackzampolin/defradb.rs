@@ -41,6 +41,67 @@ async fn push_transaction_conflicts_stop_at_bound() {
 }
 
 #[tokio::test]
+async fn transient_marker_io_failure_recovers_durable_scopes() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store.clone());
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    for (doc_id, collection_id, error) in [
+        (
+            "doc",
+            "collection",
+            crate::corekv::Error::Io("injected transient marker failure".to_string()),
+        ),
+        (
+            "",
+            "collection",
+            crate::corekv::Error::Backend("injected transient marker failure".to_string()),
+        ),
+    ] {
+        let attempts = AtomicUsize::new(0);
+        retry_scope_marker_write(|| async {
+            if attempts.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
+                Err(error.clone())
+            } else {
+                peerstore
+                    .register_scope_marker_once("peer", doc_id, collection_id, &retry_info)
+                    .await
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    let restarted = Peerstore::new(store);
+    assert!(restarted.get_retry_info("peer").await.unwrap().is_some());
+    let markers = restarted.get_retry_documents("peer").await.unwrap();
+    assert_eq!(markers.len(), 2);
+    assert!(markers.iter().any(|marker| marker.doc_id == "doc"));
+    assert!(markers.iter().any(|marker| marker.is_collection_commit()));
+}
+
+#[tokio::test]
+async fn marker_io_failures_stop_at_bound() {
+    let attempts = AtomicUsize::new(0);
+
+    let error = retry_scope_marker_write(|| async {
+        attempts.fetch_add(1, AtomicOrdering::Relaxed);
+        Err::<(), _>(crate::corekv::Error::Backend(
+            "injected persistent marker failure".to_string(),
+        ))
+    })
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, crate::corekv::Error::Backend(_)));
+    assert_eq!(
+        attempts.load(AtomicOrdering::Relaxed),
+        PUSH_RETRY_TXN_MAX_ATTEMPTS
+    );
+}
+
+#[tokio::test]
 async fn test_peerstore_basic() {
     let store = Arc::new(MemoryStore::new());
     let peerstore = Peerstore::new(store);

@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracing;
 
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const PUSH_MARKER_IO_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 const LEGACY_RETRY_COMMIT_PREFIX: &str = "/rep/retry/commit/";
 
 fn legacy_retry_commit_prefix(peer_id: Option<&str>) -> Vec<u8> {
@@ -53,21 +55,32 @@ pub struct ReplicatorRetryGuard {
     _guard: RwLockWriteGuardArc<()>,
 }
 
-async fn retry_push_txn_conflicts<T, F, Fut>(mut operation: F) -> Result<T>
+async fn retry_push_txn<T, F, Fut, P>(mut operation: F, is_retryable: P) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
+    P: Fn(&crate::corekv::Error) -> bool,
 {
     let mut retried = false;
     for attempt in 1..=PUSH_RETRY_TXN_MAX_ATTEMPTS {
         match operation().await {
-            Err(error) if error.is_retriable() && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
+            Err(error) if is_retryable(&error) && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
                 telemetry::record_retry_attempt(telemetry::RetryLayer::PushMarker);
                 retried = true;
-                tracing::debug!(attempt, "retrying push-ledger transaction conflict");
+                if error.is_retriable() {
+                    tracing::debug!(attempt, "retrying push retry-state transaction conflict");
+                } else {
+                    tracing::warn!(attempt, %error, "retrying durable push retry-state write");
+                    wait_before_marker_retry(attempt).await;
+                }
             }
-            Err(error) if error.is_retriable() => {
+            Err(error) if is_retryable(&error) => {
                 telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushMarker);
+                tracing::error!(
+                    attempts = PUSH_RETRY_TXN_MAX_ATTEMPTS,
+                    %error,
+                    "durable push retry-state write retries exhausted"
+                );
                 return Err(error);
             }
             Ok(value) => {
@@ -80,6 +93,35 @@ where
         }
     }
     unreachable!("bounded transaction retry loop always returns")
+}
+
+async fn retry_push_txn_conflicts<T, F, Fut>(operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_push_txn(operation, crate::corekv::Error::is_retriable).await
+}
+
+async fn retry_scope_marker_write<T, F, Fut>(operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_push_txn(operation, is_retryable_marker_write).await
+}
+
+fn is_retryable_marker_write(error: &crate::corekv::Error) -> bool {
+    error.is_retriable()
+        || matches!(
+            error,
+            crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
+        )
+}
+
+async fn wait_before_marker_retry(_attempt: usize) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::time::sleep(PUSH_MARKER_IO_RETRY_DELAY * _attempt as u32).await;
 }
 
 /// Peerstore provides storage for peer and replication metadata
@@ -268,31 +310,41 @@ impl<S: Store> Peerstore<S> {
         collection_id: &str,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            let id_key = ReplicatorRetryIDKey::new(peer_id);
-            if !txn.has(&id_key.bytes()).await? {
-                let mut info = super::RetryInfo::from_bytes(retry_info_bytes)
-                    .unwrap_or_else(|_| super::RetryInfo::new_initial());
-                info.bump_for(peer_id);
-                txn.set(
-                    &id_key.bytes(),
-                    &info.to_bytes().map_err(crate::corekv::Error::Other)?,
-                )
-                .await?;
-            }
-            let marker = if doc_id.is_empty() {
-                if collection_id.is_empty() {
-                    return txn.commit().await;
-                }
-                ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
-            } else {
-                ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
-            };
-            txn.set(&marker, &[]).await?;
-            txn.commit().await
+        retry_scope_marker_write(|| {
+            self.register_scope_marker_once(peer_id, doc_id, collection_id, retry_info_bytes)
         })
         .await
+    }
+
+    async fn register_scope_marker_once(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        retry_info_bytes: &[u8],
+    ) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        let id_key = ReplicatorRetryIDKey::new(peer_id);
+        if !txn.has(&id_key.bytes()).await? {
+            let mut info = super::RetryInfo::from_bytes(retry_info_bytes)
+                .unwrap_or_else(|_| super::RetryInfo::new_initial());
+            info.bump_for(peer_id);
+            txn.set(
+                &id_key.bytes(),
+                &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+            )
+            .await?;
+        }
+        let marker = if doc_id.is_empty() {
+            if collection_id.is_empty() {
+                return txn.commit().await;
+            }
+            ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
+        };
+        txn.set(&marker, &[]).await?;
+        txn.commit().await
     }
 
     /// One-way conversion of payload-valued document records and CID-scoped
