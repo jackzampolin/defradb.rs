@@ -437,30 +437,6 @@ pub async fn get_all_collections(
     Ok(Json(collections))
 }
 
-/// Delete a collection by name.
-///
-/// DELETE /api/v0/collections/{name}
-///
-/// Removes the collection and all its versions.
-///
-/// Requires `CollectionPatch` permission when NAC is enabled.
-pub async fn delete_collection(
-    State(state): State<AppState>,
-    identity: ExtractIdentity,
-    Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
-
-    let collection_mgmt = state.require_collection_mgmt()?;
-
-    collection_mgmt
-        .delete_collection(&name)
-        .await
-        .map_err(http_error_from_backend_message)?;
-
-    Ok(Json(serde_json::json!({})))
-}
-
 /// Delete one or more collections by name (Go #4688 parity).
 ///
 /// DELETE /api/v0/collections?name=Users,Books&active-only=true

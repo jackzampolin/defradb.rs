@@ -125,7 +125,7 @@ pub(crate) fn create_router_with_state_and_body_limits(
             "/{name}",
             get(handlers::get_collection_doc_ids)
                 .post(handlers::create_document)
-                .delete(handlers::delete_collection),
+                .delete(handlers::delete_documents_with_filter),
         )
         .route("/{name}/describe", get(handlers::describe_collection))
         .route("/{name}/exists", get(handlers::collection_exists))

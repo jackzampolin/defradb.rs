@@ -15,6 +15,16 @@ struct MockDocument {
     data: JsonValue,
 }
 
+/// Whether every key in `filter` equals the same key in `data`.
+fn matches_filter(data: &JsonValue, filter: &JsonValue) -> bool {
+    match filter.as_object() {
+        Some(fields) => fields
+            .iter()
+            .all(|(key, want)| data.get(key).is_some_and(|got| got == want)),
+        None => false,
+    }
+}
+
 /// Mock REST operations for testing collection and document handlers.
 #[derive(Debug)]
 pub struct MockRestOperations {
@@ -230,6 +240,28 @@ impl RestOperations for MockRestOperations {
             None => Err(RestError::collection_not_found(collection)),
         }
     }
+
+    /// Matches on equality of each filter key against the stored document,
+    /// which is enough to tell "the filter was applied" from "it was ignored".
+    async fn delete_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        let mut collections = self.collections.write().unwrap();
+        let docs = collections
+            .get_mut(collection)
+            .ok_or_else(|| RestError::collection_not_found(collection))?;
+
+        let matched: Vec<String> = docs
+            .iter()
+            .filter(|doc| matches_filter(&doc.data, filter))
+            .map(|doc| doc.doc_id.clone())
+            .collect();
+        docs.retain(|doc| !matched.contains(&doc.doc_id));
+        Ok(matched)
+    }
 }
 
 /// Mock REST operations that always fails (for error path testing).
@@ -332,6 +364,15 @@ impl RestOperations for FailingMockRestOperations {
         _doc_id: &str,
         _identity: Option<&Did>,
     ) -> RestResult<bool> {
+        Err(self.error.clone())
+    }
+
+    async fn delete_documents_with_filter(
+        &self,
+        _collection: &str,
+        _filter: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
         Err(self.error.clone())
     }
 }

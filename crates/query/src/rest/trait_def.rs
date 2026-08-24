@@ -114,4 +114,16 @@ pub trait RestOperations: MaybeSendSync {
         doc_id: &str,
         identity: Option<&Did>,
     ) -> RestResult<bool>;
+
+    /// Delete every document matching a filter.
+    ///
+    /// This is Go's `DeleteDocumentsWithFilter`. The filter is a GraphQL
+    /// filter object, as the `filter` argument of a `delete_<Collection>`
+    /// mutation takes it, and the returned ids are the documents deleted.
+    async fn delete_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>>;
 }
