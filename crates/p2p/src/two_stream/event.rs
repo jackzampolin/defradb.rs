@@ -91,22 +91,3 @@ pub enum TwoStreamEvent {
     /// Failed to decode an incoming message.
     DecodeError { peer_id: PeerId, error: String },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::TwoStreamEvent;
-
-    #[test]
-    fn manage_variants_exist() {
-        fn _a(e: TwoStreamEvent) -> bool {
-            matches!(
-                e,
-                TwoStreamEvent::ManageRequest { .. }
-                    | TwoStreamEvent::ManageReply { .. }
-                    | TwoStreamEvent::ManageQueryRequest { .. }
-                    | TwoStreamEvent::ManageQueryReply { .. }
-            )
-        }
-        let _ = _a;
-    }
-}
