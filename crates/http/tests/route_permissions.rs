@@ -541,18 +541,34 @@ fn all_registered_routes_return_expected_permission() {
         ),
     ];
 
+    // Every mount in `API_PREFIXES` serves this same route set, so each form
+    // has to resolve to the same permission. Checking them here rather than
+    // hand-copying the list keeps the mounts from drifting apart.
     for (path, method, expected) in &routes {
-        let actual = route_permission(path, method);
-        assert_eq!(
-            actual, *expected,
-            "Mismatch for {} {}: expected {:?}, got {:?}",
-            method, path, expected, actual
-        );
+        for candidate in mount_forms(path) {
+            let actual = route_permission(&candidate, method);
+            assert_eq!(
+                actual, *expected,
+                "Mismatch for {} {}: expected {:?}, got {:?}",
+                method, candidate, expected, actual
+            );
+        }
     }
 }
 
+/// The same route as every prefix in `go_paths::API_PREFIXES` mounts it.
+fn mount_forms(v0_path: &str) -> Vec<String> {
+    let Some(suffix) = v0_path.strip_prefix("/api/v0") else {
+        return vec![v0_path.to_string()];
+    };
+    defra_http::go_paths::API_PREFIXES
+        .iter()
+        .map(|prefix| format!("{prefix}{suffix}"))
+        .collect()
+}
+
 #[test]
-fn v1_routes_use_same_permissions_as_v0() {
+fn every_mount_form_uses_the_same_permission_as_v0() {
     for (v0_path, method) in [
         ("/api/v0/version", Method::GET),
         ("/api/v0/graphql", Method::POST),
@@ -562,10 +578,25 @@ fn v1_routes_use_same_permissions_as_v0() {
         ("/api/v0/backup/export", Method::POST),
         ("/api/v0/block/signed", Method::GET),
     ] {
-        let v1_path = v0_path.replacen("/api/v0", "/api/v1", 1);
+        let expected = route_permission(v0_path, &method);
+        for candidate in mount_forms(v0_path) {
+            assert_eq!(
+                route_permission(&candidate, &method),
+                expected,
+                "{candidate} disagrees with {v0_path} for {method}"
+            );
+        }
+    }
+}
+
+/// A path that only looks versioned must not be rewritten into the table.
+#[test]
+fn near_miss_version_segments_are_not_folded() {
+    for path in ["/api/v10/collections", "/api/v2/collections"] {
         assert_eq!(
-            route_permission(&v1_path, &method),
-            route_permission(v0_path, &method)
+            route_permission(path, &Method::GET),
+            RoutePermission::Required(NodePermission::DocumentRead),
+            "{path} should fall to the safe default"
         );
     }
 }

@@ -305,12 +305,32 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
     }
 }
 
+/// Fold every mount of the API router onto its `/api/v0` key.
+///
+/// `go_paths::API_PREFIXES` mounts one route set three times, so `/api/v1/x`
+/// and the unversioned `/api/x` reach the same handler as `/api/v0/x` and must
+/// carry the same permission. A form that fails to fold here falls to the `_`
+/// arm and is enforced as `DocumentRead`, which is a privilege downgrade
+/// rather than a 404.
 fn normalize_api_version(path: &str) -> Cow<'_, str> {
-    if path == "/api/v1" {
+    let Some(rest) = path.strip_prefix("/api") else {
+        return Cow::Borrowed(path);
+    };
+    if rest == "/v0" || rest.starts_with("/v0/") {
+        return Cow::Borrowed(path);
+    }
+
+    let suffix = match rest {
+        "/v1" => "",
+        _ => rest
+            .strip_prefix("/v1")
+            .filter(|stripped| stripped.starts_with('/'))
+            .unwrap_or(rest),
+    };
+
+    if suffix.is_empty() {
         Cow::Borrowed("/api/v0")
-    } else if let Some(suffix) = path.strip_prefix("/api/v1/") {
-        Cow::Owned(format!("/api/v0/{suffix}"))
     } else {
-        Cow::Borrowed(path)
+        Cow::Owned(format!("/api/v0{suffix}"))
     }
 }
