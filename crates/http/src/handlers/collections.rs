@@ -106,7 +106,7 @@ pub async fn list_collections(
 ) -> Result<Json<CollectionsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let selector = query.into_selector()?;
+    let selector = query.into_selector();
     if !selector.is_unfiltered() {
         return list_selected_collections(&state, &selector).await;
     }
@@ -150,10 +150,26 @@ async fn list_selected_collections(
     }
     .map_err(http_error_from_backend_message)?;
 
-    let mut collections: Vec<String> = versions
-        .into_iter()
+    let selected: Vec<&schema::CollectionVersion> = versions
+        .iter()
         .filter(|version| selector.selects(version))
-        .map(|version| version.name)
+        .collect();
+
+    // Go looks a version id up directly and propagates not-found
+    // (`internal/db/collection.go:210-215`, `GetCollectionByID`), where an
+    // unknown name or collection id is swallowed into an empty list. A typo in
+    // a version id must not read as "no such collection version".
+    if let Some(version_id) = &selector.version_id {
+        if selected.is_empty() {
+            return Err(HttpError::NotFound(format!(
+                "no collection version {version_id}"
+            )));
+        }
+    }
+
+    let mut collections: Vec<String> = selected
+        .into_iter()
+        .map(|version| version.name.clone())
         .collect();
     collections.sort();
     collections.dedup();

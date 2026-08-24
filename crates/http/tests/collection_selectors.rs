@@ -209,28 +209,42 @@ async fn a_narrowed_request_without_a_version_store_is_an_error() {
 /// A selector Rust cannot parse must be refused, not dropped.
 #[tokio::test]
 async fn an_unparseable_selector_is_refused() {
-    let (status, _) = get(router(), "?get_inactive=maybe").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    for query in ["?get_inactive=maybe", "?get_inactive="] {
+        let (status, body) = get(router(), query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+    }
 }
 
-/// A selector sent with an empty value is refused rather than quietly meaning
-/// "everything" or "nothing". Both of those hand the caller something other
-/// than what it asked for, which is the bug this handling exists to fix.
+/// Go keys the selectors off `Query().Has(..)`, so `?name=` is a name set to
+/// the empty string, not an absent selector. It matches nothing and comes back
+/// as an empty list (`http/handler_store.go:391`, then the stage-two name
+/// filter drops the zero-value collection because it is not active).
 #[tokio::test]
-async fn an_empty_selector_value_is_refused() {
+async fn an_empty_name_or_collection_id_selects_nothing() {
     for query in [
         "?name=",
-        "?version_id=",
         "?collection_id=",
         "?name=%20",
         "?name=&get_inactive=true",
     ] {
         let (status, body) = get(router(), query).await;
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "{query} should be refused, got {body}"
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert!(
+            names(query).await.is_empty(),
+            "{query} should select nothing"
         );
+    }
+}
+
+/// Go looks a version id up directly and returns `ErrCollectionNotFound`,
+/// which its error mapping turns into a 404 (`internal/db/collection.go:210`,
+/// `GetCollectionByID`). An unknown name is swallowed into an empty list, but
+/// an unknown version id is not, so a typo must not read as success.
+#[tokio::test]
+async fn an_unknown_version_id_is_a_404() {
+    for query in ["?version_id=nope", "?version_id="] {
+        let (status, body) = get(router(), query).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{query}: {body}");
     }
 }
 
