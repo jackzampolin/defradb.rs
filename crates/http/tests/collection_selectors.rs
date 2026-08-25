@@ -80,8 +80,7 @@ fn router_with(versions: Arc<Versions>) -> Router {
     defra_http::create_router_with_state(state)
 }
 
-/// A router that can list but has no version store, so a narrowed request
-/// cannot be answered.
+/// A router with no version store, so no listing can be answered.
 fn router_without_versions() -> Router {
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
@@ -185,25 +184,33 @@ async fn a_collection_with_two_versions_is_named_once() {
     );
 }
 
-/// An unnarrowed request keeps its existing answer and its existing source,
-/// which is the REST listing rather than the version store.
+/// The divergence that two sources allowed: the collection cache deliberately
+/// holds inactive P2P-synced collections, so the unnarrowed listing used to
+/// name a collection the narrowed one dropped. Both read the stored versions
+/// now, as Go does, so an inactive collection is absent from both.
 #[tokio::test]
-async fn no_selectors_keep_the_previous_behaviour() {
-    let (status, body) = get(router_without_versions(), "").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("Users"), "{body}");
+async fn an_inactive_collection_is_absent_from_narrowed_and_unnarrowed_alike() {
+    assert!(
+        !names("").await.contains(&"Orders".to_string()),
+        "an inactive collection must not be listed"
+    );
+    assert!(
+        names("?name=Orders").await.is_empty(),
+        "and must not be selectable by name either"
+    );
 }
 
-/// Failing loudly is the point of the fix. Answering a narrowed request from
-/// the unnarrowed listing would be the same silent-widening bug in a new
-/// place.
+/// Every request reads the same source, so a missing version store fails the
+/// same way for all of them rather than quietly answering from somewhere else.
 #[tokio::test]
-async fn a_narrowed_request_without_a_version_store_is_an_error() {
-    let (status, _) = get(router_without_versions(), "?name=Users").await;
-    assert!(
-        status.is_server_error() || status.is_client_error(),
-        "expected a failure, got {status}"
-    );
+async fn every_request_needs_the_version_store() {
+    for query in ["", "?name=Users"] {
+        let (status, _) = get(router_without_versions(), query).await;
+        assert!(
+            status.is_server_error() || status.is_client_error(),
+            "{query:?} should fail without a version store, got {status}"
+        );
+    }
 }
 
 /// A selector Rust cannot parse must be refused, not dropped.
@@ -246,6 +253,56 @@ async fn an_unknown_version_id_is_a_404() {
         let (status, body) = get(router(), query).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{query}: {body}");
     }
+}
+
+/// The 404 fires from Go's direct lookup, which the active-by-name arm
+/// pre-empts, so a name alongside the version id turns it back into an empty
+/// 200. `collection describe --collection-name X --version-id Y` sends exactly
+/// that combination (`cli/collection.go:86-100`), so getting this wrong 404s a
+/// working CLI call.
+#[tokio::test]
+async fn a_name_pre_empts_the_version_lookup_so_a_bad_version_is_not_a_404() {
+    for query in [
+        "?name=Users&version_id=nope",
+        "?name=Books&version_id=users-v2",
+    ] {
+        let (status, body) = get(router(), query).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert!(names(query).await.is_empty(), "{query} selects nothing");
+    }
+}
+
+/// `get_inactive` takes the name arm out of the running, so the version
+/// lookup runs again and an id that exists is not an error even when the name
+/// filters it away.
+#[tokio::test]
+async fn get_inactive_restores_the_version_lookup() {
+    let (status, body) = get(
+        router(),
+        "?name=Books&get_inactive=true&version_id=users-v2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(names("?name=Books&get_inactive=true&version_id=users-v2")
+        .await
+        .is_empty());
+
+    let (status, _) = get(router(), "?name=Books&get_inactive=true&version_id=nope").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the lookup runs here, so a missing id is not found"
+    );
+}
+
+/// Go's message for this is `collection not found` (`client/errors.go:29`).
+#[tokio::test]
+async fn the_not_found_body_matches_gos_message() {
+    let (_, body) = get(router(), "?version_id=nope").await;
+    assert!(
+        body.contains("collection not found"),
+        "expected Go's message, got {body}"
+    );
 }
 
 /// Inactive versions cost a scan of every stored version. A selector that does

@@ -80,6 +80,18 @@ impl CollectionSelector {
         version_matches && name_matches && collection_matches && visible
     }
 
+    /// Whether Go resolves this selection by looking the version id up
+    /// directly, rather than using it only as a filter.
+    ///
+    /// The candidate switch tries the active-by-name arm first, so a name with
+    /// `get_inactive` false wins and the version id never reaches the lookup
+    /// (`internal/db/collection.go:203-215`). The distinction is load-bearing:
+    /// the direct lookup propagates not-found, where the stage-two filter just
+    /// yields an empty selection.
+    pub fn resolves_by_version_lookup(&self) -> bool {
+        self.version_id.is_some() && !(self.names.is_some() && !self.get_inactive)
+    }
+
     /// Go picks candidates by collection id only when neither a name nor a
     /// version already picked them, so those two take precedence over it.
     fn applies_collection_id(&self) -> bool {

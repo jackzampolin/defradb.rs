@@ -94,6 +94,14 @@ fn parse_collection_doc_ids_pagination(
 /// a request for one collection with every collection and gives the caller no
 /// way to tell.
 ///
+/// One source for every request, narrowed or not. Reading the unnarrowed case
+/// from a different place let the two disagree: the collection cache
+/// deliberately holds inactive P2P-synced collections
+/// (`db/src/merge/merge_handler/definition.rs`), so a node that synced `Users`
+/// without activating it listed it for `GET /collections` and not for
+/// `?name=Users`. Go answers both from the stored collections
+/// (`description.GetActiveCollections`), which is what the version store is.
+///
 /// The response is still a name list. Go returns full collection definitions
 /// here; that shape difference is tracked separately, and `GET
 /// /collections/versions` already serves version-level detail.
@@ -107,41 +115,10 @@ pub async fn list_collections(
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
     let selector = query.into_selector();
-    if !selector.is_unfiltered() {
-        return list_selected_collections(&state, &selector).await;
-    }
 
-    // The unnarrowed listing stays on the REST path because that one honours a
-    // transaction-scoped collection provider, where the system store below
-    // does not. Narrowing needs per-version fields the name list does not
-    // carry, so it has to read the versions.
-    let rest = state
-        .rest
-        .as_ref()
-        .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
-
-    match rest.list_collections().await {
-        Ok(collections) => Ok(Json(CollectionsResponse { collections })),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list collections");
-            Err(e.into())
-        }
-    }
-}
-
-/// Apply the selectors to the stored collection versions.
-///
-/// Fails loudly when the version store is not configured rather than falling
-/// back to the unnarrowed listing: silently answering a narrowed request with
-/// everything is the bug this handler is fixing.
-async fn list_selected_collections(
-    state: &AppState,
-    selector: &db::CollectionSelector,
-) -> Result<Json<CollectionsResponse>, HttpError> {
     // The same branch `refresh_views` makes on the same selector: inactive
     // versions cost a scan of every stored version, and a selector that does
-    // not ask for them is answerable from the active listing alone. Two
-    // surfaces sharing one selector have to decide this the same way.
+    // not ask for them is answerable from the active listing alone.
     let collection_versions = state.require_collection_versions()?;
     let versions = if selector.needs_all_versions() {
         collection_versions.get_all_collections().await
@@ -150,26 +127,24 @@ async fn list_selected_collections(
     }
     .map_err(http_error_from_backend_message)?;
 
-    let selected: Vec<&schema::CollectionVersion> = versions
-        .iter()
-        .filter(|version| selector.selects(version))
-        .collect();
-
-    // Go looks a version id up directly and propagates not-found
-    // (`internal/db/collection.go:210-215`, `GetCollectionByID`), where an
-    // unknown name or collection id is swallowed into an empty list. A typo in
-    // a version id must not read as "no such collection version".
-    if let Some(version_id) = &selector.version_id {
-        if selected.is_empty() {
-            return Err(HttpError::NotFound(format!(
-                "no collection version {version_id}"
-            )));
+    // Go propagates not-found only from the direct version lookup, which the
+    // active-by-name arm pre-empts (`internal/db/collection.go:210-215`). So
+    // `?version_id=nope` is a 404 while `?name=Users&version_id=nope` is an
+    // empty 200, and an unknown name or collection id never errors at all.
+    if selector.resolves_by_version_lookup() {
+        let version_id = selector
+            .version_id
+            .as_ref()
+            .expect("a version lookup has a version id");
+        if !versions.iter().any(|v| &v.version_id == version_id) {
+            return Err(HttpError::NotFound("collection not found".into()));
         }
     }
 
-    let mut collections: Vec<String> = selected
+    let mut collections: Vec<String> = versions
         .into_iter()
-        .map(|version| version.name.clone())
+        .filter(|version| selector.selects(version))
+        .map(|version| version.name)
         .collect();
     collections.sort();
     collections.dedup();

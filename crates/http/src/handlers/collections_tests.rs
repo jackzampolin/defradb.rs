@@ -16,6 +16,7 @@ use tower::ServiceExt;
 fn create_state() -> AppState {
     AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
+        .with_collection_mgmt(Arc::new(MockCollectionManagementOperations::new()))
         .build()
 }
 
@@ -36,8 +37,9 @@ async fn test_list_collections() {
     let result = list_collections(State(state), identity, Query(Default::default())).await;
     assert!(result.is_ok());
     let response = result.unwrap();
-    assert!(response.collections.contains(&"Users".to_string()));
-    assert!(response.collections.contains(&"Books".to_string()));
+    // The listing reads the stored versions, which is what the collection
+    // management mock serves.
+    assert!(response.collections.contains(&"MockCollection".to_string()));
 }
 
 #[tokio::test]
