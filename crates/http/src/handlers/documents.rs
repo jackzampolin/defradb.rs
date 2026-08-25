@@ -242,22 +242,37 @@ impl From<Vec<String>> for DocumentsResult {
     }
 }
 
+/// Parse a filtered mutation's request body.
+fn request_body(body: &Bytes) -> Result<JsonValue, HttpError> {
+    serde_json::from_slice(body)
+        .map_err(|e| HttpError::BadRequest(format!("invalid request body: {e}")))
+}
+
 /// Read the `filter` a filtered mutation must have.
 ///
-/// A missing or null filter is refused rather than treated as match-all. Go's
-/// behaviour for that case could not be confirmed against its source here, and
-/// the failure mode of guessing wrong is deleting or rewriting every document
-/// in the collection, which is exactly the silent-destruction bug this route
-/// is being fixed for. Refusing is recoverable; guessing is not.
-pub(crate) fn required_filter(body: &Bytes, field: &str) -> Result<JsonValue, HttpError> {
-    let parsed: JsonValue = serde_json::from_slice(body)
-        .map_err(|e| HttpError::BadRequest(format!("invalid request body: {e}")))?;
-
-    match parsed.get(field) {
-        Some(JsonValue::Null) | None => Err(HttpError::BadRequest(format!(
-            "'{field}' is required; send a filter object to select the documents to act on"
-        ))),
-        Some(filter) => Ok(filter.clone()),
+/// Go types it as `any` and accepts three forms
+/// (`internal/db/document_update.go:163-183`): a `map`, GraphQL source as a
+/// `string`, and nothing else. Its own HTTP client marshals whatever the
+/// caller handed it (`http/client_document.go:299-321`), and the JS client
+/// always sends a string, so both forms arrive in practice.
+///
+/// A missing or null filter is refused, which is parity rather than caution:
+/// nil reaches Go's `default:` arm as `ErrUnsupportedFilterType`, a 400. An
+/// empty string is Go's `ErrEmptyFilter`, also a 400.
+///
+/// The string form is parsed into conditions rather than pasted into the
+/// mutation, so it is validated exactly like a filter that arrived as an
+/// object.
+fn required_filter(request: &JsonValue) -> Result<JsonValue, HttpError> {
+    match request.get("filter") {
+        Some(JsonValue::Object(conditions)) => Ok(JsonValue::Object(conditions.clone())),
+        Some(JsonValue::String(source)) => {
+            query::parse_filter_string(source).map_err(|e| HttpError::BadRequest(e.to_string()))
+        }
+        Some(JsonValue::Null) | None => Err(HttpError::BadRequest(
+            "'filter' is required; send a filter object to select the documents to act on".into(),
+        )),
+        Some(_) => Err(HttpError::BadRequest("unsupported filter type".into())),
     }
 }
 
@@ -282,7 +297,7 @@ pub async fn delete_documents_with_filter(
 ) -> Result<Json<DocumentsResult>, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentDelete).await?;
 
-    let filter = required_filter(&body, "filter")?;
+    let filter = required_filter(&request_body(&body)?)?;
 
     let rest = state
         .rest

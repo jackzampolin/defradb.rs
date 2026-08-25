@@ -15,14 +15,18 @@ struct MockDocument {
     data: JsonValue,
 }
 
-/// Whether every key in `filter` equals the same key in `data`.
-fn matches_filter(data: &JsonValue, filter: &JsonValue) -> bool {
-    match filter.as_object() {
-        Some(fields) => fields
-            .iter()
-            .all(|(key, want)| data.get(key).is_some_and(|got| got == want)),
-        None => false,
-    }
+/// Whether `filter` selects `data`, using the production filter engine.
+///
+/// Not a hand-rolled matcher: one that understood a different filter language
+/// than the server would make every test here green on requests the real path
+/// rejects, which is the whole hazard on a route that deletes documents.
+fn matches_filter(data: &JsonValue, filter: &JsonValue) -> RestResult<bool> {
+    let conditions = filter
+        .as_object()
+        .ok_or_else(|| RestError::invalid_input("filter must be an object"))?;
+    query::Filter::from_conditions(conditions.clone())
+        .matches_json_object(data)
+        .map_err(|e| RestError::invalid_input(e.to_string()))
 }
 
 /// Mock REST operations for testing collection and document handlers.
@@ -254,11 +258,12 @@ impl RestOperations for MockRestOperations {
             .get_mut(collection)
             .ok_or_else(|| RestError::collection_not_found(collection))?;
 
-        let matched: Vec<String> = docs
-            .iter()
-            .filter(|doc| matches_filter(&doc.data, filter))
-            .map(|doc| doc.doc_id.clone())
-            .collect();
+        let mut matched = Vec::new();
+        for doc in docs.iter() {
+            if matches_filter(&doc.data, filter)? {
+                matched.push(doc.doc_id.clone());
+            }
+        }
         docs.retain(|doc| !matched.contains(&doc.doc_id));
         Ok(matched)
     }

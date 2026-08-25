@@ -138,3 +138,25 @@ impl FilterOp {
         matches!(self, Self::Any | Self::All | Self::None)
     }
 }
+
+/// A field condition with a bare scalar normalized to `{_eq: value}`.
+///
+/// Go's connor treats a scalar directly as equality (`internal/connor/eq.go`),
+/// so `{name: "Alice"}` and `{name: {_eq: "Alice"}}` are the same filter and a
+/// Go-compatible client may send either. Arrays are deliberately left alone:
+/// connor gives them a meaning other than equality, and guessing it here would
+/// be worse than the caller getting an error.
+///
+/// Both field-condition sites run this, because a filter that matches on one
+/// path and errors on the other is the divergence this exists to prevent.
+pub(super) fn normalize_field_condition(
+    value: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    if value.is_string() || value.is_number() || value.is_boolean() {
+        let mut ops = serde_json::Map::new();
+        ops.insert(FilterOp::Eq.as_str().to_string(), value.clone());
+        std::borrow::Cow::Owned(serde_json::Value::Object(ops))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}

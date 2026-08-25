@@ -26,9 +26,13 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 fn router() -> Router {
+    router_with(Arc::new(MockCollectionManagementOperations::new()))
+}
+
+fn router_with(mgmt: Arc<MockCollectionManagementOperations>) -> Router {
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
-        .with_collection_mgmt(Arc::new(MockCollectionManagementOperations::new()))
+        .with_collection_mgmt(mgmt)
         .build();
     defra_http::create_router_with_state(state)
 }
@@ -81,7 +85,8 @@ async fn doc_ids(router: Router) -> Vec<String> {
 #[tokio::test]
 async fn a_filter_deletes_only_the_matching_documents() {
     let router = router();
-    let (status, body) = delete_with(router.clone(), r#"{"filter":{"name":"Alice"}}"#).await;
+    let (status, body) =
+        delete_with(router.clone(), r#"{"filter":{"name":{"_eq":"Alice"}}}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let result: Value = serde_json::from_str(&body).unwrap();
@@ -93,11 +98,21 @@ async fn a_filter_deletes_only_the_matching_documents() {
 
 /// The bug itself: this route used to destroy the collection.
 #[tokio::test]
-async fn a_filtered_delete_leaves_the_collection_standing() {
-    let router = router();
-    let (status, body) = delete_with(router.clone(), r#"{"filter":{"name":"Alice"}}"#).await;
+async fn a_filtered_delete_never_touches_collection_management() {
+    let mgmt = Arc::new(MockCollectionManagementOperations::new());
+    let router = router_with(mgmt.clone());
+    let (status, body) =
+        delete_with(router.clone(), r#"{"filter":{"name":{"_eq":"Alice"}}}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
+    // The listing alone cannot detect a revert: it does not go through
+    // collection management, and the drop is a no-op against this mock. What
+    // pins the fix is that collection management is never reached.
+    assert!(
+        mgmt.dropped_collections().is_empty(),
+        "a filtered document delete dropped {:?}",
+        mgmt.dropped_collections()
+    );
     assert!(
         collection_names(router)
             .await
@@ -110,7 +125,7 @@ async fn a_filtered_delete_leaves_the_collection_standing() {
 /// A client reading `Count` off a lowercase `count` sees nothing.
 #[tokio::test]
 async fn the_response_uses_gos_field_names() {
-    let (_, body) = delete_with(router(), r#"{"filter":{"name":"Alice"}}"#).await;
+    let (_, body) = delete_with(router(), r#"{"filter":{"name":{"_eq":"Alice"}}}"#).await;
     let result: Value = serde_json::from_str(&body).unwrap();
     assert!(result.get("Count").is_some(), "{body}");
     assert!(result.get("DocIDs").is_some(), "{body}");
@@ -120,7 +135,8 @@ async fn the_response_uses_gos_field_names() {
 #[tokio::test]
 async fn a_filter_matching_nothing_deletes_nothing() {
     let router = router();
-    let (status, body) = delete_with(router.clone(), r#"{"filter":{"name":"Nobody"}}"#).await;
+    let (status, body) =
+        delete_with(router.clone(), r#"{"filter":{"name":{"_eq":"Nobody"}}}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let result: Value = serde_json::from_str(&body).unwrap();
@@ -156,7 +172,7 @@ async fn an_unknown_collection_is_not_a_success() {
         router(),
         Method::DELETE,
         "/api/v0/collections/Nope",
-        r#"{"filter":{"name":"Alice"}}"#,
+        r#"{"filter":{"name":{"_eq":"Alice"}}}"#,
     )
     .await;
     assert_ne!(status, StatusCode::OK);
@@ -190,4 +206,61 @@ async fn the_route_is_gated_as_a_document_delete() {
         RoutePermission::Required(NodePermission::CollectionPatch),
         "dropping a collection stays a collection permission"
     );
+}
+
+/// Go's filter is `any` and a string is first-class, parsed with
+/// `NewFilterFromString` (`internal/db/document_update.go:168-176`). Its own
+/// client marshals whatever it was handed and the JS client always sends a
+/// string, so this is a payload Go-compatible clients really produce.
+#[tokio::test]
+async fn a_filter_sent_as_graphql_source_is_applied() {
+    let router = router();
+    let (status, body) =
+        delete_with(router.clone(), r#"{"filter":"{name: {_eq: \"Alice\"}}"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let result: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(result["Count"], json!(1));
+    assert_eq!(doc_ids(router).await, vec!["bae-456"]);
+}
+
+/// An empty string filter is Go's `ErrEmptyFilter`, and a type Go's switch has
+/// no arm for is `ErrUnsupportedFilterType`. Both are 400s there.
+#[tokio::test]
+async fn an_unsupported_filter_type_is_refused() {
+    for body in [
+        r#"{"filter":""}"#,
+        r#"{"filter":"   "}"#,
+        r#"{"filter":[1,2]}"#,
+        r#"{"filter":7}"#,
+        r#"{"filter":true}"#,
+        r#"{"filter":"not graphql"}"#,
+    ] {
+        let router = router();
+        let (status, response) = delete_with(router.clone(), body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "body {body} should be refused, got {response}"
+        );
+        assert_eq!(
+            doc_ids(router).await.len(),
+            2,
+            "body {body} deleted something"
+        );
+    }
+}
+
+/// Go's connor reads a bare scalar as equality (`internal/connor/eq.go:63-76`),
+/// so `{"name":"Alice"}` and `{"name":{"_eq":"Alice"}}` are the same filter and
+/// a Go-compatible client may send either.
+#[tokio::test]
+async fn a_bare_scalar_condition_means_equality() {
+    let router = router();
+    let (status, body) = delete_with(router.clone(), r#"{"filter":{"name":"Alice"}}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let result: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(result["Count"], json!(1));
+    assert_eq!(doc_ids(router).await, vec!["bae-456"]);
 }

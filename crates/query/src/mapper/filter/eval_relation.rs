@@ -85,6 +85,7 @@ impl Filter {
             let field_missing = !obj.contains_key(key);
             let field_value = obj.get(key).cloned().unwrap_or(JsonValue::Null);
 
+            let value = super::op::normalize_field_condition(value);
             let ops = value
                 .as_object()
                 .ok_or_else(|| QueryError::invalid_filter("field condition must be object"))?;

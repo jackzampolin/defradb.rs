@@ -64,8 +64,9 @@ pub use plan::{
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{
-    parse_mutations, parse_mutations_with_limits, parse_query, parse_query_with_limits,
-    parse_request, parse_request_with_limits, ExplainType, ParsedOperation,
+    parse_filter_string, parse_mutations, parse_mutations_with_limits, parse_query,
+    parse_query_with_limits, parse_request, parse_request_with_limits, ExplainType,
+    ParsedOperation,
 };
 pub use rest::{
     CollectionDocIdsPage, CollectionDocIdsPagination, RestError, RestOperations,
