@@ -122,6 +122,12 @@ impl From<&str> for P2PError {
     }
 }
 
+impl P2PError {
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::Unsupported(message.into())
+    }
+}
+
 /// Trait for P2P operations that can be accessed via HTTP.
 ///
 /// Abstracts P2P host functionality to decouple HTTP handlers from the
@@ -227,6 +233,21 @@ pub trait P2POperations: Send + Sync {
 
     /// Sync collection versions (schema definitions) from connected peers via Bitswap.
     async fn sync_collection_versions(&self, version_ids: Vec<String>) -> P2PResult<()>;
+
+    /// Replay an explicit document set to one peer through DocPusher.
+    ///
+    /// Returns after retry markers are registered and the bounded push
+    /// attempt finishes. Default implementations report the operation as
+    /// unsupported.
+    async fn push_documents_to_peer(
+        &self,
+        _peer_id: &str,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> P2PResult<()> {
+        Err(P2PError::unsupported(
+            "push_documents_to_peer is not implemented",
+        ))
+    }
 }
 
 /// Replicator information for HTTP responses.

@@ -1118,6 +1118,30 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .sync_versions(&self.handle, version_ids, connected_peers)
             .await
     }
+
+    async fn push_documents_to_peer(
+        &self,
+        peer_id: &str,
+        docs: Vec<P2pDocumentRequest>,
+    ) -> P2PResult<()> {
+        let peer_id = match p2p::parse_multiaddr_with_peer_id(peer_id) {
+            Ok(parsed) => parsed.peer_id,
+            Err(_) => peer_id.parse::<libp2p::PeerId>().map_err(|error| {
+                P2PError::invalid_input(format!("invalid peer ID '{peer_id}': {error}"))
+            })?,
+        };
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| P2PError::unsupported("no database context for document push"))?;
+        let pairs: Vec<(String, String)> = docs
+            .into_iter()
+            .map(|doc| (doc.collection, doc.doc_id))
+            .collect();
+        pusher
+            .push_existing_docs_by_id(&p2p::transport::PeerId::from(peer_id), &pairs)
+            .await
+    }
 }
 
 #[cfg(test)]

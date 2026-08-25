@@ -41,8 +41,8 @@ pub use peer_identity::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use push_docs::{
-    push_existing_docs, push_existing_docs_with_config, retry_collection_commit, retry_doc,
-    PushExistingDocsSeOptions,
+    push_existing_docs, push_existing_docs_by_id, push_existing_docs_with_config,
+    retry_collection_commit, retry_doc, PushExistingDocsSeOptions,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use push_docs_replay::ReplayPushConfig;

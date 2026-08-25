@@ -914,6 +914,24 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
         Ok(())
     }
+
+    async fn push_documents_to_peer(
+        &self,
+        peer_id: &str,
+        docs: Vec<P2pDocumentRequest>,
+    ) -> P2PResult<()> {
+        let (peer_id, _direct_addrs) = parse_public_peer_addr(peer_id)
+            .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| P2PError::unsupported("no database context for document push"))?;
+        let pairs: Vec<(String, String)> = docs
+            .into_iter()
+            .map(|doc| (doc.collection, doc.doc_id))
+            .collect();
+        pusher.push_existing_docs_by_id(&peer_id, &pairs).await
+    }
 }
 
 #[cfg(test)]
