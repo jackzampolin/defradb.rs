@@ -31,6 +31,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Validate schema (includes policy validation for path traversal prevention)
         schema.validate()?;
+        Collection::validate_default_values(&schema)?;
         let name = collection_name.as_str().to_string();
 
         // For views, regenerate version_id to include query_select in the CID
