@@ -291,6 +291,13 @@ impl<S: Store> crate::database::DB<S> {
     ) -> Result<CollectionVersion> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
+        let existing = self.get_all_collection_versions().await?;
+        schema::definition_validation::validate_new_collections_with_existing(
+            std::slice::from_ref(&schema),
+            &existing,
+        )
+        .map_err(Error::Other)?;
+
         let name = schema.name.clone();
         let mut txn = self.new_txn(false).await?;
 
@@ -351,6 +358,10 @@ impl<S: Store> crate::database::DB<S> {
     ) -> Result<Vec<CollectionVersion>> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
+        let existing = self.get_all_collection_versions().await?;
+        schema::definition_validation::validate_new_collections_with_existing(&schemas, &existing)
+            .map_err(Error::Other)?;
+
         // Track old collection_id -> new collection_id mappings.
         // When views are created, create_collection_with_txn regenerates CIDs to include
         // query source data. Sibling schemas' relation fields may reference the old CIDs

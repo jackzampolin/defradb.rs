@@ -72,3 +72,23 @@ fn non_nillable_field_rejects_null_and_missing_values() {
         .to_string();
     assert!(error.contains("value not provided for non-nillable field. Name: createdAt"));
 }
+
+#[tokio::test]
+async fn atomic_creation_rejects_an_unknown_relation_target() {
+    let database = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .unwrap();
+    let author = FieldDescription::new("1", "author", FieldKind::named("Missing", false))
+        .with_relation_name("missing_posts")
+        .as_primary();
+    let posts = CollectionVersion::new("Post", "v-post", "c-post", vec![author]);
+
+    let error = database
+        .create_collections_atomic(vec![posts])
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("no type found for given name. Field: author, Kind: Missing"));
+}

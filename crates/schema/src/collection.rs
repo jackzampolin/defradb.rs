@@ -364,6 +364,7 @@ impl CollectionVersion {
     }
 
     fn validate_relation_id_field_kinds(&self) -> Result<()> {
+        // Matches Go's validateRelationalFieldIDType.
         for field in self
             .relation_fields()
             .filter(|field| !field.kind.is_array())
