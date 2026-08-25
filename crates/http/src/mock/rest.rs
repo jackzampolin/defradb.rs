@@ -267,6 +267,33 @@ impl RestOperations for MockRestOperations {
         docs.retain(|doc| !matched.contains(&doc.doc_id));
         Ok(matched)
     }
+
+    async fn update_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        updater: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        let mut collections = self.collections.write().unwrap();
+        let docs = collections
+            .get_mut(collection)
+            .ok_or_else(|| RestError::collection_not_found(collection))?;
+
+        let mut updated = Vec::new();
+        for doc in docs.iter_mut() {
+            if !matches_filter(&doc.data, filter)? {
+                continue;
+            }
+            if let (Some(data), Some(patch)) = (doc.data.as_object_mut(), updater.as_object()) {
+                for (key, value) in patch {
+                    data.insert(key.clone(), value.clone());
+                }
+            }
+            updated.push(doc.doc_id.clone());
+        }
+        Ok(updated)
+    }
 }
 
 /// Mock REST operations that always fails (for error path testing).
@@ -376,6 +403,16 @@ impl RestOperations for FailingMockRestOperations {
         &self,
         _collection: &str,
         _filter: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        Err(self.error.clone())
+    }
+
+    async fn update_documents_with_filter(
+        &self,
+        _collection: &str,
+        _filter: &JsonValue,
+        _updater: &JsonValue,
         _identity: Option<&Did>,
     ) -> RestResult<Vec<String>> {
         Err(self.error.clone())

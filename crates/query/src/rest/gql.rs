@@ -146,3 +146,16 @@ pub(super) fn build_filtered_delete_mutation(
         filter = json_to_graphql_input(filter)?
     ))
 }
+
+pub(super) fn build_filtered_update_mutation(
+    collection: &str,
+    filter: &JsonValue,
+    updater: &JsonValue,
+) -> RestResult<String> {
+    Ok(format!(
+        r#"mutation {{ update_{collection}(filter: {filter}, input: {updater}) {{ _docID }} }}"#,
+        collection = collection,
+        filter = json_to_graphql_input(filter)?,
+        updater = json_to_graphql_input(updater)?
+    ))
+}

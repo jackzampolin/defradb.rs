@@ -126,4 +126,17 @@ pub trait RestOperations: MaybeSendSync {
         filter: &JsonValue,
         identity: Option<&Did>,
     ) -> RestResult<Vec<String>>;
+
+    /// Apply an update to every document matching a filter.
+    ///
+    /// This is Go's `UpdateDocumentsWithFilter`. `updater` is the patch to
+    /// apply, as the `input` argument of an `update_<Collection>` mutation
+    /// takes it, and the returned ids are the documents updated.
+    async fn update_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        updater: &JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>>;
 }

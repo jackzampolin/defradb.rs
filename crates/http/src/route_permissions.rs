@@ -96,12 +96,14 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
         "/api/v0/collections/indexes" => RoutePermission::Required(NodePermission::IndexList),
-        // DELETE here is Go's filtered document delete, not a collection drop,
-        // so it is a document permission. Dropping a collection is
-        // `DELETE /collections?name=...`, which keeps `CollectionPatch`.
+        // PATCH and DELETE here are Go's filtered document operations, not
+        // collection ones, so they are document permissions. Dropping a
+        // collection is `DELETE /collections?name=...`, which keeps
+        // `CollectionPatch`.
         "/api/v0/collections/:name" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::DocumentUpdate),
+            Method::PATCH => RoutePermission::Required(NodePermission::DocumentUpdate),
             Method::DELETE => RoutePermission::Required(NodePermission::DocumentDelete),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },

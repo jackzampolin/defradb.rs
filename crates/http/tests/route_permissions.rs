@@ -310,7 +310,12 @@ fn all_registered_routes_return_expected_permission() {
             Method::POST,
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
-        // Go's filtered document delete, not a collection drop.
+        // Go's filtered document operations, not collection ones.
+        (
+            "/api/v0/collections/:name",
+            Method::PATCH,
+            RoutePermission::Required(NodePermission::DocumentUpdate),
+        ),
         (
             "/api/v0/collections/:name",
             Method::DELETE,
