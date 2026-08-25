@@ -104,7 +104,7 @@ fn collection_routes() {
     );
     assert_eq!(
         route_permission("/api/v0/collections/:name", &Method::DELETE),
-        RoutePermission::Required(NodePermission::CollectionPatch)
+        RoutePermission::Required(NodePermission::DocumentDelete)
     );
 }
 
@@ -281,6 +281,11 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Required(NodePermission::CollectionPatch),
         ),
         (
+            "/api/v0/collections",
+            Method::DELETE,
+            RoutePermission::Required(NodePermission::CollectionPatch),
+        ),
+        (
             "/api/v0/collections/default",
             Method::POST,
             RoutePermission::Required(NodePermission::CollectionPatch),
@@ -305,10 +310,11 @@ fn all_registered_routes_return_expected_permission() {
             Method::POST,
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
+        // Go's filtered document delete, not a collection drop.
         (
             "/api/v0/collections/:name",
             Method::DELETE,
-            RoutePermission::Required(NodePermission::CollectionPatch),
+            RoutePermission::Required(NodePermission::DocumentDelete),
         ),
         (
             "/api/v0/collections/:name/truncate",

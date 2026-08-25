@@ -22,6 +22,7 @@ mod values;
 mod variables;
 
 // Re-export everything from parser for backwards compatibility
+pub use filters::parse_filter_string;
 pub use limits::{MAX_QUERY_DEPTH, MAX_QUERY_WIDTH};
 pub use parser::{
     parse_mutations, parse_mutations_with_limits, parse_mutations_with_variables, parse_query,
