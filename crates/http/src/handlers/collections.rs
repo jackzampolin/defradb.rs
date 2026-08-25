@@ -16,6 +16,7 @@ use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
 use serde::Serialize;
 
 use crate::error::{http_error_from_backend_message, HttpError};
+use crate::handlers::collection_selector::CollectionSelectorQuery;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -83,29 +84,72 @@ fn parse_collection_doc_ids_pagination(
     Ok(CollectionDocIdsPagination { limit, offset })
 }
 
-/// List all collection names.
+/// List collection names, narrowed by Go's selectors.
 ///
-/// GET /api/v0/collections
+/// GET /api/v0/collections?name=Users&version_id=..&collection_id=..&get_inactive=true
+///
+/// The selectors are Go's `GetCollectionsOptions` (`http/client.go:422-448`)
+/// and resolve through the shared `db::CollectionSelector`, the same lookup
+/// `POST /view/refresh` uses. Ignoring them, as this handler used to, answers
+/// a request for one collection with every collection and gives the caller no
+/// way to tell.
+///
+/// One source for every request, narrowed or not. Reading the unnarrowed case
+/// from a different place let the two disagree: the collection cache
+/// deliberately holds inactive P2P-synced collections
+/// (`db/src/merge/merge_handler/definition.rs`), so a node that synced `Users`
+/// without activating it listed it for `GET /collections` and not for
+/// `?name=Users`. Go answers both from the stored collections
+/// (`description.GetActiveCollections`), which is what the version store is.
+///
+/// The response is still a name list. Go returns full collection definitions
+/// here; that shape difference is tracked separately, and `GET
+/// /collections/versions` already serves version-level detail.
 ///
 /// Requires `CollectionGet` permission when NAC is enabled.
 pub async fn list_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    Query(query): Query<CollectionSelectorQuery>,
 ) -> Result<Json<CollectionsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let rest = state
-        .rest
-        .as_ref()
-        .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
+    let selector = query.into_selector();
 
-    match rest.list_collections().await {
-        Ok(collections) => Ok(Json(CollectionsResponse { collections })),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list collections");
-            Err(e.into())
+    // The same branch `refresh_views` makes on the same selector: inactive
+    // versions cost a scan of every stored version, and a selector that does
+    // not ask for them is answerable from the active listing alone.
+    let collection_versions = state.require_collection_versions()?;
+    let versions = if selector.needs_all_versions() {
+        collection_versions.get_all_collections().await
+    } else {
+        collection_versions.get_active_collections().await
+    }
+    .map_err(http_error_from_backend_message)?;
+
+    // Go propagates not-found only from the direct version lookup, which the
+    // active-by-name arm pre-empts (`internal/db/collection.go:210-215`). So
+    // `?version_id=nope` is a 404 while `?name=Users&version_id=nope` is an
+    // empty 200, and an unknown name or collection id never errors at all.
+    if selector.resolves_by_version_lookup() {
+        let version_id = selector
+            .version_id
+            .as_ref()
+            .expect("a version lookup has a version id");
+        if !versions.iter().any(|v| &v.version_id == version_id) {
+            return Err(HttpError::NotFound("collection not found".into()));
         }
     }
+
+    let mut collections: Vec<String> = versions
+        .into_iter()
+        .filter(|version| selector.selects(version))
+        .map(|version| version.name)
+        .collect();
+    collections.sort();
+    collections.dedup();
+
+    Ok(Json(CollectionsResponse { collections }))
 }
 
 /// Get document IDs in a collection.

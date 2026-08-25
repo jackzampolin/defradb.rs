@@ -15,6 +15,7 @@ pub mod backup;
 pub mod batch;
 pub mod block;
 pub mod browser_sync;
+pub mod collection_selector;
 pub mod collections;
 pub mod documents;
 pub mod encrypted_index;

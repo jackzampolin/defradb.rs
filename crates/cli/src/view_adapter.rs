@@ -162,7 +162,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
         if !materialized_names.is_empty() {
             self.database
-                .refresh_views(db::RefreshViewsOptions::with_names(materialized_names))
+                .refresh_views(db::CollectionSelector::with_names(materialized_names))
                 .await
                 .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
         }
@@ -177,7 +177,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
         Ok(created_versions)
     }
 
-    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String> {
+    async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String> {
         self.database
             .check_node_access(None, acp::nac::NodePermission::ViewRefresh)
             .await

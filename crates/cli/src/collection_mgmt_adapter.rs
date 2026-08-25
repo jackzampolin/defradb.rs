@@ -129,6 +129,14 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
             .map_err(|e| format!("{}", e))
     }
 
+    /// Answered from the collection cache, without scanning every stored
+    /// version, which is the whole point of the selector's active-only path.
+    async fn get_active_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        self.database
+            .get_active_collection_versions()
+            .map_err(|e| format!("{}", e))
+    }
+
     async fn delete_collection(&self, name: &str) -> Result<(), String> {
         self.database
             .delete_collection(name)
