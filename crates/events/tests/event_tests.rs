@@ -1,4 +1,7 @@
-use super::*;
+//! Integration tests for event types and messages
+
+use cid::Cid;
+use events::{EventName, MergeCompleteData, Message, PendingDagQuarantinedData, Update};
 
 #[test]
 fn test_event_name_matches() {
