@@ -9,8 +9,8 @@ use rand::SeedableRng;
 use serde::Serialize;
 
 use crate::ohttp_transport::{
-    spawn_ohttp_replica, OhttpUseCaseClient, OriginTransportConfig, PaddingStrategy,
-    RelayMetricsSnapshot,
+    spawn_ohttp_replica_on, OhttpUseCaseClient, OriginTransportConfig, PaddingStrategy,
+    RelayMetrics, RelayMetricsSnapshot,
 };
 use crate::selected::{
     EncryptedTagBuildRecord, NullifierBuildRecord, PocLimits, TableUseCase, UseCaseBuildInput,
@@ -22,6 +22,8 @@ use crate::verification::{build_demo_witnesses, encrypt_projection, verify_nulli
 const DEMO_OPERATOR_KEY: [u8; 32] = [0x44; 32];
 const DEMO_PROJECTION_KEY: [u8; 32] = [0x50; 32];
 const TOR_SOCKS_ENV: &str = "PIR_POC_TOR_SOCKS_URL";
+const TOR_RELAY_URLS_ENV: &str = "PIR_POC_TOR_RELAY_URLS";
+const OHTTP_RELAY_BINDS_ENV: &str = "PIR_POC_OHTTP_RELAY_BINDS";
 const TRANSPORT_QUERY_SAMPLES: usize = 11;
 
 #[derive(Debug, Serialize)]
@@ -59,8 +61,12 @@ pub struct TransportObservation {
     pub hides_query: bool,
     pub hides_origin_from_provider: bool,
     pub setup_ms: Option<f64>,
+    pub verified_query_first_ms: Option<f64>,
     pub verified_query_p50_ms: Option<f64>,
+    pub verified_query_p95_ms: Option<f64>,
     pub query_samples: usize,
+    pub encrypted_upload_bytes_per_query: Option<u64>,
+    pub encrypted_download_bytes_per_query: Option<u64>,
     pub note: &'static str,
 }
 
@@ -134,7 +140,8 @@ pub async fn run() -> Result<SelectedDemoReport> {
         direct_query_samples.push(elapsed_ms(query));
     }
     let witness = witness.ok_or_else(|| anyhow::anyhow!("demo nullifier was not found"))?;
-    let direct_query_p50_ms = median(&mut direct_query_samples);
+    let direct_query_first_ms = direct_query_samples[0];
+    let (direct_query_p50_ms, direct_query_p95_ms) = summarize(&mut direct_query_samples);
     let tag_values = client
         .verified_tag_lookup(b"tag-37", &DEMO_PROJECTION_KEY)
         .await?
@@ -151,8 +158,26 @@ pub async fn run() -> Result<SelectedDemoReport> {
     // A separate relay and gateway per replica avoids giving one relay both
     // Dense selector shares.  Loopback HTTP is used only by this executable;
     // production deployment requires HTTPS on both OHTTP hops.
-    let left_ohttp = spawn_ohttp_replica(left, &DEMO_OPERATOR_KEY, "replica-0", 1).await?;
-    let right_ohttp = spawn_ohttp_replica(right, &DEMO_OPERATOR_KEY, "replica-1", 2).await?;
+    let relay_binds = two_env_values(OHTTP_RELAY_BINDS_ENV)?
+        .unwrap_or(["127.0.0.1:0".to_owned(), "127.0.0.1:0".to_owned()]);
+    let left_ohttp = spawn_ohttp_replica_on(
+        left,
+        &DEMO_OPERATOR_KEY,
+        "replica-0",
+        1,
+        "127.0.0.1:0",
+        &relay_binds[0],
+    )
+    .await?;
+    let right_ohttp = spawn_ohttp_replica_on(
+        right,
+        &DEMO_OPERATOR_KEY,
+        "replica-1",
+        2,
+        "127.0.0.1:0",
+        &relay_binds[1],
+    )
+    .await?;
     let ohttp_padding = PaddingStrategy::Fixed {
         request_bytes: 4_096,
         response_bytes: 65_536,
@@ -165,6 +190,10 @@ pub async fn run() -> Result<SelectedDemoReport> {
     )
     .await?;
     let ohttp_setup_ms = elapsed_ms(ohttp_setup);
+    let ohttp_metrics_before = [
+        left_ohttp.metrics.snapshot(),
+        right_ohttp.metrics.snapshot(),
+    ];
     let mut ohttp_query_samples = Vec::with_capacity(TRANSPORT_QUERY_SAMPLES);
     let mut ohttp_nullifier = None;
     for _ in 0..TRANSPORT_QUERY_SAMPLES {
@@ -174,7 +203,17 @@ pub async fn run() -> Result<SelectedDemoReport> {
     }
     let ohttp_nullifier =
         ohttp_nullifier.ok_or_else(|| anyhow::anyhow!("OHTTP demo nullifier was not found"))?;
-    let ohttp_query_p50_ms = median(&mut ohttp_query_samples);
+    let ohttp_query_first_ms = ohttp_query_samples[0];
+    let (ohttp_query_p50_ms, ohttp_query_p95_ms) = summarize(&mut ohttp_query_samples);
+    let ohttp_metrics_after = [
+        left_ohttp.metrics.snapshot(),
+        right_ohttp.metrics.snapshot(),
+    ];
+    let (ohttp_upload_per_query, ohttp_download_per_query) = per_query_encrypted_bytes(
+        &ohttp_metrics_before,
+        &ohttp_metrics_after,
+        TRANSPORT_QUERY_SAMPLES,
+    );
     let ohttp_tag = ohttp_client
         .verified_tag_lookup(b"tag-37", &DEMO_PROJECTION_KEY)
         .await?
@@ -207,7 +246,8 @@ pub async fn run() -> Result<SelectedDemoReport> {
         )?;
         public_query_samples.push(elapsed_ms(query));
     }
-    let public_query_p50_ms = median(&mut public_query_samples);
+    let public_query_first_ms = public_query_samples[0];
+    let (public_query_p50_ms, public_query_p95_ms) = summarize(&mut public_query_samples);
 
     let mut transport_comparison = vec![
         TransportObservation {
@@ -217,8 +257,12 @@ pub async fn run() -> Result<SelectedDemoReport> {
             hides_query: false,
             hides_origin_from_provider: false,
             setup_ms: Some(public_setup_ms),
+            verified_query_first_ms: Some(public_query_first_ms),
             verified_query_p50_ms: Some(public_query_p50_ms),
+            verified_query_p95_ms: Some(public_query_p95_ms),
             query_samples: TRANSPORT_QUERY_SAMPLES,
+            encrypted_upload_bytes_per_query: None,
+            encrypted_download_bytes_per_query: None,
             note: "one visible candidate through the public/decoy endpoint",
         },
         TransportObservation {
@@ -228,8 +272,12 @@ pub async fn run() -> Result<SelectedDemoReport> {
             hides_query: true,
             hides_origin_from_provider: false,
             setup_ms: Some(direct_setup_ms),
+            verified_query_first_ms: Some(direct_query_first_ms),
             verified_query_p50_ms: Some(direct_query_p50_ms),
+            verified_query_p95_ms: Some(direct_query_p95_ms),
             query_samples: TRANSPORT_QUERY_SAMPLES,
+            encrypted_upload_bytes_per_query: None,
+            encrypted_download_bytes_per_query: None,
             note: "Dense XOR hides the target but both replicas see the wallet address",
         },
         TransportObservation {
@@ -239,18 +287,22 @@ pub async fn run() -> Result<SelectedDemoReport> {
             hides_query: true,
             hides_origin_from_provider: true,
             setup_ms: Some(ohttp_setup_ms),
+            verified_query_first_ms: Some(ohttp_query_first_ms),
             verified_query_p50_ms: Some(ohttp_query_p50_ms),
+            verified_query_p95_ms: Some(ohttp_query_p95_ms),
             query_samples: TRANSPORT_QUERY_SAMPLES,
+            encrypted_upload_bytes_per_query: Some(ohttp_upload_per_query),
+            encrypted_download_bytes_per_query: Some(ohttp_download_per_query),
             note: "independent OHTTP relay/gateway path per PIR replica",
         },
     ];
     transport_comparison.push(
         tor_observation(
-            &[left_ohttp.relay_url(), right_ohttp.relay_url()],
             ohttp_padding,
             &nullifier,
+            [&left_ohttp.metrics, &right_ohttp.metrics],
         )
-        .await,
+        .await?,
     );
 
     Ok(SelectedDemoReport {
@@ -285,32 +337,55 @@ pub async fn run() -> Result<SelectedDemoReport> {
 }
 
 async fn tor_observation(
-    relay_urls: &[String],
     padding: PaddingStrategy,
     nullifier: &[u8; 32],
-) -> TransportObservation {
+    relay_metrics: [&RelayMetrics; 2],
+) -> Result<TransportObservation> {
     let Ok(proxy_url) = std::env::var(TOR_SOCKS_ENV) else {
-        return TransportObservation {
+        return Ok(TransportObservation {
             path: "PIR Tor + OHTTP",
             status: format!("not run: set {TOR_SOCKS_ENV}=socks5h://127.0.0.1:9050"),
             server_count: 2,
             hides_query: true,
             hides_origin_from_provider: true,
             setup_ms: None,
+            verified_query_first_ms: None,
             verified_query_p50_ms: None,
+            verified_query_p95_ms: None,
             query_samples: 0,
+            encrypted_upload_bytes_per_query: None,
+            encrypted_download_bytes_per_query: None,
             note: "requires a real Tor/Arti SOCKS listener; the POC does not fake Tor numbers",
-        };
+        });
+    };
+    let Some(relay_urls) = two_env_values(TOR_RELAY_URLS_ENV)? else {
+        return Ok(TransportObservation {
+            path: "PIR Tor + OHTTP",
+            status: format!("not run: set {TOR_RELAY_URLS_ENV}=URL_0,URL_1"),
+            server_count: 2,
+            hides_query: true,
+            hides_origin_from_provider: true,
+            setup_ms: None,
+            verified_query_first_ms: None,
+            verified_query_p50_ms: None,
+            verified_query_p95_ms: None,
+            query_samples: 0,
+            encrypted_upload_bytes_per_query: None,
+            encrypted_download_bytes_per_query: None,
+            note: "Tor cannot reach the demo's loopback relay URLs; use two onion or remote HTTPS relay URLs",
+        });
     };
     let transports = vec![
         OriginTransportConfig::TorSocks5 {
-            proxy_url: proxy_url.clone(),
+            proxy_url: isolated_socks_url(&proxy_url, 0)?,
         },
-        OriginTransportConfig::TorSocks5 { proxy_url },
+        OriginTransportConfig::TorSocks5 {
+            proxy_url: isolated_socks_url(&proxy_url, 1)?,
+        },
     ];
     let setup = Instant::now();
     let client = OhttpUseCaseClient::connect_with_transport_configs(
-        relay_urls,
+        &relay_urls,
         &DEMO_OPERATOR_KEY,
         padding,
         &transports,
@@ -318,18 +393,23 @@ async fn tor_observation(
     .await;
     let setup_ms = elapsed_ms(setup);
     let Ok(client) = client else {
-        return TransportObservation {
+        return Ok(TransportObservation {
             path: "PIR Tor + OHTTP",
             status: "failed to connect through configured Tor SOCKS listener".to_owned(),
             server_count: 2,
             hides_query: true,
             hides_origin_from_provider: true,
             setup_ms: Some(setup_ms),
+            verified_query_first_ms: None,
             verified_query_p50_ms: None,
+            verified_query_p95_ms: None,
             query_samples: 0,
-            note: "local loopback relays may not be reachable through a Tor exit; deploy remote HTTPS relays for a real run",
-        };
+            encrypted_upload_bytes_per_query: None,
+            encrypted_download_bytes_per_query: None,
+            note: "verify the onion/HTTPS relay URLs, Tor bootstrap status, and relay fixed-port mappings",
+        });
     };
+    let metrics_before = [relay_metrics[0].snapshot(), relay_metrics[1].snapshot()];
     let mut samples = Vec::with_capacity(TRANSPORT_QUERY_SAMPLES);
     let mut verified = true;
     for _ in 0..TRANSPORT_QUERY_SAMPLES {
@@ -340,8 +420,12 @@ async fn tor_observation(
         );
         samples.push(elapsed_ms(query));
     }
-    let verified_query_p50_ms = median(&mut samples);
-    TransportObservation {
+    let first_ms = samples[0];
+    let (verified_query_p50_ms, verified_query_p95_ms) = summarize(&mut samples);
+    let metrics_after = [relay_metrics[0].snapshot(), relay_metrics[1].snapshot()];
+    let (upload_per_query, download_per_query) =
+        per_query_encrypted_bytes(&metrics_before, &metrics_after, TRANSPORT_QUERY_SAMPLES);
+    Ok(TransportObservation {
         path: "PIR Tor + OHTTP",
         status: if verified {
             "verified".to_owned()
@@ -352,18 +436,100 @@ async fn tor_observation(
         hides_query: true,
         hides_origin_from_provider: true,
         setup_ms: Some(setup_ms),
+        verified_query_first_ms: Some(first_ms),
         verified_query_p50_ms: Some(verified_query_p50_ms),
+        verified_query_p95_ms: Some(verified_query_p95_ms),
         query_samples: TRANSPORT_QUERY_SAMPLES,
+        encrypted_upload_bytes_per_query: Some(upload_per_query),
+        encrypted_download_bytes_per_query: Some(download_per_query),
         note:
-            "Tor hides the wallet from the OHTTP relay; OHTTP keeps PIR bytes opaque to Tor relays",
+            "separate SOCKS-auth isolation tokens request one Tor circuit context per PIR replica",
+    })
+}
+
+fn two_env_values(name: &str) -> Result<Option<[String; 2]>> {
+    let Ok(value) = std::env::var(name) else {
+        return Ok(None);
+    };
+    Ok(Some(parse_two_values(name, &value)?))
+}
+
+fn parse_two_values(name: &str, value: &str) -> Result<[String; 2]> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let values: [String; 2] = values
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{name} must contain exactly two comma-separated values"))?;
+    Ok(values)
+}
+
+fn isolated_socks_url(base: &str, replica: usize) -> Result<String> {
+    let mut url = reqwest::Url::parse(base)?;
+    if url.scheme() != "socks5h" {
+        anyhow::bail!("{TOR_SOCKS_ENV} must use socks5h:// for remote DNS resolution");
     }
+    url.set_username(&format!("pir-replica-{replica}"))
+        .map_err(|_| anyhow::anyhow!("Tor SOCKS URL cannot carry an isolation username"))?;
+    url.set_password(Some("defradb-pir"))
+        .map_err(|_| anyhow::anyhow!("Tor SOCKS URL cannot carry an isolation password"))?;
+    Ok(url.into())
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
 }
 
-fn median(samples: &mut [f64]) -> f64 {
+fn summarize(samples: &mut [f64]) -> (f64, f64) {
     samples.sort_by(f64::total_cmp);
-    samples[samples.len() / 2]
+    let p50 = samples[samples.len() / 2];
+    let p95_index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+    (p50, samples[p95_index])
+}
+
+fn per_query_encrypted_bytes(
+    before: &[RelayMetricsSnapshot; 2],
+    after: &[RelayMetricsSnapshot; 2],
+    queries: usize,
+) -> (u64, u64) {
+    let upload = after
+        .iter()
+        .zip(before)
+        .map(|(after, before)| after.encrypted_request_bytes - before.encrypted_request_bytes)
+        .sum::<u64>()
+        / queries as u64;
+    let download = after
+        .iter()
+        .zip(before)
+        .map(|(after, before)| after.encrypted_response_bytes - before.encrypted_response_bytes)
+        .sum::<u64>()
+        / queries as u64;
+    (upload, download)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requires_exactly_two_relay_values() {
+        assert_eq!(
+            parse_two_values("RELAYS", " http://one, http://two ").unwrap(),
+            ["http://one", "http://two"]
+        );
+        assert!(parse_two_values("RELAYS", "http://one").is_err());
+        assert!(parse_two_values("RELAYS", "one,two,three").is_err());
+    }
+
+    #[test]
+    fn tor_proxy_uses_remote_dns_and_per_replica_isolation() {
+        let first = isolated_socks_url("socks5h://127.0.0.1:9050", 0).unwrap();
+        let second = isolated_socks_url("socks5h://127.0.0.1:9050", 1).unwrap();
+        assert_eq!(first, "socks5h://pir-replica-0:defradb-pir@127.0.0.1:9050");
+        assert_eq!(second, "socks5h://pir-replica-1:defradb-pir@127.0.0.1:9050");
+        assert!(isolated_socks_url("socks5://127.0.0.1:9050", 0).is_err());
+    }
 }

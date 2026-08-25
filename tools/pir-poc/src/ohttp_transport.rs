@@ -605,11 +605,30 @@ pub async fn spawn_ohttp_replica(
     replica_id: impl Into<String>,
     key_id: u8,
 ) -> Result<RunningOhttpReplica> {
+    spawn_ohttp_replica_on(
+        store,
+        operator_key,
+        replica_id,
+        key_id,
+        "127.0.0.1:0",
+        "127.0.0.1:0",
+    )
+    .await
+}
+
+pub async fn spawn_ohttp_replica_on(
+    store: Arc<UseCaseStore>,
+    operator_key: &[u8; 32],
+    replica_id: impl Into<String>,
+    key_id: u8,
+    gateway_bind: &str,
+    relay_bind: &str,
+) -> Result<RunningOhttpReplica> {
     let gateway = OhttpGateway::new(store, operator_key, replica_id, key_id)?;
-    let gateway_server = spawn_gateway(gateway, "127.0.0.1:0").await?;
+    let gateway_server = spawn_gateway(gateway, gateway_bind).await?;
     let gateway_url = format!("http://{}", gateway_server.address);
     let metrics = RelayMetrics::default();
-    let relay = spawn_relay(&gateway_url, "127.0.0.1:0", metrics.clone()).await?;
+    let relay = spawn_relay(&gateway_url, relay_bind, metrics.clone()).await?;
     Ok(RunningOhttpReplica {
         gateway: gateway_server,
         relay,

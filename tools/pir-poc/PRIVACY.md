@@ -210,7 +210,8 @@ No transport protects a compromised wallet or OS. TorJS running in the same Java
 | Implemented | Fixed demo framing | Hit and application-error responses have identical encrypted sizes |
 | Implemented | Client result verification | Shieldd Poseidon path, projection AEAD and generation manifest all fail closed on tampering |
 | Implemented | End-to-end comparison | Visible HTTP, PIR HTTP and PIR OHTTP report setup and verified-query time; Tor is never simulated |
-| Next | Remote HTTPS relays through native Tor/Arti | Desktop and one phone report startup, latency, RAM, battery, upload and download |
+| Implemented | Native Tor plus two v3 onion routes on desktop | Fresh/cached startup, first/p50/p95 latency, Tor RAM/CPU and encrypted OHTTP bytes are measured; separate SOCKS-auth contexts isolate replica paths |
+| Next | Independent remote operators plus native mobile Arti | One phone reports startup, latency, peak client RAM, battery and total on-wire bytes; role separation is real rather than co-located |
 | Next if needed | Small/medium/large fixed classes with streaming | Only declared class/generation leakage and bounded phone peak memory |
 
 Every future result should report aggregate server work, gateway work, client CPU/RAM, upload, download, latency, trust assumption and exact observable leakage. Additional systems do not enter the POC merely because they might improve a stronger threat model.
@@ -235,8 +236,8 @@ Every future result should report aggregate server work, gateway work, client CP
 
 The highest-value sequence is now short:
 
-1. deploy two remote HTTPS OHTTP paths and establish the loopback-versus-network baseline;
-2. run the same client through native Tor/Arti on desktop and one phone;
+1. deploy the two OHTTP/onion paths under independent operators and establish the co-located-versus-remote baseline;
+2. run the same client through native Arti on one phone, including battery and peak client memory;
 3. add a second fixed traffic class only if measured payloads do not fit the current class;
 4. revisit one deferred mechanism only when a concrete observer or abuse problem remains.
 

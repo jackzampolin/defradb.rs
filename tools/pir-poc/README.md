@@ -41,20 +41,36 @@ against a canonical Shieldd Poseidon root, authenticates/decrypts an encrypted
 tag projection, executes a 100-decoy lookup while processing one row, and
 registers/evaluates matching and missing Shinzo Compact-DPF subscriptions. It
 then repeats all three private paths through two independent RFC 9458 OHTTP
-relay/gateway paths. Its final table measures cold setup and 11-query p50
-verified latency for a visible direct lookup, direct PIR, and OHTTP PIR. A real
-Tor lane is included only when configured:
+relay/gateway paths. Its final table measures setup, first-query, p50 and p95
+verified latency over 11 queries. OHTTP rows also report aggregate encrypted
+upload/download per query across both replicas. A real Tor lane is included
+only when all three transport variables are configured:
 
 ```bash
-PIR_POC_TOR_SOCKS_URL=socks5h://127.0.0.1:9050 \
+PIR_POC_OHTTP_RELAY_BINDS=127.0.0.1:19080,127.0.0.1:19081 \
+PIR_POC_TOR_SOCKS_URL=socks5h://127.0.0.1:19050 \
+PIR_POC_TOR_RELAY_URLS=http://REPLICA_0.onion,http://REPLICA_1.onion \
   cargo run -p pir-poc --release -- demo
 ```
 
-The Tor lane deliberately has no simulated fallback. For a meaningful run,
-deploy the OHTTP relays at remote HTTPS addresses reachable through Tor; the
-loopback demo addresses may be rejected by an exit path. The SOCKS POC proves
-transport interchangeability, not circuit isolation; a native Arti integration
-should use a separate isolation context for each replica path.
+For a local onion transport test, map two v3 onion services to the two fixed
+relay binds. The Tor SOCKS listener must enable authentication isolation:
+
+```text
+SocksPort 127.0.0.1:19050 IsolateSOCKSAuth
+HiddenServiceDir /path/to/onion-replica-0
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:19080
+HiddenServiceDir /path/to/onion-replica-1
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:19081
+```
+
+The client supplies a distinct SOCKS username for each PIR replica, requesting
+separate Tor circuit contexts. The Tor lane deliberately has no simulated
+fallback. Two onion services on one Tor process validate the transport but do
+not establish operator non-collusion; production needs independently operated
+relay/gateway/replica paths.
 
 ## Build and serve an immutable generation
 

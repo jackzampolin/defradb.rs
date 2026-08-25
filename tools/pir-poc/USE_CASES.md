@@ -325,9 +325,47 @@ Tests cover all three private protocols, ciphertext tampering, replay, key
 rotation/expiry, malformed and oversized padding, authenticated metadata, and
 equal fixed-size success/error responses. `pir-poc demo` exercises the complete
 client -> relay -> gateway -> selected-service flow. It also reports cold setup
-and 11-query p50 verified latency for one visible direct lookup, direct Dense
-XOR and Dense XOR over OHTTP. `PIR_POC_TOR_SOCKS_URL` adds a real Tor + OHTTP row; when
-Tor is unavailable the row is explicitly marked not run.
+plus first-query/p50/p95 verified latency over 11 queries for one visible direct
+lookup, direct Dense XOR and Dense XOR over OHTTP. Three environment variables
+add a real Tor + OHTTP row: `PIR_POC_TOR_SOCKS_URL`,
+`PIR_POC_TOR_RELAY_URLS`, and `PIR_POC_OHTTP_RELAY_BINDS`. When Tor is not
+configured, the row is explicitly marked not run.
+
+### Real Tor/onion benchmark
+
+This run used the signed Tor Expert Bundle 15.0.20 (Tor 0.4.9.11), Windows 11,
+an AMD Ryzen 7 3700X and Rust 1.94.0 on 2026-08-25. Two v3 onion services mapped
+to the POC's two local OHTTP relays. The client used `socks5h` and separate
+SOCKS-auth isolation tokens for the replica paths. Every reported query
+reconstructed and verified the requested nullifier witness.
+
+| Path | Setup (ms) | First query (ms) | p50 (ms) | p95 (ms) | Encrypted upload/query | Encrypted download/query |
+|---|---:|---:|---:|---:|---:|---:|
+| Visible direct HTTP | 5.35 | 6.49 | 4.96 | 6.49 | not instrumented | not instrumented |
+| Two-server PIR, direct HTTP | 8.78 | 5.21 | 5.09 | 5.21 | not instrumented | not instrumented |
+| Two-server PIR, OHTTP loopback | 8.26 | 5.73 | 5.90 | 15.14 | 8,302 B | 131,136 B |
+| Two-server PIR, Tor + OHTTP, cold circuits | 5,330.55 | 1,160.26 | 1,258.54 | 1,374.52 | 8,302 B | 131,136 B |
+| Two-server PIR, Tor + OHTTP, warm[^tor-warm] | 2,026.60 | 863.92 | 882.98 | 1,186.26 | 8,302 B | 131,136 B |
+
+[^tor-warm]: Median of three run-level results; every run contains 11 verified queries. Individual warm p50 values were 867.56, 882.98 and 896.43 ms.
+
+Fresh Tor bootstrap took about 8.1 seconds; restart with cached directory state
+took about 3.9 seconds. During three warm runs Tor used 125.64 MiB working set,
+96.53 MiB private memory, and 2.406 CPU-seconds over 38.884 wall-seconds (about
+0.062 average CPU core). These are desktop measurements, not phone/battery
+results.
+
+The OHTTP byte counts are exact relay payload counters summed over both
+replicas; they exclude Tor cell framing, circuit handshakes and TCP/TLS
+overhead. Fixed envelopes make the OHTTP and Tor rows equal at the application
+layer. The two onion services and both POC servers ran on this machine, so this
+is a real Tor rendezvous-path measurement but not evidence of administrative
+non-collusion or geographically remote provider latency.
+
+The conclusion is narrow: Tor works without changing PIR/OHTTP and does not add
+PIR server evaluation, but warm verified latency was about 150x loopback OHTTP
+in this run. Keep OHTTP as the low-latency default and Tor/onion as an explicit
+strong-origin mode until native mobile Arti is measured on a phone.
 
 The OHTTP layer hides origin from a non-colluding relay/gateway pair; it does
 not change PIR server work or its non-collusion requirement. It also does not
@@ -356,6 +394,9 @@ The POC now enforces:
 - AES-256-GCM projection authentication bound to generation, tag and slot;
 - a direct/Tor origin-transport boundary that leaves PIR and OHTTP framing
   unchanged.
+- fixed local relay binds plus independently addressed Tor relay URLs for real
+  onion-service testing;
+- per-replica SOCKS-auth circuit isolation and first/p50/p95/byte reporting.
 
 Before production, replace the symmetric operator MAC with the deployment's
 signature/key-distribution system, obtain the Shieldd root through consensus or
