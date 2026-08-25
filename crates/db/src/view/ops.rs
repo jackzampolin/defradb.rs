@@ -401,6 +401,11 @@ impl<S: Store> crate::database::DB<S> {
             .collections
             .read()
             .map_err(|_| Error::Other("failed to acquire collections lock".to_string()))?;
-        Ok(cache.values().map(|c| c.schema().clone()).collect())
+        Ok(cache
+            .values()
+            .map(|collection| collection.schema())
+            .filter(|schema| schema.is_active)
+            .cloned()
+            .collect())
     }
 }
