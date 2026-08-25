@@ -1,6 +1,10 @@
+#[cfg(feature = "research")]
 mod batch_benchmark;
+#[cfg(feature = "research")]
 mod batch_eval;
+#[cfg(feature = "research")]
 mod benchmark;
+#[cfg(feature = "research")]
 mod demo;
 
 use std::collections::HashMap;
@@ -16,8 +20,11 @@ use rand::{CryptoRng, RngCore};
 // construction and the AES-based PRG, in addition to non-collusion. It is not
 // an information-theoretic FSS implementation.
 
+#[cfg(feature = "research")]
 pub use batch_benchmark::{run as benchmark_batches, LiveBatchBenchmarkReport};
+#[cfg(feature = "research")]
 pub use benchmark::{run as benchmark, SubscriptionBenchmarkReport};
+#[cfg(feature = "research")]
 pub use demo::{run as demo, SubscriptionDemoReport};
 
 const INPUT_BYTES: usize = 4;
@@ -44,6 +51,14 @@ impl SubscriptionId {
         let mut value = [0u8; 16];
         rng.fill_bytes(&mut value);
         Self(value)
+    }
+
+    pub fn from_bytes(value: [u8; 16]) -> Self {
+        Self(value)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
     }
 }
 
@@ -96,6 +111,31 @@ pub struct NotificationShare {
     pub subscription_id: SubscriptionId,
     party: bool,
     value: [u8; OUTPUT_BYTES],
+}
+
+impl NotificationShare {
+    pub fn from_wire(
+        subscription_id: SubscriptionId,
+        party_index: usize,
+        value: [u8; OUTPUT_BYTES],
+    ) -> Result<Self> {
+        if party_index > 1 {
+            bail!("Compact DPF result party must be 0 or 1");
+        }
+        Ok(Self {
+            subscription_id,
+            party: party_index == 1,
+            value,
+        })
+    }
+
+    pub fn party_index(&self) -> usize {
+        usize::from(self.party)
+    }
+
+    pub fn value(&self) -> &[u8; OUTPUT_BYTES] {
+        &self.value
+    }
 }
 
 pub fn combine_compact(shares: &[NotificationShare]) -> Result<bool> {
@@ -162,6 +202,10 @@ impl CompactSubscriptionServer {
 
     pub fn subscription_count(&self) -> usize {
         self.subscriptions.len()
+    }
+
+    pub fn party_index(&self) -> usize {
+        usize::from(self.party)
     }
 
     pub fn evaluate_event(&self, event_bucket: usize) -> Result<Vec<NotificationShare>> {

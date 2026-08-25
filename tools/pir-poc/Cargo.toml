@@ -8,27 +8,55 @@ license.workspace = true
 repository.workspace = true
 description = "Isolated private information retrieval proof of concept for DefraDB"
 
+[features]
+default = []
+research = [
+    "dep:defra-node",
+    "dep:epserde",
+    "dep:events",
+    "dep:memory-stats",
+    "dep:ptr_hash",
+    "dep:query",
+    "dep:sha2",
+    "dep:thiserror",
+]
+
 [dependencies]
 anyhow.workspace = true
+aes-gcm.workspace = true
 axum.workspace = true
 base64.workspace = true
 blake3 = "1.8"
-defra-node = { path = "../../crates/defra-node", default-features = false, features = ["native"] }
-events = { path = "../../crates/events" }
+blake2b_simd = "1"
+bhttp = "0.8"
+defra-node = { path = "../../crates/defra-node", default-features = false, features = ["native"], optional = true }
+events = { path = "../../crates/events", optional = true }
 fss-rs = { version = "0.6", default-features = false, features = ["prg", "stable"] }
 hex.workspace = true
-memory-stats = "1.2"
-epserde = "0.13"
-ptr_hash = { version = "2.0.2", features = ["epserde"] }
-query = { path = "../../crates/query" }
+memory-stats = { version = "1.2", optional = true }
+ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
+poseidon377 = { version = "1.2.0", default-features = false, features = ["std"] }
+epserde = { version = "0.13", optional = true }
+ptr_hash = { version = "2.0.2", features = ["epserde"], optional = true }
+query = { path = "../../crates/query", optional = true }
 rand.workspace = true
 rayon = "1.10"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "socks"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
+sha2 = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "export-simplepir-corpus"
+path = "examples/export-simplepir-corpus.rs"
+required-features = ["research"]
+
+[[example]]
+name = "portable-gates"
+path = "examples/portable-gates.rs"
+required-features = ["research"]

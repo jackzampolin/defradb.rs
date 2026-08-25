@@ -1,4 +1,8 @@
-# DefraDB PIR POC: measured comparison and current choices
+# DefraDB PIR POC: research comparison archive
+
+The product-shaped default POC now exposes only the three paths in
+`USE_CASES.md`. This file preserves the experiments that produced those
+choices; their code is compiled only with the `research` feature.
 
 This document is the decision summary for the POC. The primary metric is
 **aggregate server work per complete useful private result**. Build, client

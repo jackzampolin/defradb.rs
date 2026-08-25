@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DefraDB PIR selected-use-case immutable generation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "generation_height",
+    "generation_root_hex",
+    "nullifiers",
+    "encrypted_tags",
+    "shinzo_bucket_count"
+  ],
+  "properties": {
+    "generation_height": { "type": "integer", "minimum": 0 },
+    "generation_root_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "nullifiers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nullifier_hex", "position", "witness_base64"],
+        "properties": {
+          "nullifier_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "position": { "type": "integer", "minimum": 1 },
+          "witness_base64": {
+            "type": "string",
+            "description": "Base64 encoding of exactly 2,008 Shieldd witness bytes"
+          }
+        }
+      }
+    },
+    "encrypted_tags": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tag_base64", "encrypted_values_base64"],
+        "properties": {
+          "tag_base64": { "type": "string" },
+          "encrypted_values_base64": {
+            "type": "array",
+            "description": "AES-256-GCM projection envelopes; associated data binds generation height/root, tag and slot",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "shinzo_bucket_count": {
+      "type": "integer",
+      "minimum": 2,
+      "description": "Must be a power of two"
+    },
+    "limits": {
+      "type": "object",
+      "description": "Optional signed admission-policy overrides; omitted fields use POC defaults"
+    }
+  }
+}

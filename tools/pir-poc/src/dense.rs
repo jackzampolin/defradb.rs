@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use rand::{CryptoRng, RngCore};
+#[cfg(feature = "research")]
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 
 use crate::snapshot::SnapshotView;
@@ -113,11 +114,13 @@ fn xor_row_bytes(output: &mut [u8], row: &[u8]) {
 /// Keeping the pool alive avoids creating OS threads for every request. The
 /// caller controls the number of workers so one PIR request cannot silently
 /// monopolize every server core.
+#[cfg(feature = "research")]
 pub(crate) struct ParallelEvaluator {
     pool: ThreadPool,
     thread_count: usize,
 }
 
+#[cfg(feature = "research")]
 impl ParallelEvaluator {
     pub(crate) fn new(thread_count: usize) -> Result<Self> {
         if thread_count == 0 {
@@ -172,6 +175,7 @@ impl ParallelEvaluator {
     }
 }
 
+#[cfg(feature = "research")]
 fn answer_query_byte_range(
     snapshot: SnapshotView<'_>,
     query_bytes: &[u8],
@@ -315,6 +319,7 @@ mod tests {
         assert_eq!(answer_batch(snapshot.view(), &queries).unwrap(), individual);
     }
 
+    #[cfg(feature = "research")]
     #[test]
     fn parallel_evaluator_matches_serial_answers() {
         for (bucket_count, row_size) in [(4, 13), (32, 32), (64, 65)] {
