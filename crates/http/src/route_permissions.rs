@@ -307,30 +307,29 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
 
 /// Fold every mount of the API router onto its `/api/v0` key.
 ///
-/// `go_paths::API_PREFIXES` mounts one route set three times, so `/api/v1/x`
-/// and the unversioned `/api/x` reach the same handler as `/api/v0/x` and must
-/// carry the same permission. A form that fails to fold here falls to the `_`
-/// arm and is enforced as `DocumentRead`, which is a privilege downgrade
-/// rather than a 404.
+/// `go_paths::API_PREFIXES` is what `routes.rs` mounts the one route set at,
+/// so it is also what has to be folded here. Deriving from the same constant
+/// is the point: a prefix added there without a matching arm here would mount
+/// the whole route set unfolded, and every route under it would fall to the
+/// `_` arm and be enforced as `DocumentRead`.
+///
+/// The longest match wins, so the list stays order-independent: `/api/v0/x`
+/// must fold on `/api/v0` and not on the bare `/api`.
+///
+/// Note this rewrites rather than rejects: `/api/v2/collections` becomes
+/// `/api/v0/v2/collections`, which is safe only because no table key begins
+/// with `/api/v0/v`, and which lands on the `_` arm as it should.
 fn normalize_api_version(path: &str) -> Cow<'_, str> {
-    let Some(rest) = path.strip_prefix("/api") else {
-        return Cow::Borrowed(path);
-    };
-    if rest == "/v0" || rest.starts_with("/v0/") {
-        return Cow::Borrowed(path);
-    }
+    let matched = crate::go_paths::API_PREFIXES
+        .iter()
+        .filter_map(|prefix| {
+            path.strip_prefix(*prefix)
+                .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        })
+        .max_by_key(|suffix| path.len() - suffix.len());
 
-    let suffix = match rest {
-        "/v1" => "",
-        _ => rest
-            .strip_prefix("/v1")
-            .filter(|stripped| stripped.starts_with('/'))
-            .unwrap_or(rest),
-    };
-
-    if suffix.is_empty() {
-        Cow::Borrowed("/api/v0")
-    } else {
-        Cow::Owned(format!("/api/v0{suffix}"))
+    match matched {
+        Some(suffix) => Cow::Owned(format!("/api/v0{suffix}")),
+        None => Cow::Borrowed(path),
     }
 }
