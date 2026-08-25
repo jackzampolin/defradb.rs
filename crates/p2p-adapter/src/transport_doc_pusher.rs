@@ -22,6 +22,20 @@ pub trait TransportDocPusher: Send + Sync {
         se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()>;
 
+    /// Replay an explicit `(collection_name, doc_id)` set to one peer.
+    ///
+    /// Loads persisted replicator filters the same way [`Self::retry_doc`]
+    /// does. Default implementations report the operation as unsupported.
+    async fn push_existing_docs_by_id(
+        &self,
+        _peer_id: &PeerId,
+        _docs: &[(String, String)],
+    ) -> P2PResult<()> {
+        Err(P2PError::unsupported(
+            "push_existing_docs_by_id is not implemented",
+        ))
+    }
+
     async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
         -> P2PResult<()>;
 
@@ -139,6 +153,34 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
                 encryption_key: se_key,
                 identity_pubkey: se_identity_pubkey,
             },
+            &replication_filter::QueryReplicationFilterMatcher::new(),
+            &self.car_authority,
+        )
+        .await
+        .map_err(P2PError::from)
+    }
+
+    async fn push_existing_docs_by_id(
+        &self,
+        peer_id: &PeerId,
+        docs: &[(String, String)],
+    ) -> P2PResult<()> {
+        let peer_id_str = peer_id.to_string();
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let filters = match peerstore.get_replicator(&peer_id_str).await {
+            Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
+                .map(|info| info.filters)
+                .unwrap_or_default(),
+            _ => p2p::ReplicationFilters::new(),
+        };
+        db::merge::push_existing_docs_by_id(
+            &self.transport,
+            &self.db,
+            self.document_acp.get().map(|acp| acp.as_ref()),
+            peer_id,
+            docs,
+            &filters,
+            db::merge::PushExistingDocsSeOptions::default(),
             &replication_filter::QueryReplicationFilterMatcher::new(),
             &self.car_authority,
         )

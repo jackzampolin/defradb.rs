@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use acp::DocumentACP;
@@ -50,6 +51,45 @@ async fn document_matches_filter<R: Reader + ?Sized>(
     Ok(matcher.matches("", filter, &document_json))
 }
 
+/// Index an optional `(collection_name, doc_id)` allowlist.
+///
+/// `None` means every document in the scanned collections should be considered.
+fn allowlist_index(allowlist: Option<&[(String, String)]>) -> Option<HashMap<&str, HashSet<&str>>> {
+    let docs = allowlist?;
+    let mut index: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (collection, doc_id) in docs {
+        index
+            .entry(collection.as_str())
+            .or_default()
+            .insert(doc_id.as_str());
+    }
+    Some(index)
+}
+
+fn unique_collection_names(docs: &[(String, String)]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for (collection, _) in docs {
+        if seen.insert(collection.as_str()) {
+            names.push(collection.clone());
+        }
+    }
+    names
+}
+
+fn document_is_allowlisted(
+    collection_name: &str,
+    doc_id: &str,
+    allowlist: Option<&HashMap<&str, HashSet<&str>>>,
+) -> bool {
+    match allowlist {
+        None => true,
+        Some(index) => index
+            .get(collection_name)
+            .is_some_and(|ids| ids.contains(doc_id)),
+    }
+}
+
 /// Push existing documents to a replicator peer through the configured transport.
 #[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs<S: Store + 'static, T: P2PTransport>(
@@ -78,6 +118,38 @@ pub async fn push_existing_docs<S: Store + 'static, T: P2PTransport>(
     .await
 }
 
+/// Push an explicit `(collection_name, doc_id)` set through the existing
+/// replay path (connection wait, retry guard, ACP creator resolution,
+/// bounded PushLog, marker registration).
+#[allow(clippy::too_many_arguments)]
+pub async fn push_existing_docs_by_id<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
+    db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
+    peer_id: &PeerId,
+    docs: &[(String, String)],
+    filters: &p2p::ReplicationFilters,
+    se_options: PushExistingDocsSeOptions<'_>,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
+) -> Result<(), String> {
+    let collections = unique_collection_names(docs);
+    push_existing_docs_with_config_and_allowlist(
+        transport,
+        db,
+        document_acp,
+        peer_id,
+        &collections,
+        filters,
+        se_options,
+        ReplayPushConfig::default(),
+        matcher,
+        car_authority,
+        Some(docs),
+    )
+    .await
+}
+
 /// Push existing documents with explicit replay limits.
 #[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>(
@@ -91,6 +163,39 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
     replay_config: ReplayPushConfig,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
     car_authority: &p2p::sync::HeadHintCarAuthority,
+) -> Result<(), String> {
+    push_existing_docs_with_config_and_allowlist(
+        transport,
+        db,
+        document_acp,
+        peer_id,
+        collections,
+        filters,
+        se_options,
+        replay_config,
+        matcher,
+        car_authority,
+        None,
+    )
+    .await
+}
+
+/// Push existing documents, optionally restricted to an allowlist of
+/// `(collection_name, doc_id)` pairs. `None` scans every document in
+/// `collections`.
+#[allow(clippy::too_many_arguments)]
+async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
+    db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
+    peer_id: &PeerId,
+    collections: &[String],
+    filters: &p2p::ReplicationFilters,
+    se_options: PushExistingDocsSeOptions<'_>,
+    replay_config: ReplayPushConfig,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
+    car_authority: &p2p::sync::HeadHintCarAuthority,
+    allowlist: Option<&[(String, String)]>,
 ) -> Result<(), String> {
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
@@ -154,8 +259,15 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
     let mut push_handles = Vec::new();
     let replay_gate = Arc::new(ReplayPushGate::new(replay_config));
     let mut skipped_creator_docs = 0usize;
+    let allowlist_by_collection = allowlist_index(allowlist);
 
     for col_name in collections {
+        if let Some(ref allowed) = allowlist_by_collection {
+            if !allowed.contains_key(col_name.as_str()) {
+                continue;
+            }
+        }
+
         let collection = match db
             .get_collection(col_name)
             .map_err(|e| format!("failed to get collection: {}", e))?
@@ -201,6 +313,10 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
         }
 
         'documents: for (doc_short_id, doc_id) in &doc_ids {
+            if !document_is_allowlisted(col_name, doc_id, allowlist_by_collection.as_ref()) {
+                continue;
+            }
+
             if let Some(filter) = filters.get(collection.collection_id()) {
                 if !document_matches_filter(
                     &datastore,
@@ -436,6 +552,12 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
         };
 
         for col_name in collections {
+            if let Some(ref allowed) = allowlist_by_collection {
+                if !allowed.contains_key(col_name.as_str()) {
+                    continue;
+                }
+            }
+
             let collection = match db.get_collection(col_name) {
                 Ok(Some(c)) => c,
                 _ => continue,
@@ -486,6 +608,10 @@ pub async fn push_existing_docs_with_config<S: Store + 'static, T: P2PTransport>
 
             let mut all_artifacts = Vec::new();
             for (doc_short_id, doc_id) in &se_doc_ids {
+                if !document_is_allowlisted(col_name, doc_id, allowlist_by_collection.as_ref()) {
+                    continue;
+                }
+
                 if let Some(filter) = filters.get(collection.collection_id()) {
                     if !document_matches_filter(
                         &datastore,
@@ -792,4 +918,51 @@ pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
         &heads,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scanned_docs() -> Vec<(String, String)> {
+        vec![
+            ("Users".to_string(), "doc-a".to_string()),
+            ("Users".to_string(), "doc-b".to_string()),
+            ("Posts".to_string(), "doc-c".to_string()),
+        ]
+    }
+
+    fn retain_allowlisted(
+        scanned: &[(String, String)],
+        allowlist: Option<&[(String, String)]>,
+    ) -> Vec<(String, String)> {
+        let index = allowlist_index(allowlist);
+        scanned
+            .iter()
+            .filter(|(collection, doc_id)| {
+                document_is_allowlisted(collection, doc_id, index.as_ref())
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn allowlist_path_only_considers_named_docs() {
+        let allowlist = [
+            ("Users".to_string(), "doc-a".to_string()),
+            ("Posts".to_string(), "missing-doc".to_string()),
+        ];
+        let considered = retain_allowlisted(&scanned_docs(), Some(&allowlist));
+        assert_eq!(considered, vec![("Users".to_string(), "doc-a".to_string())]);
+        assert_eq!(
+            unique_collection_names(&allowlist),
+            vec!["Users".to_string(), "Posts".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_allowlist_considers_every_scanned_doc() {
+        let considered = retain_allowlisted(&scanned_docs(), None);
+        assert_eq!(considered, scanned_docs());
+    }
 }
