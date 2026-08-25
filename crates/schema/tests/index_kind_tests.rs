@@ -26,6 +26,8 @@ fn the_kind_serializes_as_a_discriminated_envelope() {
     assert_eq!(json["KindDescription"]["Metric"], "COSINE");
     assert_eq!(json["KindDescription"]["Dimensions"], 768);
     assert_eq!(json["KindDescription"]["HNSW"]["M"], 16);
+    assert_eq!(json["KindDescription"]["HNSW"]["EfConstruction"], 128);
+    assert_eq!(json["KindDescription"]["HNSW"]["EfSearch"], 64);
 
     let ordered =
         serde_json::to_value(IndexKind::Ordered(OrderedIndexDescription { unique: true })).unwrap();
@@ -48,6 +50,33 @@ fn the_kind_tag_controls_deserialization() {
 
     let error = serde_json::from_str::<IndexKind>(r#"{"Kind":42}"#).unwrap_err();
     assert!(error.to_string().contains("unknown index kind: 42"));
+}
+
+#[test]
+fn hnsw_defaults_and_partial_overrides_parse_from_the_envelope() {
+    let implicit: IndexKind =
+        serde_json::from_str(r#"{"Kind":1,"KindDescription":{"Algorithm":"HNSW","HNSW":{}}}"#)
+            .unwrap();
+    let IndexKind::Vector(implicit) = implicit else {
+        panic!("expected a vector index");
+    };
+    assert_eq!(implicit.hnsw, Some(HnswParams::default()));
+
+    let explicit: IndexKind = serde_json::from_str(
+        r#"{"Kind":1,"KindDescription":{"Algorithm":"HNSW","HNSW":{"EfConstruction":45,"EfSearch":56}}}"#,
+    )
+    .unwrap();
+    let IndexKind::Vector(explicit) = explicit else {
+        panic!("expected a vector index");
+    };
+    assert_eq!(
+        explicit.hnsw,
+        Some(HnswParams {
+            m: 16,
+            ef_construction: 45,
+            ef_search: 56,
+        })
+    );
 }
 
 #[test]
