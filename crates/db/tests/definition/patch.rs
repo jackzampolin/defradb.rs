@@ -30,6 +30,22 @@ async fn users_db() -> DB<MemoryStore> {
     db
 }
 
+#[tokio::test]
+async fn patch_rejects_an_invalid_default_value() {
+    let db = users_db().await;
+    let patch = r#"[{
+        "op": "add",
+        "path": "/Users/Fields/-",
+        "value": {"Name": "age", "Kind": "Int", "DefaultValue": "unknown"}
+    }]"#;
+
+    let error = db.patch_collection("Users", patch, None).await.unwrap_err();
+
+    assert!(error.to_string().contains(
+        "default field value is invalid. Collection: Users, Inner: Field 'age' has incompatible type"
+    ));
+}
+
 const ADD_AGE_PATCH: &str = r#"
     [{
         "op": "add",

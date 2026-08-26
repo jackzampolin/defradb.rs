@@ -116,7 +116,6 @@ pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> 
 }
 
 /// Convert a JSON value to a document NormalValue with schema-aware type coercion.
-#[allow(dead_code)]
 pub fn json_to_normal_value_with_kind(
     value: &JsonValue,
     field_kind: Option<&FieldKind>,
