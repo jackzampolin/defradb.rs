@@ -162,7 +162,7 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
 
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
-    async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
+    async fn add_schema(&self, sdl: &str) -> anyhow::Result<Vec<CollectionVersion>> {
         let creator = Self::current_identity()?;
         self.database
             .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
@@ -177,7 +177,8 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         self.validate_policies(&collections).await?;
 
-        self.database
+        let created = self
+            .database
             .create_collections_atomic_with_acp_registration(
                 collections,
                 self.document_acp.clone(),
@@ -185,7 +186,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             )
             .await
             .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
-        Ok(())
+        Ok(created)
     }
 
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
