@@ -29,10 +29,15 @@ const POSITION_BYTES: usize = 8;
 const LEAF_BYTES: usize = 80;
 const BUCKET_ENTRY_BYTES: usize = POSITION_BYTES + LEAF_BYTES;
 const BUCKET_HEADER_BYTES: usize = 16;
-const BUCKET_CAPACITY: usize = 384;
+// Canonical Fq values occupy only part of the nominal 253-bit prefix space,
+// concentrating a uniform field sample into roughly 59% of radix buckets.
+const BUCKET_CAPACITY: usize = 640;
 const SERVER_COUNT: usize = 2;
 const DECOY_COUNT: usize = 100;
 const WITNESS_BYTES: usize = BUCKET_ENTRY_BYTES + DEPTH * (ARITY - 1) * HASH_BYTES;
+// Any big-endian value whose first byte is below the BLS12-377 Fq modulus's
+// 0x12 leading byte is canonical, regardless of the remaining bytes.
+const SYNTHETIC_FQ_LEADING_BYTE_EXCLUSIVE: u8 = 0x12;
 
 #[derive(Clone, Copy, Debug)]
 struct Scale {
@@ -296,7 +301,7 @@ pub fn run(profile: Profile) -> Result<ActiveNullifierReport> {
         .flatten()
         .filter(|leaf| changed_leaf_positions.contains(&leaf.position))
         .map(|leaf| ActiveLeaf {
-            value: leaf.value,
+            value: synthetic_field_encoding(leaf.value),
             position: leaf.position,
             next_index: 0,
             next_value: [0; 32],
@@ -345,7 +350,7 @@ pub fn run(profile: Profile) -> Result<ActiveNullifierReport> {
     let mut target = synthetic_nullifier(0x6162_7365_6e74, 2);
     while contains_value(&buckets, &target) {
         target = *blake3::hash(&target).as_bytes();
-        target[0] &= 0x1f;
+        target[0] %= SYNTHETIC_FQ_LEADING_BYTE_EXCLUSIVE;
     }
     let strict = benchmark_strict_query(
         &radix_rows,
@@ -435,7 +440,7 @@ pub fn run(profile: Profile) -> Result<ActiveNullifierReport> {
         caveats: vec![
             "this reproduces Shieldd's index topology and mutation coordinates but uses deterministic BLAKE3 row fixtures, not Shieldd's Poseidon377 implementation",
             "the flat comparison mutates staging buffers; the implemented immutable delta is separately built, authenticated, and published through a generation-pinned Arc",
-            "radix occupancy uses synthetic canonical-order values with three leading field slack bits cleared; activate only after measuring real Shieldd nullifier distributions",
+            "radix occupancy uses deterministic canonical field values and capacity adjusted for the occupied Fq prefix range; activate only after measuring real Shieldd nullifier distributions",
             "the path stage is 20 level-specific batches of three ordinary Dense selectors; a production TreePIR-style path protocol remains an optimization target",
             "server p50 is summed sequential in-process replica elapsed time and excludes storage I/O, transport, TLS, queues, cycles, and energy",
             "100 decoys provide candidate-set privacy only and the client processes only its target witness",
@@ -449,10 +454,17 @@ fn synthetic_nullifier(index: u64, generation: u8) -> [u8; 32] {
     hasher.update(&[generation]);
     hasher.update(&index.to_le_bytes());
     let mut value = *hasher.finalize().as_bytes();
-    // BLS12-377 Fq encodings have leading slack bits. Clearing three makes the
-    // radix distribution representative without importing Shieldd consensus.
-    value[0] &= 0x1f;
+    // Keep the ordered value strictly below the field modulus while retaining
+    // representative high-order radix distribution.
+    value[0] %= SYNTHETIC_FQ_LEADING_BYTE_EXCLUSIVE;
     value
+}
+
+// The radix benchmark stores synthetic values in big-endian ordering form.
+// ActiveGeneration consumes Shieldd's canonical little-endian field encoding.
+fn synthetic_field_encoding(mut ordered: [u8; 32]) -> [u8; 32] {
+    ordered.reverse();
+    ordered
 }
 
 fn bucket_for(value: &[u8; 32], bucket_count: usize) -> usize {
@@ -1030,7 +1042,7 @@ mod tests {
         let mut target = synthetic_nullifier(99_999, 9);
         while contains_value(&buckets, &target) {
             target = *blake3::hash(&target).as_bytes();
-            target[0] &= 0x1f;
+            target[0] %= SYNTHETIC_FQ_LEADING_BYTE_EXCLUSIVE;
         }
         let bucket = bucket_for(&target, buckets.len());
         let row_bytes = bucket_row_bytes().unwrap();

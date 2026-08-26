@@ -7,7 +7,7 @@ use super::Profile;
 use crate::ohttp_transport::{measure_ohttp_crypto, OhttpCryptoObservation, PaddingStrategy};
 
 const ACTIVE_NULLIFIER_REQUEST_BYTES_PER_REPLICA: usize = 541_241;
-const ACTIVE_NULLIFIER_RESPONSE_BYTES_PER_REPLICA: usize = 35_816;
+const ACTIVE_NULLIFIER_RESPONSE_BYTES_PER_REPLICA: usize = 58_344;
 const BILLION_TAG_REQUEST_BYTES_PER_REPLICA: usize = 1_250;
 const BILLION_TAG_RESPONSE_BYTES_PER_REPLICA: usize = 19_428_008;
 const COMPACT_DPF_REGISTRATION_BYTES_PER_REPLICA: usize = 320;

@@ -7,6 +7,45 @@ The primary objective is minimum aggregate server work for a complete useful
 result. Client CPU, upload, download, storage, build/update work, privacy and
 availability remain separate metrics.
 
+## POC exit decision
+
+The protocol exploration can stop here. The POC has established that DefraDB
+can support private query as an isolated serving index, demonstrated the three
+needed query shapes, measured their tradeoffs against visible candidates, and
+carried the same requests through RFC 9458 OHTTP. More protocol experiments are
+unlikely to reduce the main remaining risk: building a bounded, durable DefraDB
+export/event adapter and validating it under production load.
+
+This is the exact implementation status:
+
+| Path | Runnable default POC | Scale evidence | Deliberately left for production |
+|---|---|---|---|
+| Nullifier snapshot | Authenticated exact nullifier-to-2,008-byte-witness table; Dense XOR over two or more replicas; client verifies the Shieldd-shaped Poseidon path | Separate research benchmark models a 1,048,576-leaf active generation, a 32,768-nullifier block, radix predecessor retrieval and immutable deltas | Feed canonical witnesses/roots from Shieldd, wire block updates into the sidecar if live path construction is required, and add cross-repository fixture parity tests |
+| Encrypted tag snapshot | Authenticated digest-to-ordinal directory and fixed padded encrypted rows; Dense XOR or visible-candidate lookup over identical rows | Separate logical benchmark executes the work/wire geometry for 1B documents, 0.01% match and exact-MPHF stripes without claiming a resident 194 GB endpoint | Choose the allowed metadata leakage, build a stable compact directory, and serve binary memory-mapped artifacts rather than JSON-loaded rows |
+| Shinzo live | Two-party Compact-DPF registration and event evaluation endpoints | Microbenchmarks plus a research-only embedded DefraDB `EventName::Update` demonstration | Add the durable event listener, subscription lifecycle, fixed-cadence delivery and replay/recovery policy |
+| Origin hiding | Real OHTTP relay, gateway, key rotation, replay filtering, padding and direct/Tor-capable clients in the demo | Codec/HPKE benchmark at all representative payload sizes | HTTPS deployment, independent operators, anonymous admission and operational traffic-shaping policy |
+
+The default endpoint is intentionally smaller than some benchmarked layouts.
+In particular, it does **not** serve a billion-row resident table, the
+nullifier endpoint does **not** consult the radix/delta engine on each request,
+and `/v1/shinzo/event` is driven by its caller rather than by a built-in DefraDB
+listener. Those experiments are evidence for the next implementation, not a
+claim that the production-scale service already exists.
+
+The clean integration boundary is the result worth preserving:
+
+```text
+committed, authorized DefraDB state
+  -> deterministic projection/event adapter
+  -> immutable PIR artifact or Compact-DPF event bucket
+  -> isolated PIR sidecar
+```
+
+No PIR code needs to modify CRDT merge, document storage, ACP, the query
+planner, or ordinary query execution. Experimental layouts should remain under
+`tools/pir-poc`; production work should begin with the adapter and artifact
+format, not by moving the whole POC into DefraDB core.
+
 ## Runtime architecture
 
 The normal binary contains five commands and three use-case paths. It remains a
@@ -14,16 +53,17 @@ DefraDB/Shieldd sidecar: an exporter supplies committed generation records, the
 POC builds immutable tables, and no DefraDB query planner or storage engine is
 modified.
 
-Strict and 100-decoy modes share one table:
+Strict and visible-candidate modes share one table (the benchmark uses exactly
+100 candidates; the endpoint admits up to the authenticated configured limit):
 
 ```text
 authenticated generation
         |
-        +-- active nullifier witness table
+        +-- exact active-nullifier witness projection
         |       +-- Dense XOR selector shares -> one fixed witness
         |       `-- 100 visible ordinals -> 100 witnesses, process one
         |
-        +-- encrypted tag projection
+        +-- exact encrypted-tag projection
         |       +-- Dense XOR selector shares -> one fixed result row
         |       `-- 100 visible ordinals -> 100 result rows, process one
         |
@@ -62,15 +102,14 @@ Command:
 cargo run -p pir-poc --release -- benchmark full
 ```
 
-Artifact: `target/pir-poc-results/selected-use-cases-full-final.json`.
-The direct-binary run completed in 15.26 seconds with 603,688 KiB peak RSS,
-zero swap and exit status zero.
+The table below is from a full release run of the reviewed branch. Timings are
+host-specific; protocol byte counts and result schedules are deterministic.
 
 | Use case | Private protocol | Private server time | Private client time | 100-decoy server time | 100-decoy client time | Private download | Decoy download |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Active nullifier -> 2,008 B Merkle witness | Two-server live radix + Dense path retrieval | 35.76 ms | 24.58 ms | 0.232 ms | 0.00014 ms | 71.6 KB | 200.8 KB |
-| Tag over 1B documents, 0.01% match -> 100K encrypted results | Two-server exact-MPHF striped Dense XOR | 13,299.94 ms | 44.63 ms | 69.60 ms | 38.19 ms | 38.9 MB | 1.94 GB |
-| Shinzo live wallet subscription | Two-server Compact DPF | 0.000732 ms | 0.000040 ms | 0.000021 ms | approximately 0 ms[^timer] | 252 B | 204 B |
+| Active nullifier -> 2,008 B Merkle witness | Two-server live radix + Dense path retrieval | 34.45 ms | 22.29 ms | 0.141 ms | 0.00010 ms | 116.7 KB | 200.8 KB |
+| Tag over 1B documents, 0.01% match -> 100K encrypted results | Two-server exact-MPHF striped Dense XOR | 10,398.29 ms | 38.90 ms | 106.79 ms | 31.39 ms | 38.9 MB | 1.94 GB |
+| Shinzo live wallet subscription | Two-server Compact DPF | 0.00080 ms | 0.00010 ms | below timer resolution | below timer resolution[^timer] | 252 B | 204 B |
 
 [^timer]: Below the benchmark timer's useful resolution.
 
@@ -86,29 +125,25 @@ intersections.
 The unified benchmark also exercises the real RFC 9458 HPKE and Binary HTTP
 implementation at representative per-replica payload sizes. These measurements
 isolate origin-hiding cryptography and framing; they exclude PIR evaluation,
-TCP, TLS, relay latency and queues. A release-mode quick run on the development
-machine produced:
+TCP, TLS, relay latency and queues. Release-mode runs on the development
+machine produced representative values:
 
 | Per-replica payload | Padding | Request wire | Response wire | Client codec + crypto p50 | Gateway codec + crypto p50 |
 |---|---|---:|---:|---:|---:|
 | Compact-DPF representative: 320 B request, 126 B response | None | 489 B | 195 B | 0.133 ms | 0.092 ms |
 | Compact-DPF representative | Power of two | 567 B | 288 B | 0.120 ms | 0.089 ms |
 | Compact-DPF representative | Fixed 1 KiB/1 KiB | 1,079 B | 1,056 B | 0.127 ms | 0.101 ms |
-| Active-nullifier share: 541,241 B request, 35,816 B response | None | 541,412 B | 35,887 B | 0.423 ms | 0.357 ms |
-| Active-nullifier share | Power of two | 1,048,631 B | 65,568 B | 0.813 ms | 0.849 ms |
+| Active-nullifier share: 541,241 B request, 58,344 B response | None | 541,412 B | 58,415 B | 1.031 ms | 0.628 ms |
+| Active-nullifier share | Power of two | 1,048,631 B | 65,568 B | 1.788 ms | 1.164 ms |
 | 1B-tag share: 1,250 B request, 19,428,008 B response | None | 1,419 B | 19,428,079 B | 49.79 ms | 77.99 ms |
 | 1B-tag share | Power of two | 2,103 B | 33,554,464 B | 76.43 ms | 117.62 ms |
 
 Unpadded OHTTP adds approximately 55 request bytes and 32 response bytes beyond
-Binary HTTP. The active-nullifier transport row uses the full-scale 541 KB
-selector share: two gateways add about 0.71 ms aggregate, roughly 2% of the
-full-run 35.76 ms PIR work; total client codec/crypto adds about 0.85 ms to the
-24.58 ms PIR client work. For the 1B-tag case, two gateways add about 156 ms,
-roughly 1.2% of the full-run 13.30-second PIR traversal. Client codec/crypto
-adds about 100 ms of aggregate CPU to the roughly 45 ms PIR combine/decrypt
-work because it must authenticate two 19.4 MB encrypted OHTTP answers.
-Compact DPF is the opposite: OHTTP dwarfs its microsecond evaluator, but still
-costs only about a tenth of a millisecond per party before network latency.
+Binary HTTP. For active-nullifier and tag retrieval, PIR traversal and large
+answer authentication dominate the small HPKE setup. For Compact DPF, OHTTP
+dwarfs its microsecond evaluator but remains around a fraction of a millisecond
+per party before network latency. Consult the current JSON output for timing;
+the byte classes above are the stable deployment inputs.
 
 Power-of-two padding is not the default recommendation for large result rows:
 it inflated the 19.4 MB answer to 33.6 MB and increased gateway crypto time by
@@ -121,8 +156,14 @@ classes leak their respective size class.
 
 ### 1. Active-nullifier private retrieval
 
-The active Shieldd generation is represented as one immutable base plus small,
-authenticated delta levels. A private lookup has two fixed-schedule stages:
+The runnable endpoint uses the simplest complete result: a canonical nullifier
+maps directly to one supplied fixed 2,008-byte Shieldd-shaped witness. Dense
+XOR privately retrieves that padded row, and the client verifies it against the
+authenticated generation root. This avoids a second private document fetch.
+
+The separate active-generation research benchmark represents Shieldd state as
+one immutable base plus small authenticated delta levels. Its proposed private
+lookup has two fixed-schedule stages:
 
 1. privately retrieve the linked predecessor leaf from a radix layout;
 2. privately retrieve the sibling rows at every level of the quaternary Merkle
@@ -135,9 +176,18 @@ witness. The generation height and root are public, but the nullifier has
 information-theoretic target privacy while at least one required replica does
 not collude with the others.
 
-### 2. Exact-MPHF striped Dense XOR
+The base/delta engine is built, authenticated and benchmarked, but the default
+HTTP nullifier endpoint does not yet derive witnesses from it. Production can
+keep the direct witness projection when Shieldd exports witnesses cheaply, or
+wire the radix/path engine when storing every populated witness is too costly.
 
-A public exact minimal-perfect hash function maps every populated tag to a
+### 2. Encrypted-tag Dense XOR and the exact-MPHF scale layout
+
+The runnable endpoint uses the safe canonical digest-to-ordinal directory. It
+is deliberately straightforward and suitable for demos and moderate exported
+collections; it is not the billion-document directory implementation.
+
+In the scale benchmark, a public exact minimal-perfect hash function maps every populated tag to a
 compact ordinal, avoiding an overprovisioned hash table. The tag's results are
 stored in fixed continuation stripes. In the one-billion-document benchmark,
 the target has 100,000 matches, each containing five encrypted fields in one
@@ -169,6 +219,11 @@ Its event cost is proportional to the subscriptions being evaluated. Privacy
 is computational under the DPF construction and AES PRG, and the selected
 implementation is exactly two-party.
 
+The default HTTP surface proves registration and evaluation. The
+research-only `research defra-events` command proves that DefraDB's committed
+`EventName::Update` stream is a usable source. Durable event ingestion and
+notification delivery are integration work, not hidden inside the POC server.
+
 ## Adding a third server
 
 | Private process | Can add a third server? | Effect |
@@ -197,10 +252,10 @@ maximum 32,768-nullifier block. The rejected flat sidecar rewrites every one of
 
 | Active block update | Flat padded layout | Implemented immutable delta |
 |---|---:|---:|
-| Build/update time | 194.19 ms | 78.56 ms p50 |
-| Payload written/replica | 143,667,040 B | 11,865,610 B |
-| Amplification over raw 32-byte inserts | 137.01x | 11.32x |
-| Relative result | baseline | 12.11x fewer bytes; 2.47x faster construction |
+| Build/update time | 156.74 ms | 89.68 ms p50 |
+| Payload written/replica | 235,938,720 B | 11,859,028 B |
+| Amplification over raw 32-byte inserts | 225.01x | 11.31x |
+| Relative result | baseline | 19.90x fewer bytes; 1.75x faster construction |
 
 The implemented layout has:
 
@@ -224,10 +279,10 @@ an unauthenticated public HTTP endpoint.
 
 Strict query versus decoys:
 
-- Strict Dense baseline: 35.76 ms aggregate server, 24.58 ms client, 1,082,482 B
-  upload and 71,632 B download.
-- Decoys: 0.232 ms server and 200,800 B download.
-- Strict used 154.38x more server elapsed and saved 2.80x download.
+- Strict Dense baseline: 34.45 ms aggregate server, 22.29 ms client, 1,082,482 B
+  upload and 116,688 B download.
+- Decoys: 0.141 ms server and 200,800 B download.
+- Strict used 244.12x more server elapsed and saved 1.72x download.
 - The decoy client parses only the target witness and ignores the other 99.
 
 The remaining nullifier query optimization is a tree-specific path PIR. The
@@ -246,9 +301,9 @@ executes every logical scan over one resident 496.88 MB representative plane;
 it preserves XOR count and wire geometry without claiming deployed 194 GB
 memory behavior.
 
-- Strict Dense: 13.30 seconds server, 38.86 MB response.
-- 100 decoys: 69.60 ms server, 1.943 GB response.
-- Strict used 191.09x more server elapsed.
+- Strict Dense: 10.40 seconds server, 38.86 MB response.
+- 100 decoys: 106.79 ms server, 1.943 GB response.
+- Strict used 97.37x more server elapsed.
 - Decoys downloaded 50x more data.
 - Both decrypt only the target's 100,000 ciphertexts. The decoy client ignores
   9.9 million non-target ciphertexts without AEAD.
@@ -273,10 +328,10 @@ shares plus a fixed encrypted capsule, regardless of match or miss.
 
 The full run verified both a target event and a non-target event:
 
-- Compact DPF aggregate server p50: 0.000732 ms.
-- Client combine p50: 0.000040 ms.
+- Compact DPF aggregate server p50: 0.00080 ms.
+- Client combine p50: 0.00010 ms.
 - Fixed response: 252 bytes.
-- Indexed 100-wallet candidate lookup: 0.000021 ms and 204 bytes.
+- Indexed 100-wallet candidate lookup: below timer resolution and 204 bytes.
 
 The decoy index is faster but reveals all registered wallets and longitudinal
 activity. Compact DPF's absolute work is already below expected transport,

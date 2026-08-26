@@ -17,8 +17,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::active_generation::{
-    ActiveGeneration, ActiveGenerationImage, ActiveGenerationLimits, ActiveLeaf,
-    AuthenticatedGenerationManifest,
+    nullifier_order_key, ActiveGeneration, ActiveGenerationImage, ActiveGenerationLimits,
+    ActiveLeaf, AuthenticatedGenerationManifest,
 };
 use crate::dense;
 use crate::dense_batch::{BatchEvaluator, BatchKernel};
@@ -604,17 +604,17 @@ impl UseCaseStore {
                 if witness.len() != NULLIFIER_WITNESS_BYTES {
                     bail!("nullifier witness must use Shieldd's fixed 2008-byte schedule");
                 }
-                Ok((key, record.position, witness))
+                Ok((nullifier_order_key(&key)?, key, record.position, witness))
             })
             .collect::<Result<Vec<_>>>()?;
         decoded_nullifiers.sort_by_key(|record| record.0);
-        for (index, (key, position, witness)) in decoded_nullifiers.iter().enumerate() {
+        for (index, (_, key, position, witness)) in decoded_nullifiers.iter().enumerate() {
             let next = decoded_nullifiers.get(index + 1);
             leaves.push(ActiveLeaf {
                 value: *key,
                 position: *position,
-                next_index: next.map_or(0, |record| record.1),
-                next_value: next.map_or([0; 32], |record| record.0),
+                next_index: next.map_or(0, |record| record.2),
+                next_value: next.map_or([0; 32], |record| record.1),
                 sentinel: false,
                 terminal: next.is_none(),
             });
@@ -683,8 +683,8 @@ impl UseCaseStore {
                         .to_owned(),
                 ),
                 (
-                    "decoy-100".to_owned(),
-                    "candidate-set privacy only; server sees all candidates and longitudinal intersections"
+                    "decoy".to_owned(),
+                    "candidate-set privacy only; server sees every candidate and the configured cardinality, enabling longitudinal intersections"
                         .to_owned(),
                 ),
                 (
@@ -1037,11 +1037,13 @@ mod tests {
     #[test]
     fn immutable_store_round_trip_verifies_manifest_before_use() {
         let key = [5; 32];
+        let mut nullifier = [0; 32];
+        nullifier[0] = 2;
         let input = UseCaseBuildInput {
             generation_height: 1,
             generation_root_hex: hex::encode([1; 32]),
             nullifiers: vec![NullifierBuildRecord {
-                nullifier_hex: hex::encode([2; 32]),
+                nullifier_hex: hex::encode(nullifier),
                 position: 1,
                 witness_base64: STANDARD.encode(vec![3; NULLIFIER_WITNESS_BYTES]),
             }],

@@ -127,22 +127,24 @@ proofs.
 
 ## Serving admission is still an integration gate
 
-The benchmark code contains bounded Dense batch evaluation and deterministic
-portable-client admission calculations, but the legacy HTTP demo does not call
-them. A production endpoint must enforce authenticated limits before allocating
-or evaluating: selector/share bytes, batch size, table work, response bytes,
-transient memory, concurrent requests, subscription count, and live event
-batch. It must reject duplicate subscription identifiers instead of silently
-replacing them. These limits belong in the serving boundary, with queue dwell
-and rejection counters reported separately from cryptographic evaluation time.
+The selected HTTP/OHTTP service now enforces authenticated selector, batch,
+table, response, transient-memory, concurrency and subscription limits, and it
+rejects duplicate subscription identifiers. Clients and the OHTTP relay also
+stream responses through local byte ceilings. Historical research servers do
+not all share this boundary, and the POC still lacks principal-aware rate
+limits, bounded queue dwell, cancellation and production metrics. Preserve the
+selected service's fail-before-evaluation checks when extracting production
+crates, then add those operational controls at the serving edge.
 
 ## Minimal integration sequence
 
-1. Keep the current `tools/pir-poc` process and feed it deterministic exported
-   JSON/projection bytes from DefraDB.
-2. Add a read-only snapshot-export adapter using the embedded query API.
-3. Add an optional sidecar listener on `EventName::Update` for live compact-DPF
-   evaluation.
-4. Only after the table/protocol choice stabilizes, move stable manifest and
-   serving interfaces into dedicated crates. Do not move experimental layout
-   implementations into core Defra crates.
+1. Freeze this POC as the decision/evidence archive.
+2. Add a read-only snapshot-export adapter using the normal authorized embedded
+   query API; make its deterministic output digest the builder input.
+3. Replace JSON-loaded table images with a versioned, bounded binary artifact
+   that servers can memory-map and publish atomically.
+4. Add an optional sidecar listener on `EventName::Update` for live Compact-DPF
+   evaluation, using the existing research demonstration as the seam test.
+5. Extract only the stable manifest, client combine/verification and selected
+   serving APIs into small crates. Do not move experimental layouts into core
+   Defra crates.

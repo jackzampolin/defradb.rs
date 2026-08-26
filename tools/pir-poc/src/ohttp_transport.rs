@@ -30,11 +30,11 @@ use serde::{Deserialize, Serialize};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::dense;
-use crate::selected::{decode_table_answer, OrdinalDirectory, TableUseCase, UseCaseStore};
+use crate::selected::{decode_table_answer, TableUseCase, UseCaseStore};
 use crate::selected_http::{
-    DecoyAnswerResponse, DecoyClientResult, DecoyQueryRequest, PrivateAnswerResponse,
-    PrivateQueryRequest, SelectedService, ShinzoEventRequest, ShinzoEventResponse,
-    ShinzoRegistrationRequest, UseCaseMetadata,
+    bounded_response_bytes, collect_indexed, DecoyAnswerResponse, DecoyClientResult,
+    DecoyQueryRequest, PrivateAnswerResponse, PrivateQueryRequest, SelectedService,
+    ShinzoEventRequest, ShinzoEventResponse, ShinzoRegistrationRequest, UseCaseMetadata,
 };
 use crate::subscription::{combine_compact, compact_registration, NotificationShare};
 use crate::verification::{decrypt_projection_values, verify_nullifier_witness};
@@ -50,6 +50,7 @@ const RESPONSE_PADDING_NONE: &[u8] = b"none";
 const RESPONSE_PADDING_POWER_OF_TWO: &[u8] = b"power-of-two";
 const MAX_OHTTP_PLAINTEXT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_OHTTP_WIRE_BYTES: usize = MAX_OHTTP_PLAINTEXT_BYTES + 1_024;
+const MAX_OHTTP_KEY_DOCUMENT_BYTES: usize = 64 * 1024;
 const DEFAULT_REPLAY_CAPACITY: usize = 16_384;
 
 /// Network path used to reach an OHTTP relay.  OHTTP still protects the PIR
@@ -712,7 +713,9 @@ async fn relay_ohttp_keys(
         .await
         .map_err(bad_gateway)?;
     let status = response.status();
-    let body = response.bytes().await.map_err(bad_gateway)?.to_vec();
+    let body = bounded_response_bytes(response, MAX_OHTTP_KEY_DOCUMENT_BYTES, "OHTTP key document")
+        .await
+        .map_err(bad_gateway_error)?;
     Ok((
         status,
         [(header::CONTENT_TYPE.as_str(), "application/json")],
@@ -743,7 +746,10 @@ async fn post_ohttp_relay(
         .await
         .map_err(bad_gateway)?;
     let status = response.status();
-    let response_body = response.bytes().await.map_err(bad_gateway)?.to_vec();
+    let response_body =
+        bounded_response_bytes(response, MAX_OHTTP_WIRE_BYTES, "OHTTP gateway response")
+            .await
+            .map_err(bad_gateway_error)?;
     relay
         .metrics
         .0
@@ -761,6 +767,10 @@ fn internal_http_error(error: anyhow::Error) -> (StatusCode, String) {
 }
 
 fn bad_gateway(error: reqwest::Error) -> (StatusCode, String) {
+    (StatusCode::BAD_GATEWAY, error.to_string())
+}
+
+fn bad_gateway_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::BAD_GATEWAY, error.to_string())
 }
 
@@ -827,7 +837,10 @@ impl OhttpClient {
             .send()
             .await?
             .error_for_status()?;
-        let key_document: AuthenticatedOhttpKeyDocument = response.json().await?;
+        let key_document: AuthenticatedOhttpKeyDocument = serde_json::from_slice(
+            &bounded_response_bytes(response, MAX_OHTTP_KEY_DOCUMENT_BYTES, "OHTTP key document")
+                .await?,
+        )?;
         let config = key_document.verify(operator_key)?;
         Ok(Self {
             transport,
@@ -906,7 +919,8 @@ impl OhttpClient {
         {
             bail!("OHTTP relay returned an unexpected media type");
         }
-        let encrypted_response = response.bytes().await?;
+        let encrypted_response =
+            bounded_response_bytes(response, MAX_OHTTP_WIRE_BYTES, "OHTTP relay response").await?;
         let relay_round_trip_ms = elapsed_ms(relay_started.elapsed());
         let encrypted_response_bytes = encrypted_response.len();
         let decapsulate_started = Instant::now();
@@ -984,9 +998,9 @@ impl OhttpUseCaseClient {
             .map(|value| value.context("OHTTP replica did not connect"))
             .collect::<Result<Vec<_>>>()?;
         let expected_metadata = connected[0].1.clone();
-        validate_metadata(&expected_metadata, operator_key)?;
+        expected_metadata.validate(operator_key)?;
         for (client, candidate_metadata) in &connected {
-            validate_metadata(candidate_metadata, operator_key)?;
+            candidate_metadata.validate(operator_key)?;
             if candidate_metadata != &expected_metadata
                 || client.key_document.document.generation_body_digest_hex
                     != hex::encode(expected_metadata.manifest.manifest.body_digest)
@@ -1009,7 +1023,7 @@ impl OhttpUseCaseClient {
         use_case: TableUseCase,
         key: &[u8],
     ) -> Result<Option<Vec<Vec<u8>>>> {
-        let (manifest, directory, route) = table_parts(&self.metadata, use_case, false);
+        let (manifest, directory, route) = self.metadata.table_parts(use_case, false);
         let (ordinal, _) = directory.ordinal(key);
         let shares =
             dense::query_shares(ordinal, manifest.row_count, self.replicas.len(), &mut OsRng)?;
@@ -1098,7 +1112,7 @@ impl OhttpUseCaseClient {
             bail!("decoy set must contain the target exactly once");
         }
         let target_index = target_indices[0];
-        let (manifest, _, route) = table_parts(&self.metadata, use_case, true);
+        let (manifest, _, route) = self.metadata.table_parts(use_case, true);
         let digest = hex::encode(self.metadata.manifest.manifest.body_digest);
         let response = self.replicas[0]
             .post_json::<_, DecoyAnswerResponse>(
@@ -1182,77 +1196,6 @@ impl OhttpUseCaseClient {
         }
         combine_compact(&shares)
     }
-}
-
-fn validate_metadata(metadata: &UseCaseMetadata, operator_key: &[u8; 32]) -> Result<()> {
-    let limits = &metadata.manifest.manifest.limits;
-    metadata.manifest.verify(operator_key, limits)?;
-    metadata
-        .nullifier_directory
-        .validate(limits.max_client_metadata_bytes)?;
-    metadata
-        .encrypted_tag_directory
-        .validate(limits.max_client_metadata_bytes)?;
-    if metadata.nullifier_directory.digest
-        != metadata.manifest.manifest.nullifier_table.directory_digest
-        || metadata.encrypted_tag_directory.digest
-            != metadata
-                .manifest
-                .manifest
-                .encrypted_tag_table
-                .directory_digest
-    {
-        bail!("OHTTP metadata is not bound to the selected manifest");
-    }
-    Ok(())
-}
-
-fn table_parts(
-    metadata: &UseCaseMetadata,
-    use_case: TableUseCase,
-    decoy: bool,
-) -> (
-    &crate::selected::PrivateTableManifest,
-    &OrdinalDirectory,
-    &'static str,
-) {
-    match (use_case, decoy) {
-        (TableUseCase::Nullifier, false) => (
-            &metadata.manifest.manifest.nullifier_table,
-            &metadata.nullifier_directory,
-            "/v1/nullifier/private",
-        ),
-        (TableUseCase::Nullifier, true) => (
-            &metadata.manifest.manifest.nullifier_table,
-            &metadata.nullifier_directory,
-            "/v1/nullifier/decoy",
-        ),
-        (TableUseCase::EncryptedTag, false) => (
-            &metadata.manifest.manifest.encrypted_tag_table,
-            &metadata.encrypted_tag_directory,
-            "/v1/tag/private",
-        ),
-        (TableUseCase::EncryptedTag, true) => (
-            &metadata.manifest.manifest.encrypted_tag_table,
-            &metadata.encrypted_tag_directory,
-            "/v1/tag/decoy",
-        ),
-    }
-}
-
-async fn collect_indexed<T: Send + 'static>(
-    tasks: &mut JoinSet<Result<(usize, T)>>,
-    count: usize,
-) -> Result<Vec<T>> {
-    let mut values = (0..count).map(|_| None).collect::<Vec<_>>();
-    while let Some(result) = tasks.join_next().await {
-        let (index, value) = result.context("OHTTP replica request task failed")??;
-        values[index] = Some(value);
-    }
-    values
-        .into_iter()
-        .map(|value| value.context("OHTTP replica returned no value"))
-        .collect()
 }
 
 fn elapsed_ms(duration: Duration) -> f64 {
@@ -1347,7 +1290,7 @@ mod tests {
             nullifiers: (1..=128)
                 .map(|value| {
                     let mut nullifier = [0; 32];
-                    nullifier[31] = value;
+                    nullifier[0] = value;
                     NullifierBuildRecord {
                         nullifier_hex: hex::encode(nullifier),
                         position: u64::from(value),
@@ -1481,7 +1424,7 @@ mod tests {
         .unwrap();
 
         let mut nullifier = [0; 32];
-        nullifier[31] = 31;
+        nullifier[0] = 31;
         let witness = client
             .strict_lookup(TableUseCase::Nullifier, &nullifier)
             .await

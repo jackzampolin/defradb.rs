@@ -7,8 +7,9 @@ DefraDB query execution or storage:
 2. an encrypted tag projection with a fixed result class;
 3. a Shinzo wallet-event subscription using two-party Compact DPF.
 
-Strict Dense XOR and the 100-decoy baseline share the same immutable serving
-rows. The decoy client decodes only its known target row and drops the other 99.
+Strict Dense XOR and the visible-candidate baseline share the same immutable
+serving rows. The benchmark uses 100 candidates; the decoy client decodes only
+its known target row and drops the others.
 The complete protocol explanation, client/server benchmark table, privacy
 comparison and two-versus-three-server discussion live in
 [USE_CASES.md](USE_CASES.md). It is the single authoritative design document;
@@ -105,8 +106,8 @@ cargo run -p pir-poc --release -- query strict tag <tag-base64> \
   http://127.0.0.1:8080 http://127.0.0.1:8081
 ```
 
-Candidate-set query using one server and a JSON array containing exactly 100
-encoded candidate keys:
+Candidate-set query using one server and a JSON array containing the target
+exactly once. The default authenticated limit is 100 encoded candidate keys:
 
 ```bash
 cargo run -p pir-poc --release -- query decoy tag <target-base64> \
@@ -136,6 +137,8 @@ cargo run -p pir-poc --release -- query shinzo 1234 1234 \
   or internally inconsistent generations.
 - Query, response, batch, metadata, table, transient-memory, in-flight and
   subscription limits are enforced before expensive evaluation/allocation.
+- HTTP and OHTTP clients and relays stream responses through local size limits;
+  they do not trust `Content-Length` as their only memory bound.
 - Default query APIs recompute Shieldd's 20-level, 4-ary Poseidon path against
   the authenticated root and authenticate tag projections with AES-256-GCM.
   AEAD associated data binds generation height/root, tag and result slot.

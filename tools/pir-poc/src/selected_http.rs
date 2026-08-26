@@ -40,6 +40,58 @@ pub struct UseCaseMetadata {
     pub encrypted_tag_directory: OrdinalDirectory,
 }
 
+impl UseCaseMetadata {
+    pub(crate) fn validate(&self, operator_key: &[u8; 32]) -> Result<()> {
+        let limits = &self.manifest.manifest.limits;
+        self.manifest.verify(operator_key, limits)?;
+        self.nullifier_directory
+            .validate(limits.max_client_metadata_bytes)?;
+        self.encrypted_tag_directory
+            .validate(limits.max_client_metadata_bytes)?;
+        if self.nullifier_directory.digest
+            != self.manifest.manifest.nullifier_table.directory_digest
+            || self.encrypted_tag_directory.digest
+                != self.manifest.manifest.encrypted_tag_table.directory_digest
+        {
+            bail!("selected POC metadata is not bound to its manifest");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn table_parts(
+        &self,
+        use_case: TableUseCase,
+        decoy: bool,
+    ) -> (
+        &crate::selected::PrivateTableManifest,
+        &OrdinalDirectory,
+        &'static str,
+    ) {
+        match (use_case, decoy) {
+            (TableUseCase::Nullifier, false) => (
+                &self.manifest.manifest.nullifier_table,
+                &self.nullifier_directory,
+                "/v1/nullifier/private",
+            ),
+            (TableUseCase::Nullifier, true) => (
+                &self.manifest.manifest.nullifier_table,
+                &self.nullifier_directory,
+                "/v1/nullifier/decoy",
+            ),
+            (TableUseCase::EncryptedTag, false) => (
+                &self.manifest.manifest.encrypted_tag_table,
+                &self.encrypted_tag_directory,
+                "/v1/tag/private",
+            ),
+            (TableUseCase::EncryptedTag, true) => (
+                &self.manifest.manifest.encrypted_tag_table,
+                &self.encrypted_tag_directory,
+                "/v1/tag/decoy",
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PrivateQueryRequest {
     pub body_digest_hex: String,
@@ -476,21 +528,7 @@ impl UseCaseClient {
                 bail!("selected POC replicas advertise different generations");
             }
         }
-        let limits = &first.manifest.manifest.limits;
-        first.manifest.verify(operator_key, limits)?;
-        first
-            .nullifier_directory
-            .validate(limits.max_client_metadata_bytes)?;
-        first
-            .encrypted_tag_directory
-            .validate(limits.max_client_metadata_bytes)?;
-        if first.nullifier_directory.digest
-            != first.manifest.manifest.nullifier_table.directory_digest
-            || first.encrypted_tag_directory.digest
-                != first.manifest.manifest.encrypted_tag_table.directory_digest
-        {
-            bail!("selected POC client metadata is not bound to its manifest");
-        }
+        first.validate(operator_key)?;
         Ok(Self {
             http,
             servers: servers.into(),
@@ -507,7 +545,7 @@ impl UseCaseClient {
         use_case: TableUseCase,
         key: &[u8],
     ) -> Result<Option<Vec<Vec<u8>>>> {
-        let (manifest, directory, route) = self.table_parts(use_case, false);
+        let (manifest, directory, route) = self.metadata.table_parts(use_case, false);
         let (ordinal, _) = directory.ordinal(key);
         let shares =
             dense::query_shares(ordinal, manifest.row_count, self.servers.len(), &mut OsRng)?;
@@ -546,7 +584,7 @@ impl UseCaseClient {
             answers.push(STANDARD.decode(&response.answer_shares[0])?);
         }
         let row = dense::combine(&answers)?;
-        decode_table_row(manifest, &row, key)
+        decode_table_answer(manifest, &row, key)
     }
 
     /// Reconstructs and verifies a Shieldd indexed-tree witness against the
@@ -613,7 +651,7 @@ impl UseCaseClient {
             bail!("decoy set must contain the target exactly once");
         }
         let target_index = target_indices[0];
-        let (manifest, _, route) = self.table_parts(use_case, true);
+        let (manifest, _, route) = self.metadata.table_parts(use_case, true);
         let body_digest_hex = hex::encode(self.metadata.manifest.manifest.body_digest);
         let request = DecoyQueryRequest {
             body_digest_hex: body_digest_hex.clone(),
@@ -640,7 +678,7 @@ impl UseCaseClient {
             bail!("selected POC server returned a mismatched decoy answer");
         }
         let target_row = STANDARD.decode(&response.rows[target_index])?;
-        let values = decode_table_row(manifest, &target_row, target)?;
+        let values = decode_table_answer(manifest, &target_row, target)?;
         Ok(DecoyClientResult {
             values,
             returned_rows: response.rows.len(),
@@ -707,47 +745,6 @@ impl UseCaseClient {
         }
         combine_compact(&shares)
     }
-
-    fn table_parts(
-        &self,
-        use_case: TableUseCase,
-        decoy: bool,
-    ) -> (
-        &crate::selected::PrivateTableManifest,
-        &OrdinalDirectory,
-        &'static str,
-    ) {
-        match (use_case, decoy) {
-            (TableUseCase::Nullifier, false) => (
-                &self.metadata.manifest.manifest.nullifier_table,
-                &self.metadata.nullifier_directory,
-                "/v1/nullifier/private",
-            ),
-            (TableUseCase::Nullifier, true) => (
-                &self.metadata.manifest.manifest.nullifier_table,
-                &self.metadata.nullifier_directory,
-                "/v1/nullifier/decoy",
-            ),
-            (TableUseCase::EncryptedTag, false) => (
-                &self.metadata.manifest.manifest.encrypted_tag_table,
-                &self.metadata.encrypted_tag_directory,
-                "/v1/tag/private",
-            ),
-            (TableUseCase::EncryptedTag, true) => (
-                &self.metadata.manifest.manifest.encrypted_tag_table,
-                &self.metadata.encrypted_tag_directory,
-                "/v1/tag/decoy",
-            ),
-        }
-    }
-}
-
-fn decode_table_row(
-    manifest: &crate::selected::PrivateTableManifest,
-    row: &[u8],
-    key: &[u8],
-) -> Result<Option<Vec<Vec<u8>>>> {
-    decode_table_answer(manifest, row, key)
 }
 
 async fn fetch_all_metadata(
@@ -767,18 +764,18 @@ async fn fetch_all_metadata(
     collect_indexed(&mut tasks, servers.len()).await
 }
 
-async fn collect_indexed<T: Send + 'static>(
+pub(crate) async fn collect_indexed<T: Send + 'static>(
     tasks: &mut JoinSet<Result<(usize, T)>>,
     count: usize,
 ) -> Result<Vec<T>> {
     let mut values = (0..count).map(|_| None).collect::<Vec<_>>();
     while let Some(result) = tasks.join_next().await {
-        let (index, value) = result.context("selected POC request task failed")??;
+        let (index, value) = result.context("selected POC replica request task failed")??;
         values[index] = Some(value);
     }
     values
         .into_iter()
-        .map(|value| value.context("selected POC request returned no value"))
+        .map(|value| value.context("selected POC replica returned no value"))
         .collect()
 }
 
@@ -793,17 +790,34 @@ async fn bounded_json<T: DeserializeOwned>(
     response: reqwest::Response,
     maximum_bytes: usize,
 ) -> Result<T> {
+    let bytes =
+        bounded_response_bytes(response, maximum_bytes, "selected POC HTTP response").await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub(crate) async fn bounded_response_bytes(
+    mut response: reqwest::Response,
+    maximum_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|length| length > maximum_bytes as u64)
     {
-        bail!("selected POC HTTP response exceeds local admission limit");
+        bail!("{label} exceeds local admission limit");
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > maximum_bytes {
-        bail!("selected POC HTTP response exceeds local admission limit");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let next_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .context("HTTP response length overflow")?;
+        if next_len > maximum_bytes {
+            bail!("{label} exceeds local admission limit");
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -823,7 +837,7 @@ mod tests {
             nullifiers: (1..=100)
                 .map(|value| {
                     let mut key = [0; 32];
-                    key[31] = value;
+                    key[0] = value;
                     NullifierBuildRecord {
                         nullifier_hex: hex::encode(key),
                         position: u64::from(value),
@@ -855,7 +869,7 @@ mod tests {
         let client = UseCaseClient::connect(&urls, &KEY).await.unwrap();
 
         let mut nullifier = [0; 32];
-        nullifier[31] = 7;
+        nullifier[0] = 7;
         let strict = client
             .strict_lookup(TableUseCase::Nullifier, &nullifier)
             .await

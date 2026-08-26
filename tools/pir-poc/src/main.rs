@@ -156,7 +156,7 @@ async fn decoy_query(args: &[String]) -> Result<()> {
         (_, None) => None,
     };
     print_json(&LookupOutput {
-        mode: "decoy-100",
+        mode: "decoy",
         present: verified_values.is_some(),
         values_base64: verified_values
             .unwrap_or_default()
@@ -237,6 +237,7 @@ async fn research(args: &[String]) -> Result<()> {
         Some("billion-tag") => print_json(&pir_poc::benchmark::run_billion_tag(profile)?),
         Some("cold") => print_json(&pir_poc::benchmark::run_cold(profile)?),
         Some("dense-batch") => print_json(&pir_poc::benchmark::run_dense_batch(profile)?),
+        Some("defra-events") => print_json(&pir_poc::subscription::demo().await?),
         Some("end-to-end") => print_json(&pir_poc::benchmark::run_end_to_end(profile)?),
         Some("endpoints") => print_json(&pir_poc::benchmark::run_endpoints(profile).await?),
         Some("fuse") => print_json(&pir_poc::benchmark::run_fuse(profile)?),

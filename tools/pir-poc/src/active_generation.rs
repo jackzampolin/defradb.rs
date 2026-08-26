@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{bail, Context, Result};
+use poseidon377::Fq;
 use serde::{Deserialize, Serialize};
 
 pub const TREE_DEPTH: usize = 20;
@@ -159,7 +160,7 @@ impl GenerationDelta {
         leaves: Vec<ActiveLeaf>,
         nodes: Vec<ChangedNode>,
     ) -> Result<Self> {
-        let leaves = normalize_leaves(leaves);
+        let leaves = normalize_leaves(leaves)?;
         let nodes = normalize_nodes(nodes)?;
         let digest = delta_digest(height, &root, &leaves, &nodes);
         Ok(Self {
@@ -238,7 +239,7 @@ impl ActiveGeneration {
         limits: ActiveGenerationLimits,
     ) -> Result<Self> {
         limits.validate()?;
-        let base_leaves = normalize_leaves(leaves);
+        let base_leaves = normalize_leaves(leaves)?;
         validate_sentinel(&base_leaves)?;
         let base_nodes = nodes_to_map(normalize_nodes(nodes)?)?;
         let levels = vec![None; limits.max_delta_levels];
@@ -298,7 +299,7 @@ impl ActiveGeneration {
             }
         }
         if !incoming.leaves.is_empty() || !incoming.nodes.is_empty() {
-            base_leaves = merge_leaf_sets(&base_leaves, &incoming.leaves);
+            base_leaves = merge_leaf_sets(&base_leaves, &incoming.leaves)?;
             for node in &incoming.nodes {
                 base_nodes.insert(node.coordinate, node.hash);
             }
@@ -335,13 +336,14 @@ impl ActiveGeneration {
 
     pub fn lookup_at_or_before(&self, target: &[u8; 32]) -> Result<FixedScheduleLookup> {
         let mut candidate =
-            predecessor_in(&self.base_leaves, target, true).map(|leaf| (leaf, usize::MAX));
+            predecessor_in(&self.base_leaves, target, true)?.map(|leaf| (leaf, usize::MAX));
         for (level_index, level) in self.levels.iter().enumerate() {
-            let level_candidate = level
-                .as_ref()
-                .and_then(|delta| predecessor_in(&delta.leaves, target, true));
+            let level_candidate = match level {
+                Some(delta) => predecessor_in(&delta.leaves, target, true)?,
+                None => None,
+            };
             candidate =
-                select_candidate(candidate, level_candidate.map(|leaf| (leaf, level_index)));
+                select_candidate(candidate, level_candidate.map(|leaf| (leaf, level_index)))?;
         }
         let leaf = candidate
             .map(|candidate| candidate.0)
@@ -355,13 +357,14 @@ impl ActiveGeneration {
 
     pub fn strict_predecessor(&self, target: &[u8; 32]) -> Result<FixedScheduleLookup> {
         let mut candidate =
-            predecessor_in(&self.base_leaves, target, false).map(|leaf| (leaf, usize::MAX));
+            predecessor_in(&self.base_leaves, target, false)?.map(|leaf| (leaf, usize::MAX));
         for (level_index, level) in self.levels.iter().enumerate() {
-            let level_candidate = level
-                .as_ref()
-                .and_then(|delta| predecessor_in(&delta.leaves, target, false));
+            let level_candidate = match level {
+                Some(delta) => predecessor_in(&delta.leaves, target, false)?,
+                None => None,
+            };
             candidate =
-                select_candidate(candidate, level_candidate.map(|leaf| (leaf, level_index)));
+                select_candidate(candidate, level_candidate.map(|leaf| (leaf, level_index)))?;
         }
         Ok(FixedScheduleLookup {
             leaf: candidate
@@ -493,7 +496,7 @@ impl ActiveGeneration {
             };
             levels.push(delta);
         }
-        let base_leaves = normalize_leaves(image.base_leaves);
+        let base_leaves = normalize_leaves(image.base_leaves)?;
         validate_sentinel(&base_leaves)?;
         let base_nodes = nodes_to_map(normalize_nodes(image.base_nodes)?)?;
         let rebuilt = Self::from_parts(
@@ -607,12 +610,24 @@ impl ActiveGenerationPublisher {
     }
 }
 
-fn normalize_leaves(leaves: Vec<ActiveLeaf>) -> Vec<ActiveLeaf> {
+/// Returns the same fixed-width big-endian ordering key used by Shieldd's
+/// `FqOrdKey`. Nullifiers are encoded little-endian on the wire, so comparing
+/// their encoded bytes directly is not field order.
+pub(crate) fn nullifier_order_key(value: &[u8; 32]) -> Result<[u8; 32]> {
+    let field = Fq::from_bytes_checked(value).map_err(|_| {
+        anyhow::anyhow!("active-generation nullifier is not a canonical field element")
+    })?;
+    let mut key = field.to_bytes();
+    key.reverse();
+    Ok(key)
+}
+
+fn normalize_leaves(leaves: Vec<ActiveLeaf>) -> Result<Vec<ActiveLeaf>> {
     let mut by_value = BTreeMap::new();
     for leaf in leaves {
-        by_value.insert(leaf.value, leaf);
+        by_value.insert(nullifier_order_key(&leaf.value)?, leaf);
     }
-    by_value.into_values().collect()
+    Ok(by_value.into_values().collect())
 }
 
 fn normalize_nodes(mut nodes: Vec<ChangedNode>) -> Result<Vec<ChangedNode>> {
@@ -650,7 +665,7 @@ fn validate_sentinel(leaves: &[ActiveLeaf]) -> Result<()> {
 }
 
 fn merge_deltas(older: &GenerationDelta, newer: &GenerationDelta) -> Result<GenerationDelta> {
-    let leaves = merge_leaf_sets(&older.leaves, &newer.leaves);
+    let leaves = merge_leaf_sets(&older.leaves, &newer.leaves)?;
     let mut nodes = older
         .nodes
         .iter()
@@ -667,43 +682,51 @@ fn merge_deltas(older: &GenerationDelta, newer: &GenerationDelta) -> Result<Gene
     )
 }
 
-fn merge_leaf_sets(older: &[ActiveLeaf], newer: &[ActiveLeaf]) -> Vec<ActiveLeaf> {
+fn merge_leaf_sets(older: &[ActiveLeaf], newer: &[ActiveLeaf]) -> Result<Vec<ActiveLeaf>> {
     let mut leaves = older
         .iter()
-        .map(|leaf| (leaf.value, *leaf))
-        .collect::<BTreeMap<_, _>>();
+        .map(|leaf| Ok((nullifier_order_key(&leaf.value)?, *leaf)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
     for leaf in newer {
-        leaves.insert(leaf.value, *leaf);
+        leaves.insert(nullifier_order_key(&leaf.value)?, *leaf);
     }
-    leaves.into_values().collect()
+    Ok(leaves.into_values().collect())
 }
 
 fn predecessor_in(
     leaves: &[ActiveLeaf],
     target: &[u8; 32],
     include_equal: bool,
-) -> Option<ActiveLeaf> {
-    let index = match leaves.binary_search_by_key(target, |leaf| leaf.value) {
-        Ok(index) if include_equal => index + 1,
-        Ok(index) | Err(index) => index,
-    };
-    index.checked_sub(1).map(|index| leaves[index])
+) -> Result<Option<ActiveLeaf>> {
+    let target = nullifier_order_key(target)?;
+    let mut left = 0;
+    let mut right = leaves.len();
+    while left < right {
+        let middle = left + (right - left) / 2;
+        let candidate = nullifier_order_key(&leaves[middle].value)?;
+        if candidate < target || (include_equal && candidate == target) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    Ok(left.checked_sub(1).map(|index| leaves[index]))
 }
 
 fn select_candidate(
     left: Option<(ActiveLeaf, usize)>,
     right: Option<(ActiveLeaf, usize)>,
-) -> Option<(ActiveLeaf, usize)> {
-    match (left, right) {
+) -> Result<Option<(ActiveLeaf, usize)>> {
+    Ok(match (left, right) {
         (None, candidate) | (candidate, None) => candidate,
         (Some(left), Some(right))
-            if right.0.value > left.0.value
+            if nullifier_order_key(&right.0.value)? > nullifier_order_key(&left.0.value)?
                 || (right.0.value == left.0.value && right.1 < left.1) =>
         {
             Some(right)
         }
         (Some(left), Some(_)) => Some(left),
-    }
+    })
 }
 
 fn payload_bytes(leaves: usize, nodes: usize) -> Result<usize> {
@@ -801,19 +824,17 @@ mod tests {
 
     const KEY: [u8; 32] = [7; 32];
 
-    fn value(last: u8) -> [u8; 32] {
-        let mut value = [0; 32];
-        value[31] = last;
-        value
+    fn value(value: u64) -> [u8; 32] {
+        Fq::from(value).to_bytes()
     }
 
-    fn leaf(last: u8, position: u64) -> ActiveLeaf {
+    fn leaf(value: u64, position: u64) -> ActiveLeaf {
         ActiveLeaf {
-            value: value(last),
+            value: self::value(value),
             position,
             next_index: 0,
             next_value: [0; 32],
-            sentinel: last == 0,
+            sentinel: value == 0,
             terminal: false,
         }
     }
@@ -959,5 +980,34 @@ mod tests {
                 &KEY
             )
             .is_err());
+    }
+
+    #[test]
+    fn predecessor_uses_shieldd_field_order_not_little_endian_wire_order() {
+        let generation = ActiveGeneration::build_base(
+            1,
+            [1; 32],
+            vec![leaf(0, 0), leaf(1, 1), leaf(255, 2), leaf(256, 3)],
+            vec![],
+            ActiveGenerationLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            generation
+                .strict_predecessor(&value(256))
+                .unwrap()
+                .leaf
+                .value,
+            value(255)
+        );
+        assert_eq!(
+            generation
+                .lookup_at_or_before(&value(256))
+                .unwrap()
+                .leaf
+                .value,
+            value(256)
+        );
     }
 }

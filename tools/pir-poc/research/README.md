@@ -17,6 +17,7 @@ Available research benchmark names:
 - `active-nullifier`
 - `billion-tag`
 - `cold`
+- `defra-events` (executable DefraDB `EventName::Update` adapter demonstration)
 - `dense-batch`
 - `end-to-end`
 - `endpoints`
@@ -39,3 +40,8 @@ Primary evidence ledgers:
 
 Research results may use different privacy, result-shape, state and threat-model
 assumptions. Do not publish direct speed ratios unless those scopes match.
+
+`research defra-events` listens to updates from an embedded DefraDB node,
+evaluates a Compact-DPF subscription, seals a snapshot, and privately retrieves
+the matching value. It proves the intended integration seam; it is not a
+production listener and remains outside the default sidecar binary.

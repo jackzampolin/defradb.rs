@@ -102,10 +102,12 @@ the workspace's Cargo.lock v4. The exercised build matrix on this commit is:
 | `aarch64-linux-android` | Unavailable | Target and Android NDK are not installed |
 | `aarch64-apple-ios` | Unavailable | Requires a macOS/Xcode runner; unavailable on this host |
 
-The WASI and Windows failures expose the current architectural problem:
-`pir-poc` is a monolithic crate with client, server, DefraDB node, HTTP, Rayon,
-and native storage dependencies. Neither failure is evidence that the selected
-client-side PIR algebra is intrinsically incompatible with the target.
+The WASI and Windows results above came from the research/portable-gate build,
+which pulls historical native index code and the optional DefraDB integration
+demo. The default POC no longer depends on DefraDB crates, but it still combines
+portable client algebra, HTTP/OHTTP clients, server evaluators and Rayon in one
+crate. Neither failure is evidence that the selected client-side PIR algebra is
+intrinsically incompatible with the target.
 
 The production fix is a client-only crate containing authenticated manifest and
 MPHF loading, Dense share generation/combine, generation-bound SinglePass state,
