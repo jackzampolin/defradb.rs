@@ -1,5 +1,6 @@
 mod active_nullifier;
 mod billion_tag;
+pub mod cross_language;
 mod ohttp;
 mod use_cases;
 

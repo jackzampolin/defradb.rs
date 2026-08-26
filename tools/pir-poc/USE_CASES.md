@@ -120,6 +120,83 @@ Strict/decoy speed ratios are not security-equivalent comparisons. Decoys leak
 the candidate set, result cardinality, popularity and longitudinal
 intersections.
 
+### Go versus Rust Dense XOR kernel
+
+The neighboring Go DefraDB repository contains an isolated port under
+`tools/pir-poc`; it changes no database or API code. The Rust comparison entry
+point is:
+
+```bash
+cargo run -p pir-poc --release --example cross-language-dense -- full
+```
+
+The matching Go command is:
+
+```bash
+go build -trimpath -o pir-poc-bench ./tools/pir-poc
+./pir-poc-bench -profile full
+```
+
+Both executables generate byte-identical deterministic tables, confirmed by an
+FNV-1a checksum, then use fresh cryptographic randomness for every Dense XOR
+selector. They use the same targets, warmups, sample counts and validation.
+The public and decoy paths carry 8-byte ordinals and deliberately exclude tag
+hashing, directory construction and database lookup: this section compares
+retrieval kernels, not the complete selected-use-case endpoints above.
+Client phases run for at least 10 ms and server paths for at least 50 ms before
+being divided into per-operation time. `server_total` is aggregate work: the
+sum of sequential evaluation across replicas, not concurrent wall time.
+
+These are medians across three alternating full run pairs on 2026-08-25. Each
+full run itself reports the median of 11 samples for the single-query workloads
+and seven for batch-16. The host was Windows 11, Ryzen 7 3700X, 16 GB RAM, Rust
+1.94.0/LLVM 21.1.8 and Go 1.25.9 with `GOMAXPROCS=1`. Both kernels are
+single-threaded. Compilation, table construction, HTTP and storage are
+excluded.
+
+| Workload | Path | Rust server work | Go server work | Go delta |
+|---|---|---:|---:|---:|
+| 1,048,576 x 96 B, batch 1 | Public/direct | 0.083 us | 0.072 us | -13.3% |
+| | 100 visible candidates | 0.520 us | 1.766 us | +239.6% |
+| | Dense XOR, 2 replicas | 15.04 ms | 19.49 ms | +29.6% |
+| | Dense XOR, 3 replicas | 22.21 ms | 29.50 ms | +32.9% |
+| 65,536 x 2,008 B, batch 1 | Public/direct | 0.104 us | 0.374 us | +259.6% |
+| | 100 visible candidates | 4.893 us | 29.777 us | +508.6% |
+| | Dense XOR, 2 replicas | 12.55 ms | 15.90 ms | +26.7% |
+| | Dense XOR, 3 replicas | 18.40 ms | 23.38 ms | +27.1% |
+| 262,144 x 96 B, batch 16 | Public/direct | 0.885 us | 0.697 us | -21.2% |
+| | 100 visible candidates | 11.224 us | 31.647 us | +182.0% |
+| | Dense XOR, 2 replicas | 58.74 ms | 78.60 ms | +33.8% |
+| | Dense XOR, 3 replicas | 89.29 ms | 117.38 ms | +31.5% |
+
+The direct and decoy percentages magnify sub-32-us allocator/copy differences;
+their absolute work remains negligible beside Dense XOR and they do not offer
+equivalent privacy. Dense XOR is the decision-relevant result: Rust used about
+21-25% less server time, or equivalently Go was 27-34% slower. A third replica
+adds about 50% total server work and wire bytes in both languages, as expected.
+
+| Workload | Replicas | Rust client query | Go client query | Go delta | Rust finish | Go finish |
+|---|---:|---:|---:|---:|---:|---:|
+| 1,048,576 x 96 B, batch 1 | 2 | 0.0584 ms | 0.0754 ms | +29.2% | 0.000094 ms | 0.000104 ms |
+| | 3 | 0.1066 ms | 0.1048 ms | -1.7% | 0.000096 ms | 0.000116 ms |
+| 65,536 x 2,008 B, batch 1 | 2 | 0.00232 ms | 0.00490 ms | +111.1% | 0.000217 ms | 0.000487 ms |
+| | 3 | 0.00443 ms | 0.00825 ms | +86.5% | 0.000264 ms | 0.000498 ms |
+| 262,144 x 96 B, batch 16 | 2 | 0.1411 ms | 0.2807 ms | +99.0% | 0.00147 ms | 0.00165 ms |
+| | 3 | 0.5005 ms | 0.5087 ms | +1.6% | 0.00151 ms | 0.00202 ms |
+
+Client percentages are less stable because the operations are tiny, but every
+measured client phase is below 0.51 ms. Language choice therefore does not
+change the protocol decision: total server evaluation remains the bottleneck.
+If minimizing that work is paramount, retain the Rust serving kernel behind
+the existing sidecar boundary. The native Go port is viable when operational
+integration is worth a measured 27-34% Dense server tax; a production Go path
+should next evaluate an inlined SIMD/assembly XOR kernel and shared-row batch
+traversal before accepting that tax.
+
+Wire geometry is identical: the locator workload uploads/downloads 256 KiB/192
+B with two replicas and 384 KiB/288 B with three; witness uses 16 KiB/4,016 B
+and 24 KiB/6,024 B; batch-16 uses 1 MiB/3,072 B and 1.5 MiB/4,608 B.
+
 ### OHTTP transport benchmark
 
 The unified benchmark also exercises the real RFC 9458 HPKE and Binary HTTP
