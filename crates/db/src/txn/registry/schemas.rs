@@ -149,6 +149,12 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
+        let existing = self.db.get_all_collection_versions().await?;
+        schema::definition_validation::validate_new_collections_with_existing(
+            &collections,
+            &existing,
+        )
+        .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
 
         let mut finalized = Vec::new();
         for collection in collections {

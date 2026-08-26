@@ -102,6 +102,36 @@ async fn test_begin_readwrite_transaction() {
 }
 
 #[tokio::test]
+async fn add_schema_in_txn_rejects_an_unpaired_relation() {
+    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let registry = DbTransactionRegistry::new(db);
+    let txn_id = registry.begin(false).await.unwrap();
+
+    let error = registry
+        .add_schema_in_txn(
+            txn_id.as_str(),
+            r#"
+                type User {
+                    posts: [Post] @relation(name: "user_posts")
+                }
+
+                type Post {
+                    title: String
+                }
+            "#,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("relation missing field. Object: Post, RelationName: user_posts"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn test_transaction_id_matches() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);

@@ -10,7 +10,7 @@ mod update_validators;
 use global_validators::*;
 use update_validators::*;
 
-use crate::CollectionVersion;
+use crate::{CollectionVersion, FieldKind};
 use std::collections::HashMap;
 
 /// Snapshot of all collection versions for validation.
@@ -42,6 +42,34 @@ impl DefinitionState {
             active_by_collection_id,
         }
     }
+
+    fn collection_for_kind<'a>(
+        &'a self,
+        host: &'a CollectionVersion,
+        kind: &FieldKind,
+    ) -> Option<&'a CollectionVersion> {
+        match kind {
+            FieldKind::Named { name, .. } => self
+                .active_by_name
+                .get(name)
+                .or_else(|| self.collections.iter().find(|col| col.name == *name)),
+            FieldKind::Relation { collection_id, .. } => self
+                .active_by_collection_id
+                .get(collection_id)
+                .or_else(|| self.collections_by_id.get(collection_id)),
+            FieldKind::SelfRef { relative_id, .. } if relative_id.is_empty() => Some(host),
+            FieldKind::SelfRef { relative_id, .. } => {
+                let host_set = host.collection_set.as_ref()?;
+                self.collections.iter().find(|col| {
+                    col.collection_set.as_ref().is_some_and(|set| {
+                        set.collection_set_id == host_set.collection_set_id
+                            && set.relative_id.to_string() == *relative_id
+                    })
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 type Validator = fn(new_state: &DefinitionState, old_state: &DefinitionState) -> Vec<String>;
@@ -68,6 +96,10 @@ const UPDATE_VALIDATORS: &[Validator] = &[
 /// Validators that run on both create and update.
 const GLOBAL_VALIDATORS: &[Validator] = &[
     validate_collection_name_unique,
+    validate_relation_points_to_valid_kind,
+    validate_secondary_fields_pair_up,
+    validate_single_side_primary,
+    validate_self_references,
     validate_collection_name_not_empty,
     validate_type_supported,
     validate_type_and_kind_compatible,
@@ -79,6 +111,13 @@ const GLOBAL_VALIDATORS: &[Validator] = &[
     validate_embedding_fields_for_generation,
     validate_vector_index_metrics,
     validate_embedding_provider_and_model,
+];
+
+const RELATION_VALIDATORS: &[Validator] = &[
+    validate_relation_points_to_valid_kind,
+    validate_secondary_fields_pair_up,
+    validate_single_side_primary,
+    validate_self_references,
 ];
 
 /// Validates embedding definitions on newly created collections.
@@ -100,6 +139,31 @@ pub fn validate_new_collections(new_collections: &[CollectionVersion]) -> Result
 
     let mut errors = Vec::new();
     for validator in validators {
+        errors.extend(validator(&new_state, &old_state));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+/// Validates relation integrity for new collections alongside persisted definitions.
+pub fn validate_new_collections_with_existing(
+    new_collections: &[CollectionVersion],
+    existing_collections: &[CollectionVersion],
+) -> Result<(), String> {
+    let collections = new_collections
+        .iter()
+        .chain(existing_collections)
+        .cloned()
+        .collect::<Vec<_>>();
+    let new_state = DefinitionState::new(&collections);
+    let old_state = DefinitionState::new(existing_collections);
+
+    let mut errors = Vec::new();
+    for validator in RELATION_VALIDATORS {
         errors.extend(validator(&new_state, &old_state));
     }
 
