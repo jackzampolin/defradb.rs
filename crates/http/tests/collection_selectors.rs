@@ -16,7 +16,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{
     body::{to_bytes, Body},
-    http::{header::HOST, Request, StatusCode},
+    http::{header::HOST, Method, Request, StatusCode},
+    response::Response,
     Router,
 };
 use defra_http::router::{AppStateBuilder, CollectionVersionOperations};
@@ -88,8 +89,8 @@ fn router_without_versions() -> Router {
     defra_http::create_router_with_state(state)
 }
 
-async fn get(router: Router, query: &str) -> (StatusCode, String) {
-    let response = router
+async fn get_response(router: Router, query: &str) -> Response {
+    router
         .oneshot(
             Request::builder()
                 .uri(format!("/api/v0/collections{query}"))
@@ -98,7 +99,11 @@ async fn get(router: Router, query: &str) -> (StatusCode, String) {
                 .unwrap(),
         )
         .await
-        .expect("router should respond");
+        .expect("router should respond")
+}
+
+async fn get(router: Router, query: &str) -> (StatusCode, String) {
+    let response = get_response(router, query).await;
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, String::from_utf8_lossy(&body).into_owned())
@@ -217,9 +222,56 @@ async fn every_request_needs_the_version_store() {
 #[tokio::test]
 async fn an_unparseable_selector_is_refused() {
     for query in ["?get_inactive=maybe", "?get_inactive="] {
-        let (status, body) = get(router(), query).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        let response = get_response(router(), query).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/json",
+            "{query} must use the Go error envelope"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).expect("JSON error body");
+        assert!(error["error"].as_str().is_some(), "{query}: {error}");
     }
+}
+
+#[tokio::test]
+async fn get_inactive_accepts_every_go_boolean_form() {
+    for value in ["1", "t", "T", "true", "TRUE", "True"] {
+        assert_eq!(
+            names(&format!("?get_inactive={value}")).await,
+            vec!["Books", "Orders", "Users"],
+            "{value} should be true"
+        );
+    }
+    for value in ["0", "f", "F", "false", "FALSE", "False"] {
+        assert_eq!(
+            names(&format!("?get_inactive={value}")).await,
+            vec!["Books", "Users"],
+            "{value} should be false"
+        );
+    }
+}
+
+#[tokio::test]
+async fn view_refresh_uses_the_same_json_selector_error() {
+    let response = router()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v0/view/refresh?get_inactive=maybe")
+                .header(HOST, "localhost:9181")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router should respond");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("JSON error body");
+    assert!(error["error"].as_str().is_some(), "{error}");
 }
 
 /// Go keys the selectors off `Query().Has(..)`, so `?name=` is a name set to

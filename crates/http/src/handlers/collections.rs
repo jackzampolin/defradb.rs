@@ -110,7 +110,7 @@ fn parse_collection_doc_ids_pagination(
 pub async fn list_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<CollectionSelectorQuery>,
+    query: CollectionSelectorQuery,
 ) -> Result<Json<CollectionsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
