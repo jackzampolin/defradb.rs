@@ -272,6 +272,17 @@ async fn a_name_pre_empts_the_version_lookup_so_a_bad_version_is_not_a_404() {
     }
 }
 
+/// The name arm selects the active version before the version id filters it.
+/// A matching active id survives, while an inactive id cannot replace it.
+#[tokio::test]
+async fn a_name_filters_its_active_candidate_by_version_id() {
+    assert_eq!(
+        names("?name=Users&version_id=users-v2").await,
+        vec!["Users"]
+    );
+    assert!(names("?name=Users&version_id=users-v1").await.is_empty());
+}
+
 /// `get_inactive` takes the name arm out of the running, so the version
 /// lookup runs again and an id that exists is not an error even when the name
 /// filters it away.
@@ -310,16 +321,18 @@ async fn the_not_found_body_matches_gos_message() {
 /// `refresh_views` makes on the same selector.
 #[tokio::test]
 async fn a_selector_that_needs_no_inactive_versions_takes_the_cheap_listing() {
-    let versions = Arc::new(Versions::default());
-    let (status, body) = get(router_with(versions.clone()), "?name=Users").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    for query in ["?name=Users", "?name=Users&version_id=users-v2"] {
+        let versions = Arc::new(Versions::default());
+        let (status, body) = get(router_with(versions.clone()), query).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
 
-    assert_eq!(versions.active_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        versions.all_calls.load(Ordering::SeqCst),
-        0,
-        "an active-only selector must not scan every stored version"
-    );
+        assert_eq!(versions.active_calls.load(Ordering::SeqCst), 1, "{query}");
+        assert_eq!(
+            versions.all_calls.load(Ordering::SeqCst),
+            0,
+            "{query} must not scan every stored version"
+        );
+    }
 }
 
 /// The converse: asking for inactive versions, or for a version by id, does
