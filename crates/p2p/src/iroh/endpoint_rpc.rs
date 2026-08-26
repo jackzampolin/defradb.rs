@@ -205,6 +205,30 @@ fn remember_connection(
     Ok(())
 }
 
+/// Make an authenticated inbound connection the preferred bidirectional send
+/// path for its peer and ALPN. A restarted peer can reconnect before QUIC has
+/// declared the previous path dead; retaining the old cached connection in
+/// that window sends requests into a live-looking path that can only time out.
+pub(super) fn remember_incoming_connection(
+    cache: &ConnectionCache,
+    alpn: &[u8],
+    connection: &iroh::endpoint::Connection,
+) -> crate::error::Result<()> {
+    let peer_id = PeerId::new(connection.remote_id().to_string());
+    let key = connection_cache_key(&peer_id, alpn)?;
+    let previous = cache.connections.lock().insert(key, connection.clone());
+    if let Some(previous) = previous {
+        debug!(
+            peer_id = %peer_id,
+            alpn = %String::from_utf8_lossy(alpn),
+            previous_connection_id = previous.stable_id(),
+            connection_id = connection.stable_id(),
+            "Authenticated inbound connection replaced cached send path"
+        );
+    }
+    Ok(())
+}
+
 fn evict_connection(cache: &ConnectionCache, peer_id: &PeerId, alpn: &[u8]) {
     if let Ok(key) = connection_cache_key(peer_id, alpn) {
         cache.connections.lock().remove(&key);
@@ -994,6 +1018,48 @@ mod tests {
             .bind()
             .await
             .expect("bind endpoint")
+    }
+
+    #[tokio::test]
+    async fn authenticated_inbound_connection_replaces_cached_send_path() {
+        const ALPN: &[u8] = b"test/inbound-replacement";
+
+        let accept_ep = localhost_endpoint(vec![ALPN.to_vec()]).await;
+        let dial_ep = localhost_endpoint(vec![]).await;
+        let accept_task = tokio::spawn({
+            let endpoint = accept_ep.clone();
+            async move {
+                let mut held = Vec::new();
+                while let Some(incoming) = endpoint.accept().await {
+                    if let Ok(connection) = incoming.await {
+                        held.push(connection);
+                    }
+                }
+            }
+        });
+
+        let previous = dial_ep
+            .connect(accept_ep.addr(), ALPN)
+            .await
+            .expect("connect previous path");
+        let replacement = dial_ep
+            .connect(accept_ep.addr(), ALPN)
+            .await
+            .expect("connect replacement path");
+        assert_ne!(previous.stable_id(), replacement.stable_id());
+
+        let peer_id = PeerId::new(accept_ep.id().to_string());
+        let cache = new_connection_cache();
+        remember_connection(&cache, &peer_id, ALPN, &previous).expect("cache previous path");
+        remember_incoming_connection(&cache, ALPN, &replacement)
+            .expect("cache authenticated inbound path");
+
+        let cached = cached_connection(&cache, &peer_id, ALPN)
+            .expect("read cache")
+            .expect("cached connection");
+        assert_eq!(cached.stable_id(), replacement.stable_id());
+
+        accept_task.abort();
     }
 
     /// Regression (#1092 review): a peer can hold several live connections

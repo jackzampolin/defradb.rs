@@ -14,6 +14,7 @@ use crate::transport::{PeerId, TransportEvent};
 use super::endpoint::{
     track_task, EndpointResources, PendingPushLogReplies, SpawnedTasks, SubscriptionSenders,
 };
+use super::endpoint_rpc::remember_incoming_connection;
 use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
@@ -70,6 +71,16 @@ pub(super) async fn handle_incoming(
     }
 
     let remote_id = connection.remote_id();
+
+    if let Err(error) =
+        remember_incoming_connection(&resources.connection_cache, &conn_alpn, &connection)
+    {
+        warn!(
+            peer_id = %remote_id,
+            error = %error,
+            "Failed to cache authenticated inbound connection as send path"
+        );
+    }
 
     let is_new =
         resources
