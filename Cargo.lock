@@ -4396,6 +4396,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "defra-version",
  "dirs",
  "serde",
  "serde_json",

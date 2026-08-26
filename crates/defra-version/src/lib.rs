@@ -7,6 +7,16 @@ pub const GO_COMPAT_BRANCH: &str = "develop";
 /// Go release tag; empty when CI should build the pinned commit from source.
 pub const GO_COMPAT_TAG: &str = "";
 
+/// Go commit carrying the rustffi test client, which the FFI oracle checks out.
+///
+/// Deliberately independent of `GO_COMPAT_COMMIT`: that pin selects the Go
+/// binary the parity job measures against and tracks upstream drift, while this
+/// one fixes the Go *test corpus* the FFI oracle runs, so its pass rate stays
+/// comparable across baseline bumps. It lives on `jack/ffi-rust-compat`, a
+/// maintained chore branch upstream does not merge, and moves only when we
+/// retarget the parity claim or fix the client.
+pub const GO_FFI_CLIENT_COMMIT: &str = "029a3105";
+
 /// Go compatibility metadata.
 #[derive(Debug, Clone, Serialize)]
 pub struct GoCompat {
@@ -158,5 +168,6 @@ mod tests {
     fn go_compat_constants_are_set() {
         assert!(!GO_COMPAT_COMMIT.is_empty());
         assert!(!GO_COMPAT_BRANCH.is_empty());
+        assert!(!GO_FFI_CLIENT_COMMIT.is_empty());
     }
 }

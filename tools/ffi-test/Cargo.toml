@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { workspace = true }
+defra-version = { path = "../../crates/defra-version" }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.35", features = ["process", "fs", "net", "rt-multi-thread", "macros", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }

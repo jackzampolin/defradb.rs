@@ -188,6 +188,25 @@ async fn get_git_commit(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Fail unless the Go checkout sits on the pinned client commit.
+///
+/// The oracle's result is only meaningful against a known Go tree: the test
+/// corpus and the harness seams both come from there, so an unpinned checkout
+/// silently changes what the pass rate means.
+pub async fn verify_go_pin(go_path: &Path) -> Result<()> {
+    let found = get_git_commit(go_path).await?;
+    let pin = defra_version::GO_FFI_CLIENT_COMMIT;
+
+    if found.starts_with(pin) || pin.starts_with(&found) {
+        return Ok(());
+    }
+
+    Err(FfiTestError::GoPinMismatch {
+        path: go_path.display().to_string(),
+        found,
+    })
+}
+
 /// Check if the worktree has uncommitted changes
 async fn is_git_dirty(path: &Path) -> Result<bool> {
     let output = Command::new("git")
@@ -430,6 +449,21 @@ mod tests {
             derive_go_path(rust_path, "feature").unwrap(),
             Path::new("/home/user/source/defradb-feature")
         );
+    }
+
+    #[test]
+    fn the_pin_mismatch_names_both_the_pin_and_what_was_found() {
+        let hint = FfiTestError::GoPinMismatch {
+            path: "/r/defradb-rustffi".to_string(),
+            found: "deadbeef".to_string(),
+        }
+        .to_string();
+
+        assert!(
+            hint.contains(defra_version::GO_FFI_CLIENT_COMMIT),
+            "names the pin: {hint}"
+        );
+        assert!(hint.contains("deadbeef"), "names what was found: {hint}");
     }
 
     #[test]
