@@ -55,9 +55,11 @@ impl CollectionSelector {
     /// Whether inactive versions have to be loaded to answer this selection.
     ///
     /// A named version is returned whether or not it is active, so asking for
-    /// one requires the full listing just as `get_inactive` does.
+    /// one directly requires the full listing just as `get_inactive` does.
+    /// When an active name selected the candidate first, the version id only
+    /// filters that candidate and does not widen the lookup.
     pub fn needs_all_versions(&self) -> bool {
-        self.get_inactive || self.version_id.is_some()
+        self.get_inactive || self.resolves_by_version_lookup()
     }
 
     /// Whether this collection version is selected.
@@ -75,7 +77,8 @@ impl CollectionSelector {
                 .collection_id
                 .as_ref()
                 .is_none_or(|id| &collection.collection_id == id);
-        let visible = self.get_inactive || collection.is_active || self.version_id.is_some();
+        let visible =
+            self.get_inactive || collection.is_active || self.resolves_by_version_lookup();
 
         version_matches && name_matches && collection_matches && visible
     }
@@ -89,7 +92,7 @@ impl CollectionSelector {
     /// the direct lookup propagates not-found, where the stage-two filter just
     /// yields an empty selection.
     pub fn resolves_by_version_lookup(&self) -> bool {
-        self.version_id.is_some() && !(self.names.is_some() && !self.get_inactive)
+        self.version_id.is_some() && (self.get_inactive || self.names.is_none())
     }
 
     /// Go picks candidates by collection id only when neither a name nor a

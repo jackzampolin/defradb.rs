@@ -52,7 +52,6 @@ fn a_version_id_selects_only_that_version() {
     assert!(!options.selects(&version("Orders", "v2", "c1")));
 }
 
-/// Go exempts a requested version from the inactive drop, so asking for a
 #[test]
 fn a_collection_id_selects_that_collections_versions() {
     let options = CollectionSelector {
@@ -130,6 +129,24 @@ fn a_name_with_get_inactive_reaches_an_inactive_version() {
     assert!(!selector.selects(&inactive("Books", "v1", "c1")));
 }
 
+/// A name selects from Go's active-by-name index before the version id is
+/// applied, so a matching inactive version cannot replace that candidate.
+#[test]
+fn a_name_with_a_version_id_stays_active_only() {
+    let selector = CollectionSelector {
+        version_id: Some("v1".to_string()),
+        ..CollectionSelector::with_names(vec!["Users".to_string()])
+    };
+    assert!(selector.selects(&version("Users", "v1", "c1")));
+    assert!(!selector.selects(&inactive("Users", "v1", "c1")));
+
+    let selector = CollectionSelector {
+        get_inactive: true,
+        ..selector
+    };
+    assert!(selector.selects(&inactive("Users", "v1", "c1")));
+}
+
 /// `needs_all_versions` decides whether the caller has to load inactive rows
 /// at all, so a version id has to imply it: a named version is returned
 /// whether or not it is active.
@@ -144,6 +161,11 @@ fn a_version_id_needs_the_full_listing() {
     assert!(CollectionSelector {
         get_inactive: true,
         ..CollectionSelector::all()
+    }
+    .needs_all_versions());
+    assert!(!CollectionSelector {
+        version_id: Some("v2".to_string()),
+        ..CollectionSelector::with_names(vec!["Users".to_string()])
     }
     .needs_all_versions());
 }
