@@ -15,7 +15,7 @@ pub const GO_COMPAT_TAG: &str = "";
 /// comparable across baseline bumps. It lives on `jack/ffi-rust-compat`, a
 /// maintained chore branch upstream does not merge, and moves only when we
 /// retarget the parity claim or fix the client.
-pub const GO_FFI_CLIENT_COMMIT: &str = "029a3105";
+pub const GO_FFI_CLIENT_COMMIT: &str = "f2f532b2";
 
 /// Go compatibility metadata.
 #[derive(Debug, Clone, Serialize)]
