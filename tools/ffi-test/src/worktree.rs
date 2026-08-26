@@ -474,7 +474,7 @@ mod tests {
         .to_string();
 
         assert!(
-            hint.contains("jack/ffi-rust-compat"),
+            hint.contains("edjroz/ffi-rust-compat"),
             "names the branch carrying the client: {hint}"
         );
         // the path may have come from --go-path or DEFRADB_GO_REPO, where

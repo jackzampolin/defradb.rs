@@ -9,7 +9,7 @@ pub enum FfiTestError {
     #[error(
         "Go checkout not found at {path}. It must be a checkout of \
          sourcenetwork/defradb carrying the rustffi client: the \
-         `jack/ffi-rust-compat` branch, or one based on it"
+         `edjroz/ffi-rust-compat` branch, or one based on it"
     )]
     GoWorktreeNotFound { path: String },
 

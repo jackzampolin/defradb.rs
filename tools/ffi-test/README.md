@@ -21,7 +21,7 @@ defradb.rs (Rust)                     defradb (Go) @ the client branch
 ```
 
 The Go tree is a checkout of `sourcenetwork/defradb` on the branch that carries
-the rustffi client — `jack/ffi-rust-compat`, or a branch based on it. That
+the rustffi client — `edjroz/ffi-rust-compat`, or a branch based on it. That
 branch is a maintained chore branch, not something upstream intends to merge;
 it holds the client plus the harness seams the client needs.
 
