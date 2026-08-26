@@ -126,6 +126,58 @@ async fn rust_txn_schema_add_via_header_is_scoped() {
     txn_schema_add_via_header_is_scoped(cluster).await;
 }
 
+async fn txn_collection_listing_via_header_is_scoped(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+    let http_client = reqwest::Client::new();
+
+    let response = http_client
+        .post(format!("{}/api/v0/collections", api_url))
+        .header("x-defradb-tx", &tx_id)
+        .body("type ListedInTxn { name: String }")
+        .send()
+        .await
+        .expect("schema add request failed");
+    assert!(
+        response.status().is_success(),
+        "schema add failed: {}",
+        response.text().await.unwrap_or_default()
+    );
+
+    let in_tx = http_client
+        .get(format!("{}/api/v0/collections?name=ListedInTxn", api_url))
+        .header("x-defradb-tx", &tx_id)
+        .send()
+        .await
+        .expect("transaction collection listing failed");
+    assert!(in_tx.status().is_success());
+    assert!(in_tx
+        .text()
+        .await
+        .expect("transaction collection body")
+        .contains("ListedInTxn"));
+
+    let outside = http_client
+        .get(format!("{}/api/v0/collections?name=ListedInTxn", api_url))
+        .send()
+        .await
+        .expect("outside collection listing failed");
+    assert!(outside.status().is_success());
+    assert!(!outside
+        .text()
+        .await
+        .expect("outside collection body")
+        .contains("ListedInTxn"));
+
+    client.tx_discard(&tx_id).expect("tx_discard failed");
+}
+
+for_each_runtime!(
+    txn_collection_listing_via_header_is_scoped,
+    txn_collection_listing_via_header_is_scoped
+);
+
 async fn concurrent_txn_endpoint_is_not_exposed(cluster: TestCluster) {
     let api_url = cluster.api_url(0);
     let response = reqwest::Client::new()

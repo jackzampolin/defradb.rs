@@ -34,7 +34,13 @@ fn create_failing_state() -> AppState {
 async fn test_list_collections() {
     let state = create_state();
     let identity = ExtractIdentity::anonymous();
-    let result = list_collections(State(state), identity, CollectionSelectorQuery::default()).await;
+    let result = list_collections(
+        State(state),
+        identity,
+        HeaderMap::new(),
+        CollectionSelectorQuery::default(),
+    )
+    .await;
     assert!(result.is_ok());
     let response = result.unwrap();
     // The listing reads the stored versions, which is what the collection
@@ -46,7 +52,13 @@ async fn test_list_collections() {
 async fn test_list_collections_no_rest() {
     let state = create_state_without_rest();
     let identity = ExtractIdentity::anonymous();
-    let result = list_collections(State(state), identity, CollectionSelectorQuery::default()).await;
+    let result = list_collections(
+        State(state),
+        identity,
+        HeaderMap::new(),
+        CollectionSelectorQuery::default(),
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -54,7 +66,13 @@ async fn test_list_collections_no_rest() {
 async fn test_list_collections_error() {
     let state = create_failing_state();
     let identity = ExtractIdentity::anonymous();
-    let result = list_collections(State(state), identity, CollectionSelectorQuery::default()).await;
+    let result = list_collections(
+        State(state),
+        identity,
+        HeaderMap::new(),
+        CollectionSelectorQuery::default(),
+    )
+    .await;
     assert!(result.is_err());
 }
 

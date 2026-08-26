@@ -21,7 +21,7 @@ use axum::{
     Router,
 };
 use defra_http::router::{AppStateBuilder, CollectionVersionOperations};
-use defra_http::{MockQueryExecutor, MockRestOperations};
+use defra_http::{MockQueryExecutor, MockRestOperations, MockTransactionOperations};
 use query::rest::RestOperations;
 use schema::CollectionVersion;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,6 +77,7 @@ fn router_with(versions: Arc<Versions>) -> Router {
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
         .with_collection_versions(versions)
+        .with_txn_ops(Arc::new(MockTransactionOperations::new()))
         .build();
     defra_http::create_router_with_state(state)
 }
@@ -90,14 +91,19 @@ fn router_without_versions() -> Router {
 }
 
 async fn get_response(router: Router, query: &str) -> Response {
+    get_response_with_txn(router, query, None).await
+}
+
+async fn get_response_with_txn(router: Router, query: &str, txn_id: Option<&str>) -> Response {
+    let mut request = Request::builder()
+        .uri(format!("/api/v0/collections{query}"))
+        .header(HOST, "localhost:9181");
+    if let Some(txn_id) = txn_id {
+        request = request.header("x-defradb-tx", txn_id);
+    }
+
     router
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v0/collections{query}"))
-                .header(HOST, "localhost:9181")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .expect("router should respond")
 }
@@ -272,6 +278,18 @@ async fn view_refresh_uses_the_same_json_selector_error() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let error: serde_json::Value = serde_json::from_slice(&body).expect("JSON error body");
     assert!(error["error"].as_str().is_some(), "{error}");
+}
+
+#[tokio::test]
+async fn a_transaction_header_reads_transaction_visible_collections() {
+    assert!(names("?name=MockCollection").await.is_empty());
+
+    let response =
+        get_response_with_txn(router(), "?name=MockCollection", Some("transaction-id")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(body["collections"], serde_json::json!(["MockCollection"]));
 }
 
 /// Go keys the selectors off `Query().Has(..)`, so `?name=` is a name set to
