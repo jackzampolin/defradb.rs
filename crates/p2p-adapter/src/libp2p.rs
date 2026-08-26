@@ -436,21 +436,14 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             &target_peer_id,
         )?;
 
-        let collections_with_changed_capabilities: HashSet<String> = validated_capabilities
-            .iter()
-            .filter_map(|(collection_id, capability)| {
-                let matches_existing = self.handle.explicit_replay_capability_matches(
-                    peer_id,
-                    collection_id.as_str(),
-                    capability,
-                );
-                if matches_existing {
-                    None
-                } else {
-                    Some(collection_id.clone())
-                }
-            })
-            .collect();
+        let collections_with_changed_capabilities = crate::collections_with_changed_capabilities(
+            &collection_cids,
+            &validated_capabilities,
+            |collection_id, capability| {
+                self.handle
+                    .explicit_replay_capability_matches(peer_id, collection_id, capability)
+            },
+        );
 
         self.handle
             .clear_explicit_replay_capability(peer_id, &collection_cids);

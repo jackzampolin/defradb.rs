@@ -1,5 +1,6 @@
 //! Shared P2P adapters implementing the HTTP P2P operation surface.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use zeroize::Zeroizing;
@@ -81,6 +82,28 @@ pub fn collections_requiring_replay(
                 || collections_with_changed_capabilities.contains(*cid)
         })
         .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn collections_with_changed_capabilities(
+    collection_cids: &[String],
+    validated_capabilities: &[(String, String)],
+    capability_matches: impl Fn(&str, Option<&str>) -> bool,
+) -> HashSet<String> {
+    let requested_capabilities: HashMap<&str, &str> = validated_capabilities
+        .iter()
+        .map(|(collection_id, capability)| (collection_id.as_str(), capability.as_str()))
+        .collect();
+
+    collection_cids
+        .iter()
+        .filter(|collection_id| {
+            !capability_matches(
+                collection_id,
+                requested_capabilities.get(collection_id.as_str()).copied(),
+            )
+        })
+        .cloned()
         .collect()
 }
 
@@ -185,8 +208,8 @@ pub fn merge_live_replicators_with_persisted_metadata(
 #[cfg(test)]
 mod resolve_remove_collections_tests {
     use super::{
-        collections_requiring_replay, merge_live_replicators_with_persisted_metadata,
-        resolve_remove_collections,
+        collections_requiring_replay, collections_with_changed_capabilities,
+        merge_live_replicators_with_persisted_metadata, resolve_remove_collections,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -251,6 +274,19 @@ mod resolve_remove_collections_tests {
         );
 
         assert!(replay_collections.is_empty());
+    }
+
+    #[test]
+    fn removing_a_cached_capability_counts_as_a_change() {
+        let cached_capabilities = HashMap::from([("cid-user", "old-capability")]);
+
+        let changed = collections_with_changed_capabilities(
+            &["cid-user".to_string()],
+            &[],
+            |collection_id, requested| cached_capabilities.get(collection_id).copied() == requested,
+        );
+
+        assert_eq!(changed, HashSet::from(["cid-user".to_string()]));
     }
 
     #[test]

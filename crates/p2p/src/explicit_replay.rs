@@ -88,12 +88,13 @@ impl ExplicitReplayCapabilityCache {
         &self,
         target_peer_id: &str,
         collection_id: &str,
-        capability: &str,
+        capability: Option<&str>,
     ) -> bool {
         self.capabilities
             .read()
             .get(&(target_peer_id.to_string(), collection_id.to_string()))
-            .is_some_and(|existing| existing.capability == capability)
+            .map(|existing| existing.capability.as_str())
+            == capability
     }
 
     pub(crate) fn attach(&self, target_peer_id: &str, request: &mut crate::PushLogRequest) {

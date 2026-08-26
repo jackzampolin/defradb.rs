@@ -436,17 +436,17 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             self.transport.local_peer_id().as_str(),
             peer_id.as_str(),
         )?;
-        let collections_with_changed_capabilities: HashSet<String> = validated_capabilities
-            .iter()
-            .filter(|(collection_id, capability)| {
-                !self.transport.explicit_replay_capability_matches(
+        let collections_with_changed_capabilities = crate::collections_with_changed_capabilities(
+            &collection_cids,
+            &validated_capabilities,
+            |collection_id, capability| {
+                self.transport.explicit_replay_capability_matches(
                     &peer_id,
                     collection_id,
                     capability,
                 )
-            })
-            .map(|(collection_id, _)| collection_id.clone())
-            .collect();
+            },
+        );
         self.transport
             .clear_explicit_replay_capabilities(&peer_id, &collection_cids);
         for (collection_id, capability) in validated_capabilities {

@@ -475,7 +475,7 @@ impl P2PHostHandle {
         &self,
         peer_id: PeerId,
         collection: &str,
-        capability: &str,
+        capability: Option<&str>,
     ) -> bool {
         self.explicit_replay_capabilities
             .matches(&peer_id.to_string(), collection, capability)
