@@ -110,4 +110,10 @@ async fn filtered_truncate_test(cluster: TestCluster) {
 
 for_each_runtime!(collection_patch, collection_patch_test);
 for_each_runtime!(collection_versioning, collection_versioning_test);
-for_each_runtime!(filtered_truncate, filtered_truncate_test);
+
+#[tokio::test]
+async fn rust_filtered_truncate() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    filtered_truncate_test(cluster).await;
+}
