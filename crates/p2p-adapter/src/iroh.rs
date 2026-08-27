@@ -383,8 +383,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         collections: Vec<String>,
         addr: Option<&str>,
         filters: ReplicationFilters,
-        _explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
-        _expected_authorizer_did: Option<&str>,
+        explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+        expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
         self.check_nac(acp::nac::NodePermission::P2pReplicatorAdd)
             .await?;
@@ -428,6 +428,33 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 .validate_replication_filters(&replication_filters)?;
         }
 
+        let requested_collections: HashSet<String> = collection_cids.iter().cloned().collect();
+        let validated_capabilities = crate::validate_explicit_replay_capabilities(
+            explicit_replay_capabilities,
+            expected_authorizer_did,
+            &requested_collections,
+            self.transport.local_peer_id().as_str(),
+            peer_id.as_str(),
+        )?;
+        let collections_with_changed_capabilities = crate::collections_with_changed_capabilities(
+            &collection_cids,
+            &validated_capabilities,
+            |collection_id, capability| {
+                self.transport.explicit_replay_capability_matches(
+                    &peer_id,
+                    collection_id,
+                    capability,
+                )
+            },
+        );
+        self.transport
+            .clear_explicit_replay_capabilities(&peer_id, &collection_cids);
+        for (collection_id, capability) in validated_capabilities {
+            self.transport
+                .set_explicit_replay_capability(&peer_id, &collection_id, &capability)
+                .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        }
+
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
         // with the same collections (idempotent reconnect path).
@@ -459,12 +486,6 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 }
             }
         };
-        let existing_collection_ids = if existing_filters == replication_filters {
-            existing_collection_ids
-        } else {
-            HashSet::new()
-        };
-
         // Same rationale as `connect_peer`: in the common pairing flow the
         // replicator is installed over an already-live connection, and a
         // redundant dial can spuriously time out (Linux). The registration and
@@ -512,15 +533,16 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         }
 
-        // Only replay collections that weren't already replicated by this peer.
-        let new_collection_names: Vec<String> = effective_collections
-            .iter()
-            .zip(collection_cids.iter())
-            .filter(|(_, cid)| !existing_collection_ids.contains(*cid))
-            .map(|(name, _)| name.clone())
-            .collect();
+        let collection_names_requiring_replay = crate::collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &existing_filters,
+            &replication_filters,
+            &collections_with_changed_capabilities,
+        );
 
-        if !new_collection_names.is_empty() {
+        if !collection_names_requiring_replay.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
@@ -532,15 +554,15 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
                 tracing::info!(
                     peer_id = %push_peer,
-                    new_collections = ?new_collection_names,
-                    "Replaying existing docs for new collections only"
+                    replay_collections = ?collection_names_requiring_replay,
+                    "Replaying existing docs for collections requiring replay"
                 );
 
                 tokio::spawn(async move {
                     if let Err(error) = push_pusher
                         .push_existing_docs(
                             &push_peer,
-                            &new_collection_names,
+                            &collection_names_requiring_replay,
                             &push_filters,
                             push_se_key.as_ref().map(|key| key.as_slice()),
                             push_identity.as_deref(),
@@ -559,7 +581,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         } else {
             tracing::debug!(
                 peer_id = %peer_id,
-                "Replicator already exists with same collections, skipping initial replay"
+                "Replicator already exists with same collections, filters, and replay capability; skipping initial replay"
             );
             if let Some(ref bus) = self.event_bus {
                 bus.publish(events::Message::replicator_completed());
