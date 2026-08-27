@@ -32,7 +32,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30#9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -3512,7 +3512,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30#9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30"
 dependencies = [
  "eyre",
  "futures",
@@ -5297,7 +5297,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30#9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11267,7 +11267,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30#9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -11795,7 +11795,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?rev=f04e9b0716977705494ec40d17fa5f20d29cbfcf#f04e9b0716977705494ec40d17fa5f20d29cbfcf"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30#9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30"
 dependencies = [
  "eyre",
  "futures",
