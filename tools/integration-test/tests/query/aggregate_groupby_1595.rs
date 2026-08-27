@@ -261,6 +261,95 @@ async fn grouped_count_grouped_first_test(cluster: TestCluster) {
     );
 }
 
+/// Go rewrites an object-kind groupBy field to its relation ID field
+/// (`internal/planner/mapper/mapper.go`, `request.ToFieldID`), so grouping by
+/// `author` keys on `_authorID`: two authors -> two groups.
+async fn top_level_group_by_relation_field_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_book_author_schema(&node);
+    let john = add_author(&node, "John Grisham", 65, true);
+    let cornelia = add_author(&node, "Cornelia Funke", 62, false);
+    add_book(&node, "Painted House", 4.9, &john);
+    add_book(&node, "A Time for Mercy", 4.5, &john);
+    add_book(&node, "The Associate", 4.2, &john);
+    add_book(&node, "Theif Lord", 4.8, &cornelia);
+
+    let result = node
+        .query(r#"query { COUNT(Book: {groupBy: [author]}) }"#)
+        .expect("count query");
+
+    assert_eq!(result["COUNT"], serde_json::json!(2));
+}
+
+/// Go rejects grouping by an array relation (`NewErrInvalidFieldToGroupBy`).
+async fn top_level_group_by_array_relation_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_book_author_schema(&node);
+    add_author(&node, "John Grisham", 65, true);
+
+    let err = node
+        .query(r#"query { COUNT(Author: {groupBy: [published]}) }"#)
+        .expect_err("grouping by an array relation should be rejected");
+    assert!(
+        err.to_string()
+            .contains("cannot group by array or object field"),
+        "unexpected groupBy error: {err}"
+    );
+}
+
+/// `_docID` is distinct per book, so a grouped count over it equals the book
+/// count. The group field has to reach the relation's child scan.
+async fn relation_group_by_doc_id_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    setup_mixed_names(&node).await;
+
+    let result = node
+        .query(
+            r#"
+            query {
+                Author {
+                    name
+                    COUNT(published: {groupBy: [_docID]})
+                }
+            }
+            "#,
+        )
+        .expect("query authors");
+
+    assert_eq!(count_for(&result, "John Grisham"), 4);
+}
+
+/// Fetching a group field must not add it to the rendered relation output
+/// (regression guard for the #1597 `_docID` leak).
+async fn relation_group_by_doc_id_no_leak_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_book_author_schema(&node);
+    let john = add_author(&node, "John Grisham", 65, true);
+    add_book(&node, "Painted House", 4.9, &john);
+    add_book(&node, "A Time for Mercy", 4.5, &john);
+
+    let result = node
+        .query(
+            r#"
+            query {
+                Author {
+                    published { name }
+                    COUNT(published: {groupBy: [_docID]})
+                }
+            }
+            "#,
+        )
+        .expect("query authors");
+
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([{
+            "published": [{"name": "Painted House"}, {"name": "A Time for Mercy"}],
+            "COUNT": 2,
+        }])
+    );
+}
+
 #[tokio::test]
 async fn rust_aggregate_groupby_1595_on_single_field() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
@@ -307,4 +396,28 @@ async fn rust_aggregate_groupby_1595_grouped_count_plain_first() {
 async fn rust_aggregate_groupby_1595_grouped_count_grouped_first() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     grouped_count_grouped_first_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_top_level_group_by_relation_field() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    top_level_group_by_relation_field_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_top_level_group_by_array_relation() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    top_level_group_by_array_relation_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_relation_group_by_doc_id() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    relation_group_by_doc_id_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_relation_group_by_doc_id_no_leak() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    relation_group_by_doc_id_no_leak_test(cluster).await;
 }

@@ -281,22 +281,34 @@ impl Planner {
                     }
 
                     // Add fields referenced by groupBy so they appear in the output
-                    // for post-processing group-key construction
+                    // for post-processing group-key construction. Grouped targets
+                    // render into a private `__agg_` slot, so `_docID` and friends
+                    // are safe to fetch here — they never reach relation output.
                     if let Some(ref group_by) = target.group_by {
-                        for group_field in &group_by.fields {
-                            if group_field.starts_with('_') {
+                        for group_field in group_by.resolved_fields(&target_collection)? {
+                            if child_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == group_field)
+                            {
                                 continue;
                             }
-                            if let Some(idx) = target_collection
+                            let idx = match target_collection
                                 .fields
                                 .iter()
-                                .position(|f| f.name == *group_field)
+                                .position(|f| f.name == group_field)
                             {
-                                if child_mapping.first_index_of_name(group_field).is_none() {
-                                    child_mapping.add(idx, group_field);
-                                    child_mapping.add_render_key(idx, group_field);
-                                }
+                                Some(idx) => idx,
+                                // `_docID` has no schema slot. Park it past every
+                                // schema index so it cannot share one with a field.
+                                None => child_mapping
+                                    .next_index()
+                                    .max(target_collection.fields.len()),
+                            };
+                            if child_mapping.first_index_of_name(&group_field) != Some(idx) {
+                                child_mapping.add(idx, &group_field);
                             }
+                            child_mapping.add_render_key(idx, &group_field);
                         }
                     }
 

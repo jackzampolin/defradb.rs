@@ -1,6 +1,9 @@
 //! Core mapper types for query operations
 
+use schema::CollectionVersion;
+
 use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::mapper::cursor::{CursorAliases, CursorPageInfoFields, CursorParams};
 use crate::mapper::filter::Filter;
 
@@ -122,6 +125,29 @@ impl GroupBy {
 
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
+    }
+
+    /// Group fields under the names the planner actually stores them by.
+    ///
+    /// A single relation is stored as its ID field, so grouping by `author`
+    /// keys on `_authorID`; grouping by an array relation is rejected. Mirrors
+    /// Go's `internal/planner/mapper/mapper.go`.
+    pub fn resolved_fields(&self, collection: &CollectionVersion) -> Result<Vec<String>> {
+        self.fields
+            .iter()
+            .map(|name| match collection.field_by_name(name) {
+                Some(field) if field.kind.is_relation() => {
+                    if field.kind.is_array() {
+                        Err(QueryError::parse(format!(
+                            "cannot group by array or object field. Field: {name}"
+                        )))
+                    } else {
+                        Ok(CollectionVersion::relation_id_field_name(name))
+                    }
+                }
+                _ => Ok(name.clone()),
+            })
+            .collect()
     }
 }
 

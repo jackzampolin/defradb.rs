@@ -7,8 +7,8 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 use crate::document::{documents_to_plan_docs, DocumentMapping};
-use crate::error::Result;
-use crate::mapper::{GroupBy, Requestable, Select};
+use crate::error::{QueryError, Result};
+use crate::mapper::{Requestable, Select};
 use crate::planner::{Doc, Planner};
 use crate::txn::TransactionRegistry;
 
@@ -24,19 +24,20 @@ use super::super::{DocFetcher, QueryRunner};
 fn distinct_group_count<'a>(
     docs: impl Iterator<Item = &'a Doc>,
     mapping: &DocumentMapping,
-    group_by: &GroupBy,
+    group_fields: &[String],
 ) -> i64 {
-    let indexes: Vec<Option<usize>> = group_by
-        .fields
+    let indexes: Vec<Option<usize>> = group_fields
         .iter()
         .map(|name| mapping.first_index_of_name(name))
         .collect();
     docs.map(|doc| {
         indexes
             .iter()
-            .map(|index| match index {
-                Some(i) => doc.get(*i).unwrap_or(&JsonValue::Null).to_string(),
-                None => JsonValue::Null.to_string(),
+            .map(|index| {
+                index
+                    .and_then(|i| doc.get(i))
+                    .unwrap_or(&JsonValue::Null)
+                    .to_string()
             })
             .collect::<Vec<_>>()
             .join("\u{1}")
@@ -135,7 +136,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             Some(group_by) => distinct_group_count(
                                 filtered_docs.iter().copied(),
                                 &mapping,
-                                group_by,
+                                &group_by.resolved_fields(collection)?,
                             ),
                             None => filtered_docs.len() as i64,
                         };
@@ -273,6 +274,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collection_name = target
             .map(|t| t.host_name.clone())
             .unwrap_or_else(|| select.collection_name.clone());
+
+        let collections_map = self.collections_map().await?;
+        let group_fields = match group_by {
+            Some(gb) => gb.resolved_fields(
+                collections_map
+                    .get(&collection_name)
+                    .ok_or_else(|| QueryError::collection_not_found(&collection_name))?,
+            )?,
+            None => Vec::new(),
+        };
+
         let mut select_fields = if let Some(fname) = field_name {
             // For sum/avg/etc., we need the field value
             vec![Requestable::Field(crate::mapper::Field::new(fname.clone()))]
@@ -283,14 +295,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             ))]
         };
         // Grouped targets need the grouped fields available to build group keys.
-        if let Some(gb) = group_by {
-            for name in &gb.fields {
-                let already_selected = select_fields
-                    .iter()
-                    .any(|f| matches!(f, Requestable::Field(existing) if existing.name == *name));
-                if !already_selected {
-                    select_fields.push(Requestable::Field(crate::mapper::Field::new(name.clone())));
-                }
+        for name in &group_fields {
+            let already_selected = select_fields
+                .iter()
+                .any(|f| matches!(f, Requestable::Field(existing) if existing.name == *name));
+            if !already_selected {
+                select_fields.push(Requestable::Field(crate::mapper::Field::new(name.clone())));
             }
         }
 
@@ -318,7 +328,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Execute with the planner to get filtered documents
         let fetcher_arc = FetcherWrapper::new(fetcher);
-        let collections_map = self.collections_map().await?;
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
@@ -352,9 +361,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Compute the aggregate based on type
         let value = match agg.aggregate_type {
             AggregateType::Count => {
-                let count = match group_by {
-                    Some(gb) => distinct_group_count(docs.iter(), &mapping, gb),
-                    None => docs.len() as i64,
+                let count = if group_by.is_some() {
+                    distinct_group_count(docs.iter(), &mapping, &group_fields)
+                } else {
+                    docs.len() as i64
                 };
                 JsonValue::Number(count.into())
             }
