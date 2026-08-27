@@ -145,7 +145,9 @@ async fn fan_in_pushlog_admission_no_silent_divergence() {
 
     // Wait for the first live-send wave to drain so the next merge must come
     // from the durable sender ladder rather than a still-queued initial hint.
-    let settle_deadline = Instant::now() + Duration::from_secs(30);
+    let send_waves = DOCS_PER_PUSHER.div_ceil(p2p::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER);
+    let settle_timeout = p2p::sync::DEFAULT_PUSH_SEND_TIMEOUT * (send_waves as u32 + 1);
+    let settle_deadline = Instant::now() + settle_timeout;
     loop {
         let mut settled = true;
         for pusher in 1..=PUSHERS {
