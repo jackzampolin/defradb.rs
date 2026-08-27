@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use document::NormalValue;
 
 use crate::document::DocumentMapping;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
 use crate::planner::{IndexScanParams, IndexScanType};
@@ -155,26 +155,27 @@ impl PlanNode for OrphanNode {
                         continue;
                     }
 
-                    if let Some(fetcher) = fetcher {
-                        let scan_result = fetcher
-                            .get_by_index_scan(
-                                child_collection_name,
-                                &IndexScanParams {
-                                    index_name: child_fk_index_name.clone(),
-                                    scan_type: IndexScanType::ExactMatch {
-                                        values: vec![NormalValue::String(doc_id.to_string())],
-                                    },
-                                    limit: Some(1),
-                                    offset: 0,
-                                    value_filter: None,
-                                    cursor_seek: None,
+                    let fetcher = fetcher.as_ref().ok_or_else(|| {
+                        QueryError::internal("orphan scan: fetcher not initialized")
+                    })?;
+                    let scan_result = fetcher
+                        .get_by_index_scan(
+                            child_collection_name,
+                            &IndexScanParams {
+                                index_name: child_fk_index_name.clone(),
+                                scan_type: IndexScanType::ExactMatch {
+                                    values: vec![NormalValue::String(doc_id.to_string())],
                                 },
-                            )
-                            .await?;
-                        self.exec_info.indexes_fetched += 1;
-                        if !scan_result.doc_ids().is_empty() {
-                            continue;
-                        }
+                                limit: Some(1),
+                                offset: 0,
+                                value_filter: None,
+                                cursor_seek: None,
+                            },
+                        )
+                        .await?;
+                    self.exec_info.indexes_fetched += 1;
+                    if !scan_result.doc_ids().is_empty() {
+                        continue;
                     }
                 }
                 self.current_doc = doc.deep_clone();
