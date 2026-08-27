@@ -32,14 +32,10 @@ async fn sum_with_alias_order_test(cluster: TestCluster) {
         )
         .expect("query authors");
 
-    // Go asserts 13.600000000000001 here (4.9 + 4.5 + 4.2 accumulated in
-    // insertion order). Our response path cannot express that 17th significant
-    // digit, so the order-sensitive assertions live in the limit/offset tests
-    // below, where the difference is visible at 2 significant digits.
     assert_eq!(
         result["Author"],
         serde_json::json!([
-            {"name": "John Grisham", "totalRating": 13.6},
+            {"name": "John Grisham", "totalRating": 13.600000000000001},
             {"name": "Cornelia Funke", "totalRating": 4.8},
         ])
     );
