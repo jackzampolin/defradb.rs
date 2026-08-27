@@ -24,31 +24,9 @@ fn delete_users(node: &DefraClient, ids: &[String]) {
     .unwrap_or_else(|e| panic!("delete {ids:?}: {e}"));
 }
 
-/// Two documents that share an indexed value, queried with no `order` clause,
-/// must come back in public DocID order (#1602).
-///
-/// Index keys already suffix node-local short IDs, so KV order follows
-/// insert/persist order and diverges across replicas. Public DocIDs are
-/// content-addressed and identical everywhere. This inserts the
-/// lexicographically larger DocID first so a short-ID scan would return
-/// the reverse of the asserted order.
-#[tokio::test]
-async fn rust_equal_index_keys_are_ordered_by_doc_id() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    let node = cluster.client(0);
-
-    node.schema_add(
-        r#"
-        type User {
-            name: String
-            age: Int @index
-        }
-        "#,
-    )
-    .expect("add schema");
-
-    // Prefer the names from the Go oracle test, then fall back until the
-    // second insert has the smaller public DocID.
+/// Insert two age=21 users so the lexicographically larger public DocID is
+/// assigned the smaller node-local short ID.
+fn seed_reversed_cid_pair(node: &DefraClient) -> (String, String, String, String) {
     let candidates = [
         ("John", "Andy"),
         ("zeta", "alpha"),
@@ -57,30 +35,34 @@ async fn rust_equal_index_keys_are_ordered_by_doc_id() {
         ("m", "a"),
     ];
 
-    let mut chosen: Option<(String, String, String, String)> = None;
     for (first_name, second_name) in candidates {
-        let first_id = add_user(&node, first_name);
-        let second_id = add_user(&node, second_name);
+        let first_id = add_user(node, first_name);
+        let second_id = add_user(node, second_name);
         if second_id.as_str() < first_id.as_str() {
-            chosen = Some((
+            return (
                 first_name.to_string(),
                 first_id,
                 second_name.to_string(),
                 second_id,
-            ));
-            break;
+            );
         }
-        delete_users(&node, &[first_id, second_id]);
+        delete_users(node, &[first_id, second_id]);
     }
-    let (first_name, first_id, second_name, second_id) =
-        chosen.expect("could not find a pair whose public DocID order opposes insert order");
+    panic!("could not find a pair whose public DocID order opposes insert order");
+}
 
-    let result = node
-        .query(r#"query { User(filter: {age: {_eq: 21}}) { name _docID } }"#)
-        .expect("query equal indexed keys");
-    let users = result["User"].as_array().unwrap_or_else(|| {
-        panic!("User array missing from {result}");
-    });
+fn assert_doc_id_order(
+    node: &DefraClient,
+    query: &str,
+    first_name: &str,
+    first_id: &str,
+    second_name: &str,
+    second_id: &str,
+) {
+    let result = node.query(query).expect("query equal indexed keys");
+    let users = result["User"]
+        .as_array()
+        .unwrap_or_else(|| panic!("User array missing from {result}"));
     assert_eq!(users.len(), 2, "expected both age=21 users, got {result}");
 
     let got_names: Vec<&str> = users
@@ -94,9 +76,58 @@ async fn rust_equal_index_keys_are_ordered_by_doc_id() {
 
     assert_eq!(
         got_ids,
-        vec![second_id.as_str(), first_id.as_str()],
+        vec![second_id, first_id],
         "equal index keys must come back in public DocID order \
          (inserted {first_name} then {second_name}); got {got_names:?}"
     );
-    assert_eq!(got_names, vec![second_name.as_str(), first_name.as_str()]);
+    assert_eq!(got_names, vec![second_name, first_name]);
+}
+
+fn add_schema(node: &DefraClient) {
+    node.schema_add(
+        r#"
+        type User {
+            name: String
+            age: Int @index
+        }
+        "#,
+    )
+    .expect("add schema");
+}
+
+/// Two documents that share an indexed value, queried with no `order` clause,
+/// must come back in public DocID order (#1602).
+#[tokio::test]
+async fn rust_equal_index_keys_are_ordered_by_doc_id() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    let node = cluster.client(0);
+    add_schema(&node);
+    let (first_name, first_id, second_name, second_id) = seed_reversed_cid_pair(&node);
+    assert_doc_id_order(
+        &node,
+        r#"query { User(filter: {age: {_eq: 21}}) { name _docID } }"#,
+        &first_name,
+        &first_id,
+        &second_name,
+        &second_id,
+    );
+}
+
+/// `_in` is InScan, not ExactMatch. TypeJoinMany uses InScan whenever there
+/// are two or more parents, so equal-key groups there must use the same
+/// public-DocID tie-break (#1602).
+#[tokio::test]
+async fn rust_equal_index_keys_in_filter_are_ordered_by_doc_id() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    let node = cluster.client(0);
+    add_schema(&node);
+    let (first_name, first_id, second_name, second_id) = seed_reversed_cid_pair(&node);
+    assert_doc_id_order(
+        &node,
+        r#"query { User(filter: {age: {_in: [21]}}) { name _docID } }"#,
+        &first_name,
+        &first_id,
+        &second_name,
+        &second_id,
+    );
 }
