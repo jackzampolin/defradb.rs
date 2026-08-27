@@ -20,6 +20,8 @@ mod downsample_gc;
 mod exhaustive_orphans_4454;
 #[path = "query/explain_nested.rs"]
 mod explain_nested;
+#[path = "query/float_precision.rs"]
+mod float_precision;
 #[path = "query/go_view_paths.rs"]
 mod go_view_paths;
 #[path = "query/gql_list_args.rs"]
