@@ -125,10 +125,11 @@ pub fn extract_panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 /// The return type must implement [`FfiPanicResult`]. Caught panics are
 /// converted to error results via that trait.
 ///
-/// With `panic = "abort"` (current release profile), panics abort the
-/// process before unwinding so `catch_unwind` is a no-op. In debug/test
-/// builds (which default to `panic = "unwind"`), panics are caught and
-/// converted to error returns.
+/// The workspace release profile keeps the default `panic = "unwind"`
+/// precisely so this wrapper works in shipped artifacts. Setting
+/// `panic = "abort"` would kill the host process on any internal panic;
+/// `release_profile_does_not_abort_on_panic` in `negative_tests.rs` guards
+/// against that.
 #[macro_export]
 macro_rules! ffi_entry {
     ($($body:tt)*) => {

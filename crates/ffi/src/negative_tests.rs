@@ -15,7 +15,7 @@ mod tests {
     use crate::schema::add_schema;
     use crate::subscription::{close_subscription, create_subscription, poll_subscription};
     use crate::txn::{begin_txn, commit_txn, rollback_txn};
-    use crate::types::{defra_free_string, NodeInitOptions};
+    use crate::types::{defra_free_string, FfiResult, NodeInitOptions};
 
     fn init() {
         assert!(crate::runtime::init_runtime(), "runtime init must succeed");
@@ -467,5 +467,51 @@ mod tests {
         }
 
         node_close(*node);
+    }
+
+    // ── Panic containment at the FFI boundary (#1594) ─────────────────────────
+
+    /// An internal panic must surface as an error result, not kill the process.
+    #[test]
+    fn ffi_entry_converts_panic_to_error_result() {
+        let result: FfiResult = crate::ffi_entry! {
+            panic!("deliberate test panic")
+        };
+
+        assert_eq!(result.status, 1, "a caught panic must be an error");
+        assert!(!result.error.is_null());
+        let msg = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(
+            msg.contains("internal error (panic)") && msg.contains("deliberate test panic"),
+            "error should carry the panic message, got: {msg}"
+        );
+        unsafe { defra_free_string(result.error) };
+    }
+
+    /// The release profile must not set `panic = "abort"`.
+    ///
+    /// Unit tests build with the dev profile, where `panic = "unwind"` is
+    /// already the default — so no runtime test can catch a regression that
+    /// reintroduces `panic = "abort"` and silently turns the `ffi_entry!`
+    /// `catch_unwind` into a no-op in the shipped dylib. Only this config
+    /// assertion can (#1594).
+    #[test]
+    fn release_profile_does_not_abort_on_panic() {
+        let manifest =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+                .expect("workspace Cargo.toml must be readable");
+
+        let after_header = manifest
+            .split_once("[profile.release]\n")
+            .expect("workspace must define [profile.release]")
+            .1;
+        let section = after_header
+            .split_once("\n[")
+            .map_or(after_header, |(section, _)| section);
+
+        assert!(
+            !section.lines().any(|l| l.trim_start().starts_with("panic")),
+            "[profile.release] must not set a panic strategy, got:\n{section}"
+        );
     }
 }
