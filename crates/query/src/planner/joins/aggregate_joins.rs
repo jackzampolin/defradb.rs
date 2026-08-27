@@ -207,6 +207,36 @@ impl Planner {
                                 }
                             }
                         }
+                        // Add groupBy fields from aggregate target to existing child
+                        // mapping, so group keys can be built during post-processing.
+                        if let Some(ref group_by) = target.group_by {
+                            for group_field in &group_by.fields {
+                                if group_field.starts_with('_') {
+                                    continue;
+                                }
+                                if let Some(idx) = target_collection
+                                    .fields
+                                    .iter()
+                                    .position(|f| f.name == *group_field)
+                                {
+                                    if let Some(child_mapping) =
+                                        mapping.child_at_mut(relation_field_index)
+                                    {
+                                        if child_mapping.first_index_of_name(group_field).is_none()
+                                        {
+                                            child_mapping.add(idx, group_field);
+                                        }
+                                        if !child_mapping
+                                            .render_keys
+                                            .iter()
+                                            .any(|rk| rk.key == *group_field)
+                                        {
+                                            child_mapping.add_render_key(idx, group_field);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -269,6 +299,26 @@ impl Planner {
                                         child_mapping.add(idx, order_field);
                                         child_mapping.add_render_key(idx, order_field);
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Add fields referenced by groupBy so they appear in the output
+                    // for post-processing group-key construction
+                    if let Some(ref group_by) = target.group_by {
+                        for group_field in &group_by.fields {
+                            if group_field.starts_with('_') {
+                                continue;
+                            }
+                            if let Some(idx) = target_collection
+                                .fields
+                                .iter()
+                                .position(|f| f.name == *group_field)
+                            {
+                                if child_mapping.first_index_of_name(group_field).is_none() {
+                                    child_mapping.add(idx, group_field);
+                                    child_mapping.add_render_key(idx, group_field);
                                 }
                             }
                         }

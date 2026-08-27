@@ -133,6 +133,9 @@ pub(super) fn parse_aggregate_target_obj(
                 };
                 target.order = Some(order);
             }
+            "groupBy" => {
+                target.group_by = Some(parse_group_by_value(val, variables)?);
+            }
             _ => {}
         }
     }
@@ -176,6 +179,20 @@ pub(super) fn parse_aggregate_target_from_json(
                 }
                 "order" => {
                     target.order = Some(parse_order_from_json(val)?);
+                }
+                "groupBy" => {
+                    let arr = val
+                        .as_array()
+                        .ok_or_else(|| QueryError::parse("groupBy must be a list"))?;
+                    let fields: Result<Vec<String>> = arr
+                        .iter()
+                        .map(|v| {
+                            v.as_str()
+                                .map(|s| s.to_string())
+                                .ok_or_else(|| QueryError::parse("groupBy items must be strings"))
+                        })
+                        .collect();
+                    target.group_by = Some(GroupBy::new(fields?));
                 }
                 _ => {}
             }

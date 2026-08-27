@@ -141,6 +141,17 @@ pub(crate) fn build_mapping(
                         }
                     }
                 }
+                // And the target's groupBy fields, needed to build group keys
+                // for COUNT(Users: {groupBy: [Age]})
+                if let Some(ref group_by) = target.group_by {
+                    for field_name in &group_by.fields {
+                        if mapping.first_index_of_name(field_name).is_none() {
+                            let index = mapping.next_index();
+                            mapping.add(index, field_name);
+                            // Don't add render_key - we don't want to output these fields
+                        }
+                    }
+                }
             }
         }
     }
