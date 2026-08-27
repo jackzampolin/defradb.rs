@@ -111,7 +111,7 @@ impl Default for ExecuteRetryPolicy {
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
 trait SchemaOps: Send + Sync {
-    async fn add_schema(&self, sdl: &str) -> anyhow::Result<()>;
+    async fn add_schema(&self, sdl: &str) -> anyhow::Result<Vec<CollectionVersion>>;
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()>;
     async fn patch_collection(
         &self,
@@ -128,6 +128,22 @@ trait SchemaOps: Send + Sync {
         version_id: &str,
     ) -> anyhow::Result<Option<CollectionVersion>>;
     async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
+}
+
+#[cfg(feature = "http")]
+struct HttpSchemaOps {
+    schema_ops: Arc<dyn SchemaOps>,
+}
+
+#[cfg(feature = "http")]
+#[async_trait::async_trait]
+impl defra_http::router::SchemaOperations for HttpSchemaOps {
+    async fn add_schema(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
+        self.schema_ops
+            .add_schema(sdl)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[async_trait::async_trait]
@@ -353,7 +369,8 @@ impl EmbeddedNode {
 
     /// Add a schema from a GraphQL SDL type definition.
     pub async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.add_schema(sdl)).await
+        self.as_node_identity(async { self.schema_ops.add_schema(sdl).await.map(|_| ()) })
+            .await
     }
 
     /// Create a materialized view from a source query and target SDL.
@@ -1227,6 +1244,9 @@ impl NodeBuilder {
             let server =
                 defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
                     .with_event_bus_arc(node.event_bus.clone())
+                    .with_schema_arc(Arc::new(HttpSchemaOps {
+                        schema_ops: Arc::clone(&node.schema_ops),
+                    }))
                     .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
 
             let server = if let Some(did) = node_identity_did.as_ref() {
@@ -1628,7 +1648,7 @@ mod tests {
 
     #[cfg(feature = "http")]
     #[tokio::test]
-    async fn embedded_http_exposes_only_read_collection_versions() {
+    async fn embedded_http_exposes_schema_add_and_only_read_collection_versions() {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = probe.local_addr().unwrap();
         drop(probe);
@@ -1638,12 +1658,45 @@ mod tests {
             .build()
             .await
             .unwrap();
-        node.add_schema("type Book { title: String }")
+        let client = reqwest::Client::new();
+        let schema_url = format!("http://{address}/api/v0/schema");
+        let created = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(response) = client
+                    .post(&schema_url)
+                    .header(reqwest::header::CONTENT_TYPE, "text/plain")
+                    .body("type Book { title: String }")
+                    .send()
+                    .await
+                {
+                    if response.status().is_success() {
+                        break response
+                            .json::<Vec<schema::CollectionVersion>>()
+                            .await
+                            .unwrap();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("embedded HTTP server did not expose schema add");
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].name, "Book");
+
+        let schema = client
+            .get(&schema_url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
             .await
             .unwrap();
+        assert!(schema.contains("type Book"));
 
         let url = format!("http://{address}/api/v0/collections/versions");
-        let client = reqwest::Client::new();
         let versions = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if let Ok(response) = client.get(&url).send().await {

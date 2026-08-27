@@ -466,7 +466,6 @@ impl ReplicatorPushOptionsState {
 pub(crate) trait P2PErrorExt {
     fn invalid_input(message: impl Into<String>) -> Self;
     fn not_found(message: impl Into<String>) -> Self;
-    fn unsupported(message: impl Into<String>) -> Self;
     fn transport(message: impl Into<String>) -> Self;
     fn persistence(message: impl Into<String>) -> Self;
     fn internal(message: impl Into<String>) -> Self;
@@ -479,10 +478,6 @@ impl P2PErrorExt for P2PError {
 
     fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound(message.into())
-    }
-
-    fn unsupported(message: impl Into<String>) -> Self {
-        Self::Unsupported(message.into())
     }
 
     fn transport(message: impl Into<String>) -> Self {
