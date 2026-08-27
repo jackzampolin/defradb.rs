@@ -60,6 +60,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             match fetcher
                 .get_documents_at_cid(
+                    &select.collection_name,
                     cid,
                     expected_doc_id.map(|s| s.as_str()),
                     caller_identity.as_ref(),
@@ -80,6 +81,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
+
+        // docID is a post-filter when cid is set, for every CID kind
+        // (Go parity: selectNode.Next). Mismatch is a skip, not an error.
+        let documents = if let Some(ref doc_ids) = select.doc_ids {
+            documents
+                .into_iter()
+                .filter(|(doc, _)| {
+                    doc.id()
+                        .map(|id| doc_ids.iter().any(|expected| *expected == id.to_string()))
+                        .unwrap_or(false)
+                })
+                .collect()
+        } else {
+            documents
+        };
 
         // Get collection schema for building the mapping
         let collection = self.get_collection(&select.collection_name).await?;

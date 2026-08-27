@@ -1,5 +1,7 @@
 #[path = "query/aggregate_groupby_1595.rs"]
 mod aggregate_groupby_1595;
+#[path = "query/cid_scoping_1604.rs"]
+mod cid_scoping_1604;
 #[path = "query/commits_aggregate.rs"]
 mod commits_aggregate;
 #[path = "query/commits_collection_id.rs"]

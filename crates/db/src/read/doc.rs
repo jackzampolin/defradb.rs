@@ -542,13 +542,15 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
 
     async fn get_documents_at_cid(
         &self,
+        collection_name: &str,
         cid: &str,
         expected_doc_id: Option<&str>,
         _caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
+        let (collection, _, _) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
         let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
         versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id)
+            .get_documents_at_cid(cid, expected_doc_id, Some(collection.resolved_root_id()))
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }

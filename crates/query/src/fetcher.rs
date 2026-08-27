@@ -338,17 +338,23 @@ pub trait DocFetcher: MaybeSendSync {
         ))
     }
 
-    /// Reconstruct documents at the specified CID.
+    /// Reconstruct documents at the specified CID, scoped to a collection.
     ///
     /// For document-level CIDs, returns a single document.
     /// For collection-level CIDs (branchable collections), returns all
     /// documents visible at that collection state.
+    ///
+    /// `collection_name` is the queried collection: documents belonging to
+    /// another collection are excluded, so a foreign collection's commit CID
+    /// yields an empty result (Go parity).
     async fn get_documents_at_cid(
         &self,
+        collection_name: &str,
         cid: &str,
         expected_doc_id: Option<&str>,
         caller_identity: Option<&Did>,
     ) -> Result<Vec<Document>> {
+        let _ = collection_name;
         // Default: delegate to single-document method
         let doc = self
             .get_document_at_cid(cid, expected_doc_id, caller_identity)

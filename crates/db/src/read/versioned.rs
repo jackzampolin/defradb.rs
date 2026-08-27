@@ -60,7 +60,9 @@ impl<S: Store> VersionedFetcher<S> {
         cid_str: &str,
         expected_doc_id: Option<&str>,
     ) -> Result<Document> {
-        let docs = self.get_documents_at_cid(cid_str, expected_doc_id).await?;
+        let docs = self
+            .get_documents_at_cid(cid_str, expected_doc_id, None)
+            .await?;
         docs.into_iter().next().ok_or_else(|| {
             Error::Serialization("cid either does not exist or belong to document".to_string())
         })
@@ -71,10 +73,15 @@ impl<S: Store> VersionedFetcher<S> {
     /// For document-level CIDs, returns a single document.
     /// For collection-level CIDs (branchable collections), walks the collection DAG
     /// and returns all documents visible at that collection state.
+    ///
+    /// If `collection_short_id` is provided, documents belonging to another
+    /// collection are dropped before reconstruction (Go parity: a foreign
+    /// collection's commit CID yields an empty result, never a foreign row).
     pub async fn get_documents_at_cid(
         &self,
         cid_str: &str,
         expected_doc_id: Option<&str>,
+        collection_short_id: Option<u32>,
     ) -> Result<Vec<Document>> {
         let mut guard = self.txn.lock().await;
         let txn = guard.as_mut().ok_or(Error::TxnNotActive)?;
@@ -88,7 +95,12 @@ impl<S: Store> VersionedFetcher<S> {
         // Check if this is a collection block (branchable collection CID)
         if matches!(&target_block.delta, CrdtDelta::Collection(_)) {
             return self
-                .get_documents_at_collection_cid(txn, &target_cid, &target_block)
+                .get_documents_at_collection_cid(
+                    txn,
+                    &target_cid,
+                    &target_block,
+                    collection_short_id,
+                )
                 .await;
         }
 
@@ -113,6 +125,28 @@ impl<S: Store> VersionedFetcher<S> {
             ));
         } else {
             owners
+        };
+
+        // Collection membership gate, before ACP and reconstruction
+        // (Go parity: GetDocShortID + noResults in planner/select.go).
+        let selected_owners = match collection_short_id {
+            Some(col_short_id) => {
+                let systemstore = txn.systemstore()?;
+                let mut members = Vec::with_capacity(selected_owners.len());
+                for owner in selected_owners {
+                    if crate::docid::map::get_doc_short_id(&systemstore, col_short_id, &owner)
+                        .await?
+                        .is_some()
+                    {
+                        members.push(owner);
+                    }
+                }
+                if members.is_empty() {
+                    return Ok(Vec::new());
+                }
+                members
+            }
+            None => selected_owners,
         };
 
         // Collect all blocks from target CID back to genesis
@@ -140,6 +174,7 @@ impl<S: Store> VersionedFetcher<S> {
         txn: &mut DbTxn<S>,
         start_cid: &Cid,
         start_block: &Block,
+        collection_short_id: Option<u32>,
     ) -> Result<Vec<Document>> {
         // Walk the collection DAG backwards to find all document composite CIDs.
         // Each collection block links to one document composite block.
@@ -163,6 +198,19 @@ impl<S: Store> VersionedFetcher<S> {
                             .await?
                             .and_then(|owners| owners.into_iter().next())
                         {
+                            if let Some(col_short_id) = collection_short_id {
+                                let systemstore = txn.systemstore()?;
+                                if crate::docid::map::get_doc_short_id(
+                                    &systemstore,
+                                    col_short_id,
+                                    &doc_id,
+                                )
+                                .await?
+                                .is_none()
+                                {
+                                    continue;
+                                }
+                            }
                             let priority = doc_block.delta.priority();
                             match doc_composites.get(&doc_id) {
                                 None => {
@@ -227,10 +275,14 @@ impl<S: Store> VersionedFetcher<S> {
     /// Parse a CID string, returning appropriate errors for invalid/unknown CIDs.
     fn parse_cid(cid_str: &str) -> Result<Cid> {
         Cid::from_str(cid_str).map_err(|_e| {
-            // Go's CID library is more lenient. If it looks like a valid CIDv1
-            // format, treat as "not found" rather than "invalid".
+            // Go's CID library is more lenient: a CIDv1-shaped string decodes
+            // and then misses in the blockstore, so surface the blockstore
+            // miss (an error the runner propagates) rather than the
+            // does-not-exist string it swallows as an empty result.
             if Self::looks_like_cidv1(cid_str) {
-                Error::Serialization("cid either does not exist or belong to document".to_string())
+                Error::Serialization(
+                    "seek failed: (version fetcher) failed to get block in blockstore: ipld: could not find".to_string(),
+                )
             } else {
                 Error::Serialization("invalid cid: selected encoding not supported".to_string())
             }
