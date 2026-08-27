@@ -26,6 +26,8 @@ mod float_precision;
 mod go_view_paths;
 #[path = "query/gql_list_args.rs"]
 mod gql_list_args;
+#[path = "query/index_equal_key_order.rs"]
+mod index_equal_key_order;
 #[path = "query/index_fallback_4633.rs"]
 mod index_fallback_4633;
 #[path = "query/index_management.rs"]

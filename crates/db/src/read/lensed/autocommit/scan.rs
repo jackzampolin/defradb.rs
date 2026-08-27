@@ -111,7 +111,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 let mut iter = index.get(&datastore, values).await.map_err(|e| {
                     query::error::QueryError::execution(format!("index error: {}", e))
                 })?;
-                collect_with_limit(&mut iter, limit, offset, vf).await?
+                // Full equal-key set: public-DocID tie-break sorts before offset/limit (#1602).
+                collect_with_limit(&mut iter, None, 0, vf).await?
             }
             IndexScanType::InScan {
                 values,
@@ -257,11 +258,17 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .filter(|id| seen.insert(*id))
             .collect();
 
-        let doc_ids = crate::docid::map::resolve_doc_ids(&systemstore, &doc_short_ids)
+        let mut doc_ids = crate::docid::map::resolve_doc_ids(&systemstore, &doc_short_ids)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
             })?;
+        crate::read::index_tiebreak::apply_equal_key_doc_id_tie_break(
+            &params.scan_type,
+            &mut doc_ids,
+            offset,
+            limit,
+        );
 
         let _ = txn.discard();
 
