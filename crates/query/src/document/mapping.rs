@@ -40,7 +40,7 @@ struct TypeInfo {
 ///
 /// Maps field names to indexes in the document's fields array,
 /// tracks which fields to render, and manages child mappings for nested objects.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DocumentMapping {
     /// Type information for the object (if provided)
     type_info: Option<TypeInfo>,

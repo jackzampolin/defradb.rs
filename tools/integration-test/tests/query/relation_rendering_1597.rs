@@ -1,45 +1,5 @@
-use integration_test::{DefraClient, TestCluster};
-
-/// Same Book/Author fixture the Go `one_to_many` package shares
-/// (`tests/integration/query/one_to_many/utils.go`).
-fn add_schema(node: &DefraClient) {
-    node.schema_add(
-        r#"
-        type Book {
-            name: String
-            rating: Float
-            author: Author
-        }
-
-        type Author {
-            name: String
-            age: Int
-            verified: Boolean
-            published: [Book]
-        }
-        "#,
-    )
-    .expect("add schema");
-}
-
-fn add_author(node: &DefraClient, name: &str, age: i64, verified: bool) -> String {
-    let result = node
-        .query(&format!(
-            r#"mutation {{ add_Author(input: {{name: "{name}", age: {age}, verified: {verified}}}) {{ _docID }} }}"#
-        ))
-        .unwrap_or_else(|e| panic!("add author {name}: {e}"));
-    result["add_Author"][0]["_docID"]
-        .as_str()
-        .expect("author _docID")
-        .to_string()
-}
-
-fn add_book(node: &DefraClient, name: &str, rating: f64, author: &str) {
-    node.query(&format!(
-        r#"mutation {{ add_Book(input: {{name: "{name}", rating: {rating}, author: "{author}"}}) {{ _docID }} }}"#
-    ))
-    .unwrap_or_else(|e| panic!("add book {name}: {e}"));
-}
+use crate::one_to_many_common::{add_author, add_book, add_schema};
+use integration_test::TestCluster;
 
 /// Mirrors Go `TestQueryOneToManyWithParentGroupByOnRelationAndDuplicateRelationSelection`.
 async fn parent_group_by_relation_with_duplicate_selection_test(cluster: TestCluster) {
@@ -212,6 +172,134 @@ async fn group_by_with_parent_relation_filter_test(cluster: TestCluster) {
             },
         ])
     );
+}
+
+/// The duplicate can arrive through a fragment spread, not just as a literal
+/// repeat, and must dedup the same way.
+async fn duplicate_selection_via_fragment_spread_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_schema(&node);
+
+    let john = add_author(&node, "John Grisham", 65, true);
+    add_book(&node, "Painted House", 4.9, &john);
+
+    let expected = serde_json::json!([
+        {
+            "author": {"name": "John Grisham"},
+            "GROUP": [{"name": "Painted House"}],
+        }
+    ]);
+
+    let inline_plus_fragment = node
+        .query(
+            r#"query {
+                Book(groupBy: [author]) {
+                    author { name }
+                    ...AuthorName
+                    GROUP { name }
+                }
+            }
+            fragment AuthorName on Book { author { name } }"#,
+        )
+        .expect("group by relation with fragment duplicate");
+    assert_eq!(inline_plus_fragment["Book"], expected);
+
+    let fragment_twice = node
+        .query(
+            r#"query {
+                Book(groupBy: [author]) {
+                    ...AuthorName
+                    ...AuthorName
+                    GROUP { name }
+                }
+            }
+            fragment AuthorName on Book { author { name } }"#,
+        )
+        .expect("group by relation with repeated fragment spread");
+    assert_eq!(fragment_twice["Book"], expected);
+}
+
+/// Same, through an inline fragment.
+async fn duplicate_selection_via_inline_fragment_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_schema(&node);
+
+    let john = add_author(&node, "John Grisham", 65, true);
+    add_book(&node, "Painted House", 4.9, &john);
+
+    let result = node
+        .query(
+            r#"query {
+                Book(groupBy: [author]) {
+                    author { name }
+                    ... on Book { author { name } }
+                    GROUP { name }
+                }
+            }"#,
+        )
+        .expect("group by relation with inline fragment duplicate");
+
+    assert_eq!(
+        result["Book"],
+        serde_json::json!([
+            {
+                "author": {"name": "John Grisham"},
+                "GROUP": [{"name": "Painted House"}],
+            }
+        ])
+    );
+}
+
+/// GraphQL arguments are unordered, so two selections differing only in argument
+/// order are the same selection and must dedup.
+async fn duplicate_selection_with_reordered_arguments_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_schema(&node);
+
+    let john = add_author(&node, "John Grisham", 65, true);
+    add_book(&node, "Painted House", 4.9, &john);
+    add_book(&node, "A Time for Mercy", 4.5, &john);
+    add_book(&node, "The Associate", 4.2, &john);
+
+    let result = node
+        .query(
+            r#"query {
+                Author {
+                    name
+                    published(limit: 2, order: {rating: ASC}) { name }
+                    published(order: {rating: ASC}, limit: 2) { name }
+                }
+            }"#,
+        )
+        .expect("relation selection with reordered arguments");
+
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([
+            {
+                "name": "John Grisham",
+                "published": [{"name": "The Associate"}, {"name": "A Time for Mercy"}],
+            }
+        ])
+    );
+}
+
+#[tokio::test]
+async fn rust_relation_rendering_1597_duplicate_selection_via_fragment_spread() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    duplicate_selection_via_fragment_spread_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_relation_rendering_1597_duplicate_selection_via_inline_fragment() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    duplicate_selection_via_inline_fragment_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_relation_rendering_1597_duplicate_selection_with_reordered_arguments() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    duplicate_selection_with_reordered_arguments_test(cluster).await;
 }
 
 #[tokio::test]

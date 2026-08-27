@@ -13,7 +13,7 @@ use crate::limits::DEFAULT_MAX_FILTER_DEPTH;
 ///
 /// Conditions map field names to their filter values.
 /// Supports nested conditions for related objects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Filter {
     /// Parsed filter conditions
     conditions: Map<String, JsonValue>,
