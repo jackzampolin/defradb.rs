@@ -471,7 +471,8 @@ mod tests {
 
     // ── Panic containment at the FFI boundary (#1594) ─────────────────────────
 
-    /// An internal panic must surface as an error result, not kill the process.
+    /// An internal panic must surface as an error result, not kill the process,
+    /// and must leave the process able to serve the next request.
     #[test]
     fn ffi_entry_converts_panic_to_error_result() {
         let result: FfiResult = crate::ffi_entry! {
@@ -486,6 +487,34 @@ mod tests {
             "error should carry the panic message, got: {msg}"
         );
         unsafe { defra_free_string(result.error) };
+
+        // A live round-trip after the caught panic: the process is still usable.
+        init();
+        let node = new_in_memory_node();
+
+        let sdl = CString::new("type Ping { v: Int }").unwrap();
+        let r = unsafe { add_schema(node, ptr::null(), sdl.as_ptr()) };
+        assert_eq!(r.status, 0, "add_schema must succeed after a caught panic");
+        unsafe { defra_free_string(r.value) };
+
+        let q = CString::new("query { Ping { v } }").unwrap();
+        let r = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                q.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        assert_eq!(
+            r.status, 0,
+            "exec_request must succeed after a caught panic"
+        );
+        unsafe { defra_free_string(r.value) };
+
+        node_close(node);
     }
 
     /// The release profile must not set `panic = "abort"`.
@@ -509,9 +538,15 @@ mod tests {
             .split_once("\n[")
             .map_or(after_header, |(section, _)| section);
 
-        assert!(
-            !section.lines().any(|l| l.trim_start().starts_with("panic")),
-            "[profile.release] must not set a panic strategy, got:\n{section}"
+        let offender = section.lines().map(str::trim).find(|line| {
+            line.split_once('=').is_some_and(|(key, value)| {
+                key.trim() == "panic" && value.trim().trim_matches('"') != "unwind"
+            })
+        });
+
+        assert_eq!(
+            offender, None,
+            "[profile.release] must leave panics unwinding, got:\n{section}"
         );
     }
 }

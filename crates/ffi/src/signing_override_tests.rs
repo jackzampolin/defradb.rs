@@ -74,12 +74,11 @@ mod tests {
     fn create_widget(node: usize, name: &str, signing_override: c_int) -> String {
         let response = exec(
             node,
-            &format!(r#"mutation {{ create_Widget(input: {{name: "{name}"}}) {{ _docID }} }}"#),
+            &format!(r#"mutation {{ add_Widget(input: {{name: "{name}"}}) {{ _docID }} }}"#),
             signing_override,
         );
         response
             .pointer("/data/add_Widget/0/_docID")
-            .or_else(|| response.pointer("/data/create_Widget/0/_docID"))
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("created document id missing from {response}"))
             .to_string()
