@@ -6,16 +6,45 @@ use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
-use crate::document::documents_to_plan_docs;
-use crate::error::Result;
+use crate::document::{documents_to_plan_docs, DocumentMapping};
+use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
-use crate::planner::Planner;
+use crate::planner::{Doc, Planner};
 use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::plan;
 use super::super::plan_drive;
 use super::super::{DocFetcher, QueryRunner};
+
+/// Number of distinct `group_by` keys across `docs`.
+///
+/// A document missing a grouped field is keyed as null, so all such documents
+/// share one group.
+fn distinct_group_count<'a>(
+    docs: impl Iterator<Item = &'a Doc>,
+    mapping: &DocumentMapping,
+    group_fields: &[String],
+) -> i64 {
+    let indexes: Vec<Option<usize>> = group_fields
+        .iter()
+        .map(|name| mapping.first_index_of_name(name))
+        .collect();
+    docs.map(|doc| {
+        indexes
+            .iter()
+            .map(|index| {
+                index
+                    .and_then(|i| doc.get(i))
+                    .unwrap_or(&JsonValue::Null)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\u{1}")
+    })
+    .collect::<std::collections::HashSet<_>>()
+    .len() as i64
+}
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Top-level aggregates compute a single value over all documents in a collection.
@@ -101,8 +130,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // Compute the aggregate value
                 let value = match agg.aggregate_type {
                     crate::mapper::AggregateType::Count => {
-                        // Count documents (optionally filtered)
-                        let count = filtered_docs.len() as i64;
+                        // Count documents (optionally filtered), or distinct
+                        // groups when the target is grouped.
+                        let count = match target.and_then(|t| t.group_by.as_ref()) {
+                            Some(group_by) => distinct_group_count(
+                                filtered_docs.iter().copied(),
+                                &mapping,
+                                &group_by.resolved_fields(collection)?,
+                            ),
+                            None => filtered_docs.len() as i64,
+                        };
                         JsonValue::Number(count.into())
                     }
                     crate::mapper::AggregateType::Sum => {
@@ -229,6 +266,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let target = agg.targets.first();
         let target_filter = target.and_then(|t| t.filter.as_ref());
         let field_name = target.and_then(|t| t.field_name.as_ref());
+        let group_by = target.and_then(|t| t.group_by.as_ref());
 
         // Create a modified select that fetches the collection with the filter applied.
         // This select returns documents (not aggregates), so the planner will build
@@ -236,18 +274,40 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collection_name = target
             .map(|t| t.host_name.clone())
             .unwrap_or_else(|| select.collection_name.clone());
+
+        let collections_map = self.collections_map().await?;
+        let group_fields = match group_by {
+            Some(gb) => gb.resolved_fields(
+                collections_map
+                    .get(&collection_name)
+                    .ok_or_else(|| QueryError::collection_not_found(&collection_name))?,
+            )?,
+            None => Vec::new(),
+        };
+
+        let mut select_fields = if let Some(fname) = field_name {
+            // For sum/avg/etc., we need the field value
+            vec![Requestable::Field(crate::mapper::Field::new(fname.clone()))]
+        } else {
+            // For count, we just need any field to count docs
+            vec![Requestable::Field(crate::mapper::Field::new(
+                "_docID".to_string(),
+            ))]
+        };
+        // Grouped targets need the grouped fields available to build group keys.
+        for name in &group_fields {
+            let already_selected = select_fields
+                .iter()
+                .any(|f| matches!(f, Requestable::Field(existing) if existing.name == *name));
+            if !already_selected {
+                select_fields.push(Requestable::Field(crate::mapper::Field::new(name.clone())));
+            }
+        }
+
         let filter_select = Select {
             collection_name: collection_name.clone(),
             field: crate::mapper::Field::new(collection_name.clone()),
-            fields: if let Some(fname) = field_name {
-                // For sum/avg/etc., we need the field value
-                vec![Requestable::Field(crate::mapper::Field::new(fname.clone()))]
-            } else {
-                // For count, we just need any field to count docs
-                vec![Requestable::Field(crate::mapper::Field::new(
-                    "_docID".to_string(),
-                ))]
-            },
+            fields: select_fields,
             filter: target_filter.cloned(),
             order_by: None,
             limit: None,
@@ -268,7 +328,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Execute with the planner to get filtered documents
         let fetcher_arc = FetcherWrapper::new(fetcher);
-        let collections_map = self.collections_map().await?;
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
@@ -302,7 +361,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Compute the aggregate based on type
         let value = match agg.aggregate_type {
             AggregateType::Count => {
-                let count = docs.len() as i64;
+                let count = if group_by.is_some() {
+                    distinct_group_count(docs.iter(), &mapping, &group_fields)
+                } else {
+                    docs.len() as i64
+                };
                 JsonValue::Number(count.into())
             }
             AggregateType::Sum => {
