@@ -79,6 +79,24 @@ async fn an_unknown_version_id_is_an_error_not_a_silent_success() {
 }
 
 #[tokio::test]
+async fn a_name_precedes_an_unknown_version_id() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+    db.create_collection(materialized("OrdersView"))
+        .await
+        .expect("store view");
+
+    db.refresh_views(CollectionSelector {
+        names: Some(vec!["OrdersView".to_string()]),
+        version_id: Some("bae-does-not-exist".to_string()),
+        ..CollectionSelector::all()
+    })
+    .await
+    .expect("the version id only filters the active name candidate");
+}
+
+#[tokio::test]
 async fn an_unknown_collection_id_is_an_error() {
     let db = db::DB::open(storage::backends::MemoryStore::new())
         .await

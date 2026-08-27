@@ -1,9 +1,9 @@
 name: Cancel PR CI on close
 
 # When a PR is merged or closed without merge, any still-queued / in-progress
-# CI runs for that head branch keep holding self-hosted slots forever — GitHub
-# does not invalidate them. Cancel them so the fleet is free for tip-of-main
-# and open PRs. Complements concurrency.cancel-in-progress on ci.yml (which
+# CI runs for that head branch keep consuming runner capacity because GitHub
+# does not invalidate them. Cancel them so capacity is free for tip-of-main
+# and open PRs. Complements concurrency.cancel-in-progress in ci.yml (which
 # only covers same-ref supersession while the PR is open).
 on:
   pull_request:

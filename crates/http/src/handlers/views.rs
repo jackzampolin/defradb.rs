@@ -1,10 +1,6 @@
 //! View endpoint handlers.
 
-use axum::{
-    body::Bytes,
-    extract::{Query, State},
-    Json,
-};
+use axum::{body::Bytes, extract::State, Json};
 
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::collection_selector::CollectionSelectorQuery;
@@ -89,7 +85,7 @@ fn view_names_from_body(body: &Bytes) -> Result<Option<Vec<String>>, HttpError> 
 pub async fn refresh_views(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<CollectionSelectorQuery>,
+    query: CollectionSelectorQuery,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewRefresh).await?;

@@ -12,6 +12,7 @@ use iroh::SecretKey;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
+use crate::explicit_replay::ExplicitReplayCapabilityCache;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, ManageQueryReply,
     ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
@@ -36,6 +37,7 @@ pub struct IrohTransport {
     local_peer_id: PeerId,
     local_public_key_bytes: Vec<u8>,
     secret_key: Arc<SecretKey>,
+    explicit_replay_capabilities: ExplicitReplayCapabilityCache,
 }
 
 impl IrohTransport {
@@ -50,7 +52,37 @@ impl IrohTransport {
             local_peer_id,
             local_public_key_bytes,
             secret_key: Arc::new(secret_key),
+            explicit_replay_capabilities: ExplicitReplayCapabilityCache::default(),
         }
+    }
+
+    pub fn set_explicit_replay_capability(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        capability: &str,
+    ) -> Result<()> {
+        self.explicit_replay_capabilities.set(
+            self.local_peer_id.as_str(),
+            peer_id.as_str(),
+            collection_id,
+            capability,
+        )
+    }
+
+    pub fn clear_explicit_replay_capabilities(&self, peer_id: &PeerId, collections: &[String]) {
+        self.explicit_replay_capabilities
+            .clear(peer_id.as_str(), collections);
+    }
+
+    pub fn explicit_replay_capability_matches(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        capability: Option<&str>,
+    ) -> bool {
+        self.explicit_replay_capabilities
+            .matches(peer_id.as_str(), collection_id, capability)
     }
 
     /// Send a command and await the oneshot reply.
@@ -231,6 +263,8 @@ impl P2PTransport for IrohTransport {
         peer_id: &PeerId,
         mut req: PushLogRequest,
     ) -> Result<PushLogReply> {
+        self.explicit_replay_capabilities
+            .attach(peer_id.as_str(), &mut req);
         // Advertise that this iroh sender consumes the ACK from the request
         // stream. Re-sign because the capability is part of the wire message.
         req.supports_same_stream_reply = true;
@@ -482,7 +516,10 @@ impl P2PTransport for IrohTransport {
             peer_id: peer_id.clone(),
             reply,
         })
-        .await
+        .await?;
+        self.explicit_replay_capabilities
+            .clear_all(peer_id.as_str());
+        Ok(())
     }
 
     async fn list_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
@@ -503,12 +540,22 @@ impl P2PTransport for IrohTransport {
         peer_id: &PeerId,
         collections: Vec<String>,
     ) -> Result<bool> {
-        self.send_command(|reply| IrohCommand::RemoveReplicatorCollections {
-            peer_id: peer_id.clone(),
-            collections,
-            reply,
-        })
-        .await
+        let removed_collections = collections.clone();
+        let fully_deleted = self
+            .send_command(|reply| IrohCommand::RemoveReplicatorCollections {
+                peer_id: peer_id.clone(),
+                collections,
+                reply,
+            })
+            .await?;
+        if fully_deleted {
+            self.explicit_replay_capabilities
+                .clear_all(peer_id.as_str());
+        } else {
+            self.explicit_replay_capabilities
+                .clear(peer_id.as_str(), &removed_collections);
+        }
+        Ok(fully_deleted)
     }
 
     async fn shutdown(&self) -> Result<()> {

@@ -59,17 +59,6 @@ async fn delete_with(router: Router, body: &str) -> (StatusCode, String) {
     send(router, Method::DELETE, "/api/v0/collections/Users", body).await
 }
 
-async fn collection_names(router: Router) -> Vec<String> {
-    let (status, body) = send(router, Method::GET, "/api/v0/collections", "").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    serde_json::from_str::<Value>(&body).unwrap()["collections"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|name| name.as_str().unwrap().to_string())
-        .collect()
-}
-
 async fn doc_ids(router: Router) -> Vec<String> {
     let (status, body) = send(router, Method::GET, "/api/v0/collections/Users", "").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -105,19 +94,15 @@ async fn a_filtered_delete_never_touches_collection_management() {
         delete_with(router.clone(), r#"{"filter":{"name":{"_eq":"Alice"}}}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    // The listing alone cannot detect a revert: it does not go through
-    // collection management, and the drop is a no-op against this mock. What
-    // pins the fix is that collection management is never reached.
     assert!(
         mgmt.dropped_collections().is_empty(),
         "a filtered document delete dropped {:?}",
         mgmt.dropped_collections()
     );
-    assert!(
-        collection_names(router)
-            .await
-            .contains(&"Users".to_string()),
-        "the collection must still exist after deleting a document from it"
+    assert_eq!(
+        doc_ids(router).await,
+        vec!["bae-456"],
+        "the collection and its unmatched document must survive"
     );
 }
 

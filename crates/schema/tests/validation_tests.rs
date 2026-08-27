@@ -181,3 +181,80 @@ fn test_single_sided_relation_no_primary_check() {
     // Should fail because relation points to nonexistent "users" collection
     assert!(result.is_err());
 }
+
+#[test]
+fn new_relation_can_target_an_existing_collection() {
+    let author = FieldDescription::new("3", "author", FieldKind::named("users", false))
+        .with_relation_name("user_posts")
+        .as_primary();
+    let posts = CollectionVersion::new("posts", "v-posts", "coll-posts", vec![author]);
+
+    schema::definition_validation::validate_new_collections_with_existing(
+        &[posts],
+        &[user_collection()],
+    )
+    .unwrap();
+}
+
+#[test]
+fn new_relation_must_target_a_known_collection() {
+    let author = FieldDescription::new("3", "author", FieldKind::named("missing", true))
+        .with_relation_name("user_posts")
+        .as_primary();
+    let posts = CollectionVersion::new("posts", "v-posts", "coll-posts", vec![author]);
+
+    let error =
+        schema::definition_validation::validate_new_collections_with_existing(&[posts], &[])
+            .unwrap_err();
+
+    assert!(error.contains("no type found for given name. Field: author, Kind: [missing]"));
+}
+
+#[test]
+fn secondary_relation_requires_a_primary_counterpart() {
+    let author = FieldDescription::new("3", "author", FieldKind::named("users", false))
+        .with_relation_name("user_posts");
+    let posts = CollectionVersion::new("posts", "v-posts", "coll-posts", vec![author]);
+
+    let error = schema::definition_validation::validate_new_collections_with_existing(
+        &[posts],
+        &[user_collection()],
+    )
+    .unwrap_err();
+
+    assert!(error.contains("relation missing field. Object: users, RelationName: user_posts"));
+}
+
+#[test]
+fn paired_relation_cannot_have_two_primary_fields() {
+    let posts_field = FieldDescription::new("3", "posts", FieldKind::named("posts", true))
+        .with_relation_name("user_posts")
+        .as_primary();
+    let users = CollectionVersion::new("users", "v-users", "coll-users", vec![posts_field]);
+    let author = FieldDescription::new("3", "author", FieldKind::named("users", false))
+        .with_relation_name("user_posts")
+        .as_primary();
+    let posts = CollectionVersion::new("posts", "v-posts", "coll-posts", vec![author]);
+
+    let error =
+        schema::definition_validation::validate_new_collections_with_existing(&[users, posts], &[])
+            .unwrap_err();
+
+    assert!(error.contains("relation can only have a single field set as primary"));
+}
+
+#[test]
+fn self_relation_must_use_self_kind() {
+    let manager = FieldDescription::new("3", "manager", FieldKind::named("users", false))
+        .with_relation_name("user_manager")
+        .as_primary();
+    let users = CollectionVersion::new("users", "v-users", "coll-users", vec![manager]);
+
+    let error =
+        schema::definition_validation::validate_new_collections_with_existing(&[users], &[])
+            .unwrap_err();
+
+    assert!(
+        error.contains("must specify 'Self' kind for self referencing relations. Field: manager")
+    );
+}
