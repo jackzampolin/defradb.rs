@@ -891,10 +891,21 @@ pub(super) fn parse_selection_set(
 ) -> Result<(Vec<Requestable>, DocumentMapping)> {
     let mut fields = Vec::new();
     let mut mapping = DocumentMapping::new();
+    // Rendered form of each field already taken, to drop identical repeats.
+    // `Field`'s `PartialEq` compares source positions, so it cannot be used here.
+    let mut seen: HashSet<String> = HashSet::new();
 
     for selection in &selection_set.items {
         match selection {
             Selection::Field(field) => {
+                // GraphQL merges selections sharing a response key, so an identical
+                // repeat contributes nothing. Keeping it would give the duplicate its
+                // own mapping index and its own relation join, while the renderer only
+                // ever reads one of the two indexes — the other renders as null.
+                if !seen.insert(field.to_string()) {
+                    continue;
+                }
+
                 let field_name = field.name.clone();
                 let alias = field.alias.clone();
 
