@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use document::NormalValue;
 
 use crate::document::DocumentMapping;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
 use crate::planner::{IndexScanParams, IndexScanType};
@@ -24,7 +24,7 @@ enum Inner {
     SecondarySide {
         parent_scan: Box<dyn PlanNode>,
         yielded_ids: SharedYieldedIds,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
         child_collection_name: String,
         child_fk_index_name: String,
     },
@@ -57,7 +57,7 @@ impl OrphanNode {
     pub fn secondary_side(
         parent_scan: Box<dyn PlanNode>,
         yielded_ids: SharedYieldedIds,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
         child_collection_name: String,
         child_fk_index_name: String,
         document_mapping: DocumentMapping,
@@ -155,6 +155,9 @@ impl PlanNode for OrphanNode {
                         continue;
                     }
 
+                    let fetcher = fetcher.as_ref().ok_or_else(|| {
+                        QueryError::internal("orphan scan: fetcher not initialized")
+                    })?;
                     let scan_result = fetcher
                         .get_by_index_scan(
                             child_collection_name,
