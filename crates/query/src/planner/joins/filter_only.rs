@@ -10,7 +10,6 @@ use schema::CollectionVersion;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
-use crate::mapper::{Requestable, Select};
 use crate::plan::{IndexScanNode, JoinSide, RelationFilter, ScanNode, TypeJoinMany, TypeJoinOne};
 use crate::planner::PlanNode;
 
@@ -25,9 +24,9 @@ impl Planner {
         &self,
         mut plan: Box<dyn PlanNode>,
         mapping: &mut DocumentMapping,
-        select: &Select,
         parent_collection: &CollectionVersion,
         parent_filter: Option<&crate::mapper::Filter>,
+        selected_relations: &[&str],
     ) -> Result<Box<dyn PlanNode>> {
         let filter = match parent_filter {
             Some(f) => f,
@@ -36,12 +35,11 @@ impl Planner {
 
         // Get relations referenced by the filter
         for (relation_name, nested_conditions) in filter.relation_conditions() {
-            // Skip if already joined via selection
-            let already_joined = select
-                .fields
-                .iter()
-                .any(|f| matches!(f, Requestable::Select(s) if s.field.name == relation_name));
-            if already_joined {
+            // Relations already joined from the selection, including those nested
+            // inside `GROUP`. Joining one of those again would overwrite its child
+            // render mapping with this join's internal one (_docID, FK, filter
+            // fields), leaking those fields into the rendered relation.
+            if selected_relations.contains(&relation_name.as_str()) {
                 continue;
             }
 

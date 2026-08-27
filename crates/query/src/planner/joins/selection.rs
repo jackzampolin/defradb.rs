@@ -1,6 +1,6 @@
 //! Collect nested selects and synthetic ORDER BY joins for planning.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use schema::CollectionVersion;
 
@@ -52,7 +52,7 @@ pub(super) fn collect_selects_to_process<'a>(
 pub(super) fn collect_synthetic_order_selects(
     select: &Select,
     parent_collection: &CollectionVersion,
-    already_selected: &HashSet<&str>,
+    already_selected: &[&str],
 ) -> Vec<Select> {
     // Add synthetic selects for ORDER BY relation fields not already in the selection.
     // Go's resolveOrderDependencies creates joins for relations referenced in ORDER BY
@@ -63,7 +63,7 @@ pub(super) fn collect_synthetic_order_selects(
             // Path like ["device", "model"] — first element is the relation field
             if condition.fields.len() >= 2 {
                 let relation_name = &condition.fields[0];
-                if !already_selected.contains(relation_name.as_str()) {
+                if !already_selected.contains(&relation_name.as_str()) {
                     // Check this is actually a relation field
                     if let Some(field) = parent_collection.field_by_name(relation_name) {
                         if field.kind.is_relation() {

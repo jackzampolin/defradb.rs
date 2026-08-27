@@ -72,7 +72,7 @@ impl Planner {
 
         let mut selects_to_process = selection::collect_selects_to_process(select, &mapping);
 
-        let already_selected: std::collections::HashSet<&str> = selects_to_process
+        let already_selected: Vec<&str> = selects_to_process
             .iter()
             .map(|(s, _)| s.field.name.as_str())
             .collect();
@@ -117,9 +117,9 @@ impl Planner {
         plan = self.apply_filter_only_joins(
             plan,
             &mut mapping,
-            select,
             parent_collection,
             parent_filter,
+            &already_selected,
         )?;
         plan = self.apply_secondary_id_joins(plan, &mut mapping, select, parent_collection)?;
         plan = self.apply_aggregate_joins(

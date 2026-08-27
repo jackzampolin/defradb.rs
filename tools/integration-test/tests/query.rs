@@ -50,6 +50,8 @@ mod planner_4656;
 mod planner_4684;
 #[path = "query/relation_order_panic_1594.rs"]
 mod relation_order_panic_1594;
+#[path = "query/relation_rendering_1597.rs"]
+mod relation_rendering_1597;
 #[path = "query/sdl_generate.rs"]
 mod sdl_generate;
 #[path = "query/subscription_docid.rs"]

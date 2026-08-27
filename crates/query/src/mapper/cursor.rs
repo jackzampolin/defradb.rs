@@ -3,7 +3,7 @@
 /// Parsed cursor pagination args from a GraphQL cursor query.
 /// `first`/`after` are mutually exclusive with `last`/`before`
 /// (validated by the parser).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CursorParams {
     pub first: Option<u64>,
     pub after: Option<String>, // raw base64 token; decoded in planner
@@ -24,7 +24,7 @@ impl CursorParams {
 /// Which `_pageInfo` fields the client selected, and the output key to emit them under.
 /// `None` means the field was not selected; `Some(key)` means it was selected and should
 /// appear in the response under that key (the alias if provided, else the canonical name).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CursorPageInfoFields {
     pub has_next: Option<String>,
     pub has_prev: Option<String>,
@@ -49,7 +49,7 @@ impl CursorPageInfoFields {
 /// The `_pageInfo` block and its subfields are always emitted under their
 /// canonical names (`_pageInfo`, `hasNext`, etc.) regardless of any alias,
 /// mirroring Go's planner.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CursorAliases {
     /// Alias on `_cursor` (e.g., `{ paged: _cursor { ... } }` => Some("paged")).
     /// None => emit under the literal key `_cursor`.

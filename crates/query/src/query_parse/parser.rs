@@ -881,6 +881,49 @@ pub(super) fn parse_field_to_select(
     Ok(select)
 }
 
+/// Record a parsed selection, dropping it if an identical one was already taken.
+///
+/// GraphQL merges selections sharing a response key, so an identical repeat
+/// contributes nothing. Keeping it would give the duplicate its own mapping
+/// index and its own relation join, while the renderer only ever reads one of
+/// the two indexes — the other renders as null. Comparing the parsed form
+/// rather than the source text also catches repeats that arrive through a
+/// fragment or that write their arguments in a different order.
+fn push_unique(
+    fields: &mut Vec<Requestable>,
+    mapping: &mut DocumentMapping,
+    requestable: Requestable,
+) {
+    if fields.contains(&requestable) {
+        return;
+    }
+
+    let index = mapping.next_index();
+    match &requestable {
+        Requestable::Field(f) => {
+            mapping.add(index, &f.name);
+            mapping.add_render_key(index, f.output_name());
+        }
+        Requestable::Aggregate(a) => {
+            mapping.add(index, a.aggregate_type.as_str());
+            mapping.add_render_key(index, a.output_name());
+        }
+        Requestable::Select(s) => {
+            mapping.add(index, &s.field.name);
+            mapping.add_render_key(index, s.field.output_name());
+        }
+        Requestable::Similarity(sim) => {
+            mapping.add(index, "SIMILARITY");
+            mapping.add_render_key(index, sim.output_name());
+        }
+        Requestable::FullTextSearch(fts) => {
+            mapping.add(index, "BM25");
+            mapping.add_render_key(index, fts.output_name());
+        }
+    }
+    fields.push(requestable);
+}
+
 /// Parse a selection set into fields and document mapping.
 pub(super) fn parse_selection_set(
     selection_set: &SelectionSet<'_, String>,
@@ -907,11 +950,7 @@ pub(super) fn parse_selection_set(
                         fts
                     };
 
-                    let index = mapping.next_index();
-                    mapping.add(index, "BM25");
-                    mapping.add_render_key(index, fts.output_name());
-
-                    fields.push(Requestable::FullTextSearch(fts));
+                    push_unique(&mut fields, &mut mapping, Requestable::FullTextSearch(fts));
                     continue;
                 }
 
@@ -924,11 +963,7 @@ pub(super) fn parse_selection_set(
                         similarity
                     };
 
-                    let index = mapping.next_index();
-                    mapping.add(index, "SIMILARITY");
-                    mapping.add_render_key(index, sim.output_name());
-
-                    fields.push(Requestable::Similarity(sim));
+                    push_unique(&mut fields, &mut mapping, Requestable::Similarity(sim));
                     continue;
                 }
 
@@ -941,23 +976,16 @@ pub(super) fn parse_selection_set(
                         aggregate = aggregate.with_alias(a.clone());
                     }
 
-                    // Add to document mapping
-                    let index = mapping.next_index();
-                    mapping.add(index, agg_type.as_str());
-                    mapping.add_render_key(index, aggregate.output_name());
-
-                    fields.push(Requestable::Aggregate(aggregate));
+                    push_unique(&mut fields, &mut mapping, Requestable::Aggregate(aggregate));
                 } else if !field.selection_set.items.is_empty() {
                     // This is a nested select (relation)
                     let nested = parse_field_to_select(field, variables, fragments, visiting)?;
 
-                    // Add nested select to document mapping
-                    // Use field name for internal indexing, output_name (alias) for rendering
-                    let index = mapping.next_index();
-                    mapping.add(index, &field_name);
-                    mapping.add_render_key(index, nested.field.output_name());
-
-                    fields.push(Requestable::Select(Box::new(nested)));
+                    push_unique(
+                        &mut fields,
+                        &mut mapping,
+                        Requestable::Select(Box::new(nested)),
+                    );
                 } else {
                     // Simple field
                     let select_field = if let Some(a) = alias {
@@ -966,12 +994,7 @@ pub(super) fn parse_selection_set(
                         SelectField::new(&field_name)
                     };
 
-                    // Add to document mapping
-                    let index = mapping.next_index();
-                    mapping.add(index, &field_name);
-                    mapping.add_render_key(index, select_field.output_name());
-
-                    fields.push(Requestable::Field(select_field));
+                    push_unique(&mut fields, &mut mapping, Requestable::Field(select_field));
                 }
             }
             Selection::FragmentSpread(spread) => {
@@ -1005,31 +1028,7 @@ pub(super) fn parse_selection_set(
 
                 // Merge fragment fields and mapping into our current sets
                 for frag_field in frag_fields {
-                    // Update mapping indices for the merged fields
-                    let index = mapping.next_index();
-                    match &frag_field {
-                        Requestable::Field(f) => {
-                            mapping.add(index, &f.name);
-                            mapping.add_render_key(index, f.output_name());
-                        }
-                        Requestable::Aggregate(a) => {
-                            mapping.add(index, a.aggregate_type.as_str());
-                            mapping.add_render_key(index, a.output_name());
-                        }
-                        Requestable::Select(s) => {
-                            mapping.add(index, &s.field.name);
-                            mapping.add_render_key(index, s.field.output_name());
-                        }
-                        Requestable::Similarity(sim) => {
-                            mapping.add(index, "SIMILARITY");
-                            mapping.add_render_key(index, sim.output_name());
-                        }
-                        Requestable::FullTextSearch(fts) => {
-                            mapping.add(index, "BM25");
-                            mapping.add_render_key(index, fts.output_name());
-                        }
-                    }
-                    fields.push(frag_field);
+                    push_unique(&mut fields, &mut mapping, frag_field);
                 }
             }
             Selection::InlineFragment(inline) => {
@@ -1046,30 +1045,7 @@ pub(super) fn parse_selection_set(
 
                 // Merge inline fragment fields into our current sets
                 for inline_field in inline_fields {
-                    let index = mapping.next_index();
-                    match &inline_field {
-                        Requestable::Field(f) => {
-                            mapping.add(index, &f.name);
-                            mapping.add_render_key(index, f.output_name());
-                        }
-                        Requestable::Aggregate(a) => {
-                            mapping.add(index, a.aggregate_type.as_str());
-                            mapping.add_render_key(index, a.output_name());
-                        }
-                        Requestable::Select(s) => {
-                            mapping.add(index, &s.field.name);
-                            mapping.add_render_key(index, s.field.output_name());
-                        }
-                        Requestable::Similarity(sim) => {
-                            mapping.add(index, "SIMILARITY");
-                            mapping.add_render_key(index, sim.output_name());
-                        }
-                        Requestable::FullTextSearch(fts) => {
-                            mapping.add(index, "BM25");
-                            mapping.add_render_key(index, fts.output_name());
-                        }
-                    }
-                    fields.push(inline_field);
+                    push_unique(&mut fields, &mut mapping, inline_field);
                 }
             }
         }
