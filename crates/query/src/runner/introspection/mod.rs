@@ -320,6 +320,8 @@ pub async fn execute_introspection(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+
     use super::*;
     use schema::{FieldDescription, FieldKind, ScalarArrayKind};
 
@@ -468,5 +470,62 @@ mod tests {
         assert_eq!(tags["type"]["kind"], "LIST");
         assert_eq!(tags["type"]["ofType"]["kind"], "SCALAR");
         assert_eq!(tags["type"]["ofType"]["name"], "String");
+    }
+
+    #[test]
+    fn mutation_input_is_safe_for_concurrent_first_use() {
+        const CALLERS: usize = 16;
+        const QUERY: &str = r#"{
+            __type(name: "UsersMutationInputArg") {
+                inputFields {
+                    name
+                    type { kind name ofType { kind name } }
+                }
+            }
+        }"#;
+
+        let collection = CollectionVersion::new(
+            "Users",
+            "v1",
+            "users",
+            vec![
+                FieldDescription::new("1", "name", FieldKind::Scalar(schema::ScalarKind::String)),
+                FieldDescription::new(
+                    "2",
+                    "tags",
+                    FieldKind::ScalarArray(ScalarArrayKind::StringArray),
+                ),
+            ],
+        );
+        let schema = build_introspection_schema(&[collection]).unwrap();
+        let barrier = Barrier::new(CALLERS);
+
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..CALLERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let response = futures::executor::block_on(
+                            schema.execute(async_graphql::Request::new(QUERY)),
+                        );
+                        assert!(response.errors.is_empty(), "{:?}", response.errors);
+                        serde_json::to_value(response.data).unwrap()
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<JsonValue>>()
+        });
+
+        for result in &results[1..] {
+            assert_eq!(result, &results[0]);
+        }
+        let fields = results[0]["__type"]["inputFields"].as_array().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|field| field["name"] == "name"));
+        assert!(fields.iter().any(|field| field["name"] == "tags"));
     }
 }

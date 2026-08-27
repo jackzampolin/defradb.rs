@@ -1,5 +1,6 @@
 //! Relation-based aggregate computation.
 
+use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
 
 use crate::error::Result;
@@ -269,7 +270,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 // Step 4: Compute aggregate over final items
                                 match agg_type {
                                     AggregateType::Count => {
-                                        total_count += final_items.len() as i64;
+                                        total_count += match target.group_by {
+                                            Some(ref group_by) => {
+                                                distinct_group_count(&final_items, group_by)
+                                            }
+                                            None => final_items.len() as i64,
+                                        };
                                     }
                                     AggregateType::Sum | AggregateType::Average => {
                                         for item in &final_items {
@@ -559,6 +565,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         Ok(results)
     }
+}
+
+/// Number of distinct `group_by` keys across relation items.
+///
+/// An item missing a grouped field is keyed as null, so all such items share
+/// one group. A single relation is fetched under its ID field, so `author`
+/// falls back to `_authorID` (see `GroupBy::resolved_fields`).
+fn distinct_group_count(items: &[&JsonValue], group_by: &crate::mapper::GroupBy) -> i64 {
+    items
+        .iter()
+        .map(|item| {
+            group_by
+                .fields
+                .iter()
+                .map(|name| {
+                    item.get(name.as_str())
+                        .or_else(|| {
+                            item.get(CollectionVersion::relation_id_field_name(name).as_str())
+                        })
+                        .unwrap_or(&JsonValue::Null)
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\u{1}")
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len() as i64
 }
 
 /// Extract a numeric value from a JSON item for aggregate computation.

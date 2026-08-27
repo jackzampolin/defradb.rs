@@ -168,6 +168,17 @@ impl<S: Store> crate::database::DB<S> {
         // same index/head/cache namespace as the rest of the collection history.
         new_schema.root_id = old_schema.root_id;
 
+        // Matches Go's validateDematerializedViewHasNoData.
+        if old_schema.is_materialized
+            && !new_schema.is_materialized
+            && self.collection_has_data(&old_schema).await?
+        {
+            return Err(Error::InvalidPatch(format!(
+                "cannot dematerialize a materialized view that has data, first truncate it and then try again. Name: {}, VersionID: {}",
+                old_schema.name, old_schema.version_id
+            )));
+        }
+
         // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).
         // These don't create a new schema version - they update the existing one.
         let is_isactive_only_change = is_active_explicitly_set

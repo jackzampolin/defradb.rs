@@ -16,11 +16,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{
     body::{to_bytes, Body},
-    http::{header::HOST, Request, StatusCode},
+    http::{header::HOST, Method, Request, StatusCode},
+    response::Response,
     Router,
 };
 use defra_http::router::{AppStateBuilder, CollectionVersionOperations};
-use defra_http::{MockQueryExecutor, MockRestOperations};
+use defra_http::{MockQueryExecutor, MockRestOperations, MockTransactionOperations};
 use query::rest::RestOperations;
 use schema::CollectionVersion;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,6 +77,7 @@ fn router_with(versions: Arc<Versions>) -> Router {
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
         .with_collection_versions(versions)
+        .with_txn_ops(Arc::new(MockTransactionOperations::new()))
         .build();
     defra_http::create_router_with_state(state)
 }
@@ -88,17 +90,26 @@ fn router_without_versions() -> Router {
     defra_http::create_router_with_state(state)
 }
 
-async fn get(router: Router, query: &str) -> (StatusCode, String) {
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v0/collections{query}"))
-                .header(HOST, "localhost:9181")
-                .body(Body::empty())
-                .unwrap(),
-        )
+async fn get_response(router: Router, query: &str) -> Response {
+    get_response_with_txn(router, query, None).await
+}
+
+async fn get_response_with_txn(router: Router, query: &str, txn_id: Option<&str>) -> Response {
+    let mut request = Request::builder()
+        .uri(format!("/api/v0/collections{query}"))
+        .header(HOST, "localhost:9181");
+    if let Some(txn_id) = txn_id {
+        request = request.header("x-defradb-tx", txn_id);
+    }
+
+    router
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
-        .expect("router should respond");
+        .expect("router should respond")
+}
+
+async fn get(router: Router, query: &str) -> (StatusCode, String) {
+    let response = get_response(router, query).await;
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, String::from_utf8_lossy(&body).into_owned())
@@ -217,9 +228,68 @@ async fn every_request_needs_the_version_store() {
 #[tokio::test]
 async fn an_unparseable_selector_is_refused() {
     for query in ["?get_inactive=maybe", "?get_inactive="] {
-        let (status, body) = get(router(), query).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        let response = get_response(router(), query).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/json",
+            "{query} must use the Go error envelope"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).expect("JSON error body");
+        assert!(error["error"].as_str().is_some(), "{query}: {error}");
     }
+}
+
+#[tokio::test]
+async fn get_inactive_accepts_every_go_boolean_form() {
+    for value in ["1", "t", "T", "true", "TRUE", "True"] {
+        assert_eq!(
+            names(&format!("?get_inactive={value}")).await,
+            vec!["Books", "Orders", "Users"],
+            "{value} should be true"
+        );
+    }
+    for value in ["0", "f", "F", "false", "FALSE", "False"] {
+        assert_eq!(
+            names(&format!("?get_inactive={value}")).await,
+            vec!["Books", "Users"],
+            "{value} should be false"
+        );
+    }
+}
+
+#[tokio::test]
+async fn view_refresh_uses_the_same_json_selector_error() {
+    let response = router()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v0/view/refresh?get_inactive=maybe")
+                .header(HOST, "localhost:9181")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router should respond");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("JSON error body");
+    assert!(error["error"].as_str().is_some(), "{error}");
+}
+
+#[tokio::test]
+async fn a_transaction_header_reads_transaction_visible_collections() {
+    assert!(names("?name=MockCollection").await.is_empty());
+
+    let response =
+        get_response_with_txn(router(), "?name=MockCollection", Some("transaction-id")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(body["collections"], serde_json::json!(["MockCollection"]));
 }
 
 /// Go keys the selectors off `Query().Has(..)`, so `?name=` is a name set to
@@ -272,6 +342,17 @@ async fn a_name_pre_empts_the_version_lookup_so_a_bad_version_is_not_a_404() {
     }
 }
 
+/// The name arm selects the active version before the version id filters it.
+/// A matching active id survives, while an inactive id cannot replace it.
+#[tokio::test]
+async fn a_name_filters_its_active_candidate_by_version_id() {
+    assert_eq!(
+        names("?name=Users&version_id=users-v2").await,
+        vec!["Users"]
+    );
+    assert!(names("?name=Users&version_id=users-v1").await.is_empty());
+}
+
 /// `get_inactive` takes the name arm out of the running, so the version
 /// lookup runs again and an id that exists is not an error even when the name
 /// filters it away.
@@ -310,16 +391,18 @@ async fn the_not_found_body_matches_gos_message() {
 /// `refresh_views` makes on the same selector.
 #[tokio::test]
 async fn a_selector_that_needs_no_inactive_versions_takes_the_cheap_listing() {
-    let versions = Arc::new(Versions::default());
-    let (status, body) = get(router_with(versions.clone()), "?name=Users").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    for query in ["?name=Users", "?name=Users&version_id=users-v2"] {
+        let versions = Arc::new(Versions::default());
+        let (status, body) = get(router_with(versions.clone()), query).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
 
-    assert_eq!(versions.active_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        versions.all_calls.load(Ordering::SeqCst),
-        0,
-        "an active-only selector must not scan every stored version"
-    );
+        assert_eq!(versions.active_calls.load(Ordering::SeqCst), 1, "{query}");
+        assert_eq!(
+            versions.all_calls.load(Ordering::SeqCst),
+            0,
+            "{query} must not scan every stored version"
+        );
+    }
 }
 
 /// The converse: asking for inactive versions, or for a version by id, does

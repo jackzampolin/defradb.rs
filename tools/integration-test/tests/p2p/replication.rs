@@ -88,6 +88,84 @@ async fn replication_test(cluster: TestCluster) {
 }
 
 #[tokio::test]
+async fn go_rust_replicator_backfills_existing_lww_document() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    let source = cluster.client(0);
+    let target = cluster.client(1);
+
+    source
+        .schema_add(CONTROL_SCHEMA)
+        .expect("add User schema on Rust node");
+    target
+        .schema_add(CONTROL_SCHEMA)
+        .expect("add User schema on Go node");
+
+    // Create before connecting so only replicator backfill can deliver this document.
+    let created = source
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .expect("create User on Rust node");
+    let doc_id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("created User has no _docID")
+        .to_string();
+
+    let timeout = Duration::from_secs(15);
+    cluster
+        .wait_for_log(0, "p2p_listening", timeout)
+        .await
+        .expect("Rust P2P listener did not start");
+    cluster
+        .wait_for_log(1, "p2p_listening", timeout)
+        .await
+        .expect("Go P2P listener did not start");
+    let target_info = target.p2p_info().expect("get Go P2P info");
+    let target_addr = target_info
+        .as_array()
+        .and_then(|addresses| addresses.first())
+        .and_then(|address| address.as_str())
+        .expect("Go node has no P2P address");
+
+    source.p2p_connect(&[target_addr]).expect("connect peers");
+    source
+        .p2p_collection_add(&["User"])
+        .expect("subscribe Rust node to User");
+    target
+        .p2p_collection_add(&["User"])
+        .expect("subscribe Go node to User");
+    source
+        .p2p_replicator_set(&["User"], target_addr)
+        .expect("add Go replicator");
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let users = target
+            .query("query { User { _docID name age } }")
+            .expect("query User on Go node");
+        let replicated = users["User"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["_docID"].as_str() == Some(&doc_id)
+                    && row["name"].as_str() == Some("Alice")
+                    && row["age"].as_i64() == Some(30)
+            })
+        });
+        if replicated {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "existing Rust document did not backfill to Go: {users}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test]
 async fn rust_rust_replication_rejects_downsample_source() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)

@@ -200,6 +200,32 @@ pub async fn connect(
     Ok(())
 }
 
+/// Disconnect from peers (Go-compatible format).
+///
+/// POST /api/v0/p2p/disconnect
+///
+/// Body: ["/ip4/.../p2p/...", ...]
+///
+/// Requires `P2pPeerDisconnect` permission when NAC is enabled.
+pub async fn disconnect(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(addresses): Json<Vec<String>>,
+) -> Result<(), HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerDisconnect).await?;
+
+    let p2p = state.require_p2p()?;
+
+    for addr in &addresses {
+        validate_multiaddr(addr)?;
+        p2p.disconnect_peer(addr)
+            .await
+            .map_err(map_p2p_bad_request)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

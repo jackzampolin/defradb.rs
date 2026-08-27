@@ -1,6 +1,31 @@
 use super::*;
 
 impl Collection {
+    /// Matches Go's validateCollectionFieldDefaultValue.
+    pub(crate) fn validate_default_values(schema: &CollectionVersion) -> Result<()> {
+        for field in &schema.fields {
+            let Some(default) = &field.default_value else {
+                continue;
+            };
+            let value =
+                query::plan::mutation::json_to_normal_value_with_kind(default, Some(&field.kind));
+            let value = value.map_err(|error| {
+                Error::Other(format!(
+                    "default field value is invalid. Collection: {}, Inner: {}",
+                    schema.name, error
+                ))
+            })?;
+
+            if !is_value_compatible_with_kind(&value, &field.kind) {
+                return Err(Error::Other(format!(
+                    "default field value is invalid. Collection: {}, Inner: Field '{}' has incompatible type",
+                    schema.name, field.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate a document against this collection's schema.
     ///
     /// Returns an error if the document contains fields with incorrect types.

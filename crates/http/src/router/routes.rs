@@ -168,6 +168,7 @@ pub(crate) fn create_router_with_state_and_body_limits(
         )
         .route("/active-peers", get(handlers::p2p::active_peers)) // Go-compatible
         .route("/connect", post(handlers::p2p::connect)) // Go-compatible
+        .route("/disconnect", post(handlers::p2p::disconnect)) // Go-compatible
         .route("/peers", get(handlers::p2p::list_peers))
         .route("/peers", post(handlers::p2p::connect_peer)) // Legacy
         .route("/replicators", get(handlers::p2p::list_replicators)) // Go uses /replicators
@@ -356,7 +357,8 @@ pub(crate) fn create_router_with_state_and_body_limits(
 mod tests {
     use super::*;
     use crate::mock::{
-        FailingMockP2POperations, MockDocumentAcpOperations, MockQueryExecutor, MockRestOperations,
+        FailingMockP2POperations, MockDocumentAcpOperations, MockP2POperations, MockQueryExecutor,
+        MockRestOperations,
     };
     use crate::router::{
         DocumentAcpOperations, ManageRequester, P2POperations, P2PResult, P2pDocumentInfo,
@@ -558,6 +560,31 @@ mod tests {
             status_for_p2p_request(Method::POST, "/api/v0/p2p/collections", r#"["Users"]"#).await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn p2p_disconnect_removes_connected_peer() {
+        let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+        let p2p = Arc::new(MockP2POperations::new().with_peer("12D3KooWtest"));
+        let state = AppStateBuilder::new(executor).with_p2p(p2p.clone()).build();
+        let router = create_router_with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v0/p2p/disconnect")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"["/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWtest"]"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(p2p.connected_peers().await.unwrap().is_empty());
     }
 
     #[tokio::test]

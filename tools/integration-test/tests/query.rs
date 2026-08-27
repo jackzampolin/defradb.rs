@@ -1,3 +1,5 @@
+#[path = "query/aggregate_groupby_1595.rs"]
+mod aggregate_groupby_1595;
 #[path = "query/commits_aggregate.rs"]
 mod commits_aggregate;
 #[path = "query/commits_collection_id.rs"]
@@ -18,6 +20,8 @@ mod downsample_gc;
 mod exhaustive_orphans_4454;
 #[path = "query/explain_nested.rs"]
 mod explain_nested;
+#[path = "query/float_precision.rs"]
+mod float_precision;
 #[path = "query/go_view_paths.rs"]
 mod go_view_paths;
 #[path = "query/gql_list_args.rs"]
@@ -26,6 +30,8 @@ mod gql_list_args;
 mod index_fallback_4633;
 #[path = "query/index_management.rs"]
 mod index_management;
+#[path = "query/join_order_1596.rs"]
+mod join_order_1596;
 #[path = "query/json_missing_key.rs"]
 mod json_missing_key;
 #[path = "query/lens.rs"]
@@ -40,10 +46,16 @@ mod limit_pushdown;
 mod limits;
 #[path = "query/multi_cid_vectors.rs"]
 mod multi_cid_vectors;
+#[path = "query/one_to_many_common.rs"]
+mod one_to_many_common;
 #[path = "query/planner_4656.rs"]
 mod planner_4656;
 #[path = "query/planner_4684.rs"]
 mod planner_4684;
+#[path = "query/relation_order_panic_1594.rs"]
+mod relation_order_panic_1594;
+#[path = "query/relation_rendering_1597.rs"]
+mod relation_rendering_1597;
 #[path = "query/sdl_generate.rs"]
 mod sdl_generate;
 #[path = "query/subscription_docid.rs"]

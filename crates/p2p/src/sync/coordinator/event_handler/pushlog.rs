@@ -30,6 +30,32 @@ fn build_pushlog_reply(message_id: &str, process_result: &Result<()>) -> PushLog
     }
 }
 
+fn verify_embedded_replay_capability(
+    request: &crate::message::PushLogRequest,
+    source_peer_id: &str,
+    target_peer_id: &str,
+) -> Option<ExplicitReplayAuthorization> {
+    let capability = request.explicit_replay_capability.as_deref()?;
+    match crate::verify_explicit_replay_capability(
+        capability,
+        source_peer_id,
+        target_peer_id,
+        &request.collection_id,
+    ) {
+        Ok(authorization) => Some(authorization),
+        Err(error) => {
+            tracing::warn!(
+                peer_id = source_peer_id,
+                creator = %request.creator,
+                collection_id = %request.collection_id,
+                error = %error,
+                "Rejected explicit replay capability for two-stream PushLog"
+            );
+            None
+        }
+    }
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_pushlog_request(
         &self,
@@ -208,6 +234,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         tracing::trace!(?cid, "Parsed valid CID from two-stream request");
 
+        let explicit_replay_authorization = explicit_replay_authorization.or_else(|| {
+            verify_embedded_replay_capability(
+                &request,
+                peer_id.as_str(),
+                self.runtime.transport.local_peer_id().as_str(),
+            )
+        });
+        let is_explicit_replicator =
+            is_explicit_replicator || explicit_replay_authorization.is_some();
         let broadcast = PushLogBroadcast::from_request(&request);
         let process_result = self
             .manager
@@ -284,6 +319,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use crypto::generate_ed25519;
+    use identity::{Identity, RawIdentity};
+
     use super::*;
 
     #[test]
@@ -298,5 +338,32 @@ mod tests {
             reply.err_message.as_deref(),
             Some(crate::error::RATE_LIMITED_MESSAGE)
         );
+    }
+
+    #[test]
+    fn verifies_capability_embedded_by_transport_generic_sender() {
+        let authorizer = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
+        let mut request = crate::message::PushLogRequest::new(
+            "doc".to_string(),
+            Vec::new().into(),
+            "collection".to_string(),
+            authorizer.did().unwrap().to_string(),
+            Vec::new().into(),
+        );
+        request.explicit_replay_capability = Some(
+            crate::generate_explicit_replay_capability(
+                &authorizer,
+                "source",
+                "target",
+                "collection",
+                Duration::from_secs(60),
+            )
+            .unwrap(),
+        );
+
+        let authorization =
+            verify_embedded_replay_capability(&request, "source", "target").unwrap();
+
+        assert_eq!(authorization.authorizer_did, request.creator);
     }
 }

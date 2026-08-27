@@ -80,10 +80,12 @@ impl<S: Store> crate::database::DB<S> {
             self.get_all_active_collections_internal()?
         };
 
-        // A selector that matches nothing is a caller mistake, not an empty
-        // refresh. Go looks a version up directly and propagates not-found
-        // (`internal/db/collection.go:211`), so a typo must not read as success.
-        if let Some(version_id) = &options.version_id {
+        // A direct version lookup that matches nothing is a caller mistake, not
+        // an empty refresh. Go propagates that not-found error
+        // (`internal/db/collection.go:211`).
+        if let (true, Some(version_id)) =
+            (options.resolves_by_version_lookup(), &options.version_id)
+        {
             if !collections.iter().any(|col| &col.version_id == version_id) {
                 return Err(Error::Other(format!(
                     "no active collection version {version_id}"

@@ -59,12 +59,12 @@ pub struct GoIndexDescription {
     /// Indexed fields.
     #[serde(rename = "Fields")]
     pub fields: Vec<GoIndexedFieldDescription>,
+    /// Kind and kind-specific config.
+    #[serde(flatten)]
+    pub kind: schema::IndexKind,
     /// Whether the index enforces uniqueness.
     #[serde(rename = "Unique")]
     pub unique: bool,
-    /// Kind-specific config, omitted for an ordinary index.
-    #[serde(rename = "Kind", skip_serializing_if = "Option::is_none")]
-    pub kind: Option<schema::IndexKind>,
 }
 
 /// Go v1 index description paired with its lifecycle state.
@@ -76,6 +76,12 @@ pub struct GoListIndexesResult {
     pub execution: ActionExecution,
 }
 
+fn index_kind(kind: Option<schema::IndexKind>, unique: bool) -> schema::IndexKind {
+    kind.unwrap_or(schema::IndexKind::Ordered(
+        schema::OrderedIndexDescription { unique },
+    ))
+}
+
 fn ready_index(index: crate::router::IndexInfo) -> GoListIndexesResult {
     let execution = ActionExecution {
         collection_id: index.collection_id.clone(),
@@ -84,7 +90,7 @@ fn ready_index(index: crate::router::IndexInfo) -> GoListIndexesResult {
         ..Default::default()
     };
     let description = GoIndexDescription {
-        kind: index.kind,
+        kind: index_kind(index.kind, index.unique),
         name: index.name,
         id: index.id,
         fields: index
@@ -170,7 +176,7 @@ pub async fn go_create_index(
         id: index.id,
         fields: request.fields,
         unique: index.unique,
-        kind: index.kind,
+        kind: index_kind(index.kind, index.unique),
     };
 
     Ok(Json(response))
@@ -306,7 +312,7 @@ mod tests {
     #[test]
     fn test_go_index_description_serialize() {
         let desc = GoIndexDescription {
-            kind: None,
+            kind: schema::IndexKind::Ordered(schema::OrderedIndexDescription { unique: true }),
             name: "idx_email".to_string(),
             id: 1,
             fields: vec![GoIndexedFieldDescription {
@@ -319,6 +325,8 @@ mod tests {
         assert!(json.contains("\"Name\":\"idx_email\""));
         assert!(json.contains("\"ID\":1"));
         assert!(json.contains("\"Fields\""));
+        assert!(json.contains("\"Kind\":0"));
+        assert!(json.contains("\"KindDescription\":{\"Unique\":true}"));
         assert!(json.contains("\"Unique\":true"));
     }
 }

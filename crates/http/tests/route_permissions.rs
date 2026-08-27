@@ -135,6 +135,10 @@ fn p2p_routes() {
         RoutePermission::Required(NodePermission::P2pPeerInfo)
     );
     assert_eq!(
+        route_permission("/api/v0/p2p/disconnect", &Method::POST),
+        RoutePermission::Required(NodePermission::P2pPeerDisconnect)
+    );
+    assert_eq!(
         route_permission("/api/v0/p2p/replicators", &Method::GET),
         RoutePermission::Required(NodePermission::P2pReplicatorList)
     );
@@ -361,6 +365,11 @@ fn all_registered_routes_return_expected_permission() {
             "/api/v0/p2p/connect",
             Method::POST,
             RoutePermission::Required(NodePermission::P2pPeerConnect),
+        ),
+        (
+            "/api/v0/p2p/disconnect",
+            Method::POST,
+            RoutePermission::Required(NodePermission::P2pPeerDisconnect),
         ),
         (
             "/api/v0/p2p/replicators",

@@ -1,6 +1,9 @@
 //! Core mapper types for query operations
 
+use schema::CollectionVersion;
+
 use crate::document::DocumentMapping;
+use crate::error::{QueryError, Result};
 use crate::mapper::cursor::{CursorAliases, CursorPageInfoFields, CursorParams};
 use crate::mapper::filter::Filter;
 
@@ -23,7 +26,7 @@ impl OrderDirection {
 }
 
 /// A single order condition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OrderCondition {
     /// Field path for ordering (may be compound for nested objects)
     pub fields: Vec<String>,
@@ -45,7 +48,7 @@ impl OrderCondition {
 }
 
 /// Order by specification
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct OrderBy {
     pub conditions: Vec<OrderCondition>,
 }
@@ -86,7 +89,7 @@ impl OrderBy {
 }
 
 /// Limit and offset for pagination
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Limit {
     pub limit: Option<u64>,
     pub offset: u64,
@@ -110,7 +113,7 @@ impl Limit {
 }
 
 /// Group by specification
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GroupBy {
     pub fields: Vec<String>,
 }
@@ -123,10 +126,33 @@ impl GroupBy {
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
+
+    /// Group fields under the names the planner actually stores them by.
+    ///
+    /// A single relation is stored as its ID field, so grouping by `author`
+    /// keys on `_authorID`; grouping by an array relation is rejected. Mirrors
+    /// Go's `internal/planner/mapper/mapper.go`.
+    pub fn resolved_fields(&self, collection: &CollectionVersion) -> Result<Vec<String>> {
+        self.fields
+            .iter()
+            .map(|name| match collection.field_by_name(name) {
+                Some(field) if field.kind.is_relation() => {
+                    if field.kind.is_array() {
+                        Err(QueryError::parse(format!(
+                            "cannot group by array or object field. Field: {name}"
+                        )))
+                    } else {
+                        Ok(CollectionVersion::relation_id_field_name(name))
+                    }
+                }
+                _ => Ok(name.clone()),
+            })
+            .collect()
+    }
 }
 
 /// A simple field reference
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     /// Field name
     pub name: String,
@@ -168,7 +194,7 @@ pub enum SelectionType {
 }
 
 /// A similarity computation (dot product between document vector and query vector)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Similarity {
     /// The target field containing the document's vector
     pub target_field: String,
@@ -199,7 +225,7 @@ impl Similarity {
 }
 
 /// A full-text search scoring request
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FullTextSearch {
     /// Fields to search across
     pub target_fields: Vec<String>,
@@ -229,7 +255,7 @@ impl FullTextSearch {
 }
 
 /// Requestable items in a select (field, aggregate, sub-select, similarity, or full-text search)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Requestable {
     /// Simple field
     Field(Field),
@@ -277,7 +303,7 @@ impl AggregateType {
 }
 
 /// An aggregate operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Aggregate {
     /// Type of aggregate
     pub aggregate_type: AggregateType,
@@ -359,7 +385,7 @@ impl Aggregate {
 }
 
 /// Target for an aggregate function
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AggregateTarget {
     /// Host name (collection or field group)
     pub host_name: String,
@@ -371,6 +397,9 @@ pub struct AggregateTarget {
     pub limit: Option<Limit>,
     /// Order for the target
     pub order: Option<OrderBy>,
+    /// Grouping for the target: the aggregate is computed over distinct groups
+    /// rather than over individual documents.
+    pub group_by: Option<GroupBy>,
     /// Internal key for looking up relation data when there's a collision
     /// (e.g., when both a relation selection and an aggregate use the same relation)
     pub internal_key: Option<String>,
@@ -384,6 +413,7 @@ impl AggregateTarget {
             filter: None,
             limit: None,
             order: None,
+            group_by: None,
             internal_key: None,
         }
     }
@@ -395,6 +425,7 @@ impl AggregateTarget {
             filter: None,
             limit: None,
             order: None,
+            group_by: None,
             internal_key: None,
         }
     }
@@ -406,7 +437,7 @@ impl AggregateTarget {
 }
 
 /// A complete select operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Select {
     /// Collection name
     pub collection_name: String,

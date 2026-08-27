@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::collection_selector::CollectionSelectorQuery;
+use crate::handlers::txn_header::txn_id_from_headers;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -110,20 +111,28 @@ fn parse_collection_doc_ids_pagination(
 pub async fn list_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<CollectionSelectorQuery>,
+    headers: HeaderMap,
+    query: CollectionSelectorQuery,
 ) -> Result<Json<CollectionsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
     let selector = query.into_selector();
 
-    // The same branch `refresh_views` makes on the same selector: inactive
-    // versions cost a scan of every stored version, and a selector that does
-    // not ask for them is answerable from the active listing alone.
-    let collection_versions = state.require_collection_versions()?;
-    let versions = if selector.needs_all_versions() {
-        collection_versions.get_all_collections().await
+    let versions = if let Some(txn_id) = txn_id_from_headers(&headers)? {
+        state
+            .require_txn_ops()?
+            .get_collections_in_txn(txn_id)
+            .await
     } else {
-        collection_versions.get_active_collections().await
+        // The same branch `refresh_views` makes on the same selector: inactive
+        // versions cost a scan of every stored version, and a selector that
+        // does not ask for them is answerable from the active listing alone.
+        let collection_versions = state.require_collection_versions()?;
+        if selector.needs_all_versions() {
+            collection_versions.get_all_collections().await
+        } else {
+            collection_versions.get_active_collections().await
+        }
     }
     .map_err(http_error_from_backend_message)?;
 
