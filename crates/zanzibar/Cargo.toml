@@ -11,6 +11,9 @@ description = "Standalone Zanzibar permission engine with pluggable KV backend"
 [package.metadata.cargo-machete]
 ignored = ["tracing"]
 
+[lib]
+bench = false
+
 [dependencies]
 identity = { path = "../identity" }
 async-trait.workspace = true

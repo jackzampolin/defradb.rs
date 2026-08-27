@@ -19,6 +19,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     ) -> Result<()> {
         tracing::debug!(
             peer_id = %propagation_source,
+            source_peer_id = ?message.source_peer_id,
             doc_id = %message.doc_id,
             collection_id = %message.collection_id,
             topic = %topic,
@@ -66,12 +67,78 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             });
         }
 
+        // The propagation peer remains the authenticated ingress principal,
+        // but it is not necessarily a content provider. A gossip relay can
+        // hold the announced root while none of its linked descendants are in
+        // its blockstore. Durable recovery therefore binds only to the
+        // independently authenticated publisher, and only while the transport
+        // has a route to that publisher. A relayed hint without such a route
+        // is advisory and must not create a success-acked receiver obligation.
+        let authenticated_hop = message
+            .authenticated_source_peer_id()
+            .filter(|peer_id| !peer_id.is_empty())
+            .map(|peer_id| PeerId::new(peer_id.to_owned()))
+            .ok_or_else(|| {
+                tracing::warn!(
+                    peer_id = %propagation_source,
+                    claimed_source_peer_id = ?message.source_peer_id,
+                    topic = %topic,
+                    collection_id = %message.collection_id,
+                    doc_id = %message.doc_id,
+                    "Dropping head hint without an authenticated recovery provider"
+                );
+                crate::error::Error::Unauthorized(
+                    "head hint has no authenticated recovery provider".to_string(),
+                )
+            })?;
+        let authenticated_origin = message
+            .authenticated_origin_peer_id()
+            .filter(|peer_id| !peer_id.is_empty())
+            .ok_or_else(|| {
+                tracing::warn!(
+                    peer_id = %propagation_source,
+                    authenticated_hop = %authenticated_hop,
+                    topic = %topic,
+                    collection_id = %message.collection_id,
+                    doc_id = %message.doc_id,
+                    "Dropping head hint without an authenticated content origin"
+                );
+                crate::error::Error::Unauthorized(
+                    "head hint has no authenticated content origin".to_string(),
+                )
+            })?;
+        let origin_is_routable = authenticated_origin == propagation_source.as_str()
+            || self.access.peer_state.is_connected(authenticated_origin);
+        if !origin_is_routable {
+            tracing::warn!(
+                peer_id = %propagation_source,
+                authenticated_origin,
+                authenticated_hop = %authenticated_hop,
+                topic = %topic,
+                collection_id = %message.collection_id,
+                doc_id = %message.doc_id,
+                "Dropping relayed head hint whose content origin is not routable"
+            );
+            return Err(crate::error::Error::Unauthorized(
+                "authenticated head-hint origin is not transport-routable".to_string(),
+            ));
+        }
+        let recovery_source = PeerId::new(authenticated_origin.to_owned());
+        tracing::debug!(
+            propagation_source = %propagation_source,
+            authenticated_origin,
+            authenticated_hop = %authenticated_hop,
+            origin_is_routable,
+            recovery_source = %recovery_source,
+            "Selected authenticated head-hint recovery provider"
+        );
+
         // Parse CID
         match Cid::try_from(message.cid.as_ref()) {
             Ok(cid) => {
                 self.access
                     .peer_state
-                    .peer_has_cid(propagation_source.as_str(), cid);
+                    .peer_has_cid(recovery_source.as_str(), cid);
             }
             Err(e) => {
                 tracing::warn!(
@@ -87,16 +154,23 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
-        let is_explicit_replicator =
-            self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
-
-        self.manager
-            .process_pushlog(
-                &message,
-                Some(propagation_source.as_str()),
-                is_explicit_replicator,
-                None,
-            )
-            .await
+        // Gossip authenticates the propagation hop and the signed origin, but
+        // it is not the explicit-replicator handshake. In particular, a
+        // configured relay must not confer its merge authorization on a
+        // different origin principal carried by the envelope.
+        if authenticated_origin == propagation_source.as_str() {
+            self.manager
+                .process_pushlog_from_dag_provider(
+                    &message,
+                    Some(recovery_source.as_str()),
+                    false,
+                    None,
+                )
+                .await
+        } else {
+            self.manager
+                .process_pushlog(&message, Some(recovery_source.as_str()), false, None)
+                .await
+        }
     }
 }

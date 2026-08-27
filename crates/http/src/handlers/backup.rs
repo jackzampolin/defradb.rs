@@ -28,9 +28,6 @@ use crate::nac_guard::require_permission;
 use crate::router::{AppState, ImportResult, NodePermission};
 use crate::validation::validate_collection_name;
 
-/// Maximum size for backup import data (100 MB).
-const MAX_IMPORT_SIZE: usize = 100 * 1024 * 1024;
-
 /// Maximum number of collections that can be specified in export request.
 const MAX_EXPORT_COLLECTIONS: usize = 100;
 
@@ -180,14 +177,6 @@ pub async fn import(
     }
 
     let backup = state.require_backup()?;
-
-    // Check body size limit
-    if body.len() > MAX_IMPORT_SIZE {
-        return Err(HttpError::BadRequest(format!(
-            "import data exceeds maximum size of {} bytes",
-            MAX_IMPORT_SIZE
-        )));
-    }
 
     // Convert bytes to UTF-8 string
     let body_str = String::from_utf8(body.to_vec())

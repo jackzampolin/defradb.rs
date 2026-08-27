@@ -44,6 +44,24 @@ type syncBranchableCollectionReply struct {
 	Sender       string   `json:"sender"`
 }
 
+type metaData struct {
+	Version    string
+	MessageID  string
+	SenderID   string
+	Pubkey     []byte
+	Signature  []byte `cbor:",omitempty"`
+	ErrMessage string `cbor:",omitempty"`
+}
+
+type pushLogRequest struct {
+	metaData
+	DocID        string
+	CID          []byte
+	CollectionID string
+	Creator      string
+	Block        []byte
+}
+
 type fixture struct {
 	label string
 	value any
@@ -51,6 +69,23 @@ type fixture struct {
 
 func main() {
 	fixtures := []fixture{
+		{
+			label: "push_log_request",
+			value: pushLogRequest{
+				metaData: metaData{
+					Version:   "/defradb/0.0.1",
+					MessageID: "msg-go",
+					SenderID:  "peer-go",
+					Pubkey:    []byte{0x01, 0x02},
+					Signature: []byte{0x03, 0x04},
+				},
+				DocID:        "bafy-doc",
+				CID:          []byte{0x01, 0x71, 0xaa},
+				CollectionID: "bafy-collection",
+				Creator:      "did:key:zGo",
+				Block:        []byte{0xa1, 0x61, 0x78, 0x01},
+			},
+		},
 		{
 			label: "doc_sync_request_two_ids",
 			value: docSyncRequest{DocIDs: []string{"docA", "docB"}},

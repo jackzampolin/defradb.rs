@@ -2570,7 +2570,7 @@ async fn rust_filtered_replication_composite_and_iroh() {
 /// Iroh transport variant of `rust_filtered_replication_backfill_respects_filter`:
 /// documents created BEFORE the replicator is added must be backfilled over Iroh,
 /// respecting the filter. This exercises the iroh backfill path
-/// (`push_existing_docs_via_transport`) with a predicate — the matching doc must
+/// (`push_existing_docs`) with a predicate — the matching doc must
 /// arrive while the non-matching doc stays absent.
 #[tokio::test]
 async fn rust_filtered_replication_backfill_iroh() {
@@ -2881,7 +2881,7 @@ async fn rust_filtered_replication_acp_composite_controlled_mode() {
 /// #1038 Gap 1: the filter must hold on the push-RETRY/recovery path, not only on
 /// the live push. A push to a down replicator fails and is recorded in the
 /// peerstore retry queue; the server's retry-drain loop later re-pushes via
-/// `db_merge::retry_doc`, which re-loads the document and re-applies
+/// `db::merge::retry_doc`, which re-loads the document and re-applies
 /// `document_matches_filter` (so a non-matching queued doc is skipped at retry
 /// time). This drives that path by killing node1 while node0 enqueues both a
 /// matching and a non-matching doc, then restarts node1 and asserts recovery

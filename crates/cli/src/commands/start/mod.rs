@@ -137,7 +137,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_schema_size: Option<u64>,
 
-    /// Max backup import body size in bytes (0 = unlimited, default)
+    /// Max backup import body size in bytes (0 = unlimited, default: 100 MiB)
     #[arg(long)]
     pub max_backup_size: Option<u64>,
 
@@ -425,7 +425,7 @@ impl StartArgs {
             config.datastore.store = store.parse()?;
         }
         if let Some(size) = self.valuelogfilesize {
-            config.datastore.valuelogfilesize = size;
+            config.datastore.valuelogfilesize = Some(size);
         }
         if let Some(ref addrs) = self.p2paddr {
             config.net.p2p_addresses = addrs.clone();

@@ -31,7 +31,7 @@ resolution's degenerate arms: internal index-state inconsistency such as a corru
 entry with no identifiable holder, not a live conflict between two alive documents,
 which #1126 now resolves deterministically instead of rejecting) are rejected on every
 attempt —
-`crates/db-merge/src/merge_handler/composite.rs:261-284` converts
+`crates/db/src/merge/merge_handler/composite.rs:261-284` converts
 `MergeError::UniqueConstraintViolation` into `MergeOutcome::Rejected` (defined at
 `crates/p2p/src/sync/merge.rs:89-97`), which
 `crates/p2p/src/sync/replication/handlers.rs:353-362` routes to

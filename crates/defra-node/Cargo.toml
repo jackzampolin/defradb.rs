@@ -22,7 +22,6 @@ p2p = [
     "native",
     "dep:p2p",
     "dep:blockstore",
-    "dep:cid",
     "dep:defra-http",
     "dep:defra-p2p-adapter",
     "p2p/iroh-transport",
@@ -32,14 +31,14 @@ p2p = [
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
 # Native host (tokio, event channel). Default-on.
-native = ["db/native", "db-merge/native"]
+native = ["db/native", ]
 # SourceHub / hub.rs on-chain document ACP. Default-on; omit for local-only ACP.
 sourcehub = ["dep:sourcehub"]
 # Lens WASM execution. Default-on; without it set_migration fails explicitly.
 # Weak-dep `?` forwards onto the optional adapter only when `p2p` enabled it.
 wasmtime-runtime = [
     "db/wasmtime-runtime",
-    "db-merge/wasmtime-runtime",
+    
     "lens/wasmtime-runtime",
     "defra-p2p-adapter?/wasmtime-runtime",
 ]
@@ -48,9 +47,11 @@ wasmtime-runtime = [
 # who want OTel must opt in.
 otel = ["telemetry/otlp"]
 
+[lib]
+bench = false
+
 [dependencies]
 db = { path = "../db", default-features = false }
-db-merge = { path = "../db-merge", default-features = false }
 replication-filter = { path = "../replication-filter" }
 storage = { path = "../storage" }
 query = { path = "../query" }
@@ -85,8 +86,6 @@ defra-http = { path = "../http", optional = true }
 # Optional — P2P replication (IROH transport)
 p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
 blockstore = { path = "../blockstore", optional = true }
-# Collection-commit retry records replay by CID (defradb#1113).
-cid = { workspace = true, optional = true }
 defra-p2p-adapter = { workspace = true, optional = true, default-features = false, features = ["iroh"] }
 
 # Optional — OpenTelemetry exporter (see the `otel` feature)

@@ -244,7 +244,7 @@ property to the real Rust binary.
   oracle proving it load-bearing. This is directly extractable: a harness can enumerate
   the `INV_*` / theorem names as the conformance checklist.
 - **Source anchors exist for nearly every slice.** Properties point at concrete Rust
-  symbols (e.g. `merge.rs validate_authorization`, `txn_registry.rs:305-308`,
+  symbols (e.g. `merge.rs validate_authorization`, `txn/registry/cleanup.rs:59-62`,
   `batch_signing.rs:31-32`, `mod.rs:284-323` for Jwt, `block.rs` for Cid). Spot-checks
   this run matched within a line or two.
 - **Regression oracle is automated for TLA.** `run-all.sh` encodes the expected

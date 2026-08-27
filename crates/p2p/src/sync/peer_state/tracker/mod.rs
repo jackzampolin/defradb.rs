@@ -7,8 +7,6 @@
 
 mod memory;
 mod operations;
-#[cfg(test)]
-pub mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};

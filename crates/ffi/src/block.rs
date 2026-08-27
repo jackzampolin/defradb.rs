@@ -82,7 +82,7 @@ pub unsafe extern "C" fn block_verify_signature(
             .into();
 
         let result = rt.block_on(async {
-            db::block_verify::verify_block_signature(
+            db::block::verify::verify_block_signature(
                 &database,
                 document_acp.as_ref(),
                 &cid_str,

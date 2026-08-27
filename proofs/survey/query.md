@@ -6,14 +6,17 @@ The GraphQL query engine. Volcano-iterator pipeline:
 mutation execution (`runner/mutation.rs`), `_commits` reads
 (`runner/commits.rs`), REST collection doc-id pagination (`rest/`),
 subscription event→query conversion (`subscription.rs`), and transaction
-guards (`txn/`). Types/parsing/plan layers are split into `query-types`,
-`query-parse`, `query-plan`. Most logic is plumbing over those layers.
+guards (`txn/`). The types (`mapper/`, `document/`, `error.rs`), parsing
+(`query_parse/`, `sdl_parse/`, `schema_gen/`) and plan (`plan/`, `planner/`)
+layers are modules of this crate; see `survey/query-types.md`,
+`survey/query-parse.md`, `survey/query-plan.md` for their surveys. Most
+logic is plumbing over those layers.
 
 ## State machines
 - **TransactionGuard** (`txn/guard.rs`): begin → execute* → commit | rollback,
   enforced as a linear type (consumed on finalize, Drop logs a leak). This is a
   compile-time discipline, not a concurrent protocol — nothing to model.
-- **BroadcastStatus** (`query-plan/mutator.rs`): flat result enum
+- **BroadcastStatus** (`mutator.rs`): flat result enum
   (Success/Failed/Pending/NotAttempted), no transitions.
 - **Injection seams** for security/replication: `DocumentACP`, `NacChecker`,
   `SeQueryTransport` traits are *declared* here but *implemented* in `acp`,

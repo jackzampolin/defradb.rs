@@ -13,6 +13,7 @@ mod node;
 mod peer;
 mod push;
 mod replicator;
+mod status;
 mod sync;
 mod version_sync;
 
@@ -27,6 +28,7 @@ pub use push::p2p_retry_replicators;
 pub use replicator::{
     p2p_add_replicator, p2p_add_replicator_with_filter, p2p_delete_replicator, p2p_list_replicators,
 };
+pub use status::p2p_sync_status;
 pub use sync::{p2p_sync_branchable_collection, p2p_sync_documents};
 pub use version_sync::p2p_sync_collection_versions;
 

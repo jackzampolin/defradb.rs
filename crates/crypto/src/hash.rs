@@ -24,7 +24,7 @@ pub fn sha256(data: &[u8]) -> Sha256Hash {
     hasher.finalize().into()
 }
 
-/// Compute the SHA-256 hash and return as a Vec<u8>.
+/// Compute the SHA-256 hash and return as a `Vec<u8>`.
 ///
 /// This is a convenience function for cases where a Vec is needed
 /// instead of a fixed-size array.

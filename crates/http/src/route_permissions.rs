@@ -78,6 +78,10 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::CollectionPatch),
             Method::PATCH => RoutePermission::Required(NodePermission::CollectionPatch),
+            // Dropping collections by name. This fell to the read default
+            // while `delete_collections_by_names` enforced `CollectionPatch`
+            // itself, so the outer gate was weaker than the handler.
+            Method::DELETE => RoutePermission::Required(NodePermission::CollectionPatch),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },
         "/api/v0/collections/default" => RoutePermission::Required(NodePermission::CollectionPatch),
@@ -92,10 +96,15 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
         "/api/v0/collections/indexes" => RoutePermission::Required(NodePermission::IndexList),
+        // PATCH and DELETE here are Go's filtered document operations, not
+        // collection ones, so they are document permissions. Dropping a
+        // collection is `DELETE /collections?name=...`, which keeps
+        // `CollectionPatch`.
         "/api/v0/collections/:name" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::DocumentUpdate),
-            Method::DELETE => RoutePermission::Required(NodePermission::CollectionPatch),
+            Method::PATCH => RoutePermission::Required(NodePermission::DocumentUpdate),
+            Method::DELETE => RoutePermission::Required(NodePermission::DocumentDelete),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },
         "/api/v0/collections/:name/describe" => {
@@ -183,7 +192,9 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // ACP (Document Access Control)
         // =====================================================================
         "/api/v0/acp/status" => RoutePermission::Required(NodePermission::DacStatus),
-        "/api/v0/acp/policy" => match *method {
+        // An aliased route gets its own MatchedPath, so it needs its own key
+        // here or it falls to the safe default and loses DacPolicyAdd.
+        "/api/v0/acp/policy" | "/api/v0/acp/document/policy" => match *method {
             Method::POST => RoutePermission::Required(NodePermission::DacPolicyAdd),
             Method::GET => RoutePermission::Required(NodePermission::DacStatus),
             _ => RoutePermission::Required(NodePermission::DacStatus),
@@ -268,8 +279,11 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         // Views
         // =====================================================================
-        "/api/v0/views" => RoutePermission::Required(NodePermission::ViewAdd),
-        "/api/v0/views/refresh" => RoutePermission::Required(NodePermission::ViewRefresh),
+        "/api/v0/views" | "/api/v0/view" => RoutePermission::Required(NodePermission::ViewAdd),
+        "/api/v0/views/refresh" | "/api/v0/view/refresh" => {
+            RoutePermission::Required(NodePermission::ViewRefresh)
+        }
+        // No /view/gc to alias: Go has no such route.
         "/api/v0/views/gc" => RoutePermission::Required(NodePermission::ViewGc),
 
         // =====================================================================
@@ -300,372 +314,31 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
     }
 }
 
+/// Fold every mount of the API router onto its `/api/v0` key.
+///
+/// `go_paths::API_PREFIXES` is what `routes.rs` mounts the one route set at,
+/// so it is also what has to be folded here. Deriving from the same constant
+/// is the point: a prefix added there without a matching arm here would mount
+/// the whole route set unfolded, and every route under it would fall to the
+/// `_` arm and be enforced as `DocumentRead`.
+///
+/// The longest match wins, so the list stays order-independent: `/api/v0/x`
+/// must fold on `/api/v0` and not on the bare `/api`.
+///
+/// Note this rewrites rather than rejects: `/api/v2/collections` becomes
+/// `/api/v0/v2/collections`, which is safe only because no table key begins
+/// with `/api/v0/v`, and which lands on the `_` arm as it should.
 fn normalize_api_version(path: &str) -> Cow<'_, str> {
-    if path == "/api/v1" {
-        Cow::Borrowed("/api/v0")
-    } else if let Some(suffix) = path.strip_prefix("/api/v1/") {
-        Cow::Owned(format!("/api/v0/{suffix}"))
-    } else {
-        Cow::Borrowed(path)
-    }
-}
+    let matched = crate::go_paths::API_PREFIXES
+        .iter()
+        .filter_map(|prefix| {
+            path.strip_prefix(*prefix)
+                .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        })
+        .max_by_key(|suffix| path.len() - suffix.len());
 
-#[cfg(test)]
-#[path = "route_permissions_tests.rs"]
-mod route_permissions_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_registered_routes_return_expected_permission() {
-        // Exhaustive list of all (path, method, expected) from routes.rs.
-        // If a route is added without updating route_permission(), the safe
-        // default fires and the warn log catches it at runtime.
-        let routes: Vec<(&str, Method, RoutePermission)> = vec![
-            // Exempt
-            ("/health-check", Method::GET, RoutePermission::Exempt),
-            ("/api/v0/version", Method::GET, RoutePermission::Exempt),
-            ("/api/v0/graphql/ws", Method::GET, RoutePermission::Exempt),
-            (
-                "/api/v0/batch/verify",
-                Method::POST,
-                RoutePermission::Exempt,
-            ),
-            // GraphQL
-            (
-                "/api/v0/graphql",
-                Method::GET,
-                RoutePermission::Required(NodePermission::DocumentRead),
-            ),
-            ("/api/v0/graphql", Method::POST, RoutePermission::Dynamic),
-            ("/api/v0/sync", Method::POST, RoutePermission::Dynamic),
-            (
-                "/api/v0/actions",
-                Method::GET,
-                RoutePermission::Required(NodePermission::ActionList),
-            ),
-            // Schema
-            (
-                "/api/v0/schema",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
-            ),
-            (
-                "/api/v0/schema",
-                Method::POST,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            // Transactions
-            ("/api/v0/tx", Method::POST, RoutePermission::IdentityOnly),
-            (
-                "/api/v0/tx/:id",
-                Method::POST,
-                RoutePermission::IdentityOnly,
-            ),
-            (
-                "/api/v0/tx/:id",
-                Method::DELETE,
-                RoutePermission::IdentityOnly,
-            ),
-            (
-                "/api/v0/tx/:id/lens",
-                Method::POST,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            (
-                "/api/v0/tx/:id/collections",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
-            ),
-            (
-                "/api/v0/tx/:id/schema",
-                Method::POST,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            // Collections
-            (
-                "/api/v0/collections",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
-            ),
-            (
-                "/api/v0/collections",
-                Method::PATCH,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            (
-                "/api/v0/collections/default",
-                Method::POST,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            (
-                "/api/v0/collections/versions",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
-            ),
-            (
-                "/api/v0/collections/versions",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            (
-                "/api/v0/collections/migrations",
-                Method::POST,
-                RoutePermission::Required(NodePermission::MigrationSet),
-            ),
-            (
-                "/api/v0/collections/:name",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DocumentUpdate),
-            ),
-            (
-                "/api/v0/collections/:name",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::CollectionPatch),
-            ),
-            (
-                "/api/v0/collections/:name/truncate",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::CollectionTruncate),
-            ),
-            (
-                "/api/v0/collections/:name/document/:docID",
-                Method::GET,
-                RoutePermission::Required(NodePermission::DocumentRead),
-            ),
-            (
-                "/api/v0/collections/:name/document/:docID",
-                Method::PATCH,
-                RoutePermission::Required(NodePermission::DocumentUpdate),
-            ),
-            (
-                "/api/v0/collections/:name/document/:docID",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::DocumentDelete),
-            ),
-            // P2P
-            (
-                "/api/v0/p2p/info",
-                Method::GET,
-                RoutePermission::Required(NodePermission::P2pPeerInfo),
-            ),
-            (
-                "/api/v0/p2p/sync/status",
-                Method::GET,
-                RoutePermission::Required(NodePermission::P2pPeerInfo),
-            ),
-            (
-                "/api/v0/p2p/active-peers",
-                Method::GET,
-                RoutePermission::Required(NodePermission::P2pPeerActive),
-            ),
-            (
-                "/api/v0/p2p/connect",
-                Method::POST,
-                RoutePermission::Required(NodePermission::P2pPeerConnect),
-            ),
-            (
-                "/api/v0/p2p/replicators",
-                Method::GET,
-                RoutePermission::Required(NodePermission::P2pReplicatorList),
-            ),
-            (
-                "/api/v0/p2p/replicators",
-                Method::POST,
-                RoutePermission::Required(NodePermission::P2pReplicatorAdd),
-            ),
-            (
-                "/api/v0/p2p/replicators",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::P2pReplicatorDelete),
-            ),
-            (
-                "/api/v0/p2p/collections",
-                Method::GET,
-                RoutePermission::Required(NodePermission::P2pCollectionList),
-            ),
-            (
-                "/api/v0/p2p/collections",
-                Method::POST,
-                RoutePermission::Required(NodePermission::P2pCollectionAdd),
-            ),
-            (
-                "/api/v0/p2p/collections",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::P2pCollectionDelete),
-            ),
-            (
-                "/api/v0/p2p/documents/sync",
-                Method::POST,
-                RoutePermission::Required(NodePermission::P2pSyncDocuments),
-            ),
-            (
-                "/api/v0/p2p/manage",
-                Method::POST,
-                RoutePermission::Required(NodePermission::P2pPeerConnect),
-            ),
-            (
-                "/api/v0/p2p/manage/query",
-                Method::POST,
-                RoutePermission::Required(NodePermission::P2pPeerConnect),
-            ),
-            // ACP
-            (
-                "/api/v0/acp/status",
-                Method::GET,
-                RoutePermission::Required(NodePermission::DacStatus),
-            ),
-            (
-                "/api/v0/acp/policy",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DacPolicyAdd),
-            ),
-            (
-                "/api/v0/acp/policy",
-                Method::GET,
-                RoutePermission::Required(NodePermission::DacStatus),
-            ),
-            (
-                "/api/v0/acp/document/decide",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DacStatus),
-            ),
-            (
-                "/api/v0/acp/document/relationship",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DacRelationAdd),
-            ),
-            (
-                "/api/v0/acp/document/relationship",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::DacRelationDelete),
-            ),
-            (
-                "/api/v0/acp/document/relationships",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DacRelationAdd),
-            ),
-            // ACP Node
-            (
-                "/api/v0/acp/node/status",
-                Method::GET,
-                RoutePermission::Required(NodePermission::NacStatus),
-            ),
-            (
-                "/api/v0/acp/node/enable",
-                Method::POST,
-                RoutePermission::Dynamic,
-            ),
-            (
-                "/api/v0/acp/node/relationships",
-                Method::POST,
-                RoutePermission::Required(NodePermission::NacRelationAdd),
-            ),
-            (
-                "/api/v0/acp/node/disable",
-                Method::POST,
-                RoutePermission::Dynamic,
-            ),
-            (
-                "/api/v0/acp/node/re-enable",
-                Method::POST,
-                RoutePermission::Dynamic,
-            ),
-            // Index
-            (
-                "/api/v0/index",
-                Method::POST,
-                RoutePermission::Required(NodePermission::IndexCreate),
-            ),
-            (
-                "/api/v0/index",
-                Method::GET,
-                RoutePermission::Required(NodePermission::IndexList),
-            ),
-            (
-                "/api/v0/index",
-                Method::DELETE,
-                RoutePermission::Required(NodePermission::IndexDelete),
-            ),
-            // Backup
-            (
-                "/api/v0/backup/export",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DocumentRead),
-            ),
-            (
-                "/api/v0/backup/import",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DocumentUpdate),
-            ),
-            // Block
-            (
-                "/api/v0/block/verify-signature",
-                Method::GET,
-                RoutePermission::Required(NodePermission::SignatureVerify),
-            ),
-            (
-                "/api/v0/block/signed",
-                Method::GET,
-                RoutePermission::Required(NodePermission::SignatureVerify),
-            ),
-            // Views
-            (
-                "/api/v0/views",
-                Method::POST,
-                RoutePermission::Required(NodePermission::ViewAdd),
-            ),
-            (
-                "/api/v0/views/refresh",
-                Method::POST,
-                RoutePermission::Required(NodePermission::ViewRefresh),
-            ),
-            (
-                "/api/v0/views/gc",
-                Method::POST,
-                RoutePermission::Required(NodePermission::ViewGc),
-            ),
-            // Utility
-            (
-                "/api/v0/purge",
-                Method::POST,
-                RoutePermission::Required(NodePermission::DocumentUpdate),
-            ),
-            (
-                "/api/v0/node/identity",
-                Method::GET,
-                RoutePermission::Required(NodePermission::P2pPeerConnect),
-            ),
-        ];
-
-        for (path, method, expected) in &routes {
-            let actual = route_permission(path, method);
-            assert_eq!(
-                actual, *expected,
-                "Mismatch for {} {} — expected {:?}, got {:?}",
-                method, path, expected, actual
-            );
-        }
-    }
-
-    #[test]
-    fn v1_routes_use_same_permissions_as_v0() {
-        for (v0_path, method) in [
-            ("/api/v0/version", Method::GET),
-            ("/api/v0/graphql", Method::POST),
-            ("/api/v0/collections/:name", Method::POST),
-            ("/api/v0/p2p/replicators", Method::DELETE),
-            ("/api/v0/acp/node/disable", Method::POST),
-            ("/api/v0/backup/export", Method::POST),
-            ("/api/v0/block/signed", Method::GET),
-        ] {
-            let v1_path = v0_path.replacen("/api/v0", "/api/v1", 1);
-            assert_eq!(
-                route_permission(&v1_path, &method),
-                route_permission(v0_path, &method)
-            );
-        }
+    match matched {
+        Some(suffix) => Cow::Owned(format!("/api/v0{suffix}")),
+        None => Cow::Borrowed(path),
     }
 }

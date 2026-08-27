@@ -11,12 +11,14 @@ description = "Reusable embedded/mobile DefraDB node assembly"
 [package.metadata.cargo-machete]
 ignored = ["bytes", "document", "lens", "serde", "serde_bytes", "serde_ipld_dagcbor", "thiserror"]
 
+[lib]
+bench = false
+
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 db = { path = "../db", default-features = false }
-db-merge = { path = "../db-merge", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 defra-p2p-adapter = { workspace = true, default-features = false, features = ["libp2p"] }
@@ -48,10 +50,10 @@ tracing.workspace = true
 
 [features]
 default = ["native", "wasmtime-runtime", "lark", "redb"]
-native = ["db/native", "db-merge/native", "db-merge/libp2p-transport", "defra-p2p-adapter/native"]
+native = ["db/native", "db/p2p", "defra-p2p-adapter/native"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
-    "db-merge/wasmtime-runtime",
+    
     "defra-p2p-adapter/wasmtime-runtime",
     "lens/wasmtime-runtime",
 ]

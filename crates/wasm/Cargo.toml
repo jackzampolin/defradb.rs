@@ -12,6 +12,7 @@ description = "DefraDB browser client - WASM build for browser-based application
 ignored = ["async-trait", "getrandom", "sha2"]
 
 [lib]
+bench = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
@@ -63,7 +64,6 @@ document = { path = "../document" }
 query = { path = "../query" }
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
-db-merge = { path = "../db-merge", default-features = false }
 events = { path = "../events", features = ["channel"] }
 
 # IPLD
@@ -71,7 +71,6 @@ cid.workspace = true
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
-db-index = { path = "../db-index" }
 
 [features]
 # The shipped browser artifact depends on this default. Building with

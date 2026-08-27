@@ -12,6 +12,7 @@ use iroh::SecretKey;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
+use crate::explicit_replay::ExplicitReplayCapabilityCache;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, ManageQueryReply,
     ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
@@ -36,6 +37,7 @@ pub struct IrohTransport {
     local_peer_id: PeerId,
     local_public_key_bytes: Vec<u8>,
     secret_key: Arc<SecretKey>,
+    explicit_replay_capabilities: ExplicitReplayCapabilityCache,
 }
 
 impl IrohTransport {
@@ -50,7 +52,37 @@ impl IrohTransport {
             local_peer_id,
             local_public_key_bytes,
             secret_key: Arc::new(secret_key),
+            explicit_replay_capabilities: ExplicitReplayCapabilityCache::default(),
         }
+    }
+
+    pub fn set_explicit_replay_capability(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        capability: &str,
+    ) -> Result<()> {
+        self.explicit_replay_capabilities.set(
+            self.local_peer_id.as_str(),
+            peer_id.as_str(),
+            collection_id,
+            capability,
+        )
+    }
+
+    pub fn clear_explicit_replay_capabilities(&self, peer_id: &PeerId, collections: &[String]) {
+        self.explicit_replay_capabilities
+            .clear(peer_id.as_str(), collections);
+    }
+
+    pub fn explicit_replay_capability_matches(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        capability: Option<&str>,
+    ) -> bool {
+        self.explicit_replay_capabilities
+            .matches(peer_id.as_str(), collection_id, capability)
     }
 
     /// Send a command and await the oneshot reply.
@@ -70,6 +102,33 @@ impl IrohTransport {
     pub async fn network_change(&self) -> Result<()> {
         self.send_command(|reply| IrohCommand::NetworkChange { reply })
             .await
+    }
+
+    /// Resolve a peer's Defra identity over its authenticated QUIC endpoint.
+    ///
+    /// The returned token is signed by the remote DID and audience-bound to
+    /// this endpoint ID, matching Go's block-serving identity challenge.
+    pub async fn get_peer_identity(&self, peer_id: &PeerId) -> Result<Option<identity::Did>> {
+        let request = crate::message::IdentityRequest::new(self.local_peer_id.to_string());
+        let response = self
+            .send_command(|reply| IrohCommand::ResolvePeerIdentity {
+                peer_id: peer_id.clone(),
+                request,
+                reply,
+            })
+            .await?;
+        if let Some(error) = response.err_message.as_deref() {
+            tracing::debug!(peer_id = %peer_id, error, "Iroh peer has no resolvable Defra identity");
+            return Ok(None);
+        }
+        let token_identity = identity::from_token(&response.identity_token)
+            .map_err(|error| Error::Transport(format!("invalid peer identity token: {error}")))?;
+        identity::verify_auth_token(&token_identity, self.local_peer_id.as_str()).map_err(
+            |error| Error::Transport(format!("peer identity token verification failed: {error}")),
+        )?;
+        let did = identity::Identity::did(&token_identity)
+            .map_err(|error| Error::Transport(format!("peer identity DID failed: {error}")))?;
+        Ok(Some(did))
     }
 }
 
@@ -204,6 +263,8 @@ impl P2PTransport for IrohTransport {
         peer_id: &PeerId,
         mut req: PushLogRequest,
     ) -> Result<PushLogReply> {
+        self.explicit_replay_capabilities
+            .attach(peer_id.as_str(), &mut req);
         // Advertise that this iroh sender consumes the ACK from the request
         // stream. Re-sign because the capability is part of the wire message.
         req.supports_same_stream_reply = true;
@@ -427,6 +488,10 @@ impl P2PTransport for IrohTransport {
         .await
     }
 
+    fn supports_cancellable_rooted_sync(&self) -> bool {
+        true
+    }
+
     async fn cancel_sync(&self, query_id: QueryId) -> Result<bool> {
         self.send_command(|reply| IrohCommand::CancelSync { query_id, reply })
             .await
@@ -451,7 +516,10 @@ impl P2PTransport for IrohTransport {
             peer_id: peer_id.clone(),
             reply,
         })
-        .await
+        .await?;
+        self.explicit_replay_capabilities
+            .clear_all(peer_id.as_str());
+        Ok(())
     }
 
     async fn list_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
@@ -472,12 +540,22 @@ impl P2PTransport for IrohTransport {
         peer_id: &PeerId,
         collections: Vec<String>,
     ) -> Result<bool> {
-        self.send_command(|reply| IrohCommand::RemoveReplicatorCollections {
-            peer_id: peer_id.clone(),
-            collections,
-            reply,
-        })
-        .await
+        let removed_collections = collections.clone();
+        let fully_deleted = self
+            .send_command(|reply| IrohCommand::RemoveReplicatorCollections {
+                peer_id: peer_id.clone(),
+                collections,
+                reply,
+            })
+            .await?;
+        if fully_deleted {
+            self.explicit_replay_capabilities
+                .clear_all(peer_id.as_str());
+        } else {
+            self.explicit_replay_capabilities
+                .clear(peer_id.as_str(), &removed_collections);
+        }
+        Ok(fully_deleted)
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -503,14 +581,16 @@ impl P2PTransport for IrohTransport {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use identity::Identity as _;
     use tokio::time::timeout;
 
     use crate::iroh::{spawn_endpoint, IrohDiscoveryConfig, IrohEndpointConfig};
     use crate::message::{
-        PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest, SEArtifact,
-        SEFieldQuery,
+        PushLogBroadcast, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
+        SEArtifact, SEFieldQuery,
     };
     use crate::signing::sign_with_transport;
     use crate::transport::{P2PTransport, TransportEvent};
@@ -520,6 +600,7 @@ mod tests {
     fn test_config(secret_key: SecretKey) -> IrohEndpointConfig {
         IrohEndpointConfig {
             secret_key,
+            node_identity: None,
             relay_mode: crate::iroh::IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,
@@ -527,6 +608,50 @@ mod tests {
             max_concurrent_multipath_paths: None,
             gossip_heal: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn peer_identity_is_bound_to_authenticated_iroh_endpoint() {
+        let requester_key = SecretKey::generate();
+        let server_key = SecretKey::generate();
+        let server_identity = Arc::new(
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap(),
+        );
+        let expected_did = server_identity.did().unwrap();
+
+        let (requester_tx, _requester_events, _requester_replicators, requester_task) =
+            spawn_endpoint(test_config(requester_key.clone()))
+                .await
+                .unwrap();
+        let mut server_config = test_config(server_key.clone());
+        server_config.node_identity = Some(server_identity);
+        let (server_tx, _server_events, _server_replicators, server_task) =
+            spawn_endpoint(server_config).await.unwrap();
+        let requester = IrohTransport::new(requester_tx, requester_key);
+        let server = IrohTransport::new(server_tx, server_key);
+
+        requester
+            .dial(
+                server.local_peer_id(),
+                server.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        requester
+            .poll_until_connected(server.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let resolved = requester
+            .get_peer_identity(server.local_peer_id())
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(expected_did));
+
+        requester.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+        requester_task.await.unwrap();
+        server_task.await.unwrap();
     }
 
     #[tokio::test]
@@ -687,6 +812,118 @@ mod tests {
 
         transport0.shutdown().await.unwrap();
         task0.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn three_node_relay_preserves_origin_without_promoting_hop() {
+        use bytes::Bytes;
+
+        let key0 = SecretKey::generate();
+        let key1 = SecretKey::generate();
+        let key2 = SecretKey::generate();
+        let (command_tx0, _events0, _replicators0, task0) =
+            spawn_endpoint(test_config(key0.clone())).await.unwrap();
+        let (command_tx1, _events1, _replicators1, task1) =
+            spawn_endpoint(test_config(key1.clone())).await.unwrap();
+        let (command_tx2, mut events2, _replicators2, task2) =
+            spawn_endpoint(test_config(key2.clone())).await.unwrap();
+        let transport0 = IrohTransport::new(command_tx0, key0);
+        let transport1 = IrohTransport::new(command_tx1, key1);
+        let transport2 = IrohTransport::new(command_tx2, key2);
+
+        transport0
+            .dial(
+                transport1.local_peer_id(),
+                transport1.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport1
+            .dial(
+                transport2.local_peer_id(),
+                transport2.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport0
+            .poll_until_connected(transport1.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        transport1
+            .poll_until_connected(transport2.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let topic = DefraTopic::collection("collection");
+        transport0.subscribe(topic.clone()).await.unwrap();
+        transport1.subscribe(topic.clone()).await.unwrap();
+        transport2.subscribe(topic.clone()).await.unwrap();
+
+        async fn wait_for_topic_peer(transport: &IrohTransport, topic: &DefraTopic, peer: &PeerId) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if transport
+                        .topic_peers(topic.clone())
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|candidate| candidate == peer)
+                    {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("gossip topic did not form the expected chain");
+        }
+        wait_for_topic_peer(&transport0, &topic, transport1.local_peer_id()).await;
+        wait_for_topic_peer(&transport1, &topic, transport0.local_peer_id()).await;
+        wait_for_topic_peer(&transport1, &topic, transport2.local_peer_id()).await;
+        wait_for_topic_peer(&transport2, &topic, transport1.local_peer_id()).await;
+
+        let mut broadcast = PushLogBroadcast::new(
+            "doc".to_string(),
+            Bytes::from_static(&[1, 2, 3]),
+            "collection".to_string(),
+            "creator".to_string(),
+            Bytes::from_static(&[4, 5, 6]),
+        );
+        broadcast.source_peer_id = Some(transport0.local_peer_id().to_string());
+        let origin_bytes = broadcast.origin_signing_bytes().unwrap();
+        broadcast.origin_signature = Some(transport0.sign(&origin_bytes).unwrap());
+        transport0.publish(topic, broadcast).await.unwrap();
+
+        loop {
+            let event = timeout(Duration::from_secs(10), events2.recv())
+                .await
+                .expect("timed out waiting for relayed head hint")
+                .expect("iroh event channel closed");
+            if let TransportEvent::GossipMessage {
+                propagation_source,
+                message,
+                ..
+            } = event
+            {
+                assert_eq!(propagation_source, *transport1.local_peer_id());
+                assert_eq!(
+                    message.authenticated_source_peer_id(),
+                    Some(transport1.local_peer_id().as_str())
+                );
+                assert_eq!(
+                    message.authenticated_origin_peer_id(),
+                    Some(transport0.local_peer_id().as_str())
+                );
+                break;
+            }
+        }
+
+        transport0.shutdown().await.unwrap();
+        transport1.shutdown().await.unwrap();
+        transport2.shutdown().await.unwrap();
+        task0.await.unwrap();
+        task1.await.unwrap();
+        task2.await.unwrap();
     }
 
     #[tokio::test]

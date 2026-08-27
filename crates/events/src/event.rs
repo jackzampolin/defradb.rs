@@ -377,7 +377,3 @@ impl Message {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "event_tests.rs"]
-mod tests;

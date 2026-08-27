@@ -1,4 +1,6 @@
-# Survey: `crates/db-search/`
+# Survey: `crates/db (search)/`
+
+> **Now a module, not a crate.** `db-search` was folded into `db` as `crates/db/src/search/`. The slice below is unchanged; only its location moved.
 
 ## Purpose
 Vector + hybrid retrieval for DefraDB. Four small files:

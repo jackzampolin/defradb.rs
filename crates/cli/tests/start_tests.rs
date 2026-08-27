@@ -216,7 +216,7 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.net.peers, vec!["peer1", "peer2"]);
     assert_eq!(config.datastore.max_txn_retries, 10);
     assert_eq!(config.datastore.store, DatastoreType::Memory);
-    assert_eq!(config.datastore.valuelogfilesize, 2 << 30);
+    assert_eq!(config.datastore.valuelogfilesize, Some(2 << 30));
     assert_eq!(config.net.p2p_addresses, vec!["/ip4/0.0.0.0/tcp/4001"]);
     assert!(config.net.p2p_disabled);
     assert_eq!(config.api.allowed_origins, vec!["http://localhost:3000"]);

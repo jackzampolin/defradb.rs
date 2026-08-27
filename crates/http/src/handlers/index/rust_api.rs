@@ -23,6 +23,9 @@ pub struct CreateIndexRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub unique: bool,
+    /// Present iff this is a vector index request.
+    #[serde(default)]
+    pub vector: Option<schema::VectorIndexDescription>,
 }
 
 /// Query parameters for listing indexes.
@@ -93,7 +96,7 @@ pub async fn create_index(
             request.fields,
             request.name.as_deref(),
             request.unique,
-            None,
+            request.vector,
         )
         .await
         .map_err(http_error_from_backend_message)?;

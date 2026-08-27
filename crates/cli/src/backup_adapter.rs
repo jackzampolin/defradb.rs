@@ -30,11 +30,11 @@ impl<S: Store + 'static> BackupOperations for BackupAdapter<S> {
         pretty: bool,
     ) -> Result<String, String> {
         let cols = collections.unwrap_or_default();
-        db_backup::export_database(&self.database, &self.runner, &cols, pretty).await
+        db::backup::export_database(&self.database, &self.runner, &cols, pretty).await
     }
 
     async fn import(&self, data: &str) -> Result<ImportResult, String> {
-        let stats = db_backup::import_database(&self.database, &self.runner, data).await?;
+        let stats = db::backup::import_database(&self.database, &self.runner, data).await?;
 
         Ok(ImportResult {
             documents_imported: stats.documents_imported,

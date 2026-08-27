@@ -218,11 +218,19 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
 #[async_trait]
 impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     async fn sync_status(&self) -> P2PResult<serde_json::Value> {
-        match self.sync_coordinator.as_ref() {
-            Some(coordinator) => serde_json::to_value(coordinator.sync_status())
-                .map_err(|error| P2PError::transport(error.to_string())),
-            None => Ok(serde_json::Value::Null),
+        let Some(coordinator) = self.sync_coordinator.as_ref() else {
+            return Ok(serde_json::Value::Null);
+        };
+        let mut status = serde_json::to_value(coordinator.sync_status())
+            .map_err(|error| P2PError::transport(error.to_string()))?;
+        if let (Some(pusher), Some(object)) = (self.doc_pusher.as_ref(), status.as_object_mut()) {
+            object.insert(
+                "push_retry_markers".to_string(),
+                serde_json::to_value(pusher.push_retry_marker_stats().await?)
+                    .map_err(|error| P2PError::transport(error.to_string()))?,
+            );
         }
+        Ok(status)
     }
 
     async fn local_peer_id(&self) -> P2PResult<String> {
@@ -375,8 +383,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         collections: Vec<String>,
         addr: Option<&str>,
         filters: ReplicationFilters,
-        _explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
-        _expected_authorizer_did: Option<&str>,
+        explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+        expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
         self.check_nac(acp::nac::NodePermission::P2pReplicatorAdd)
             .await?;
@@ -420,6 +428,33 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 .validate_replication_filters(&replication_filters)?;
         }
 
+        let requested_collections: HashSet<String> = collection_cids.iter().cloned().collect();
+        let validated_capabilities = crate::validate_explicit_replay_capabilities(
+            explicit_replay_capabilities,
+            expected_authorizer_did,
+            &requested_collections,
+            self.transport.local_peer_id().as_str(),
+            peer_id.as_str(),
+        )?;
+        let collections_with_changed_capabilities = crate::collections_with_changed_capabilities(
+            &collection_cids,
+            &validated_capabilities,
+            |collection_id, capability| {
+                self.transport.explicit_replay_capability_matches(
+                    &peer_id,
+                    collection_id,
+                    capability,
+                )
+            },
+        );
+        self.transport
+            .clear_explicit_replay_capabilities(&peer_id, &collection_cids);
+        for (collection_id, capability) in validated_capabilities {
+            self.transport
+                .set_explicit_replay_capability(&peer_id, &collection_id, &capability)
+                .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        }
+
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
         // with the same collections (idempotent reconnect path).
@@ -451,12 +486,6 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 }
             }
         };
-        let existing_collection_ids = if existing_filters == replication_filters {
-            existing_collection_ids
-        } else {
-            HashSet::new()
-        };
-
         // Same rationale as `connect_peer`: in the common pairing flow the
         // replicator is installed over an already-live connection, and a
         // redundant dial can spuriously time out (Linux). The registration and
@@ -475,72 +504,68 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             addrs.insert(peer_id.to_string(), addr_str.to_string());
         }
 
+        let replicator_info = p2p::ReplicatorInfo::from_raw_with_filters(
+            peer_id.to_string(),
+            collection_cids.clone(),
+            vec![addr_str.to_string()],
+            replication_filters.clone(),
+        );
+        if let Some(ref pusher) = self.doc_pusher {
+            pusher
+                .persist_replicator_info(&replicator_info)
+                .await
+                .map_err(|error| {
+                    P2PError::persistence(format!(
+                        "failed to durably register replicator {peer_id}: {error}"
+                    ))
+                })?;
+        }
+
         if let Some(ref coordinator) = self.sync_coordinator {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
             coordinator
-                .create_replicator_info(&peer_id, info, false)
+                .create_replicator_info(&peer_id, replicator_info.clone(), false)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         } else {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
             self.transport
-                .create_replicator_info(&peer_id, info)
+                .create_replicator_info(&peer_id, replicator_info)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         }
 
-        if let Some(ref pusher) = self.doc_pusher {
-            let info = p2p::ReplicatorInfo::from_raw_with_filters(
-                peer_id.to_string(),
-                collection_cids.clone(),
-                vec![addr_str.to_string()],
-                replication_filters.clone(),
-            );
-            if let Err(error) = pusher.persist_replicator_info(&info).await {
-                tracing::warn!(peer_id = %peer_id, error = %error, "failed to persist replicator");
-            }
-        }
+        let collection_names_requiring_replay = crate::collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &existing_filters,
+            &replication_filters,
+            &collections_with_changed_capabilities,
+        );
 
-        // Only replay collections that weren't already replicated by this peer.
-        let new_collection_names: Vec<String> = effective_collections
-            .iter()
-            .zip(collection_cids.iter())
-            .filter(|(_, cid)| !existing_collection_ids.contains(*cid))
-            .map(|(name, _)| name.clone())
-            .collect();
-
-        if !new_collection_names.is_empty() {
+        if !collection_names_requiring_replay.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
                 let push_peer = peer_id;
                 let push_options = self.replicator_push_options.load();
                 let push_se_key = push_options.se_encryption_key;
+                let push_identity = push_options.se_identity_pubkey;
                 let push_filters = replication_filters.clone();
 
                 tracing::info!(
                     peer_id = %push_peer,
-                    new_collections = ?new_collection_names,
-                    "Replaying existing docs for new collections only"
+                    replay_collections = ?collection_names_requiring_replay,
+                    "Replaying existing docs for collections requiring replay"
                 );
 
                 tokio::spawn(async move {
                     if let Err(error) = push_pusher
                         .push_existing_docs(
                             &push_peer,
-                            &new_collection_names,
+                            &collection_names_requiring_replay,
                             &push_filters,
                             push_se_key.as_ref().map(|key| key.as_slice()),
+                            push_identity.as_deref(),
                         )
                         .await
                     {
@@ -556,7 +581,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         } else {
             tracing::debug!(
                 peer_id = %peer_id,
-                "Replicator already exists with same collections, skipping initial replay"
+                "Replicator already exists with same collections, filters, and replay capability; skipping initial replay"
             );
             if let Some(ref bus) = self.event_bus {
                 bus.publish(events::Message::replicator_completed());
@@ -969,6 +994,7 @@ mod tests {
     fn test_endpoint_config(secret_key: iroh::SecretKey) -> IrohEndpointConfig {
         IrohEndpointConfig {
             secret_key,
+            node_identity: None,
             relay_mode: IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,

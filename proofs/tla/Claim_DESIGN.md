@@ -21,7 +21,7 @@ this repository.
 | `gents:crates/gents/src/lifecycle/claim.rs:69` and `transition.rs:463` | Execution begins from local `Claimed` and performs a later transition to processing/execution state. |
 | `gents:crates/gents/src/watcher/query.rs:73` | The watcher selects `AgentRequest` rows for the local `agent_did` and `status in [pending, processing]`. |
 | `gents:crates/gents/src/watcher.rs:102` | Each watcher instance carries one `agent_did`; multiple instances can use the same value. |
-| `crates/db-merge/src/merge_handler/lww.rs:165` | LWW merge applies the highest-priority/tie-break delta and rejects lower-priority alternatives. |
+| `crates/db/src/merge/merge_handler/lww.rs:165` | LWW merge applies the highest-priority/tie-break delta and rejects lower-priority alternatives. |
 
 ## Brainstorming Outcome
 

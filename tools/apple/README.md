@@ -81,6 +81,7 @@ The mobile-oriented entry points are:
 - `defra_mobile_ensure_schema(node, schema_sdl)`
 - `defra_mobile_execute(node, request_json)`
 - `defra_mobile_peer_info(node)`
+- `defra_mobile_sync_status(node)`
 - `defra_mobile_connect(node, addr)`
 - `defra_mobile_disconnect(node, addr)`
 - `defra_mobile_sync_collection(node, request_json)`

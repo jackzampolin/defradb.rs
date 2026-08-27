@@ -21,13 +21,14 @@ jdk_root    := tooling / "jdk"
 
 # Pinned to what CI uses. ci.yml pins Go 1.25 (:449); Cargo.toml sets
 # rust-version 1.91; proofs/lean/lean-toolchain pins Lean v4.18.0; #1310 pins
-# TLC 1.8.0 by checksum.
+# TLC 1.7.4 by checksum. The upstream 1.8.0 pre-release asset is rolling and
+# cannot provide a reproducible clean-checkout gate.
 protoc_version := "35.1"
 go_version     := "1.25.12"
 jdk_release    := "jdk-21.0.12+8"
 jq_version     := "1.8.1"
-tla_version    := "1.8.0"
-tla_sha256     := "e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
+tla_version    := "1.7.4"
+tla_sha256     := "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 
 # Pinned to ci.yml's wasm-check job.
 firefox_version     := "153.0.3"
@@ -288,7 +289,39 @@ setup-sift:
 [doc("Vector index benchmarks (insert/update/delete/search/kernels).")]
 [group('test')]
 bench-vector *args:
-    cargo bench -p db-index {{ args }}
+    cargo bench -p benches --bench sift --bench vector_search \
+        --bench vector_mutations {{ args }}
+
+# criterion writes results to target/criterion/<group>/<function>, keyed by
+# group and function name and never by binary. Its uniquifier is per-process, so
+# two targets sharing a group *and* function name overwrite each other silently.
+# Group names are distinct today; this keeps them that way.
+[doc("Fail if two bench targets share a criterion group name.")]
+[group('check')]
+bench-groups:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    dupes=""
+    for g in $(grep -ho 'benchmark_group("[^"]*")' benches/benches/*.rs | sort -u); do
+        n=$(grep -l -- "$g" benches/benches/*.rs | wc -l | tr -d ' ')
+        if [ "$n" -gt 1 ]; then dupes="$dupes  $g in $n targets"$'\n'; fi
+    done
+    if [ -n "$dupes" ]; then
+        echo "criterion group names collide across targets:" >&2
+        printf '%s' "$dupes" >&2
+        exit 1
+    fi
+    echo "criterion group names: no collisions across $(ls benches/benches/*.rs | wc -l | tr -d ' ') targets"
+
+# Profile one bench target with symbols. `[profile.bench]` inherits release's
+# `strip = true`, so a bench binary carries no symbols and a profiler resolves
+# nothing; `[profile.profile]` keeps them. criterion's own `--profile-time`
+# runs the benchmark without its sampling/analysis phases.
+[doc("Profile one bench target with symbols, under an external profiler.")]
+[group('test')]
+bench-profile target seconds="10" *args:
+    cargo bench --profile profile -p benches --bench {{ target }} -- \
+        --profile-time {{ seconds }} {{ args }}
 
 # Go, for the FFI compatibility harness and the Go-parity integration suites.
 [doc("Go, for the FFI harness and the Go-parity suites.")]
@@ -557,8 +590,13 @@ integration-all:
 
 # TLA+, Lean, and both conformance axes. This is proofs/verify-all.sh.
 [group('proofs')]
-proofs:
+proofs: check-anchors
     proofs/verify-all.sh
+
+# Every *.rs filename named in proofs/ or SURVEY.md resolves to a tracked file.
+[group('proofs')]
+check-anchors:
+    bash .github/scripts/check-proof-anchors.sh
 
 # TLC over every model, checked against the expected red/green oracle.
 [group('proofs')]
@@ -617,7 +655,7 @@ lint:
     cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
     cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
     cargo check -p p2p --no-default-features --features iroh-transport
-    cargo check -p db-merge --no-default-features --features native
+    cargo check -p db --no-default-features --features native
     just check-node-graph
 
 # Feature-graph contracts for defra-node (#1398–#1400). Not a size check.

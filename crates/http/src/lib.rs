@@ -26,6 +26,8 @@
 //! - `GET /api/v1/collections` - List all collections
 //! - `POST /api/v1/collections/{name}` - Create document(s)
 //! - `GET /api/v1/collections/{name}` - List collection document IDs
+//! - `PATCH /api/v1/collections/{name}` - Update documents matching a filter
+//! - `DELETE /api/v1/collections/{name}` - Delete documents matching a filter
 //! - `GET /api/v1/collections/{name}/document/{docID}` - Get document
 //! - `PATCH /api/v1/collections/{name}/document/{docID}` - Update document
 //! - `DELETE /api/v1/collections/{name}/document/{docID}` - Delete document
@@ -55,7 +57,8 @@
 //! - `POST /api/v1/p2p/documents/sync` - Sync specific documents (`handlers/p2p/documents.rs`)
 //!
 //! ## ACP (requires AcpOperations)
-//! - `POST /api/v1/acp/policy` - Add policy
+//! - `POST /api/v1/acp/document/policy` - Add policy (Go-compatible path)
+//! - `POST /api/v1/acp/policy` - Add policy (Rust alias)
 //! - `GET /api/v1/acp/policy` - List policies
 //! - `GET /api/v1/acp/policy/{id}` - Get policy by ID
 //!
@@ -67,6 +70,13 @@
 //! ## Backup (requires BackupOperations)
 //! - `POST /api/v1/backup/export` - Export database
 //! - `POST /api/v1/backup/import` - Import database
+//!
+//! ## Views (requires ViewOperations)
+//! - `POST /api/v1/view` - Add a view (Go-compatible path)
+//! - `POST /api/v1/views` - Add a view (Rust alias)
+//! - `POST /api/v1/view/refresh` - Refresh views (Go-compatible path)
+//! - `POST /api/v1/views/refresh` - Refresh views (Rust alias)
+//! - `POST /api/v1/views/gc` - Downsample history GC (Rust only)
 //!
 //! # Example
 //!
@@ -85,6 +95,7 @@
 pub mod auth_error;
 pub mod auth_middleware;
 pub mod error;
+pub mod go_paths;
 pub mod handlers;
 pub mod identity_extractor;
 pub mod nac_guard;
@@ -108,7 +119,7 @@ pub use router::{
     PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,
     ReplicatorInfo, TransactionOperations, ViewOperations, MANAGE_UNAUTHORIZED,
 };
-pub use server::{Server, ServerConfig};
+pub use server::{Server, ServerConfig, DEFAULT_MAX_BACKUP_SIZE};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use mock::{

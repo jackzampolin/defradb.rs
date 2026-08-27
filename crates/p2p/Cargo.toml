@@ -8,17 +8,19 @@ license.workspace = true
 repository.workspace = true
 description = "P2P networking for DefraDB using libp2p"
 
+[lib]
+bench = false
+
 [dependencies]
 # Internal crates
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 crypto = { path = "../crypto" }
 blockstore = { path = "../blockstore" }
-crdt = { path = "../crdt" }
 storage = { path = "../storage" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
-kms = { path = "../kms" }
+kms = { path = "../kms", optional = true }
 
 # libp2p transport
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"], optional = true }
@@ -66,6 +68,7 @@ unsigned-varint = "0.8"
 
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }
+lru = { workspace = true, optional = true }
 
 # Iroh transport (optional)
 iroh = { workspace = true, optional = true }
@@ -82,20 +85,20 @@ default = []
 test-utils = ["libp2p-transport"]
 libp2p-transport = [
     "dep:iroh-bitswap",
+    "dep:kms",
     "dep:libp2p",
     "dep:libp2p-stream",
     "dep:multiaddr",
     "dep:rlimit",
     "dep:sysinfo",
 ]
-iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
+iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3", "dep:lru"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-p2p = { path = ".", features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [package.metadata.cargo-machete]
-ignored = ["crdt", "multiaddr", "noq", "rand"]
+ignored = ["multiaddr", "noq", "rand"]
 
 [lints]
 workspace = true

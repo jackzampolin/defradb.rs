@@ -4,19 +4,32 @@
 /// retry tracking, and search engine retry tracking for P2P operations.
 use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
 use crate::keys::peerstore::{
-    ReplicatorKey, ReplicatorRetryCommitKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
+    ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
 };
 use crate::namespace::{Namespace, NamespacedStore};
-use async_lock::{RwLock, RwLockReadGuardArc};
+use async_lock::{RwLock, RwLockWriteGuardArc};
 use async_trait::async_trait;
-use cid::Cid;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracing;
 
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const PUSH_MARKER_IO_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+const LEGACY_RETRY_COMMIT_PREFIX: &str = "/rep/retry/commit/";
+
+fn legacy_retry_commit_prefix(peer_id: Option<&str>) -> Vec<u8> {
+    match peer_id {
+        Some(peer_id) => format!("{LEGACY_RETRY_COMMIT_PREFIX}{peer_id}/").into_bytes(),
+        None => LEGACY_RETRY_COMMIT_PREFIX.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(test)]
+fn legacy_retry_commit_key(peer_id: &str, collection_id: &str, cid: &str) -> Vec<u8> {
+    format!("{LEGACY_RETRY_COMMIT_PREFIX}{peer_id}/{collection_id}/{cid}").into_bytes()
+}
 
 type RetryPeerLock = RwLock<()>;
 
@@ -39,29 +52,40 @@ fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
 
 /// Keeps a retry pass or failure-recording operation coordinated with forget.
 pub struct ReplicatorRetryGuard {
-    _guard: RwLockReadGuardArc<()>,
+    _guard: RwLockWriteGuardArc<()>,
 }
 
-async fn retry_push_txn_conflicts<T, F, Fut>(mut operation: F) -> Result<T>
+async fn retry_push_txn<T, F, Fut, P>(mut operation: F, is_retryable: P) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
+    P: Fn(&crate::corekv::Error) -> bool,
 {
     let mut retried = false;
     for attempt in 1..=PUSH_RETRY_TXN_MAX_ATTEMPTS {
         match operation().await {
-            Err(error) if error.is_retriable() && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
-                telemetry::record_retry_attempt(telemetry::RetryLayer::PushLedger);
+            Err(error) if is_retryable(&error) && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
+                telemetry::record_retry_attempt(telemetry::RetryLayer::PushMarker);
                 retried = true;
-                tracing::debug!(attempt, "retrying push-ledger transaction conflict");
+                if error.is_retriable() {
+                    tracing::debug!(attempt, "retrying push retry-state transaction conflict");
+                } else {
+                    tracing::warn!(attempt, %error, "retrying durable push retry-state write");
+                    wait_before_marker_retry(attempt).await;
+                }
             }
-            Err(error) if error.is_retriable() => {
-                telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushLedger);
+            Err(error) if is_retryable(&error) => {
+                telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushMarker);
+                tracing::error!(
+                    attempts = PUSH_RETRY_TXN_MAX_ATTEMPTS,
+                    %error,
+                    "durable push retry-state write retries exhausted"
+                );
                 return Err(error);
             }
             Ok(value) => {
                 if retried {
-                    telemetry::record_retry_success(telemetry::RetryLayer::PushLedger);
+                    telemetry::record_retry_success(telemetry::RetryLayer::PushMarker);
                 }
                 return Ok(value);
             }
@@ -71,19 +95,33 @@ where
     unreachable!("bounded transaction retry loop always returns")
 }
 
-fn compare_push_versions(
-    left_priority: u64,
-    left_cid: &str,
-    right_priority: u64,
-    right_cid: &str,
-) -> Ordering {
-    left_priority.cmp(&right_priority).then_with(|| {
-        match (Cid::try_from(left_cid), Cid::try_from(right_cid)) {
-            (Ok(left), Ok(right)) => left.cmp(&right),
-            // Legacy or corrupt values still need a deterministic order.
-            _ => left_cid.as_bytes().cmp(right_cid.as_bytes()),
-        }
-    })
+async fn retry_push_txn_conflicts<T, F, Fut>(operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_push_txn(operation, crate::corekv::Error::is_retriable).await
+}
+
+async fn retry_scope_marker_write<T, F, Fut>(operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_push_txn(operation, is_retryable_marker_write).await
+}
+
+fn is_retryable_marker_write(error: &crate::corekv::Error) -> bool {
+    error.is_retriable()
+        || matches!(
+            error,
+            crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
+        )
+}
+
+async fn wait_before_marker_retry(_attempt: usize) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::time::sleep(PUSH_MARKER_IO_RETRY_DELAY * _attempt as u32).await;
 }
 
 /// Peerstore provides storage for peer and replication metadata
@@ -121,14 +159,14 @@ impl<S: Store> Peerstore<S> {
 
     /// Acquire permission to process retry state while the replicator exists.
     ///
-    /// The guard must be retained through transport replay and any resulting
-    /// ledger update. Forget takes the corresponding write lock, so it cannot
-    /// return while a selected retry can still be sent or persisted.
+    /// This guard is for short storage transitions only. It must not be held
+    /// across transport replay or any other network I/O. Atomic retry-state
+    /// methods reacquire the same lock when they commit their transition.
     pub async fn acquire_replicator_retry_guard(
         &self,
         peer_id: &str,
     ) -> Result<Option<ReplicatorRetryGuard>> {
-        let guard = retry_peer_lock(peer_id).read_arc().await;
+        let guard = retry_peer_lock(peer_id).write_arc().await;
         if self.has_replicator(peer_id).await? {
             Ok(Some(ReplicatorRetryGuard { _guard: guard }))
         } else {
@@ -153,7 +191,8 @@ impl<S: Store> Peerstore<S> {
         let mut keys = Vec::new();
         for prefix in [
             ReplicatorRetryDocIDKey::peer_prefix(peer_id),
-            ReplicatorRetryCommitKey::peer_prefix(peer_id),
+            ReplicatorRetryCollectionKey::peer_prefix(peer_id),
+            legacy_retry_commit_prefix(Some(peer_id)),
         ] {
             let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
             while let Some(pair) = iter.next().await? {
@@ -264,478 +303,393 @@ impl<S: Store> Peerstore<S> {
         }
     }
 
+    async fn register_scope_marker(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        retry_info_bytes: &[u8],
+    ) -> Result<()> {
+        retry_scope_marker_write(|| {
+            self.register_scope_marker_once(peer_id, doc_id, collection_id, retry_info_bytes)
+        })
+        .await
+    }
+
+    async fn register_scope_marker_once(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        retry_info_bytes: &[u8],
+    ) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        let id_key = ReplicatorRetryIDKey::new(peer_id);
+        if !txn.has(&id_key.bytes()).await? {
+            let mut info = super::RetryInfo::from_bytes(retry_info_bytes)
+                .unwrap_or_else(|_| super::RetryInfo::new_initial());
+            info.bump_for(peer_id);
+            txn.set(
+                &id_key.bytes(),
+                &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+            )
+            .await?;
+        }
+        let marker = if doc_id.is_empty() {
+            if collection_id.is_empty() {
+                return txn.commit().await;
+            }
+            ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
+        };
+        txn.set(&marker, &[]).await?;
+        txn.commit().await
+    }
+
+    /// One-way conversion of payload-valued document records and CID-scoped
+    /// collection commits into presence-only scope markers.
+    async fn migrate_push_retry_markers(&self, only_peer: Option<&str>) -> Result<usize> {
+        retry_push_txn_conflicts(|| async {
+            let mut txn = self.store.new_txn(false).await?;
+            let mut migrated = 0usize;
+            let doc_prefix = only_peer
+                .map(ReplicatorRetryDocIDKey::peer_prefix)
+                .unwrap_or_else(ReplicatorRetryDocIDKey::retry_doc_prefix);
+            let mut docs = txn
+                .iterator(IterOptions::new().with_prefix(doc_prefix))
+                .await?;
+            let mut doc_keys = Vec::new();
+            while let Some(pair) = docs.next().await? {
+                if !pair.value.is_empty() {
+                    let key = String::from_utf8_lossy(&pair.key);
+                    let peer = key
+                        .strip_prefix("/rep/retry/doc/")
+                        .and_then(|rest| rest.split('/').next())
+                        .filter(|peer| !peer.is_empty())
+                        .map(str::to_owned);
+                    doc_keys.push((pair.key, peer));
+                }
+            }
+            drop(docs);
+            for (key, peer) in doc_keys {
+                if key.ends_with(b"/") {
+                    txn.delete(&key).await?;
+                } else {
+                    txn.set(&key, &[]).await?;
+                    if let Some(peer) = peer {
+                        let id_key = ReplicatorRetryIDKey::new(&peer);
+                        if !txn.has(&id_key.bytes()).await? {
+                            let info = super::RetryInfo::new_initial();
+                            txn.set(
+                                &id_key.bytes(),
+                                &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                migrated += 1;
+            }
+
+            let commit_prefix = legacy_retry_commit_prefix(only_peer);
+            let mut commits = txn
+                .iterator(IterOptions::new().with_prefix(commit_prefix))
+                .await?;
+            let mut legacy = Vec::new();
+            while let Some(pair) = commits.next().await? {
+                let key = String::from_utf8_lossy(&pair.key);
+                let Some(rest) = key.strip_prefix(LEGACY_RETRY_COMMIT_PREFIX) else {
+                    continue;
+                };
+                let mut parts = rest.split('/');
+                let (Some(peer), Some(collection)) = (parts.next(), parts.next()) else {
+                    continue;
+                };
+                if !peer.is_empty() && !collection.is_empty() {
+                    legacy.push((pair.key.clone(), peer.to_string(), collection.to_string()));
+                }
+            }
+            drop(commits);
+            for (old_key, peer, collection) in legacy {
+                txn.set(
+                    &ReplicatorRetryCollectionKey::new(&peer, &collection).bytes(),
+                    &[],
+                )
+                .await?;
+                let id_key = ReplicatorRetryIDKey::new(&peer);
+                if !txn.has(&id_key.bytes()).await? {
+                    let mut info = super::RetryInfo::new_initial();
+                    info.bump_for(&peer);
+                    txn.set(
+                        &id_key.bytes(),
+                        &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+                    )
+                    .await?;
+                }
+                txn.delete(&old_key).await?;
+                migrated += 1;
+            }
+            txn.commit().await?;
+            Ok(migrated)
+        })
+        .await
+    }
+
     /// Record a push failure for a specific peer/doc pair.
     ///
-    /// Writes the peer marker at `/rep/retry/id/{peer}` and a versioned,
-    /// independently scheduled record at `/rep/retry/doc/{peer}/{doc}`.
+    /// Writes the peer schedule and a presence-only document or collection marker.
     pub async fn record_push_failure(
         &self,
         peer_id: &str,
         doc_id: &str,
         collection_id: &str,
-        cid: &str,
-        priority: u64,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
-        // Collection commits are doc-less, CID-scoped obligations. They are
-        // recorded under their own keyspace so they can be replayed by CID;
-        // dropping them here made a failed collection-commit push permanent,
-        // leaving receivers with heads whose parents never arrive
-        // (defradb#1113, source-inc/gents#696).
-        if doc_id.is_empty() {
-            if cid.is_empty() {
-                // A versionless doc-less failure (SE artifact) has nothing to
-                // replay: no document to re-resolve and no CID to re-send.
-                return Ok(());
-            }
-            return retry_push_txn_conflicts(|| {
-                self.record_commit_push_failure_once(
-                    peer_id,
-                    collection_id,
-                    cid,
-                    priority,
-                    retry_info_bytes,
-                )
-            })
-            .await;
+        if doc_id.is_empty() && collection_id.is_empty() {
+            return Ok(());
         }
-        retry_push_txn_conflicts(|| {
-            self.record_push_failure_once(
-                peer_id,
-                doc_id,
-                collection_id,
-                cid,
-                priority,
-                retry_info_bytes,
-            )
-        })
-        .await
+        self.register_scope_marker(peer_id, doc_id, collection_id, retry_info_bytes)
+            .await
     }
 
-    /// Record a failed collection-commit push under `/rep/retry/commit/{peer}/
-    /// {collection}/{cid}`.
-    ///
-    /// One record per CID: collection-commit DAGs chain, so a newer commit does
-    /// not make an older undelivered one redundant. A record for this exact CID
-    /// that is already pending keeps its backoff (repeat failures must not reset
-    /// the ladder); a dormant one is activated.
-    async fn record_commit_push_failure_once(
-        &self,
-        peer_id: &str,
-        collection_id: &str,
-        cid: &str,
-        priority: u64,
-        retry_info_bytes: &[u8],
-    ) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        let id_key = ReplicatorRetryIDKey::new(peer_id);
-        if !txn.has(&id_key.bytes()).await? {
-            txn.set(&id_key.bytes(), retry_info_bytes).await?;
-        }
-        let commit_key = ReplicatorRetryCommitKey::new(peer_id, collection_id, cid);
-        let existing = txn.get(&commit_key.bytes()).await?;
-        let current = existing
-            .as_deref()
-            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
-        let retry = match current {
-            Some(retry) if retry.pending => retry,
-            Some(mut retry) => {
-                retry.activate(&format!("{peer_id}:{cid}"));
-                retry
-            }
-            None => {
-                let mut retry =
-                    super::PersistedPushRetry::new_observed_commit(collection_id, cid, priority);
-                retry.activate(&format!("{peer_id}:{cid}"));
-                retry
-            }
-        };
-        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
-        txn.set(&commit_key.bytes(), &bytes).await?;
-        txn.commit().await
-    }
-
-    async fn record_push_failure_once(
-        &self,
-        peer_id: &str,
-        doc_id: &str,
-        collection_id: &str,
-        cid: &str,
-        priority: u64,
-        retry_info_bytes: &[u8],
-    ) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        let id_key = ReplicatorRetryIDKey::new(peer_id);
-        // Only write retry info if not already present (preserve existing backoff state).
-        if !txn.has(&id_key.bytes()).await? {
-            txn.set(&id_key.bytes(), retry_info_bytes).await?;
-        }
-        let doc_key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
-        let existing = txn.get(&doc_key.bytes()).await?;
-        let current = existing
-            .as_deref()
-            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
-        let retry = match current {
-            // SE-artifact failures are versionless (`cid == ""`). They must
-            // activate the current dormant head instead of comparing as an
-            // older priority-0 document failure and disappearing. The retry
-            // pass re-reads current document heads before regenerating SE
-            // artifacts, so retaining the watermark's version is correct.
-            Some(mut retry) if cid.is_empty() => {
-                if !retry.pending {
-                    retry.activate(&format!("{peer_id}:{}", retry.cid));
-                }
-                retry
-            }
-            Some(retry)
-                if compare_push_versions(retry.priority, &retry.cid, priority, cid).is_gt() =>
-            {
-                retry
-            }
-            Some(retry) if retry.cid == cid && retry.pending => retry,
-            Some(mut retry) if retry.cid == cid => {
-                retry.activate(&format!("{peer_id}:{cid}"));
-                retry
-            }
-            _ => {
-                let mut retry =
-                    super::PersistedPushRetry::new_observed(doc_id, collection_id, cid, priority);
-                retry.activate(&format!("{peer_id}:{cid}"));
-                retry
-            }
-        };
-        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
-        txn.set(&doc_key.bytes(), &bytes).await?;
-        txn.commit().await
-    }
-
-    /// Replace an existing persisted retry with a dormant newer-head watermark
-    /// without creating state for healthy `(document, peer)` pairs. A later
-    /// failure of this exact head activates its independently jittered retry.
+    /// Register the dirty scope before a live head announcement.
     pub async fn observe_push_head(
         &self,
         peer_id: &str,
         doc_id: &str,
         collection_id: &str,
-        cid: &str,
-        priority: u64,
     ) -> Result<()> {
-        if doc_id.is_empty() {
-            if cid.is_empty() {
-                return Ok(());
-            }
-            return retry_push_txn_conflicts(|| {
-                self.observe_commit_push_head_once(peer_id, collection_id, cid, priority)
-            })
-            .await;
+        if doc_id.is_empty() && collection_id.is_empty() {
+            return Ok(());
         }
-        retry_push_txn_conflicts(|| {
-            self.observe_push_head_once(peer_id, doc_id, collection_id, cid, priority)
-        })
-        .await
+        let initial = super::RetryInfo::new_initial()
+            .to_bytes()
+            .map_err(crate::corekv::Error::Other)?;
+        self.register_scope_marker(peer_id, doc_id, collection_id, &initial)
+            .await
     }
 
-    /// Dormant watermark for an in-flight collection-commit push, so a restart
-    /// can promote it if the send never completed.
-    async fn observe_commit_push_head_once(
-        &self,
-        peer_id: &str,
-        collection_id: &str,
-        cid: &str,
-        priority: u64,
-    ) -> Result<()> {
-        let key = ReplicatorRetryCommitKey::new(peer_id, collection_id, cid);
-        let mut txn = self.store.new_txn(false).await?;
-        if txn.has(&key.bytes()).await? {
-            // An existing record (pending or dormant) already tracks this exact
-            // CID; observing it again must not reset its backoff.
-            return txn.commit().await;
-        }
-        let retry = super::PersistedPushRetry::new_observed_commit(collection_id, cid, priority);
-        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
-        txn.set(&key.bytes(), &bytes).await?;
-        txn.commit().await
-    }
-
-    async fn observe_push_head_once(
-        &self,
-        peer_id: &str,
-        doc_id: &str,
-        collection_id: &str,
-        cid: &str,
-        priority: u64,
-    ) -> Result<()> {
-        let key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
-        let mut txn = self.store.new_txn(false).await?;
-        let Some(bytes) = txn.get(&key.bytes()).await? else {
-            return txn.commit().await;
-        };
-        let current = super::PersistedPushRetry::from_bytes(&bytes).ok();
-        if let Some(retry) = current.as_ref() {
-            if compare_push_versions(retry.priority, &retry.cid, priority, cid).is_gt()
-                || (retry.cid == cid && retry.pending)
-            {
-                return txn.commit().await;
-            }
-        }
-        let retry = super::PersistedPushRetry::new_observed(doc_id, collection_id, cid, priority);
-        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
-        txn.set(&key.bytes(), &bytes).await?;
-        txn.commit().await
-    }
-
-    /// The store key a retry record lives under, derived from its scope so
-    /// document heads and collection commits round-trip to the right keyspace.
-    fn retry_key_bytes(peer_id: &str, retry: &super::PersistedPushRetry) -> Vec<u8> {
-        if retry.is_collection_commit() {
-            ReplicatorRetryCommitKey::new(peer_id, &retry.collection_id, &retry.cid).bytes()
-        } else {
-            ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id).bytes()
-        }
-    }
-
-    /// Get each pending independently scheduled retry for a peer. Dormant
-    /// newest-head watermarks are omitted. Legacy raw collection-ID values
-    /// inherit the old peer-level schedule and are rewritten on their next
-    /// failure/update. Retries are returned in next-attempt order so bounded
-    /// consumers cannot starve later store keys.
-    pub async fn get_retry_documents(
-        &self,
-        peer_id: &str,
-    ) -> Result<Vec<super::PersistedPushRetry>> {
-        let fallback = self
+    async fn load_scope_markers(&self, peer_id: &str) -> Result<Vec<super::PushRetryMarker>> {
+        let retry_info = self
             .get_retry_info(peer_id)
             .await?
             .and_then(|bytes| super::RetryInfo::from_bytes(&bytes).ok())
             .unwrap_or_else(super::RetryInfo::new_initial);
-        let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
         let txn = self.store.new_txn(true).await?;
-        let opts = IterOptions::new().with_prefix(prefix);
-        let mut iter = txn.iterator(opts).await?;
-        let expected_prefix = format!("/rep/retry/doc/{peer_id}/");
-        let mut results = Vec::new();
-        while let Some(pair) = iter.next().await? {
-            let key = String::from_utf8_lossy(&pair.key);
-            let Some(doc_id) = key.strip_prefix(&expected_prefix) else {
-                continue;
-            };
-            if doc_id.is_empty() {
-                continue;
-            }
-            let retry = super::PersistedPushRetry::from_bytes(&pair.value).unwrap_or_else(|_| {
-                super::PersistedPushRetry {
-                    doc_id: doc_id.to_string(),
-                    collection_id: String::from_utf8_lossy(&pair.value).to_string(),
-                    cid: String::new(),
-                    priority: 0,
-                    pending: true,
-                    scope: super::RetryScope::Document,
-                    retry_info: fallback.clone(),
-                }
-            });
-            if retry.pending {
-                results.push(retry);
-            }
-        }
+        let mut result = Vec::new();
 
-        // Collection-commit obligations live in their own keyspace and are
-        // replayed by CID (defradb#1113).
-        let commit_prefix = ReplicatorRetryCommitKey::peer_prefix(peer_id);
-        let mut commit_iter = txn
-            .iterator(IterOptions::new().with_prefix(commit_prefix))
+        let doc_prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
+        let expected_doc = format!("/rep/retry/doc/{peer_id}/");
+        let mut docs = txn
+            .iterator(IterOptions::new().with_prefix(doc_prefix))
             .await?;
-        while let Some(pair) = commit_iter.next().await? {
-            let Ok(retry) = super::PersistedPushRetry::from_bytes(&pair.value) else {
+        while let Some(pair) = docs.next().await? {
+            let key = String::from_utf8_lossy(&pair.key);
+            let Some(doc_id) = key.strip_prefix(&expected_doc) else {
                 continue;
             };
-            if retry.pending && retry.is_collection_commit() {
-                results.push(retry);
+            if !doc_id.is_empty() {
+                result.push(super::PushRetryMarker {
+                    doc_id: doc_id.to_string(),
+                    collection_id: String::new(),
+                    scope: super::RetryScope::Document,
+                    retry_info: retry_info.clone(),
+                });
             }
         }
-        results.sort_by_key(|retry| retry.retry_info.next_retry_unix);
-        Ok(results)
+        drop(docs);
+
+        let col_prefix = ReplicatorRetryCollectionKey::peer_prefix(peer_id);
+        let expected_col = format!("/rep/retry/col/{peer_id}/");
+        let mut cols = txn
+            .iterator(IterOptions::new().with_prefix(col_prefix))
+            .await?;
+        while let Some(pair) = cols.next().await? {
+            let key = String::from_utf8_lossy(&pair.key);
+            let Some(collection_id) = key.strip_prefix(&expected_col) else {
+                continue;
+            };
+            if !collection_id.is_empty() {
+                result.push(super::PushRetryMarker {
+                    doc_id: String::new(),
+                    collection_id: collection_id.to_string(),
+                    scope: super::RetryScope::CollectionCommit,
+                    retry_info: retry_info.clone(),
+                });
+            }
+        }
+        result.sort_by(|a, b| {
+            a.scope
+                .cmp(&b.scope)
+                .then_with(|| a.doc_id.cmp(&b.doc_id))
+                .then_with(|| a.collection_id.cmp(&b.collection_id))
+        });
+        if !result.is_empty() {
+            let offset = retry_info.dispatch_cursor as usize % result.len();
+            result.rotate_left(offset);
+        }
+        Ok(result)
     }
 
-    /// Promote dormant live-send watermarks after process startup. A dormant
-    /// record means the previous process was betting on volatile in-memory
-    /// work; after a restart that work no longer exists, so the exact newest
-    /// head must become an immediately due durable retry.
-    pub async fn activate_dormant_push_retries(&self) -> Result<usize> {
+    /// Load presence-only document and collection scopes on the peer clock.
+    pub async fn get_retry_documents(&self, peer_id: &str) -> Result<Vec<super::PushRetryMarker>> {
+        self.load_scope_markers(peer_id).await
+    }
+
+    /// Migrate legacy payload/CID records into scope markers after startup.
+    pub async fn migrate_legacy_push_retries(&self) -> Result<usize> {
+        self.migrate_push_retry_markers(None).await
+    }
+
+    /// Count durable scope markers and report the oldest shared peer schedule.
+    pub async fn push_retry_marker_stats(&self) -> Result<super::PushRetryMarkerStats> {
         let txn = self.store.new_txn(true).await?;
-        let mut iter = txn
+        let mut stats = super::PushRetryMarkerStats::default();
+
+        let mut docs = txn
             .iterator(IterOptions::new().with_prefix(ReplicatorRetryDocIDKey::retry_doc_prefix()))
             .await?;
-        let expected_prefix = "/rep/retry/doc/";
-        let mut dormant = Vec::new();
-        while let Some(pair) = iter.next().await? {
-            let key = String::from_utf8_lossy(&pair.key);
-            let Some((peer_id, key_doc_id)) = key
-                .strip_prefix(expected_prefix)
-                .and_then(|suffix| suffix.split_once('/'))
-            else {
-                continue;
-            };
-            let Ok(retry) = super::PersistedPushRetry::from_bytes(&pair.value) else {
-                continue;
-            };
-            if !retry.pending {
-                dormant.push((peer_id.to_string(), key_doc_id.to_string(), retry));
+        while let Some(pair) = docs.next().await? {
+            if !pair.key.ends_with(b"/") {
+                stats.document_markers += 1;
             }
         }
-        drop(iter);
+        drop(docs);
 
-        // Collection-commit watermarks live under /rep/retry/commit/{peer}/
-        // {collection}/{cid} — a 3-segment key, so the doc-shaped `split_once`
-        // above cannot parse them. Their peer is taken from the record's own
-        // key prefix (defradb#1113).
-        let mut commit_iter = txn
+        let mut collections = txn
             .iterator(
-                IterOptions::new().with_prefix(ReplicatorRetryCommitKey::retry_commit_prefix()),
+                IterOptions::new()
+                    .with_prefix(ReplicatorRetryCollectionKey::retry_collection_prefix()),
             )
             .await?;
-        while let Some(pair) = commit_iter.next().await? {
-            let key = String::from_utf8_lossy(&pair.key);
-            let Some(peer_id) = key
-                .strip_prefix("/rep/retry/commit/")
-                .and_then(|suffix| suffix.split_once('/'))
-                .map(|(peer_id, _)| peer_id)
-            else {
-                continue;
-            };
-            let Ok(retry) = super::PersistedPushRetry::from_bytes(&pair.value) else {
-                continue;
-            };
-            if !retry.pending && retry.is_collection_commit() {
-                dormant.push((peer_id.to_string(), retry.doc_id.clone(), retry));
+        while let Some(pair) = collections.next().await? {
+            if !pair.key.ends_with(b"/") {
+                stats.collection_markers += 1;
             }
         }
-        drop(commit_iter);
-        drop(txn);
+        drop(collections);
 
-        let mut activated = 0;
-        for (peer_id, key_doc_id, retry) in dormant {
-            let Some(_retry_guard) = self.acquire_replicator_retry_guard(&peer_id).await? else {
+        let mut schedules = txn
+            .iterator(IterOptions::new().with_prefix(ReplicatorRetryIDKey::retry_prefix()))
+            .await?;
+        while let Some(pair) = schedules.next().await? {
+            let Ok(info) = super::RetryInfo::from_bytes(&pair.value) else {
                 continue;
             };
-            match retry_push_txn_conflicts(|| {
-                self.activate_dormant_push_retry_once(&peer_id, &key_doc_id, &retry)
-            })
-            .await
-            {
-                Ok(true) => activated += 1,
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        peer_id,
-                        doc_id = key_doc_id,
-                        %error,
-                        "failed to activate dormant push retry; continuing startup scan"
-                    );
-                }
-            }
+            stats.scheduled_peers += 1;
+            stats.oldest_scheduled_retry_unix = Some(
+                stats
+                    .oldest_scheduled_retry_unix
+                    .map_or(info.next_retry_unix, |oldest| {
+                        oldest.min(info.next_retry_unix)
+                    }),
+            );
         }
-        Ok(activated)
+        Ok(stats)
     }
 
-    async fn activate_dormant_push_retry_once(
+    /// Advance the current peer schedule after an attempted replay.
+    ///
+    /// This method owns the per-peer writer and reads the current value inside
+    /// the write transaction.  Callers never blind-write a stale snapshot over
+    /// reconnect activation or a concurrent marker registration.
+    pub async fn reschedule_retry_peer(
         &self,
         peer_id: &str,
-        key_doc_id: &str,
-        retry: &super::PersistedPushRetry,
+        defer_for: Option<std::time::Duration>,
     ) -> Result<bool> {
-        let key_bytes = if retry.is_collection_commit() {
-            ReplicatorRetryCommitKey::new(peer_id, &retry.collection_id, &retry.cid).bytes()
-        } else {
-            ReplicatorRetryDocIDKey::new(peer_id, key_doc_id).bytes()
-        };
-        let mut txn = self.store.new_txn(false).await?;
-        let current_bytes = txn.get(&key_bytes).await?;
-        let current = current_bytes
-            .as_deref()
-            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
-        let is_same_dormant = current.as_ref().is_some_and(|current| {
-            !current.pending && current.priority == retry.priority && current.cid == retry.cid
-        });
-        if is_same_dormant {
-            let mut activated_retry = retry.clone();
-            activated_retry.pending = true;
-            activated_retry.retry_info = super::RetryInfo::new_initial();
-            let bytes = activated_retry
-                .to_bytes()
-                .map_err(crate::corekv::Error::Other)?;
-            txn.set(&key_bytes, &bytes).await?;
-            let id_key = ReplicatorRetryIDKey::new(peer_id);
-            if !txn.has(&id_key.bytes()).await? {
-                let info = super::RetryInfo::new_initial()
-                    .to_bytes()
-                    .map_err(crate::corekv::Error::Other)?;
-                txn.set(&id_key.bytes(), &info).await?;
+        let _retry_guard = retry_peer_lock(peer_id).write_arc().await;
+        retry_push_txn_conflicts(|| async {
+            let mut txn = self.store.new_txn(false).await?;
+            if !txn.has(&ReplicatorKey::new(peer_id).bytes()).await? {
+                return Ok(false);
             }
-        }
-        txn.commit().await?;
-        Ok(is_same_dormant)
+            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
+            let Some(bytes) = txn.get(&key).await? else {
+                return Ok(false);
+            };
+            let mut info =
+                super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?;
+            info.advance_dispatch_cursor();
+            if let Some(delay) = defer_for {
+                info.defer_for(delay);
+            } else {
+                info.bump_for(peer_id);
+            }
+            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
+                .await?;
+            txn.commit().await?;
+            Ok(true)
+        })
+        .await
     }
 
-    pub async fn update_retry_document(
-        &self,
-        peer_id: &str,
-        retry: &super::PersistedPushRetry,
-    ) -> Result<()> {
-        retry_push_txn_conflicts(|| self.update_retry_document_once(peer_id, retry)).await
+    /// Make an existing peer retry schedule immediately due without changing
+    /// its failure-ladder rung.  A connection-established event is new
+    /// delivery evidence: retaining an old connection-failure deadline after
+    /// that event can leave otherwise actionable scope markers dormant.
+    pub async fn activate_retry_peer(&self, peer_id: &str) -> Result<bool> {
+        // Connection events, live head registration, retry completion, and
+        // replicator removal all touch the same per-peer schedule.  Keep this
+        // transition behind the same writer used by those other entrypoints;
+        // otherwise an Iroh reconnect can repeatedly conflict with marker
+        // registration and leave an admitted head without a durable sender
+        // obligation.
+        let _retry_guard = retry_peer_lock(peer_id).write_arc().await;
+        retry_push_txn_conflicts(|| async {
+            let mut txn = self.store.new_txn(false).await?;
+            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
+            let Some(bytes) = txn.get(&key).await? else {
+                return Ok(false);
+            };
+            let mut info =
+                super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?;
+            info.defer_for(std::time::Duration::ZERO);
+            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
+                .await?;
+            txn.commit().await?;
+            Ok(true)
+        })
+        .await
     }
 
-    async fn update_retry_document_once(
-        &self,
-        peer_id: &str,
-        retry: &super::PersistedPushRetry,
-    ) -> Result<()> {
-        let key_bytes = Self::retry_key_bytes(peer_id, retry);
-        let mut txn = self.store.new_txn(false).await?;
-        let current = txn.get(&key_bytes).await?;
-        let current_retry = current
-            .as_deref()
-            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
-        let is_current =
-            current_retry.as_ref().is_some_and(|current| {
-                current.pending && current.priority == retry.priority && current.cid == retry.cid
-            }) || (current.is_some() && current_retry.is_none() && retry.cid.is_empty());
-        if !is_current {
-            return txn.commit().await;
-        }
-        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
-        txn.set(&key_bytes, &bytes).await?;
-        txn.commit().await
-    }
-
-    /// Complete a retry only if the stored version still matches the attempt.
-    /// A concurrent newer-head observation must survive an old attempt's ack.
+    /// Remove a scope marker after the caller has verified its rederived heads
+    /// are still current. Runtime ack fences serialize this with live updates.
     pub async fn complete_retry_document(
         &self,
         peer_id: &str,
-        retry: &super::PersistedPushRetry,
+        retry: &super::PushRetryMarker,
     ) -> Result<()> {
-        retry_push_txn_conflicts(|| self.complete_retry_document_once(peer_id, retry)).await
+        self.complete_retry_scope(
+            peer_id,
+            &retry.doc_id,
+            &retry.collection_id,
+            retry.is_collection_commit(),
+        )
+        .await
     }
 
-    async fn complete_retry_document_once(
+    /// Remove one presence-only retry marker after its current scope state has
+    /// been checked while holding the peer's retry-transition guard.
+    pub async fn complete_retry_scope(
         &self,
         peer_id: &str,
-        retry: &super::PersistedPushRetry,
+        doc_id: &str,
+        collection_id: &str,
+        is_collection: bool,
     ) -> Result<()> {
-        let key_bytes = Self::retry_key_bytes(peer_id, retry);
-        let mut txn = self.store.new_txn(false).await?;
-        let current = txn.get(&key_bytes).await?;
-        let current_retry = current
-            .as_deref()
-            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
-        let is_current =
-            current_retry.as_ref().is_some_and(|current| {
-                current.pending && current.priority == retry.priority && current.cid == retry.cid
-            }) || (current.is_some() && current_retry.is_none() && retry.cid.is_empty());
-        if is_current {
-            txn.delete(&key_bytes).await?;
-        }
-        txn.commit().await
+        let key = if is_collection {
+            ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
+        };
+        retry_push_txn_conflicts(|| async {
+            let mut txn = self.store.new_txn(false).await?;
+            txn.delete(&key).await?;
+            txn.commit().await
+        })
+        .await
     }
 
     /// Get retry info bytes for a peer.
@@ -790,71 +744,52 @@ impl<S: Store> Peerstore<S> {
             .collect())
     }
 
-    /// Stop sweeping a peer once no retry is pending. Dormant newest-head
-    /// watermarks deliberately survive: they cover volatile live work and
-    /// are promoted by `activate_dormant_push_retries` after a restart.
+    /// Stop sweeping a peer once no document or collection marker remains.
     pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
         retry_push_txn_conflicts(|| self.clear_retry_peer_once(peer_id)).await
     }
 
     async fn clear_retry_peer_once(&self, peer_id: &str) -> Result<()> {
         let mut txn = self.store.new_txn(false).await?;
-        let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
-        let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
-        let expected_prefix = format!("/rep/retry/doc/{peer_id}/");
-        let mut empty_doc_keys = Vec::new();
-        let mut has_pending = false;
-        while let Some(pair) = iter.next().await? {
-            let key = String::from_utf8_lossy(&pair.key);
-            if key
-                .strip_prefix(&expected_prefix)
-                .is_some_and(str::is_empty)
-            {
-                // Clean up the unserviceable shape produced by earlier
-                // revisions without letting it wedge this peer forever.
-                empty_doc_keys.push(pair.key);
-                continue;
-            }
-            match super::PersistedPushRetry::from_bytes(&pair.value) {
-                Ok(retry) if !retry.pending => {}
-                // A pending or legacy record raced the caller's empty check;
-                // preserve it and its peer marker for the retry loop.
-                _ => {
-                    has_pending = true;
+        let mut has_markers = false;
+        let mut empty_legacy_keys = Vec::new();
+
+        for (prefix, expected_prefix) in [
+            (
+                ReplicatorRetryDocIDKey::peer_prefix(peer_id),
+                format!("/rep/retry/doc/{peer_id}/"),
+            ),
+            (
+                ReplicatorRetryCollectionKey::peer_prefix(peer_id),
+                format!("/rep/retry/col/{peer_id}/"),
+            ),
+        ] {
+            let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
+            while let Some(pair) = iter.next().await? {
+                let key = String::from_utf8_lossy(&pair.key);
+                if key
+                    .strip_prefix(&expected_prefix)
+                    .is_some_and(str::is_empty)
+                {
+                    empty_legacy_keys.push(pair.key);
+                } else {
+                    has_markers = true;
                     break;
                 }
             }
-        }
-        drop(iter);
-
-        // A pending collection-commit obligation keeps the peer swept, exactly
-        // like a pending document head: dropping the marker here would strand
-        // the commit and re-open defradb#1113 from the other end.
-        if !has_pending {
-            let commit_prefix = ReplicatorRetryCommitKey::peer_prefix(peer_id);
-            let mut commit_iter = txn
-                .iterator(IterOptions::new().with_prefix(commit_prefix))
-                .await?;
-            while let Some(pair) = commit_iter.next().await? {
-                match super::PersistedPushRetry::from_bytes(&pair.value) {
-                    Ok(retry) if !retry.pending => {}
-                    _ => {
-                        has_pending = true;
-                        break;
-                    }
-                }
+            drop(iter);
+            if has_markers {
+                break;
             }
-            drop(commit_iter);
         }
 
-        if has_pending {
-            return txn.commit().await;
+        if !has_markers {
+            for key in empty_legacy_keys {
+                txn.delete(&key).await?;
+            }
+            txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
+                .await?;
         }
-        for doc_key in empty_doc_keys {
-            txn.delete(&doc_key).await?;
-        }
-        txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
-            .await?;
         txn.commit().await
     }
 }

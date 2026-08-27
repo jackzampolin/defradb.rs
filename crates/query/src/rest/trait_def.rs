@@ -114,4 +114,29 @@ pub trait RestOperations: MaybeSendSync {
         doc_id: &str,
         identity: Option<&Did>,
     ) -> RestResult<bool>;
+
+    /// Delete every document matching a filter.
+    ///
+    /// This is Go's `DeleteDocumentsWithFilter`. The filter is a GraphQL
+    /// filter object, as the `filter` argument of a `delete_<Collection>`
+    /// mutation takes it, and the returned ids are the documents deleted.
+    async fn delete_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>>;
+
+    /// Apply an update to every document matching a filter.
+    ///
+    /// This is Go's `UpdateDocumentsWithFilter`. `updater` is the patch to
+    /// apply, as the `input` argument of an `update_<Collection>` mutation
+    /// takes it, and the returned ids are the documents updated.
+    async fn update_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        updater: &JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>>;
 }

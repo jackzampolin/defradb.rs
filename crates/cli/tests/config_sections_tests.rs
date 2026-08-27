@@ -40,7 +40,7 @@ fn test_datastore_config_defaults() {
     assert_eq!(config.store, DatastoreType::Lark);
     assert_eq!(config.path, "data");
     assert_eq!(config.max_txn_retries, 5);
-    assert_eq!(config.valuelogfilesize, 1 << 30);
+    assert_eq!(config.valuelogfilesize, None);
     assert!(!config.no_encryption);
     assert!(!config.no_signing);
     assert_eq!(config.default_key_type, "secp256k1");
@@ -161,4 +161,37 @@ fn test_net_config_validate_skipped_when_p2p_disabled() {
         ..Default::default()
     };
     assert!(config.validate().is_ok());
+}
+
+/// Every node started on a pre-`Option<u64>` binary had the old 1 GiB default
+/// serialized into its own `config.yaml` by `create_if_missing`. Reading it
+/// back would apply a 16x compaction-target change to lark and rocksdb for an
+/// operator who never passed the flag, so the key must not deserialize at all.
+#[test]
+fn legacy_valuelogfilesize_in_a_config_file_is_ignored() {
+    let yaml = r#"
+store: lark
+path: data
+max_txn_retries: 5
+valuelogfilesize: 1073741824
+no_encryption: false
+no_searchable_encryption: false
+no_signing: false
+default_key_type: secp256k1
+"#;
+    let config: DatastoreConfig = serde_yaml::from_str(yaml).expect("legacy config still loads");
+    assert_eq!(
+        config.valuelogfilesize, None,
+        "a value written by an older binary must not be mistaken for an operator setting it"
+    );
+}
+
+/// And the key must no longer be written, so the ambiguity cannot recur.
+#[test]
+fn valuelogfilesize_is_not_serialized_into_generated_config() {
+    let yaml = serde_yaml::to_string(&DatastoreConfig::default()).expect("serializes");
+    assert!(
+        !yaml.contains("valuelogfilesize"),
+        "generated config.yaml must not carry the key:\n{yaml}"
+    );
 }

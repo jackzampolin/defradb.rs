@@ -10,6 +10,9 @@ repository.workspace = true
 [package.metadata.cargo-machete]
 ignored = ["prost", "tonic-prost"]
 
+[lib]
+bench = false
+
 [dependencies]
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }

@@ -21,11 +21,19 @@ use query::QueryLimits;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state_and_sync_body_limit, AcpOperations, AppStateBuilder, BackupOperations,
-    BlockOperations, BrowserSyncOperations, CollectionManagementOperations, DocumentAcpOperations,
+    create_router_with_state_and_body_limits, AcpOperations, AppState, AppStateBuilder,
+    BackupOperations, BlockOperations, BodyLimits, BrowserSyncOperations,
+    CollectionManagementOperations, CollectionVersionOperations, DocumentAcpOperations,
     DumpOperations, EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester,
     NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
+
+/// Default cap on an inline backup import body (100 MiB).
+///
+/// Replaces a hardcoded check that used to live in the import handler, where
+/// it silently overrode the flag: `0` did not mean unlimited, and a larger
+/// flag value could not raise the bound.
+pub const DEFAULT_MAX_BACKUP_SIZE: u64 = 100 * 1024 * 1024;
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -40,7 +48,15 @@ pub struct ServerConfig {
     /// Max schema request body size in bytes (0 = unlimited).
     pub max_schema_size: u64,
     /// Max backup import body size in bytes (0 = unlimited).
+    ///
+    /// Defaults to 100 MiB rather than 0. Unlike Go, whose import reads from a
+    /// server-side filepath and has no request body to bound
+    /// (`http/handler_store.go:38-51`), ours uploads the backup inline, so this
+    /// is the only thing standing between an import and unbounded buffering.
     pub max_backup_size: u64,
+    /// Disable signing of commits, even when a node identity is configured.
+    /// Mirrors Go's `datastore.nosigning` (`cli/start.go:194`).
+    pub no_signing: bool,
     /// Request timeout in seconds (0 = no timeout).
     pub request_timeout: u64,
     /// Max concurrent requests (0 = unlimited).
@@ -58,7 +74,8 @@ impl Default for ServerConfig {
             allowed_origins: Vec::new(),
             max_body_size: 0,
             max_schema_size: 0,
-            max_backup_size: 0,
+            max_backup_size: DEFAULT_MAX_BACKUP_SIZE,
+            no_signing: false,
             request_timeout: 300,
             max_concurrent_requests: 1000,
             max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
@@ -83,6 +100,7 @@ pub struct Server {
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
+    collection_versions: Option<Arc<dyn CollectionVersionOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     view: Option<Arc<dyn ViewOperations>>,
@@ -111,6 +129,7 @@ impl Server {
             schema: None,
             lens: None,
             nac: None,
+            collection_versions: None,
             collection_mgmt: None,
             doc_acp: None,
             view: None,
@@ -139,6 +158,7 @@ impl Server {
             schema: None,
             lens: None,
             nac: None,
+            collection_versions: None,
             collection_mgmt: None,
             doc_acp: None,
             view: None,
@@ -167,6 +187,7 @@ impl Server {
             schema: None,
             lens: None,
             nac: None,
+            collection_versions: None,
             collection_mgmt: None,
             doc_acp: None,
             view: None,
@@ -195,6 +216,7 @@ impl Server {
             schema: None,
             lens: None,
             nac: None,
+            collection_versions: None,
             collection_mgmt: None,
             doc_acp: None,
             view: None,
@@ -212,6 +234,8 @@ impl Server {
     /// - `GET /api/v1/collections` - List all collections
     /// - `POST /api/v1/collections/{name}` - Create document(s)
     /// - `GET /api/v1/collections/{name}` - List collection document IDs
+    /// - `PATCH /api/v1/collections/{name}` - Update documents matching a filter
+    /// - `DELETE /api/v1/collections/{name}` - Delete documents matching a filter
     /// - `GET /api/v1/collections/{name}/document/{docID}` - Get document
     /// - `PATCH /api/v1/collections/{name}/document/{docID}` - Update document
     /// - `DELETE /api/v1/collections/{name}/document/{docID}` - Delete document
@@ -345,6 +369,15 @@ impl Server {
         self
     }
 
+    /// Set read-only collection-version operations from an Arc.
+    pub fn with_collection_versions_arc(
+        mut self,
+        collection_versions: Arc<dyn CollectionVersionOperations>,
+    ) -> Self {
+        self.collection_versions = Some(collection_versions);
+        self
+    }
+
     /// Set view operations from an Arc.
     pub fn with_view_arc(mut self, view: Arc<dyn ViewOperations>) -> Self {
         self.view = Some(view);
@@ -391,17 +424,12 @@ impl Server {
         self
     }
 
-    /// Build the router with all routes and middleware.
+    /// Assemble the router's [`AppState`] from the configured components.
     ///
-    /// CORS configuration matches Go DefraDB behavior:
-    /// - Empty origins = no CORS headers (browsers block cross-origin requests)
-    /// - "*" in origins = allow all origins
-    /// - Otherwise, case-insensitive matching against configured origins
-    ///
-    /// Returns an error if any configured CORS origins are invalid.
-    pub fn router(&self) -> Result<Router> {
-        let cors = self.build_cors_layer()?;
-
+    /// Separated from [`Self::router`] so tests can observe what the server
+    /// actually puts into state -- notably `signing_enabled`, whose whole
+    /// defect class is a value computed correctly and never consumed.
+    pub(crate) fn app_state(&self) -> AppState {
         // Build state with all configured components
         let mut builder = AppStateBuilder::new(Arc::clone(&self.executor));
         if let Some(ref rest) = self.rest {
@@ -440,6 +468,9 @@ impl Server {
         if let Some(ref nac) = self.nac {
             builder = builder.with_nac(Arc::clone(nac));
         }
+        if let Some(ref collection_versions) = self.collection_versions {
+            builder = builder.with_collection_versions(Arc::clone(collection_versions));
+        }
         if let Some(ref collection_mgmt) = self.collection_mgmt {
             builder = builder.with_collection_mgmt(Arc::clone(collection_mgmt));
         }
@@ -460,20 +491,37 @@ impl Server {
         }
         if let Some(ref did) = self.node_identity_did {
             builder = builder.with_node_identity_did(did.clone());
-            builder = builder.with_signing_enabled(true);
+            builder = builder.with_signing_enabled(self.signing_enabled());
         }
         builder = builder.with_dev_mode(self.dev_mode);
         builder = builder.with_max_txn_retries(self.config.max_txn_retries);
         builder = builder.with_query_limits(self.config.query_limits);
-        let state = builder.build();
+        builder.build()
+    }
+
+    /// Build the router with all routes and middleware.
+    ///
+    /// CORS configuration matches Go DefraDB behavior:
+    /// - Empty origins = no CORS headers (browsers block cross-origin requests)
+    /// - "*" in origins = allow all origins
+    /// - Otherwise, case-insensitive matching against configured origins
+    ///
+    /// Returns an error if any configured CORS origins are invalid.
+    pub fn router(&self) -> Result<Router> {
+        let cors = self.build_cors_layer()?;
+        let state = self.app_state();
         let state_for_middleware = state.clone();
         let browser_sync_body_limit = if self.config.max_body_size == 0 {
             defra_core::browser_sync::MAX_SYNC_BODY_BYTES
         } else {
             defra_core::browser_sync::MAX_SYNC_BODY_BYTES.min(self.config.max_body_size as usize)
         };
-        let mut router =
-            create_router_with_state_and_sync_body_limit(state, browser_sync_body_limit);
+        let limits = BodyLimits {
+            sync: browser_sync_body_limit,
+            schema: self.route_body_limit(self.config.max_schema_size),
+            backup_import: self.route_body_limit(self.config.max_backup_size),
+        };
+        let mut router = create_router_with_state_and_body_limits(state, limits);
 
         // Global auth middleware: enforces route-level permissions before handlers
         // run, and binds the caller's identity to the request task for DB-layer
@@ -623,4 +671,36 @@ impl Server {
     pub fn address(&self) -> SocketAddr {
         self.config.address
     }
+
+    /// Whether commits should be signed.
+    ///
+    /// Signing requires a configured node identity, and `--no-signing` turns it
+    /// off even when one is present. Matches Go, which keeps the identity for
+    /// ACP purposes and gates only the signature
+    /// (`cli/start.go:194`, `internal/db/db.go:164`).
+    fn signing_enabled(&self) -> bool {
+        self.node_identity_did.is_some() && !self.config.no_signing
+    }
+
+    /// Resolve a per-route body cap, clamped so it can never raise the
+    /// effective cap above the global `max_body_size`.
+    ///
+    /// `0` means unlimited for both, matching the CLI flags' documented
+    /// meaning: an unset route cap leaves the route bound only by the global
+    /// limit, and an unset global limit leaves the route cap standing alone.
+    fn route_body_limit(&self, route_limit: u64) -> Option<usize> {
+        if route_limit == 0 {
+            return None;
+        }
+        let effective = if self.config.max_body_size == 0 {
+            route_limit
+        } else {
+            route_limit.min(self.config.max_body_size)
+        };
+        Some(effective as usize)
+    }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;

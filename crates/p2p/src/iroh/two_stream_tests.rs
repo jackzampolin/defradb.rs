@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use bytes::Bytes;
+use crypto::generate_ed25519;
+use identity::{Identity, RawIdentity};
 use iroh::SecretKey;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -26,6 +28,7 @@ impl TestNode {
         let secret_key = SecretKey::generate();
         let config = IrohEndpointConfig {
             secret_key: secret_key.clone(),
+            node_identity: None,
             relay_mode: crate::iroh::IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,
@@ -132,6 +135,61 @@ async fn two_stream_request_receives_reply_on_request_stream() {
         .unwrap()
         .unwrap();
     assert_eq!(received_reply.message_id, message_id);
+
+    sender.shutdown().await;
+    receiver.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_stream_request_carries_cached_explicit_replay_capability() {
+    let sender = TestNode::spawn().await;
+    let mut receiver = TestNode::spawn().await;
+    connect(&sender.transport, &receiver.transport).await;
+
+    let authorizer = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
+    let creator = authorizer.did().unwrap().to_string();
+    let target = receiver.transport.local_peer_id().clone();
+    let capability = crate::generate_explicit_replay_capability(
+        &authorizer,
+        sender.transport.local_peer_id().as_str(),
+        target.as_str(),
+        "collection1",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    sender
+        .transport
+        .set_explicit_replay_capability(&target, "collection1", &capability)
+        .unwrap();
+
+    let request = PushLogRequest::new(
+        "doc-capability".to_string(),
+        Bytes::from_static(&[1, 2, 3]),
+        "collection1".to_string(),
+        creator,
+        Bytes::from_static(b"block-capability"),
+    );
+    let sender_transport = sender.transport.clone();
+    let send_target = target.clone();
+    let send_task = tokio::spawn(async move {
+        sender_transport
+            .send_two_stream_request(&send_target, request)
+            .await
+    });
+
+    let (_, received, token) = next_two_stream_request(&mut receiver.events).await;
+    assert_eq!(
+        received.explicit_replay_capability.as_deref(),
+        Some(capability.as_str())
+    );
+    let mut reply = PushLogReply::success(&received.message_id);
+    sign_with_transport(&receiver.transport, &mut reply).unwrap();
+    receiver
+        .transport
+        .send_pushlog_response(token, reply)
+        .await
+        .unwrap();
+    send_task.await.unwrap().unwrap();
 
     sender.shutdown().await;
     receiver.shutdown().await;

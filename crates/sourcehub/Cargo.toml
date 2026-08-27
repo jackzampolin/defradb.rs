@@ -11,6 +11,9 @@ description = "SourceHub ACP client for DefraDB"
 [package.metadata.cargo-machete]
 ignored = ["alloy-rlp"]
 
+[lib]
+bench = false
+
 [dependencies]
 # HTTP client for REST/LCD and CometBFT JSON-RPC
 reqwest = { version = "0.12", default-features = false, features = [
@@ -65,7 +68,7 @@ alloy-rlp.workspace = true
 bs58.workspace = true
 
 # ACP light client (proof-validated cache)
-acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", tag = "defra-harness/2026-08-14-restart-port-guard" }
+acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", rev = "f04e9b0716977705494ec40d17fa5f20d29cbfcf" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 futures.workspace = true

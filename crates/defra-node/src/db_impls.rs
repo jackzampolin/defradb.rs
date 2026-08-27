@@ -9,6 +9,31 @@ use schema::CollectionVersion;
 use crate::acp_ops::PolicyLookup;
 use crate::{BlockOps, SchemaOps};
 
+#[cfg(feature = "http")]
+pub(crate) struct DbCollectionVersionOps<S: storage::corekv::Store + 'static> {
+    database: Arc<db::DB<S>>,
+}
+
+#[cfg(feature = "http")]
+impl<S: storage::corekv::Store + 'static> DbCollectionVersionOps<S> {
+    pub(crate) fn new(database: Arc<db::DB<S>>) -> Self {
+        Self { database }
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait::async_trait]
+impl<S: storage::corekv::Store + 'static> defra_http::router::CollectionVersionOperations
+    for DbCollectionVersionOps<S>
+{
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        self.database
+            .get_all_collection_versions()
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 pub(crate) struct DbBlockOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
     document_acp: Arc<dyn acp::DocumentACP>,
@@ -44,7 +69,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             .map(|did| Did::try_from(did.to_string()))
             .transpose()?;
         let caller_identity: acp::Identity = caller_did.into();
-        db::block_verify::authorized_signed_block_bytes(
+        db::block::verify::authorized_signed_block_bytes(
             &self.database,
             self.document_acp.as_ref(),
             cid,
@@ -55,7 +80,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
     }
 
     async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String> {
-        db::block_verify::verified_block_signer_did(
+        db::block::verify::verified_block_signer_did(
             &self.database,
             self.document_acp.as_ref(),
             cid,
@@ -124,9 +149,7 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
     /// identity string is present yet malformed, so a permissioned collection is
     /// never silently created unregistered.
     fn current_identity() -> anyhow::Result<Option<Did>> {
-        match defra_core::current_identity::try_get_scoped_identity()
-            .or_else(defra_core::current_identity::get_current_identity)
-        {
+        match defra_core::current_identity::get_effective_identity() {
             Some(raw) => {
                 Ok(Some(Did::new(raw).map_err(|e| {
                     anyhow::anyhow!("malformed ambient identity: {}", e)
@@ -228,9 +251,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         if !materialized_names.is_empty() {
             self.database
-                .refresh_views(Some(db::RefreshViewsOptions::with_names(
-                    materialized_names,
-                )))
+                .refresh_views(db::CollectionSelector::with_names(materialized_names))
                 .await
                 .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
         }

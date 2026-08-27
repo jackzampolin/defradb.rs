@@ -27,17 +27,17 @@ property about the missing gate, not about CRDT merge details.
   `crates/acp/src/dac.rs:40`, with registered docs denying anonymous/non-granted
   identities.
 - Regular User query plans are wrapped with `PermissionFilterNode` when a collection has
-  an ACP policy in `crates/query-plan/src/planner/builder/mod.rs:160`.
+  an ACP policy in `crates/query/src/planner/builder/mod.rs:160`.
 - `PermissionFilterNode` calls
   `check_doc_access_with_overlay(..., DocumentPermission::Read, ...)` and fails closed in
-  `crates/query-plan/src/plan/permission_filter.rs:84`.
+  `crates/query/src/plan/permission_filter.rs:84`.
 - The query runner routes `_commits` away from regular collection selects in
   `crates/query/src/runner/query/select.rs:30`.
 - `_commits` fetches commit history, then applies a separate per-commit ACP filter in
   `crates/query/src/runner/commits.rs:654`, calling
   `check_doc_access_with_overlay(..., DocumentPermission::Read, ...)` at
   `crates/query/src/runner/commits.rs:792`.
-- P2P merge-side ACP filtering is in `crates/db-merge/src/acp_merge_handler.rs:71`: with
+- P2P merge-side ACP filtering is in `crates/db/src/merge/acp_merge_handler.rs:71`: with
   strict replicated-doc access enabled, protected composites require local
   `DocumentPermission::Read` before merge.
 - Embedded setup wires that strict merge-side mode for SourceHub-backed ACP in

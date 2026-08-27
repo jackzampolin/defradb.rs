@@ -1,6 +1,6 @@
 # Formal-Modelability Survey — Coverage Index
 
-Consolidated map of all 40 per-crate surveys in `proofs/survey/`. Three sections:
+Consolidated map of all 34 per-crate surveys in `proofs/survey/`. Three sections:
 already-modeled candidates (cross-check), the proposed-new backlog (prioritized),
 and out-of-scope crates (covered by integration tests).
 
@@ -89,7 +89,7 @@ high → low priority.
 | NAC lifecycle privilege-escalation safety | acp | TLA+ | Across Enabled→DisabledTemporarily→re_enable, no non-admin mutates admin/grant set; writes while disabled rejected; persisted disabled-flag survives restart; live-vs-persisted is_admin asymmetry is sound | medium |
 | TxnRegistryCleanupRace | db | TLA+ | Stale-txn cleanup sweep never evicts a still-live transaction (no lost active txn); only genuinely idle-past-max-age txns are removed and rolled back | medium |
 | merge-queue-serialization | db-merge | TLA+ | Per-doc MergeQueue mutex serializes same-doc merges while parallel across docs; bounded 5x conflict-retry loses/duplicates no block; retry exhaustion fails closed | medium |
-| Deferred-ACP overlay consistency | query-plan | TLA+ | Txn-local projected_registrations gates reads as the committed ACP state would; commit applies all hooks, rollback applies none; no txn observes another's uncommitted projection; fail-closed across projected→committed | medium |
+| Deferred-ACP overlay consistency | query | TLA+ | Txn-local projected_registrations gates reads as the committed ACP state would; commit applies all hooks, rollback applies none; no txn observes another's uncommitted projection; fail-closed across projected→committed | medium |
 | index-maintenance-consistency | db-index | Lean | After on_document_update(old,new) the stored index-entry set equals extract(new): no stale tuples remain, none missing | medium |
 | JWT issuer binding / algorithm-confusion resistance | identity | either | from_token yields DID d only when iss==did(pubkey)==d, header alg matches key_type, signature verifies; no cross-curve confusion; discharges Auth-slice assumption | medium |
 | capability revocation consistency | p2p | TLA+ | Once revoked, every later verify denies; revocation monotone and consistent under concurrent verify/revoke on shared deny-list | medium |
@@ -139,8 +139,6 @@ integration tests, Go FFI parity, or unit tests. One line each on why.
 - **p2p-adapter** — HTTP-facing adapter delegating to p2p/db/db-merge/acp; sync-completion loop is advisory-only; convergence proven downstream.
 - **pg-compat** — stateless SQL→GraphQL transpiler + pgwire IO; auth check is a one-line DID==username guard; translation pinned by integration tests.
 - **query** — deterministic single-node dataflow + trait-seam glue; every security/replication concern delegated to already-modeled crates.
-- **query-parse** — deterministic parsing/validation front-end; Tarjan SCC grouping feeds content-addressing already owned by other slices.
-- **query-types** — query-engine type vocabulary; filter eval/split are local GraphQL semantics pinned by filter_tests + Go parity.
 - **schema** — pure deterministic definition logic; content-addressing core lives in defra-core; validation = "matches Go" via FFI parity.
 - **sourcehub** — on-chain ACP client plumbing; the security-critical cache state machine is already in the Acp slice; light-client trust is external.
 - **telemetry** — OpenTelemetry exporter glue; only a once-per-process latch + dedup string filter, covered by unit tests.

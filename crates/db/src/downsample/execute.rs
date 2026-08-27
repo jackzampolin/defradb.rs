@@ -2,9 +2,9 @@
 
 use super::parse::*;
 use super::types::*;
+use crate::block::builder::decode_priority_varint;
 use crate::error::{Error, Result};
 use chrono::Utc;
-use db_blocks::decode_priority_varint;
 use document::{DocID, Document, NormalValue};
 use query::fetcher::CommitsQueryOptions;
 use query::mutator::DocMutator;
@@ -19,7 +19,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     pub(super) async fn latest_doc_priority(&self, doc_id: &str) -> Result<u64> {
         let txn = self.new_txn(true).await?;
         let systemstore = txn.systemstore()?;
-        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+        let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
             let _ = txn.discard();
             return Ok(0);
         };
@@ -263,7 +263,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         target_doc_id: Option<&DocID>,
         aggregate: &WindowAggregate,
     ) -> Result<DocID> {
-        let mutator = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
+        let mutator = crate::write::autocommit::AutoCommitMutator::new(self.clone());
         let maybe_existing = match target_doc_id {
             Some(id) => mutator
                 .get_for_update(&plan.target.name, id)
@@ -452,7 +452,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
         let doc_id = DocID::from_string(doc_id)
             .map_err(|e| Error::Other(format!("invalid doc_id '{}': {}", doc_id, e)))?;
-        let fetcher = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
+        let fetcher = crate::write::autocommit::AutoCommitMutator::new(self.clone());
         let source_doc = match fetcher
             .get_for_update(collection.name(), &doc_id)
             .await

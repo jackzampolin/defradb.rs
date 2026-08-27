@@ -23,7 +23,7 @@ use super::hooks::ManageHooks;
 /// sign once with this node's transport, then send the response. The
 /// sign-then-send ordering is security-sensitive and lives only here. Logs and
 /// drops on send failure; silently drops if signing fails (mirrors the SE serve
-/// pattern in `db_merge::se::serve`).
+/// pattern in `db::merge::se::serve`).
 pub async fn serve_manage_request<T: P2PTransport>(
     hooks: &ManageHooks,
     transport: &T,
@@ -435,10 +435,10 @@ mod tests {
             &self,
             _identity: &Did,
             _permission: acp::NodePermission,
-        ) -> db_nac::Result<bool> {
+        ) -> db::nac::Result<bool> {
             Ok(self.0)
         }
-        async fn initialize(&self, _owner_identity: Option<&Did>) -> db_nac::Result<()> {
+        async fn initialize(&self, _owner_identity: Option<&Did>) -> db::nac::Result<()> {
             unimplemented!()
         }
         async fn status(&self) -> acp::nac::NacStatus {
@@ -450,31 +450,31 @@ mod tests {
         async fn is_enabled(&self) -> bool {
             unimplemented!()
         }
-        async fn is_admin(&self, _identity: &Did) -> db_nac::Result<bool> {
+        async fn is_admin(&self, _identity: &Did) -> db::nac::Result<bool> {
             unimplemented!()
         }
-        async fn is_admin_persisted(&self, _identity: &Did) -> db_nac::Result<bool> {
+        async fn is_admin_persisted(&self, _identity: &Did) -> db::nac::Result<bool> {
             unimplemented!()
         }
         async fn is_owner(&self, _identity: &Did) -> bool {
             unimplemented!()
         }
-        async fn enable(&self, _owner: &Did) -> db_nac::Result<()> {
+        async fn enable(&self, _owner: &Did) -> db::nac::Result<()> {
             unimplemented!()
         }
-        async fn disable(&self, _requestor: &Did) -> db_nac::Result<()> {
+        async fn disable(&self, _requestor: &Did) -> db::nac::Result<()> {
             unimplemented!()
         }
-        async fn re_enable(&self, _requestor: &Did) -> db_nac::Result<()> {
+        async fn re_enable(&self, _requestor: &Did) -> db::nac::Result<()> {
             unimplemented!()
         }
-        async fn purge(&self, _requestor: &Did) -> db_nac::Result<()> {
+        async fn purge(&self, _requestor: &Did) -> db::nac::Result<()> {
             unimplemented!()
         }
-        async fn add_admin(&self, _requestor: &Did, _target: &Did) -> db_nac::Result<bool> {
+        async fn add_admin(&self, _requestor: &Did, _target: &Did) -> db::nac::Result<bool> {
             unimplemented!()
         }
-        async fn remove_admin(&self, _requestor: &Did, _target: &Did) -> db_nac::Result<bool> {
+        async fn remove_admin(&self, _requestor: &Did, _target: &Did) -> db::nac::Result<bool> {
             unimplemented!()
         }
         async fn add_permission_grant(
@@ -482,7 +482,7 @@ mod tests {
             _requestor: &Did,
             _target: &Did,
             _permission: acp::NodePermission,
-        ) -> db_nac::Result<bool> {
+        ) -> db::nac::Result<bool> {
             unimplemented!()
         }
         async fn remove_permission_grant(
@@ -490,10 +490,10 @@ mod tests {
             _requestor: &Did,
             _target: &Did,
             _permission: acp::NodePermission,
-        ) -> db_nac::Result<bool> {
+        ) -> db::nac::Result<bool> {
             unimplemented!()
         }
-        async fn info(&self) -> db_nac::NacInfo {
+        async fn info(&self) -> db::nac::NacInfo {
             unimplemented!()
         }
     }

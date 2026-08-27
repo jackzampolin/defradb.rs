@@ -12,6 +12,9 @@ description = "Lens schema migration support for DefraDB"
 default = ["wasmtime-runtime"]
 wasmtime-runtime = ["dep:wasmtime", "dep:tokio", "dep:parking_lot"]
 
+[lib]
+bench = false
+
 [dependencies]
 # Core
 async-trait.workspace = true

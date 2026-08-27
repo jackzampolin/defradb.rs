@@ -25,8 +25,8 @@ TLA+ does not prove byte/value merge algebra.
 | Missing-link discovery walks the full reachable DAG and short-circuits already merged subtrees. | `crates/p2p/src/sync/manager/links.rs:56`, `links.rs:78` |
 | Fetch tries CAR first, then selective block batches, and emits `DagReady` only when no missing links remain. | `crates/p2p/src/sync/coordinator/dag_fetcher.rs:56`, `dag_fetcher.rs:99`, `dag_fetcher.rs:164` |
 | Pending DAG entries have TTL/capacity limits, so convergence requires eventual reannouncement/head rediscovery if pending state is dropped. | `crates/p2p/src/sync/manager/pending.rs:11`, `pending.rs:17`, `crates/p2p/src/sync/manager/process/pending_dag.rs:311` |
-| DocSync/BranchableSync discover current heads from providers after reconnect. | `crates/p2p/src/sync/coordinator/event_handler/doc_sync.rs:152`, `branchable_sync.rs:62`, `crates/db-merge/src/head_provider.rs:38`, `head_provider.rs:194` |
-| Composite merge recursively merges parent heads before the current block; durable merged sets skip duplicate replay. | `crates/db-merge/src/merge_handler/composite.rs:140`, `crates/db-merge/src/merge_handler/mod.rs:83` |
+| DocSync/BranchableSync discover current heads from providers after reconnect. | `crates/p2p/src/sync/coordinator/event_handler/doc_sync.rs:152`, `branchable_sync.rs:62`, `crates/db/src/merge/head_provider.rs:38`, `head_provider.rs:194` |
+| Composite merge recursively merges parent heads before the current block; durable merged sets skip duplicate replay. | `crates/db/src/merge/merge_handler/composite.rs:140`, `crates/db/src/merge/merge_handler/mod.rs:83` |
 
 ## TLA+ Abstraction
 
@@ -78,7 +78,7 @@ Lean lives under `proofs/lean/` and models local merge/apply behavior:
   (`crates/crdt/src/counter.rs:410`, `counter.rs:447`).
 - Counter idempotency is modeled at the durable merged-CID/applied-set layer, which
   is the contract documented above the merge handler
-  (`crates/db-merge/src/merge_handler/counter.rs:422`).
+  (`crates/db/src/merge/merge_handler/counter.rs:422`).
 - Composite merge is componentwise over field-local state
   (`crates/crdt/src/composite.rs:512`).
 

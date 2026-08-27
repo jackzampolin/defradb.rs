@@ -715,6 +715,31 @@ pub trait SchemaOperations: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
 }
 
+/// Read-only collection-version observation.
+///
+/// Kept separate from collection management so embedded consumers can resolve
+/// collection names to IDs without enabling schema or data mutation routes.
+#[async_trait::async_trait]
+pub trait CollectionVersionOperations: Send + Sync {
+    /// Get all collection versions (active + inactive) from the system store.
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// The active collection versions only.
+    ///
+    /// Defaults to filtering the full listing, so an implementation that has
+    /// no cheaper path stays correct. A backend that can answer without
+    /// scanning every stored version should override this: it is the path a
+    /// selector takes whenever `needs_all_versions` is false.
+    async fn get_active_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        Ok(self
+            .get_all_collections()
+            .await?
+            .into_iter()
+            .filter(|version| version.is_active)
+            .collect())
+    }
+}
+
 /// Trait for collection management operations beyond basic CRUD.
 ///
 /// Provides schema patching, version activation, and truncation operations
@@ -774,6 +799,17 @@ pub trait CollectionManagementOperations: Send + Sync {
 
     /// Get all collection versions (active + inactive) from the system store.
     async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// The active collection versions only. See
+    /// `CollectionVersionOperations::get_active_collections`.
+    async fn get_active_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        Ok(self
+            .get_all_collections()
+            .await?
+            .into_iter()
+            .filter(|version| version.is_active)
+            .collect())
+    }
 
     /// Delete a collection by name.
     async fn delete_collection(&self, name: &str) -> Result<(), String>;
@@ -948,9 +984,9 @@ pub trait ViewOperations: Send + Sync {
 
     /// Refresh materialized view caches.
     ///
-    /// If `names` is provided, only those views are refreshed. Otherwise all
-    /// materialized views are refreshed.
-    async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String>;
+    /// The options select which views to refresh, mirroring Go's collection
+    /// lookup. Default options refresh every materialized view.
+    async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String>;
 
     /// Run manual downsample history GC.
     ///

@@ -20,7 +20,7 @@ use p2p::P2PTransport;
 use tokio::sync::Notify;
 
 pub(crate) type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
-pub(crate) type EmbeddedMergeHandler<S> = db_merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
+pub(crate) type EmbeddedMergeHandler<S> = db::merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
 type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>;
 pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
@@ -31,9 +31,7 @@ pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Sen
 /// identity string is present yet malformed — never silently degrading a
 /// permissioned collection to public.
 fn resolve_creator_identity() -> Result<Option<identity::Did>> {
-    match defra_core::current_identity::try_get_scoped_identity()
-        .or_else(defra_core::current_identity::get_current_identity)
-    {
+    match defra_core::current_identity::get_effective_identity() {
         Some(raw) => {
             Ok(Some(identity::Did::new(raw).map_err(|error| {
                 anyhow!("malformed ambient identity: {error}")
@@ -496,9 +494,10 @@ where
     let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
     let (raw_identity, node_identity_did) = create_node_identity(&config.signing)?;
+    let raw_identity = raw_identity.map(Arc::new);
     let mut db_options = db::DbOptions::default();
-    if let Some(identity) = raw_identity {
-        db_options = db_options.with_node_identity(identity);
+    if let Some(identity) = raw_identity.as_ref() {
+        db_options = db_options.with_node_identity_arc(identity.clone());
     }
 
     let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
@@ -549,6 +548,7 @@ where
                 event_bus.clone(),
                 iroh,
                 sync_config.clone(),
+                raw_identity.clone(),
             )
             .await?,
         ),
@@ -729,98 +729,4 @@ where
         shutdown_finished: AtomicBool::new(false),
         shutdown_notify: Notify::new(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicUsize;
-
-    use async_trait::async_trait;
-
-    #[derive(Clone, Default)]
-    struct SlowCloseStore {
-        inner: storage::MemoryStore,
-        close_calls: Arc<AtomicUsize>,
-        close_started: Arc<Notify>,
-        close_finished: Arc<AtomicBool>,
-        allow_close: Arc<Notify>,
-    }
-
-    impl SlowCloseStore {
-        async fn wait_until_close_started(&self) {
-            loop {
-                let notified = self.close_started.notified();
-                if self.close_calls.load(Ordering::SeqCst) > 0 {
-                    return;
-                }
-                notified.await;
-            }
-        }
-    }
-
-    impl storage::corekv::private::Sealed for SlowCloseStore {}
-
-    #[async_trait]
-    impl storage::Store for SlowCloseStore {
-        async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
-            self.inner.new_txn(readonly).await
-        }
-
-        async fn close(&self) -> storage::Result<()> {
-            self.close_calls.fetch_add(1, Ordering::SeqCst);
-            self.close_started.notify_waiters();
-            self.allow_close.notified().await;
-            let result = self.inner.close().await;
-            self.close_finished.store(true, Ordering::SeqCst);
-            result
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn concurrent_shutdown_callers_wait_for_teardown_completion() -> Result<()> {
-        let store = Arc::new(SlowCloseStore::default());
-        let node = Arc::new(build_with_store(store.clone(), EmbeddedNodeConfig::default()).await?);
-
-        let first = {
-            let node = node.clone();
-            tokio::spawn(async move {
-                node.shutdown().await;
-            })
-        };
-
-        store.wait_until_close_started().await;
-
-        let second = {
-            let node = node.clone();
-            let store = store.clone();
-            tokio::spawn(async move {
-                node.shutdown().await;
-                assert!(
-                    store.close_finished.load(Ordering::SeqCst),
-                    "shutdown() returned before store close completed"
-                );
-            })
-        };
-
-        tokio::task::yield_now().await;
-        assert!(
-            !second.is_finished(),
-            "concurrent shutdown caller returned before teardown completed"
-        );
-
-        store.allow_close.notify_waiters();
-
-        first.await.expect("first shutdown task should not panic");
-        second.await.expect("second shutdown task should not panic");
-
-        assert_eq!(
-            store.close_calls.load(Ordering::SeqCst),
-            1,
-            "shutdown should only close the store once"
-        );
-        assert!(store.close_finished.load(Ordering::SeqCst));
-
-        Ok(())
-    }
 }

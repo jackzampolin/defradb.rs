@@ -17,6 +17,7 @@ use crate::p2p::{
     new_node_with_p2p, p2p_add_replicator_with_filter, p2p_connect, p2p_disconnect,
     p2p_notify_network_change, p2p_peer_info, p2p_shareable_address,
     p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
+    p2p_sync_status,
 };
 use crate::query::exec_request;
 use crate::schema::validate_collection_policy;
@@ -538,6 +539,18 @@ pub extern "C" fn defra_mobile_shareable_address(node_ptr: usize) -> FfiResult {
     }
 }
 
+/// Return the node's live P2P sync status as JSON.
+#[no_mangle]
+pub extern "C" fn defra_mobile_sync_status(node_ptr: usize) -> FfiResult {
+    ffi_entry! {
+        let identity = match default_identity_cstring(node_ptr) {
+            Ok(value) => value,
+            Err(error) => return FfiResult::error(error),
+        };
+        unsafe { p2p_sync_status(node_ptr, c_string_ptr(&identity)) }
+    }
+}
+
 /// Connect the node to a peer address.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -727,6 +740,12 @@ mod tests {
     #[test]
     fn mobile_shareable_address_exports_node_only_ffi_signature() {
         let symbol: extern "C" fn(usize) -> FfiResult = defra_mobile_shareable_address;
+        let _ = symbol;
+    }
+
+    #[test]
+    fn mobile_sync_status_exports_node_only_ffi_signature() {
+        let symbol: extern "C" fn(usize) -> FfiResult = defra_mobile_sync_status;
         let _ = symbol;
     }
 

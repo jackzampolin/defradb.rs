@@ -1,15 +1,17 @@
 ---- MODULE MergeQueue ----
 \* Per-document write serialization + bounded conflict-retry, abstracting
-\* crates/db/src/doc_write_queue.rs (DocWriteQueue, owned by the DB and shared by
+\* crates/db/src/write/queue.rs (DocWriteQueue, owned by the DB and shared by
 \* BOTH the local-write path and the db-merge merge handler — #1021) and
-\* crates/db-merge/src/merge_handler/batch.rs (merge_blocks_individually retry loop).
-\* (Was crates/db-merge/src/merge_handler/queue.rs before #1021 unified local
+\* crates/db/src/merge/merge_handler/batch.rs (merge_blocks_individually retry loop).
+\* (Was crates/db/src/merge/merge_handler/queue.rs before #1021 unified local
 \* writes and merges onto one per-doc lock.) Anchors are in MergeQueue_DESIGN.md.
 \*
-\* The property: the per-doc async mutex serializes same-document merges while letting
-\* different documents run in parallel; the bounded (MaxRetries) txn-conflict retry loop
-\* loses and duplicates no block; retry exhaustion fails CLOSED (the block is reported
-\* failed and stays re-deliverable, never silently marked done).
+\* The property: one P2P merge writer owns the shared mutable index transaction at a
+\* time, while the per-doc async mutex still serializes local writes with merges on the
+\* same document. The writer may apply an ordered multi-document batch. The bounded
+\* (MaxRetries) txn-conflict retry loop loses and duplicates no block; retry exhaustion
+\* fails CLOSED (the block is reported failed and stays re-deliverable, never silently
+\* marked done).
 \*
 \* INDEPENDENT ORACLE.  Correctness is judged from two ground-truth ledgers that are NOT
 \* the mechanism's own accept/skip decision:
@@ -22,7 +24,8 @@
 \* fake them by agreeing with itself.
 \*
 \* Three knobs select correct mechanism vs. adversary variant:
-\*   LockMode = "PerDoc" - real code: MergeQueue.acquire(doc) before the retry loop  [GREEN]
+\*   LockMode = "GlobalMerge" - one receiver merge writer plus per-doc guards       [GREEN]
+\*            = "PerDoc" - pre-stage-3: different-doc P2P writers overlap           [RED]
 \*            = "None"    - bug: no per-doc mutex; same-doc merges run concurrently  [RED]
 \*   FailMode = "Closed"  - real Rust: exhausted retries -> Err -> NOT marked done   [GREEN]
 \*            = "Open"     - Go merge.go bug: exhausted retries -> return nil ->
@@ -45,7 +48,7 @@ CONSTANTS
   Dup,         \* [Blocks -> Blocks] block b is a duplicate delivery of Dup[b] (or itself)
   MaxRetries,  \* retry budget (MAX_MERGE_RETRIES = 5; node.go MaxTxnRetries = 5)
   MaxUserWrites, \* bound on adversarial concurrent local user-writes per doc
-  LockMode,    \* "PerDoc" | "None"
+  LockMode,    \* "GlobalMerge" | "PerDoc" | "None"
   FailMode,    \* "Closed" | "Open"
   UserWriteMode \* "PerDoc" | "LockFree"  — does a local user-write take the shared guard?
 
@@ -56,7 +59,7 @@ ASSUME Dup \in [Blocks -> Blocks]
 ASSUME \A b \in Blocks : BlockDoc[Dup[b]] = BlockDoc[b]
 ASSUME MaxRetries \in Nat /\ MaxRetries >= 1
 ASSUME MaxUserWrites \in Nat
-ASSUME LockMode \in {"PerDoc", "None"}
+ASSUME LockMode \in {"GlobalMerge", "PerDoc", "None"}
 ASSUME FailMode \in {"Closed", "Open"}
 ASSUME UserWriteMode \in {"PerDoc", "LockFree"}
 
@@ -120,7 +123,10 @@ Init ==
 \* None:   no lock; any number of same-doc workers can enter the critical section.
 CanAcquire(b) ==
   LET d == BlockDoc[b] IN
-  IF LockMode = "PerDoc" THEN lockOwner[d] = NoOwner ELSE TRUE
+  CASE LockMode = "GlobalMerge" ->
+         lockOwner[d] = NoOwner /\ \A other \in Docs : inCrit[other] = {}
+    [] LockMode = "PerDoc" -> lockOwner[d] = NoOwner
+    [] OTHER -> TRUE
 
 \* ---- Adversary (pre-#1021, conflict-retry path): a LOCK-FREE local user-write ---------
 \* Models "a user updates a document while a merge is in progress" (Go merge.go comment):
@@ -139,7 +145,7 @@ UserWrite(d) ==
 
 \* ---- #1021 fix: a local user-write that ACQUIRES the shared per-doc guard -------------
 \* update_impl/create_impl take the SAME per-doc DocWriteQueue guard the merge handler
-\* takes (crates/db/src/doc_write_queue.rs, shared by both paths). The write is performed
+\* takes (crates/db/src/write/queue.rs, shared by both paths). The write is performed
 \* INSIDE the critical section and the guard is released afterwards, so a local write and a
 \* same-doc merge are mutually excluded — never interleaved in the critical section. The
 \* merge worker's CanAcquire already refuses while lockOwner = UserTok, and vice-versa.
@@ -148,8 +154,9 @@ UserWriteAcquire(d) ==
   /\ UserWriteMode = "PerDoc"
   /\ userWrites[d] < MaxUserWrites
   /\ ~uwInCrit[d]
-  /\ IF LockMode = "PerDoc" THEN lockOwner[d] = NoOwner ELSE TRUE
-  /\ lockOwner' = [lockOwner EXCEPT ![d] = IF LockMode = "PerDoc" THEN UserTok ELSE @]
+  /\ IF LockMode \in {"GlobalMerge", "PerDoc"} THEN lockOwner[d] = NoOwner ELSE TRUE
+  /\ lockOwner' = [lockOwner EXCEPT
+       ![d] = IF LockMode \in {"GlobalMerge", "PerDoc"} THEN UserTok ELSE @]
   /\ uwInCrit'  = [uwInCrit  EXCEPT ![d] = TRUE]
   /\ UNCHANGED <<pc, attempt, readVer, seenMerged, docVer, userWrites,
                  applied, docState, marked, inCrit>>
@@ -159,7 +166,8 @@ UserWriteRelease(d) ==
   /\ uwInCrit[d]
   /\ docVer'     = [docVer     EXCEPT ![d] = @ + 1]
   /\ userWrites' = [userWrites EXCEPT ![d] = @ + 1]
-  /\ lockOwner'  = [lockOwner  EXCEPT ![d] = IF LockMode = "PerDoc" THEN NoOwner ELSE @]
+  /\ lockOwner'  = [lockOwner  EXCEPT
+       ![d] = IF LockMode \in {"GlobalMerge", "PerDoc"} THEN NoOwner ELSE @]
   /\ uwInCrit'   = [uwInCrit   EXCEPT ![d] = FALSE]
   /\ UNCHANGED <<pc, attempt, readVer, seenMerged, applied, docState, marked, inCrit>>
 
@@ -173,7 +181,8 @@ Acquire(b) ==
   /\ pc[b] = "start"
   /\ CanAcquire(b)
   /\ pc'         = [pc         EXCEPT ![b] = "crit"]
-  /\ lockOwner'  = [lockOwner  EXCEPT ![d] = IF LockMode = "PerDoc" THEN b ELSE @]
+  /\ lockOwner'  = [lockOwner  EXCEPT
+       ![d] = IF LockMode \in {"GlobalMerge", "PerDoc"} THEN b ELSE @]
   /\ inCrit'     = [inCrit     EXCEPT ![d] = @ \cup {b}]
   /\ readVer'    = [readVer    EXCEPT ![b] = docVer[d]]
   /\ seenMerged' = [seenMerged EXCEPT ![b] = (Orig(b) \in docState[d])]
@@ -202,7 +211,8 @@ Commit(b) ==
   /\ NoConflict(b)
   /\ pc'        = [pc     EXCEPT ![b] = "done"]
   /\ marked'    = [marked EXCEPT ![b] = TRUE]
-  /\ lockOwner' = [lockOwner EXCEPT ![d] = IF LockMode = "PerDoc" THEN NoOwner ELSE @]
+  /\ lockOwner' = [lockOwner EXCEPT
+       ![d] = IF LockMode \in {"GlobalMerge", "PerDoc"} THEN NoOwner ELSE @]
   /\ inCrit'    = [inCrit EXCEPT ![d] = @ \ {b}]
   /\ IF AlreadyApplied(b)
        THEN \* terminal skip "already merged": no second application
@@ -238,7 +248,8 @@ Exhaust(b) ==
   /\ ~NoConflict(b)
   /\ attempt[b] = MaxRetries
   /\ pc'        = [pc EXCEPT ![b] = "done"]
-  /\ lockOwner' = [lockOwner EXCEPT ![d] = IF LockMode = "PerDoc" THEN NoOwner ELSE @]
+  /\ lockOwner' = [lockOwner EXCEPT
+       ![d] = IF LockMode \in {"GlobalMerge", "PerDoc"} THEN NoOwner ELSE @]
   /\ inCrit'    = [inCrit EXCEPT ![d] = @ \ {b}]
   /\ marked'    = [marked EXCEPT ![b] = (FailMode = "Open")]
   /\ UNCHANGED <<attempt, readVer, seenMerged, docVer, userWrites, applied, docState, uwInCrit>>
@@ -273,6 +284,23 @@ DocOccupants(d) == Cardinality(inCrit[d]) + (IF uwInCrit[d] THEN 1 ELSE 0)
 
 INV_SameDocSerialized ==
   \A d \in Docs : DocOccupants(d) <= 1
+
+\* A batch is one writer even when it contains several roots. MergeQueue models
+\* individual block workers, so this invariant rules out overlapping workers;
+\* SyncOwnership models the multi-root claim as one owner explicitly.
+INV_SingleMergeWriter ==
+  Cardinality(UNION {inCrit[d] : d \in Docs}) <= 1
+
+\* Anti-vacuity witness for the per-document lock model.  A configuration
+\* using LockMode="PerDoc" must be able to reach two active documents, proving
+\* same-document serialization is not merely an alias for a global lock.
+TwoDocsActive ==
+  \E d1, d2 \in Docs :
+    /\ d1 # d2
+    /\ inCrit[d1] # {}
+    /\ inCrit[d2] # {}
+
+NoCrossDocParallel == ~TwoDocsActive
 
 \* ---- Shared-guard mutual exclusion: a local user-write and a merge are NEVER both in
 \* the critical section on the SAME doc (#1021). This is the property the counter fix
@@ -310,18 +338,4 @@ INV_NoSilentDrop ==
 \* Combined with INV_NoSilentDrop this states the no-loss guarantee directly.
 INV_NoLoss ==
   \A b \in Blocks : (pc[b] = "done") => (Delivered(b) \/ ~marked[b])
-
-\* =====================================================================================
-\* VACUITY GUARD (used only as a NEGATED probe; see MC_MergeQueue_CrossDocParallel).
-\* If two different-doc workers can be in their critical sections simultaneously, this
-\* predicate is reachable; asserting it as an invariant forces TLC to exhibit the witness
-\* as a counterexample, proving the lock does not serialize across documents.
-\* =====================================================================================
-TwoDocsActive ==
-  \E d1, d2 \in Docs :
-    /\ d1 # d2
-    /\ inCrit[d1] # {}
-    /\ inCrit[d2] # {}
-
-NoCrossDocParallel == ~TwoDocsActive
 ====

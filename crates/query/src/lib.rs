@@ -13,25 +13,23 @@
 //!
 //! # Main Components
 //!
-//! - `document`: Document mapping and field positioning (in query-types crate)
-//! - `mapper`: Query types (Select, Filter, Order, Aggregate) (in query-types crate)
+//! - `document`: Document mapping and field positioning
+//! - `mapper`: Query types (Select, Filter, Order, Aggregate)
 //! - `planner`: Plan node trait and execution info
 //! - `plan`: Concrete plan node implementations
 
-// Types extracted to query-types crate.
-pub use query_types::document;
-pub use query_types::error;
-pub use query_types::json_convert;
-pub use query_types::limits;
-pub use query_types::mapper;
+pub(crate) mod collection_provider;
+pub(crate) mod doc;
+pub mod document;
+pub mod error;
+pub mod json_convert;
+pub mod limits;
+pub mod mapper;
 
-// Parsing extracted to query-parse crate.
-// Re-export as module aliases so `use crate::query_parse::` etc. still work.
-extern crate query_parse as query_parse_ext;
-pub use query_parse_ext::query_parse;
-pub use query_parse_ext::schema_gen;
-pub use query_parse_ext::sdl_parse;
-pub use query_parse_ext::select_convert;
+pub mod query_parse;
+pub mod schema_gen;
+pub mod sdl_parse;
+pub mod select_convert;
 
 pub mod executor;
 pub mod rest;
@@ -40,11 +38,11 @@ pub mod subscription;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use query_plan::{doc_stream, fetcher, mutator, plan, planner};
-
-// `txn` is split: plan-layer primitives live in `query_plan::txn`, while
-// `TransactionGuard` stays in this crate because it is generic over
-// `QueryExecutor`. The local `txn` module re-exports both.
+pub mod doc_stream;
+pub mod fetcher;
+pub mod mutator;
+pub mod plan;
+pub mod planner;
 pub mod txn;
 
 // Re-exports for convenience
@@ -66,8 +64,9 @@ pub use plan::{
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{
-    parse_mutations, parse_mutations_with_limits, parse_query, parse_query_with_limits,
-    parse_request, parse_request_with_limits, ExplainType, ParsedOperation,
+    parse_filter_string, parse_mutations, parse_mutations_with_limits, parse_query,
+    parse_query_with_limits, parse_request, parse_request_with_limits, ExplainType,
+    ParsedOperation,
 };
 pub use rest::{
     CollectionDocIdsPage, CollectionDocIdsPagination, RestError, RestOperations,

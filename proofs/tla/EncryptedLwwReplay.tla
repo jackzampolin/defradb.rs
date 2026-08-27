@@ -8,9 +8,9 @@
 \* must retain the encrypted field block that triggers the key request.
 \*
 \* Source anchors:
-\* - crates/db-merge/src/merge_handler/composite_fields.rs propagates transient
+\* - crates/db/src/merge/merge_handler/composite_fields.rs propagates transient
 \*   KMS failures so the merge remains pending;
-\* - crates/db-merge/src/push_docs{,_transport}.rs preserve encrypted LWW heads;
+\* - crates/db/src/merge/push_docs{,_transport}.rs preserve encrypted LWW heads;
 \* - crates/p2p/src/sync/pending_store.rs persists acknowledged pending DAGs;
 \* - crates/crdt/src/lww.rs selects the greatest (priority, value) version.
 EXTENDS Naturals

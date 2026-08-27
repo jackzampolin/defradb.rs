@@ -178,7 +178,7 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
     /// surfacing an error here would tell the caller the grant failed when it
     /// did not.
     async fn publish_document_update(&self, collection_id: &str, doc_id: &str) {
-        match db::block_reader::read_latest_composite_block(&self.database, doc_id).await {
+        match db::block::reader::read_latest_composite_block(&self.database, doc_id).await {
             Ok(result) => {
                 self.event_bus
                     .publish(events::Message::update(events::Update::new(
