@@ -5,13 +5,15 @@
 //! visible keys.  Compact-DPF registration remains two-party and mutable while
 //! being generation-bound at the HTTP boundary.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::body::to_bytes;
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD;
@@ -32,6 +34,13 @@ use crate::subscription::{
 use crate::verification::{decrypt_projection_values, verify_nullifier_witness};
 
 const LOCAL_MAX_HTTP_BODY_BYTES: usize = 512 * 1024 * 1024;
+const SHINZO_INGEST_TOKEN_ENV: &str = "SHINZO_PIR_INGEST_TOKEN";
+const MAX_SHINZO_EVENTS_PER_INGEST: usize = 256;
+const MAX_SHINZO_INGEST_BODY_BYTES: usize = 128 * 1024;
+const MAX_SHINZO_EVENT_ID_BYTES: usize = 256;
+const MAX_SHINZO_MAILBOX_ENTRIES: usize = 4_096;
+const MAX_SHINZO_SEEN_EVENTS: usize = 65_536;
+const MAX_SHINZO_POLL_ENTRIES: usize = 256;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UseCaseMetadata {
@@ -138,18 +147,167 @@ pub struct ShinzoEventResponse {
     pub value_base64: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShinzoLiveEvent {
+    pub event_id: String,
+    pub event_bucket: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShinzoEventIngestRequest {
+    pub protocol_version: u32,
+    pub events: Vec<ShinzoLiveEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShinzoEventIngestResponse {
+    pub body_digest_hex: String,
+    pub party_index: usize,
+    pub accepted_events: usize,
+    pub duplicate_events: usize,
+    pub evaluated_subscriptions: usize,
+    pub latest_cursor: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShinzoPollRequest {
+    pub body_digest_hex: String,
+    pub subscription_id_hex: String,
+    pub after_cursor: u64,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShinzoMailboxEntry {
+    pub cursor: u64,
+    pub event_id: String,
+    pub value_base64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShinzoPollResponse {
+    pub body_digest_hex: String,
+    pub subscription_id_hex: String,
+    pub party_index: usize,
+    pub latest_cursor: u64,
+    pub gap: bool,
+    pub entries: Vec<ShinzoMailboxEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct StoredShinzoShare {
+    cursor: u64,
+    event_id: String,
+    value: [u8; 16],
+}
+
+#[derive(Default)]
+struct ShinzoMailbox {
+    latest_cursor: u64,
+    entries: VecDeque<StoredShinzoShare>,
+}
+
+#[derive(Default)]
+struct ShinzoLiveState {
+    latest_cursor: u64,
+    mailboxes: HashMap<SubscriptionId, ShinzoMailbox>,
+    seen_events: HashSet<String>,
+    seen_order: VecDeque<String>,
+}
+
+impl ShinzoLiveState {
+    fn register(&mut self, id: SubscriptionId) {
+        self.mailboxes.entry(id).or_default();
+    }
+
+    fn is_duplicate(&self, event_id: &str) -> bool {
+        self.seen_events.contains(event_id)
+    }
+
+    fn record_event(&mut self, event_id: String, shares: Vec<NotificationShare>) -> Result<()> {
+        self.latest_cursor = self
+            .latest_cursor
+            .checked_add(1)
+            .context("Shinzo event cursor overflow")?;
+        self.seen_events.insert(event_id.clone());
+        self.seen_order.push_back(event_id.clone());
+        while self.seen_order.len() > MAX_SHINZO_SEEN_EVENTS {
+            if let Some(expired) = self.seen_order.pop_front() {
+                self.seen_events.remove(&expired);
+            }
+        }
+        for share in shares {
+            let mailbox = self.mailboxes.entry(share.subscription_id).or_default();
+            mailbox.latest_cursor = mailbox
+                .latest_cursor
+                .checked_add(1)
+                .context("Shinzo mailbox cursor overflow")?;
+            mailbox.entries.push_back(StoredShinzoShare {
+                cursor: mailbox.latest_cursor,
+                event_id: event_id.clone(),
+                value: *share.value(),
+            });
+            while mailbox.entries.len() > MAX_SHINZO_MAILBOX_ENTRIES {
+                mailbox.entries.pop_front();
+            }
+        }
+        Ok(())
+    }
+
+    fn poll(
+        &self,
+        id: SubscriptionId,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<(u64, bool, Vec<StoredShinzoShare>)> {
+        let mailbox = self
+            .mailboxes
+            .get(&id)
+            .context("subscription is not registered")?;
+        let gap = mailbox
+            .entries
+            .front()
+            .is_some_and(|entry| entry.cursor > after_cursor.saturating_add(1));
+        Ok((
+            mailbox.latest_cursor,
+            gap,
+            mailbox
+                .entries
+                .iter()
+                .filter(|entry| entry.cursor > after_cursor)
+                .take(limit)
+                .cloned()
+                .collect(),
+        ))
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SelectedService {
     store: Arc<UseCaseStore>,
     permits: Arc<Semaphore>,
+    shinzo_live: Arc<Mutex<ShinzoLiveState>>,
+    shinzo_ingest_token: Option<Arc<str>>,
 }
 
 impl SelectedService {
     pub(crate) fn new(store: Arc<UseCaseStore>) -> Result<Self> {
+        Self::new_with_shinzo_ingest_token(store, None)
+    }
+
+    fn new_with_shinzo_ingest_token(
+        store: Arc<UseCaseStore>,
+        shinzo_ingest_token: Option<String>,
+    ) -> Result<Self> {
         store.limits.validate()?;
+        if shinzo_ingest_token.as_ref().is_some_and(String::is_empty) {
+            bail!("Shinzo PIR ingest token must not be empty");
+        }
         Ok(Self {
             permits: Arc::new(Semaphore::new(store.limits.max_in_flight)),
             store,
+            shinzo_live: Arc::new(Mutex::new(ShinzoLiveState::default())),
+            shinzo_ingest_token: shinzo_ingest_token.map(Arc::from),
         })
     }
 
@@ -247,7 +405,12 @@ impl SelectedService {
         if server.subscription_count() >= self.store.limits.max_subscriptions {
             bail!("subscription admission limit reached");
         }
-        server.register(id, &key)
+        server.register(id, &key)?;
+        self.shinzo_live
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Shinzo mailbox lock poisoned"))?
+            .register(id);
+        Ok(())
     }
 
     async fn evaluate_shinzo(&self, request: ShinzoEventRequest) -> Result<ShinzoEventResponse> {
@@ -264,6 +427,115 @@ impl SelectedService {
             subscription_id_hex: id.to_string(),
             party_index: share.party_index(),
             value_base64: STANDARD.encode(share.value()),
+        })
+    }
+
+    fn require_shinzo_ingest_auth(&self, headers: &HeaderMap) -> Result<()> {
+        let expected = self
+            .shinzo_ingest_token
+            .as_deref()
+            .context("Shinzo event ingestion is disabled")?;
+        let supplied = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .context("missing Shinzo event ingest bearer token")?;
+        let expected_digest = blake3::hash(expected.as_bytes());
+        let supplied_digest = blake3::hash(supplied.as_bytes());
+        if expected_digest != supplied_digest {
+            bail!("invalid Shinzo event ingest bearer token");
+        }
+        Ok(())
+    }
+
+    async fn ingest_shinzo_events(
+        &self,
+        request: ShinzoEventIngestRequest,
+    ) -> Result<ShinzoEventIngestResponse> {
+        if request.protocol_version != crate::shinzo::LIVE_PROTOCOL_VERSION {
+            bail!("unsupported Shinzo live protocol version");
+        }
+        if request.events.is_empty() || request.events.len() > MAX_SHINZO_EVENTS_PER_INGEST {
+            bail!("Shinzo event ingest batch exceeds limit");
+        }
+        let mut request_ids = HashSet::with_capacity(request.events.len());
+        for event in &request.events {
+            if event.event_id.is_empty() || event.event_id.len() > MAX_SHINZO_EVENT_ID_BYTES {
+                bail!("Shinzo event ID has an invalid length");
+            }
+            if !request_ids.insert(event.event_id.as_str()) {
+                bail!("Shinzo event ingest batch contains duplicate IDs");
+            }
+            if event.event_bucket >= self.store.manifest.manifest.shinzo_bucket_count {
+                bail!("event bucket is outside the subscription domain");
+            }
+        }
+
+        let server = self
+            .store
+            .shinzo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("subscription lock poisoned"))?;
+        let mut live = self
+            .shinzo_live
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Shinzo mailbox lock poisoned"))?;
+        let mut accepted_events = 0usize;
+        let mut duplicate_events = 0usize;
+        let mut evaluated_subscriptions = 0usize;
+        for event in request.events {
+            if live.is_duplicate(&event.event_id) {
+                duplicate_events += 1;
+                continue;
+            }
+            let shares = server.evaluate_event(event.event_bucket)?;
+            evaluated_subscriptions = evaluated_subscriptions
+                .checked_add(shares.len())
+                .context("evaluated subscription count overflow")?;
+            live.record_event(event.event_id, shares)?;
+            accepted_events += 1;
+        }
+        Ok(ShinzoEventIngestResponse {
+            body_digest_hex: self.body_digest_hex(),
+            party_index: server.party_index(),
+            accepted_events,
+            duplicate_events,
+            evaluated_subscriptions,
+            latest_cursor: live.latest_cursor,
+        })
+    }
+
+    async fn poll_shinzo(&self, request: ShinzoPollRequest) -> Result<ShinzoPollResponse> {
+        self.require_generation(&request.body_digest_hex)?;
+        if request.limit == 0 || request.limit > MAX_SHINZO_POLL_ENTRIES {
+            bail!("Shinzo poll entry limit is invalid");
+        }
+        let id = parse_subscription_id(&request.subscription_id_hex)?;
+        let party_index = self
+            .store
+            .shinzo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("subscription lock poisoned"))?
+            .party_index();
+        let live = self
+            .shinzo_live
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Shinzo mailbox lock poisoned"))?;
+        let (latest_cursor, gap, entries) = live.poll(id, request.after_cursor, request.limit)?;
+        Ok(ShinzoPollResponse {
+            body_digest_hex: self.body_digest_hex(),
+            subscription_id_hex: id.to_string(),
+            party_index,
+            latest_cursor,
+            gap,
+            entries: entries
+                .into_iter()
+                .map(|entry| ShinzoMailboxEntry {
+                    cursor: entry.cursor,
+                    event_id: entry.event_id,
+                    value_base64: STANDARD.encode(entry.value),
+                })
+                .collect(),
         })
     }
 
@@ -326,6 +598,10 @@ impl SelectedService {
                         &self.evaluate_shinzo(serde_json::from_slice(body)?).await?,
                     )?,
                 )),
+                ("POST", "/v1/shinzo/poll") => Ok((
+                    StatusCode::OK,
+                    serde_json::to_vec(&self.poll_shinzo(serde_json::from_slice(body)?).await?)?,
+                )),
                 _ => Ok((
                     StatusCode::NOT_FOUND,
                     serde_json::to_vec("OHTTP target is not an admitted PIR route")?,
@@ -358,9 +634,17 @@ impl Drop for RunningSelectedServer {
 }
 
 pub async fn spawn_selected(store: Arc<UseCaseStore>, bind: &str) -> Result<RunningSelectedServer> {
+    spawn_selected_with_ingest_token(store, bind, None).await
+}
+
+pub async fn spawn_selected_with_ingest_token(
+    store: Arc<UseCaseStore>,
+    bind: &str,
+    shinzo_ingest_token: Option<String>,
+) -> Result<RunningSelectedServer> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
-    let service = SelectedService::new(store)?;
+    let service = SelectedService::new_with_shinzo_ingest_token(store, shinzo_ingest_token)?;
     let task = tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, selected_router(service)).await {
             eprintln!("selected PIR sidecar stopped: {error}");
@@ -375,7 +659,20 @@ pub async fn serve_selected(store: Arc<UseCaseStore>, bind: &str) -> Result<()> 
         "selected PIR sidecar listening on http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, selected_router(SelectedService::new(store)?)).await?;
+    let ingest_token = std::env::var(SHINZO_INGEST_TOKEN_ENV).ok();
+    if ingest_token.is_none() {
+        eprintln!(
+            "Shinzo live event ingestion disabled; set {SHINZO_INGEST_TOKEN_ENV} to enable it"
+        );
+    }
+    axum::serve(
+        listener,
+        selected_router(SelectedService::new_with_shinzo_ingest_token(
+            store,
+            ingest_token,
+        )?),
+    )
+    .await?;
     Ok(())
 }
 
@@ -394,6 +691,8 @@ fn selected_router(service: SelectedService) -> Router {
         .route("/v1/tag/decoy", post(post_tag_decoy))
         .route("/v1/shinzo/register", post(post_shinzo_register))
         .route("/v1/shinzo/event", post(post_shinzo_event))
+        .route("/v1/shinzo/events", post(post_shinzo_events))
+        .route("/v1/shinzo/poll", post(post_shinzo_poll))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(service)
 }
@@ -465,9 +764,42 @@ async fn post_shinzo_event(
         .map_err(http_error)
 }
 
+async fn post_shinzo_events(
+    State(service): State<SelectedService>,
+    request: Request,
+) -> Result<Json<ShinzoEventIngestResponse>, (StatusCode, String)> {
+    service
+        .require_shinzo_ingest_auth(request.headers())
+        .map_err(http_error)?;
+    let body = to_bytes(request.into_body(), MAX_SHINZO_INGEST_BODY_BYTES)
+        .await
+        .map_err(|error| http_error(error.into()))?;
+    let request = serde_json::from_slice(&body).map_err(|error| http_error(error.into()))?;
+    service
+        .ingest_shinzo_events(request)
+        .await
+        .map(Json)
+        .map_err(http_error)
+}
+
+async fn post_shinzo_poll(
+    State(service): State<SelectedService>,
+    Json(request): Json<ShinzoPollRequest>,
+) -> Result<Json<ShinzoPollResponse>, (StatusCode, String)> {
+    service
+        .poll_shinzo(request)
+        .await
+        .map(Json)
+        .map_err(http_error)
+}
+
 fn http_error(error: anyhow::Error) -> (StatusCode, String) {
     let message = error.to_string();
-    let status = if message.contains("capacity") || message.contains("limit") {
+    let status = if message.contains("ingestion is disabled") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if message.contains("bearer token") {
+        StatusCode::UNAUTHORIZED
+    } else if message.contains("capacity") || message.contains("limit") {
         StatusCode::TOO_MANY_REQUESTS
     } else if message.contains("generation mismatch") {
         StatusCode::CONFLICT
@@ -490,6 +822,19 @@ pub struct DecoyClientResult {
     pub processed_rows: usize,
     pub ignored_without_decoding: usize,
     pub target_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShinzoSubscription {
+    pub id: SubscriptionId,
+    pub cursor: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ShinzoNotification {
+    pub cursor: u64,
+    pub event_id: String,
+    pub matched: bool,
 }
 
 impl UseCaseClient {
@@ -745,6 +1090,108 @@ impl UseCaseClient {
         }
         combine_compact(&shares)
     }
+
+    pub async fn register_shinzo_subscription(
+        &self,
+        target_bucket: usize,
+    ) -> Result<ShinzoSubscription> {
+        if self.servers.len() != 2 {
+            bail!("Compact DPF subscriptions require exactly two servers");
+        }
+        let registration = compact_registration(
+            target_bucket,
+            self.metadata.manifest.manifest.shinzo_bucket_count,
+            &mut OsRng,
+        )?;
+        let body_digest_hex = hex::encode(self.metadata.manifest.manifest.body_digest);
+        for (server, key) in self.servers.iter().zip(registration.server_keys.iter()) {
+            self.http
+                .post(format!("{server}/v1/shinzo/register"))
+                .json(&ShinzoRegistrationRequest {
+                    body_digest_hex: body_digest_hex.clone(),
+                    subscription_id_hex: registration.id.to_string(),
+                    server_key_base64: STANDARD.encode(key),
+                })
+                .send()
+                .await?
+                .error_for_status()?;
+        }
+        Ok(ShinzoSubscription {
+            id: registration.id,
+            cursor: 0,
+        })
+    }
+
+    pub async fn poll_shinzo_subscription(
+        &self,
+        subscription: &mut ShinzoSubscription,
+        limit: usize,
+    ) -> Result<Vec<ShinzoNotification>> {
+        if self.servers.len() != 2 {
+            bail!("Compact DPF subscriptions require exactly two servers");
+        }
+        let body_digest_hex = hex::encode(self.metadata.manifest.manifest.body_digest);
+        let request = ShinzoPollRequest {
+            body_digest_hex: body_digest_hex.clone(),
+            subscription_id_hex: subscription.id.to_string(),
+            after_cursor: subscription.cursor,
+            limit,
+        };
+        let mut responses = Vec::with_capacity(2);
+        for server in self.servers.iter() {
+            let response = self
+                .http
+                .post(format!("{server}/v1/shinzo/poll"))
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?;
+            let response: ShinzoPollResponse = bounded_json(response, 256 * 1024).await?;
+            if response.body_digest_hex != body_digest_hex
+                || response.subscription_id_hex != subscription.id.to_string()
+            {
+                bail!("Compact DPF server returned a mismatched mailbox");
+            }
+            if response.gap {
+                bail!("Compact DPF mailbox history was truncated before polling");
+            }
+            responses.push(response);
+        }
+        if responses[0].party_index == responses[1].party_index {
+            bail!("Compact DPF mailboxes came from the same server party");
+        }
+        let common = responses[0].entries.len().min(responses[1].entries.len());
+        let mut notifications = Vec::with_capacity(common);
+        for index in 0..common {
+            let left = &responses[0].entries[index];
+            let right = &responses[1].entries[index];
+            if left.cursor != right.cursor || left.event_id != right.event_id {
+                bail!("Compact DPF replicas returned divergent event streams");
+            }
+            let values = [left, right]
+                .iter()
+                .zip(&responses)
+                .map(|(entry, response)| {
+                    let value: [u8; 16] = STANDARD
+                        .decode(&entry.value_base64)?
+                        .try_into()
+                        .map_err(|_| {
+                            anyhow::anyhow!("Compact DPF mailbox share has the wrong length")
+                        })?;
+                    NotificationShare::from_wire(subscription.id, response.party_index, value)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            notifications.push(ShinzoNotification {
+                cursor: left.cursor,
+                event_id: left.event_id.clone(),
+                matched: combine_compact(&values)?,
+            });
+        }
+        if let Some(last) = notifications.last() {
+            subscription.cursor = last.cursor;
+        }
+        Ok(notifications)
+    }
 }
 
 async fn fetch_all_metadata(
@@ -858,10 +1305,17 @@ mod tests {
 
     #[tokio::test]
     async fn endpoints_execute_all_three_selected_use_cases() {
+        let ingest_token = "test-shinzo-ingest-token";
         let left = Arc::new(UseCaseStore::build(input(), &KEY, 0).unwrap());
         let right = Arc::new(UseCaseStore::build(input(), &KEY, 1).unwrap());
-        let left_server = spawn_selected(left, "127.0.0.1:0").await.unwrap();
-        let right_server = spawn_selected(right, "127.0.0.1:0").await.unwrap();
+        let left_server =
+            spawn_selected_with_ingest_token(left, "127.0.0.1:0", Some(ingest_token.to_owned()))
+                .await
+                .unwrap();
+        let right_server =
+            spawn_selected_with_ingest_token(right, "127.0.0.1:0", Some(ingest_token.to_owned()))
+                .await
+                .unwrap();
         let urls = [
             format!("http://{}", left_server.address),
             format!("http://{}", right_server.address),
@@ -887,6 +1341,67 @@ mod tests {
         assert_eq!(decoy.processed_rows, 1);
         assert_eq!(decoy.ignored_without_decoding, 99);
         assert_eq!(decoy.values.unwrap()[0], b"cipher-37");
+
+        let mut subscription = client.register_shinzo_subscription(1234).await.unwrap();
+        let ingest = ShinzoEventIngestRequest {
+            protocol_version: crate::shinzo::LIVE_PROTOCOL_VERSION,
+            events: vec![
+                ShinzoLiveEvent {
+                    event_id: "ethereum-mainnet:miss".into(),
+                    event_bucket: 999,
+                },
+                ShinzoLiveEvent {
+                    event_id: "ethereum-mainnet:match".into(),
+                    event_bucket: 1234,
+                },
+            ],
+        };
+        let http = reqwest::Client::new();
+        for server in &urls {
+            let response = http
+                .post(format!("{server}/v1/shinzo/events"))
+                .bearer_auth(ingest_token)
+                .json(&ingest)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            let result: ShinzoEventIngestResponse = response.json().await.unwrap();
+            assert_eq!(result.accepted_events, 2);
+            assert_eq!(result.duplicate_events, 0);
+            assert_eq!(result.evaluated_subscriptions, 2);
+        }
+        let duplicate: ShinzoEventIngestResponse = http
+            .post(format!("{}/v1/shinzo/events", urls[0]))
+            .bearer_auth(ingest_token)
+            .json(&ingest)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(duplicate.accepted_events, 0);
+        assert_eq!(duplicate.duplicate_events, 2);
+
+        let notifications = client
+            .poll_shinzo_subscription(&mut subscription, 16)
+            .await
+            .unwrap();
+        assert_eq!(notifications.len(), 2);
+        assert!(!notifications[0].matched);
+        assert!(notifications[1].matched);
+
+        let unauthorized = http
+            .post(format!("{}/v1/shinzo/events", urls[0]))
+            .body("not-json-and-must-not-be-parsed-before-auth")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
         assert!(client.subscribe_and_evaluate(1234, 1234).await.unwrap());
     }

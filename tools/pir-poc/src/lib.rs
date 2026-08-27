@@ -4,6 +4,7 @@ pub mod benchmark;
 pub mod demo;
 pub mod dense;
 pub mod dense_batch;
+pub mod encrypted_search;
 #[cfg(feature = "research")]
 pub mod finite_differences;
 #[cfg(feature = "research")]
@@ -23,6 +24,7 @@ pub mod selected_demo;
 pub mod selected_http;
 #[cfg(feature = "research")]
 pub mod service;
+pub mod shinzo;
 #[cfg(feature = "research")]
 pub mod single_pass;
 pub mod snapshot;
@@ -30,5 +32,6 @@ pub mod subscription;
 #[cfg(feature = "research")]
 pub mod subset_xor;
 pub mod tag_pages;
+pub mod use_case_gallery;
 pub mod verification;
 pub use profile::Profile;

@@ -49,6 +49,7 @@ than hard-coding it.
 |---|---:|---:|---:|---:|---:|
 | Cold MPHF Dense | 98,534 B | 65,824 B | 98,534 B | 65,536 B | 192 B |
 | Warm SinglePass `Q=2` | 14,778,662 B | 39,944,486 B | 25,264,358 B | 80 B | 448 B |
+| Live packed presence, 65,536 buckets (research adapter) | selector seed + cursor | about 16 KiB while generating both shares | 0 B | 16,384 B once | 2 B/epoch before framing |
 | Live Compact DPF | 0 B cryptographic client key state | 908 B | 0 B | 844 B registration | 64 B/event |
 
 SinglePass's transient upper bound assumes the full 25,165,824-byte table and
@@ -65,6 +66,8 @@ milliseconds:
 - Warm SinglePass consumes every 25,165,824 table byte during setup, initializes
   forward/inverse permutation positions, and reports reconstruction plus
   show-and-shuffle byte-XOR work per query.
+- Live packed presence generates two reusable 8 KiB selector shares once and
+  combines one bit from each replica at every public epoch.
 - Live Compact DPF generates a depth-22 key and combines one 16-byte result pair.
 
 Instruction count, AES/PRG throughput, PtrHash behavior, allocator/RSS, battery,

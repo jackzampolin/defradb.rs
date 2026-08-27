@@ -30,7 +30,8 @@ not be presented as the serving endpoint for the choices below.
 | Cold with 3+ servers, low storage/traffic, or simplest serving path | Exact PtrHash MPHF ordinal + replicated Dense XOR over an inline fixed projection | Smallest exact table tested; one sequential private pass; tiny public index; supports arbitrary n-out-of-n replicas | Every query still performs about `n/2` tables of aggregate selected-row XOR work |
 | Cold, several ready independent queries | Same table with shared-row traversal, then ephemeral Four-Russians for larger batches | Preserves independent Dense shares while reusing table traversal/cache work; no persistent storage expansion | Requires queries to overlap; queue delay must be bounded and reported |
 | Warm, many sequential queries by one authorized client | Two-server SinglePass over the same exact table, normally `Q=2` | Replaces scans with a few indexed rows and tiny online upload | Client downloads the full 24.09 MiB generation and keeps 14.09 MiB state; exactly two asymmetric roles; mutable state cannot roll back |
-| Live computational-private subscription | Two-server Compact DPF | Registration keys are compact and the target is computationally hidden from either non-colluding evaluator under the AES-based PRG/DPF construction | Evaluates every subscription for every event and emits fixed output for every subscription |
+| Live alert when block/epoch cadence is acceptable | Registered replicated Dense XOR over a packed 65,536-bucket presence bitmap; private snapshot fetch on hit | Minimum measured strict server work, one bit of result/replica, information-theoretic privacy, and direct 3+ replica support | Reveals public epoch cadence; stores 8 KiB selector/subscriber/server and waits until epoch close |
+| Immediate live alert when epoch delay is unacceptable | Two-server Compact DPF | Compact 2,080-byte registration/server and the target is computationally hidden from either non-colluding evaluator | Evaluates every subscription for every event, emits fixed output for every subscription, and is exactly two-party |
 | Snapshot or live when candidate-set privacy is acceptable | Public indexed 100-decoy lookup | Ordinary indexed work is much cheaper than exact PIR | Server sees the candidate set, event/tag bucket, access volume, and timing; not privacy-equivalent |
 | Single-server computational-security snapshot | SimplePIR experiment on the same 96-byte pages | Removes the non-collusion assumption and measured server time is competitive | Larger client work/traffic and reusable hint; separate security lane and implementation stack |
 | Very large or variable projection | Private locator page followed by padded private document batch | Keeps document choice private when inline bounds are impossible | A second full-table stage grows with padded fanout; inline wins strongly when a bounded projection is acceptable |
@@ -248,6 +249,8 @@ safe drop-in three-server generalization.
 
 ## Live subscriptions
 
+### Immediate per-event baseline
+
 The full Compact-DPF batch run uses a 16-bit domain, two servers, subscriber
 counts 1/100/1,000/10,000, event batches 1/8/64/1,024, and hit, miss, uniform,
 and finite-Zipf streams. Timed cells satisfy `subscriptions * events <= 65,536`;
@@ -272,7 +275,155 @@ The selected `fss-rs` DPF is exactly two-party. Copying either key share to a
 third server gives neither three-party privacy nor fault tolerance. A reviewed
 threshold/multi-party DPF is a different protocol and remains research work.
 
+### Fixed-epoch packed-presence result
+
+Most wallet alerts do not need one network response per event. Ethereum logs
+already have a natural public block boundary, and Mizu or generic DefraDB can
+choose an explicit one-second, block, or multi-block public cadence. During an
+epoch the server sets a bit in a fixed 65,536-bucket bitmap for every observed
+bucket. At epoch close, every subscriber privately retrieves its one presence
+bit and performs the ordinary padded snapshot protocol only on a hit.
+
+This is exact even if a bucket occurs repeatedly: event ingestion ORs the bit;
+the PIR result is not event parity. Building the 8 KiB bitmap is ordinary
+`O(events)` work outside the timed retrieval. The following nine-sample full
+run used an RTX 2070 SUPER. Strict times are aggregate GPU kernel work across
+two sequentially measured replicas; 100 visible buckets are one host-CPU
+server reading the same warm bitmap.
+
+| Ready subscribers | Packed Dense strict | 16-byte-row Dense control | GPU DPF | 100 visible buckets | Strict parallel wall/batch |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 35.380 us | 36.708 us | 1,959.239 us | 0.054 us | 0.018 ms |
+| 32 | 1.096 us | 2.606 us | 61.704 us | 0.068 us | 0.018 ms |
+| 128 | 0.371 us | 2.310 us | 37.472 us | 0.082 us | 0.027 ms |
+| 512 | **0.156 us** | 2.537 us | 29.096 us | 0.187 us | 0.040 ms |
+| 1,024 | **0.151 us** | 2.542 us | 28.875 us | 0.249 us | 0.077 ms |
+| 2,048 | **0.229 us** | 2.512 us | 28.535 us | 0.325 us | 0.243 ms |
+
+The bold elapsed results are not a claim that strict PIR is intrinsically
+cheaper than decoys: the packed kernel ran on the GPU while the visible control
+ran on the CPU, and energy was not measured for the CPU control. They do show
+that once 512+ subscribers are ready, strict packed presence no longer carries
+a meaningful server-latency penalty on this host. At batch 128 it is 101x less
+aggregate kernel time than the pinned GPU-DPF path. The older 16-byte histogram
+was unnecessary for a hit alert and is retained only as a control.
+
+| Per subscriber | Packed Dense | GPU DPF | 100 visible buckets |
+|---|---:|---:|---:|
+| One-time registration to all servers | 16,384 B | 4,160 B | 400 B |
+| Stored registration/server | 8,192 B | 2,080 B | about 400 B plus index overhead |
+| Result/epoch before framing | 2 B | 32 B | 1,600 B |
+| Server-count flexibility | 2, 3, or more XOR replicas | exactly 2 | one visible server |
+
+Selectors/keys may be retained on the GPU. If packed selectors are copied from
+host memory every epoch, the measured aggregate H2D cost at batch 512 is an
+additional 1.986 us/subscriber, far above its 0.156-us kernel. Production must
+therefore budget GPU-resident registrations, stage long-lived pinned batches,
+or explicitly include PCIe work. One million Dense subscriptions occupy about
+8.2 GB on each server and need roughly 0.16 seconds aggregate kernel time per
+epoch by the batch-512 result (about 0.08 seconds with two replicas in parallel),
+before scheduling and network. The DPF state is four times smaller but its
+measured server work is much larger.
+
+The architecture changes the scale law from per-event Compact DPF
+`O(events * subscriptions)` to ordinary `O(events)` bitmap construction plus
+packed PIR `O(65,536 * subscriptions)` once per epoch. Against the measured
+0.78-us immediate Compact-DPF baseline, batch-512 packed presence breaks even
+at one event/epoch and wins increasingly as event count rises. At the 5,000 TPS
+maximum and a two-second epoch, 10,000 events and 10,000 subscribers imply
+about 1.56 ms of aggregate packed GPU kernel work versus about 78 seconds of
+aggregate per-event CPU DPF work. This cross-hardware estimate is a capacity
+direction, not an identical-hardware speedup.
+
+Use packed presence for Mizu routing-tag hints, Shinzo address/topic alerts and
+DefraDB equality change feeds whenever the product accepts the declared epoch
+latency. Keep immediate Compact DPF only for a genuinely sub-epoch requirement.
+On a hit, the client still needs a fixed-window, padded private snapshot fetch;
+the alert does not return the matching document.
+
 ## Single-server computational lane
+
+### Same-GPU Dense versus pinned GPU-DPF
+
+The CUDA adapter pins the archived
+[`facebookresearch/GPU-DPF`](https://github.com/facebookresearch/GPU-DPF) POC at
+commit `ce23a06af884ee54300b5bc5fd5350e445f10b0b`. It compares the upstream
+ChaCha12 DPF expansion/fused table reduction with a bit-packed Dense XOR control
+on the identical 120-useful-byte/128-physical-byte GPU table. Every sample
+reconstructs and verifies every selected record. The two replicas execute
+sequentially on one RTX 2070 SUPER; values below are their aggregate kernel
+time per query.
+
+| Rows / physical table per replica | Ready queries | Dense XOR | GPU DPF | Dense upload/query | DPF upload/query |
+|---:|---:|---:|---:|---:|---:|
+| `2^20` / 128 MiB | 1 | 0.752 ms | 50.376 ms | 256 KiB | 4,160 B |
+|  | 8 | 0.709 ms | 6.114 ms | 256 KiB | 4,160 B |
+|  | 32 | 0.696 ms | 1.557 ms | 256 KiB | 4,160 B |
+|  | 128 | **0.703 ms** | 0.778 ms | 256 KiB | 4,160 B |
+| `2^23` / 1 GiB | 1 | 5.543 ms | 394.835 ms | 2 MiB | 4,160 B |
+|  | 8 | 5.572 ms | 48.787 ms | 2 MiB | 4,160 B |
+|  | 32 | 5.575 ms | 12.393 ms | 2 MiB | 4,160 B |
+|  | 128 | **5.547 ms** | 6.302 ms | 2 MiB | 4,160 B |
+| `2^25` / 4 GiB | 1 | 22.176 ms | 1,603.580 ms | 8 MiB | 4,160 B |
+|  | 8 | 22.669 ms | 196.652 ms | 8 MiB | 4,160 B |
+|  | 32 | 22.384 ms | 48.664 ms | 8 MiB | 4,160 B |
+|  | 128 | **22.019 ms** | 25.641 ms | 8 MiB | 4,160 B |
+
+DPF amortizes unused GPU occupancy, but it does not overtake Dense by batch 128
+at any locally executable size. At `2^25`, batch 128, Dense also used about
+3.62 J/query versus DPF's 4.74 J/query by coarse 10-ms NVML sampling. DPF's
+real advantage is 63x--2,017x smaller upload as `N` grows, not lower total
+server work. This archived implementation is useful evidence, not the last word
+on modern DPF kernels; production evaluation should repeat on the intended GPU
+and a reviewed library.
+
+Dense retains information-theoretic `n`-replica flexibility. This DPF path is
+computational and exactly two-party. The largest run is the local fit limit,
+not a protocol limit: the 4 GiB table plus selectors and workspaces fit the
+8 GB card; a 16 GiB table does not.
+
+Reproduce both the snapshot and live matrices with:
+
+```bash
+bash tools/pir-poc/research/run-gpu-pir-defra.sh full
+```
+
+### Ethereum GPU reference versus 100 visible candidates
+
+The `gpu-reference-decoy` experiment accepts the published warm, index-based
+[`inspire-gpu`](https://github.com/keewoolee/inspire-gpu) results as the strict
+single-server reference. It measures one target plus 99 visible present
+ordinals over the same 120-byte entry counts. Every row is copied into the
+response; the client is not credited with server-side filtering.
+
+| Logical database | Visible 100 p50 / p95 | Visible q/s | InsPIRe single | Single/visible | InsPIRe batched/query | Batched/visible |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,006,632,960 B (`2^23` rows) | 11.38 / 13.53 us | 87,871 | 2.6 ms | 228.5x | 1.727 ms | 151.8x |
+| 4,026,531,840 B (`2^25` rows) | 12.51 / 14.00 us | 79,935 | 7.9 ms | 631.5x | 3.876 ms | 309.8x |
+| 16,106,127,360 B (`2^27` rows) | 12.84 / 13.87 us | 77,911 | 31.1 ms | 2,423.0x | 8.7 ms | 677.8x |
+
+Visible-candidate traffic is 800 B up plus 12,000 B down. InsPIRe publishes a
+383 KiB round trip, 30.64x more. The GPU is entirely server-side: the published
+16 GB instance occupies 25.77 GB on one 32 GB RTX 5090. Its client is portable
+CPU code, holds no database-dependent hint, takes about 31 ms to construct a
+query, and spends only a few additional milliseconds packing and extracting.
+
+The table reports the median process result from five fresh full runs, each
+using eleven samples. The process-level p50 ranges were 9.67--16.04 us,
+11.05--16.32 us, and 11.88--15.08 us respectively. A temporary file mapping spans each
+exact logical address space; 102,400 scheduled rows touch an estimated 388--431
+MB of randomly distributed host pages and are prefaulted before timing. This is
+a cache-defeating warm point-read benchmark, not proof that the entire 16 GB
+database was resident and not a cold-storage measurement. It begins at public
+ordinals because `inspire-gpu` is also index-based; keyword mapping is an outer
+layer for both.
+
+The result is decisive only for total server work under weaker privacy. One
+hundred indexed reads stay `O(100)` as `N` grows; double-stateless PIR remains
+`O(N)`. GPU acceleration makes strict PIR latency and capacity plausible, but
+does not make it comparable to visible candidates in compute or traffic. The
+trade is candidate-set privacy with severe longitudinal leakage versus strict
+computational privacy among every entry.
 
 The pinned official SimplePIR implementation was adapted to the same 262,144 x
 96-byte corpus and reconstructed every byte. Three-sample local results:

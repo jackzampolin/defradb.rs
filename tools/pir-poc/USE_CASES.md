@@ -3,6 +3,10 @@
 This is the authoritative POC decision record. Historical protocol exploration
 is archived in `COMPARISON.md`, `EXPLORATION.md`, and `research/`.
 
+Application-shaped Mizu, Shinzo and generic DefraDB examples are implemented in
+the [use-case gallery](USE_CASE_GALLERY.md). The gallery reuses the protocols
+selected here and does not add another serving architecture.
+
 The primary objective is minimum aggregate server work for a complete useful
 result. Client CPU, upload, download, storage, build/update work, privacy and
 availability remain separate metrics.
@@ -12,9 +16,11 @@ availability remain separate metrics.
 The protocol exploration can stop here. The POC has established that DefraDB
 can support private query as an isolated serving index, demonstrated the three
 needed query shapes, measured their tradeoffs against visible candidates, and
-carried the same requests through RFC 9458 OHTTP. More protocol experiments are
-unlikely to reduce the main remaining risk: building a bounded, durable DefraDB
-export/event adapter and validating it under production load.
+carried the same requests through RFC 9458 OHTTP. The final GPU pass also found
+the packed-presence epoch optimization that makes strict live alerts practical.
+More protocol experiments are unlikely to reduce the main remaining risk:
+building a bounded, durable DefraDB export/event adapter and validating it under
+production load.
 
 This is the exact implementation status:
 
@@ -22,22 +28,24 @@ This is the exact implementation status:
 |---|---|---|---|
 | Nullifier snapshot | Authenticated exact nullifier-to-2,008-byte-witness table; Dense XOR over two or more replicas; client verifies the Shieldd-shaped Poseidon path | Separate research benchmark models a 1,048,576-leaf active generation, a 32,768-nullifier block, radix predecessor retrieval and immutable deltas | Feed canonical witnesses/roots from Shieldd, wire block updates into the sidecar if live path construction is required, and add cross-repository fixture parity tests |
 | Encrypted tag snapshot | Authenticated digest-to-ordinal directory and fixed padded encrypted rows; Dense XOR or visible-candidate lookup over identical rows | Separate logical benchmark executes the work/wire geometry for 1B documents, 0.01% match and exact-MPHF stripes without claiming a resident 194 GB endpoint | Choose the allowed metadata leakage, build a stable compact directory, and serve binary memory-mapped artifacts rather than JSON-loaded rows |
-| Shinzo live | Two-party Compact-DPF registration and event evaluation endpoints | Microbenchmarks plus a research-only embedded DefraDB `EventName::Update` demonstration | Add the durable event listener, subscription lifecycle, fixed-cadence delivery and replay/recovery policy |
+| Shinzo live | Immediate two-party Compact-DPF endpoints plus a correctness-checked packed-presence Dense CUDA epoch adapter; authenticated event ingestion and host adapter consume DefraDB log updates | Real local-write integration, cross-language vectors, per-event CPU baseline, and full packed Dense/GPU-DPF/visible epoch matrix | Promote packed epochs into the sidecar, then add durable cursors, persistent registrations, fixed-cadence delivery and replay/recovery policy |
 | Origin hiding | Real OHTTP relay, gateway, key rotation, replay filtering, padding and direct/Tor-capable clients in the demo | Codec/HPKE benchmark at all representative payload sizes | HTTPS deployment, independent operators, anonymous admission and operational traffic-shaping policy |
 
 The default endpoint is intentionally smaller than some benchmarked layouts.
 In particular, it does **not** serve a billion-row resident table, the
 nullifier endpoint does **not** consult the radix/delta engine on each request,
-and `/v1/shinzo/event` is driven by its caller rather than by a built-in DefraDB
-listener. Those experiments are evidence for the next implementation, not a
-claim that the production-scale service already exists.
+and the Shinzo adapter still delivers events from memory without a durable
+replay cursor. The original `/v1/shinzo/event` synchronous test route remains,
+while real host updates use authenticated `/v1/shinzo/events` ingestion and
+per-replica `/v1/shinzo/poll` mailboxes. This proves the integration boundary,
+not a production-scale live notification service.
 
 The clean integration boundary is the result worth preserving:
 
 ```text
 committed, authorized DefraDB state
   -> deterministic projection/event adapter
-  -> immutable PIR artifact or Compact-DPF event bucket
+  -> immutable PIR artifact, packed epoch bitmap, or immediate DPF event bucket
   -> isolated PIR sidecar
 ```
 
@@ -67,7 +75,8 @@ authenticated generation
         |       +-- Dense XOR selector shares -> one fixed result row
         |       `-- 100 visible ordinals -> 100 result rows, process one
         |
-        `-- Shinzo Compact-DPF registrations -> fixed event shares
+        +-- Shinzo packed Dense registrations -> fixed epoch hit shares
+        `-- Shinzo Compact-DPF registrations -> immediate event shares
 ```
 
 The client ordinal format is a canonical, safe digest-to-ordinal directory. It
@@ -115,10 +124,67 @@ host-specific; protocol byte counts and result schedules are deterministic.
 
 Private server time is aggregate elapsed work across both replicas. These are
 in-process measurements and exclude HTTP, TLS, queues and network latency.
+The Shinzo row is the currently served immediate Compact-DPF path; the newer
+packed-presence epoch result below is the recommended production direction and
+is measured by the separate CUDA research runner.
 
 Strict/decoy speed ratios are not security-equivalent comparisons. Decoys leak
 the candidate set, result cardinality, popularity and longitudinal
 intersections.
+
+### Huge-dataset GPU PIR versus 100 visible candidates
+
+The research benchmark below accepts the published Ethereum Reads
+[`inspire-gpu`](https://github.com/keewoolee/inspire-gpu) figures and measures
+our weaker baseline at the identical `2^23`, `2^25`, and `2^27` index spaces
+with 120-byte records. Each visible-candidate request supplies 100 present
+ordinals and returns all 100 rows. The full release run uses eleven samples and
+a 388--431 MB resident, randomly distributed working set inside each exact
+file-backed address space, so the reads exceed last-level cache without
+pretending this host keeps an entire 16 GB table in RAM.
+
+| Logical table | 100-candidate server p50 / p95 | Candidate throughput | InsPIRe GPU single | PIR/decoy time | InsPIRe GPU batched per query | Batched PIR/decoy time |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1.01 GB, 8.39M rows | 11.38 / 13.53 us | 87,871 q/s | 2.6 ms | 228x | 1.73 ms | 152x |
+| 4.03 GB, 33.55M rows | 12.51 / 14.00 us | 79,935 q/s | 7.9 ms | 632x | 3.88 ms | 310x |
+| 16.11 GB, 134.22M rows | 12.84 / 13.87 us | 77,911 q/s | 31.1 ms | 2,423x | 8.7 ms | 678x |
+
+The visible request is 800 bytes and its response is 12,000 bytes. The
+published InsPIRe round trip is 383 KiB, 30.64x larger. This ordering is
+expected: the visible path reads 12 KB regardless of `N`, while strict
+double-stateless PIR evaluates the full logical database. InsPIRe nevertheless
+makes strict privacy practical: its CUDA server reaches 115 q/s at 16 GB and
+batch 32, while the portable client is CPU-only, needs no database hint, builds
+a query in about 31 ms, and does not need a GPU.
+
+This does **not** make visible candidates the privacy-equivalent winner. The
+server learns all 100 identities, and repeated or biased candidate sets can
+shrink the effective anonymity set far below 100. Strict PIR hides the selected
+ordinal among all 134.22 million entries at the 16 GB scale. Use the visible
+path when candidate-set privacy is acceptable; use GPU PIR when that leakage is
+not acceptable.
+
+Reproduce the local half of the comparison:
+
+```bash
+cargo run -p pir-poc --release --features research -- \
+  research gpu-reference-decoy full
+```
+
+The table uses the median process result from five fresh WSL full runs; the
+process-level p50 ranges were 9.67--16.04 us, 11.05--16.32 us and
+11.88--15.08 us. The timed scope is warm and index-based, like `inspire-gpu`: keyword-index
+lookup, page faults, HTTP/TLS, network transfer and client filtering are
+excluded. The mapped address spaces are exact, but only scheduled pages are
+resident, so this is not a cold-storage benchmark.
+
+The same-host CUDA control does not change a snapshot choice. On the 1 GiB
+physical table, two-server Dense used 5.54 ms aggregate/query at both batch 1
+and 128; the pinned GPU-DPF path fell from 394.83 ms at batch 1 to 6.30 ms at
+batch 128 but never overtook Dense. On the largest fitting 4 GiB table and
+batch 128, Dense was 22.02 ms versus GPU-DPF 25.64 ms. DPF saves upload
+(4,160 B/query instead of 2--8 MiB here), not total server work. See
+`COMPARISON.md` for the full correctness, energy and batch matrix.
 
 ### Go versus Rust Dense XOR kernel
 
@@ -282,24 +348,39 @@ The strict query scans the projection, but downloads only target results. The
 ciphertexts. The client authenticates/decrypts its 100,000 target values and
 discards the other 9.9 million without AEAD work.
 
-### 3. Compact-DPF live subscription
+### 3. Packed-presence Dense live subscription
 
-At registration, the client converts its target wallet bucket into two compact
-function-share keys and sends one key to each replica. A single key is
-pseudorandom and does not reveal the target. For every new event, each replica
-evaluates its key at the event bucket and returns a fixed-size output share.
-The client combines both shares: a matching event reconstructs the notification
-and a miss reconstructs zero.
+The preferred live flow uses a declared public cadence: one Ethereum block,
+one second, or another fixed epoch. Events set bits in a fixed 65,536-bucket
+presence bitmap. At registration, the client sends each replica one random
+8 KiB Dense selector share; XORing all shares gives a one-hot vector for the
+private bucket. At epoch close, each server computes one packed parity answer,
+and the client XORs the answer bytes. A hit triggers the normal private padded
+snapshot fetch for that epoch.
 
-Unlike snapshot Dense PIR, Compact DPF does not scan historical document rows.
-Its event cost is proportional to the subscriptions being evaluated. Privacy
-is computational under the DPF construction and AES PRG, and the selected
-implementation is exactly two-party.
+This is information-theoretically private under the same non-collusion model as
+snapshot Dense, exact when a bucket occurs more than once, and works with two,
+three, or more replicas. Selectors are reusable across epochs: reuse links one
+subscription at a server but does not reveal its uniformly hidden bucket. The
+cost is 8 KiB of retained selector state per subscriber per server and epoch
+latency rather than immediate notification.
 
-The default HTTP surface proves registration and evaluation. The
-research-only `research defra-events` command proves that DefraDB's committed
-`EventName::Update` stream is a usable source. Durable event ingestion and
-notification delivery are integration work, not hidden inside the POC server.
+On the RTX 2070 SUPER, a batch of 512 ready subscriptions cost 0.156 us
+aggregate strict kernel time/subscriber/epoch, returned 2 B across two replicas,
+and was slightly below the matched one-server 100-visible-bucket control's
+0.187 us. The visible path is still weaker privacy and returns 1,600 B. One
+million strict subscriptions require about 8.2 GB selector storage/server and
+about 0.16 seconds aggregate kernel work/epoch if selector batches stay on the
+GPU. Copying them from host memory every epoch adds about 1.99 us/subscriber at
+batch 512 and must not be omitted from capacity planning.
+
+Compact DPF remains the fallback when the application truly requires an answer
+for every individual event. It stores only 2,080 B/server/subscription, but the
+current implementation is computational, exactly two-party, and evaluates
+every subscription for every event. Its default HTTP endpoints and the
+research-only `research defra-events` command still prove that immediate flow;
+the packed epoch protocol is currently a correctness-checked CUDA research
+adapter, not yet the default sidecar API.
 
 ## Adding a third server
 
@@ -307,6 +388,7 @@ notification delivery are integration work, not hidden inside the POC server.
 |---|---|---|
 | Active nullifier radix/path Dense XOR | Yes, without changing the table or cryptographic construction | Generate three XOR shares and combine three answers. Aggregate upload, response traffic and server work rise by about 50% relative to two servers. |
 | Exact-MPHF striped Dense XOR | Yes, without changing MPHF, stripes or rows | The same `n`-server sharing works for any `n >= 2`; a three-server deployment again costs approximately 50% more aggregate work than two servers. |
+| Packed-presence Dense subscription | Yes, without changing the public bitmap | Store one 8 KiB share/subscriber on each server and XOR all answer bits. Three servers add about 50% aggregate kernel/storage/registration cost relative to two. |
 | Compact DPF subscription | No, not as a drop-in change | The current DPF construction and wire format produce exactly two keys and require exactly two answers. Three-party support needs a multi-party FSS/DPF construction or a different live protocol. |
 
 The Dense extension is flexible about server count, but it is `n`-of-`n`: all
@@ -399,24 +481,37 @@ not a speed optimization.
 
 ## 3. Shinzo wallet-event subscription
 
-The selected live protocol is two-party Compact DPF over a 65,536-bucket public
-domain. Registration uploads 640 bytes total. Each event returns fixed match
-shares plus a fixed encrypted capsule, regardless of match or miss.
+The selected production direction is a fixed public block/epoch plus private
+packed-presence Dense over a 65,536-bucket domain. Shinzo logs already have
+block boundaries, so waiting for the block's committed bitmap is normally a
+natural rather than artificial delay. A hit tells the wallet to issue a padded
+private snapshot query for the matching log page; it does not expose or return
+the log by itself.
 
-The full run verified both a target event and a non-target event:
+At 512 ready subscriptions on the local RTX 2070 SUPER:
 
-- Compact DPF aggregate server p50: 0.00080 ms.
-- Client combine p50: 0.00010 ms.
-- Fixed response: 252 bytes.
-- Indexed 100-wallet candidate lookup: below timer resolution and 204 bytes.
+- packed-presence Dense: 0.000156 ms aggregate server kernel/subscriber/epoch,
+  about 0.000078 ms parallel latency, and 2 B response across two replicas;
+- GPU DPF over an overprovisioned 16-byte histogram: 0.029096 ms aggregate;
+- 100 visible buckets: 0.000187 ms on one CPU server and 1,600 B response;
+- one-time registration: 16,384 B Dense, 4,160 B GPU DPF, or 400 B visible.
 
-The decoy index is faster but reveals all registered wallets and longitudinal
-activity. Compact DPF's absolute work is already below expected transport,
-event decoding and delivery overhead, so further cryptographic optimization is
-not a POC priority.
+The strict result being slightly faster in elapsed time than visible candidates
+is hardware- and batching-specific, not a security-equivalent universal
+speedup. It is enough to remove server computation as the reason to choose
+decoys for epoch alerts. Dense still needs 8 KiB retained selector state on
+each server, fixed-cadence responses, independent operators, and GPU residency
+or explicitly charged PCIe transfers.
 
-Compact DPF is computationally private under its construction and AES PRG; it
-is not information-theoretic and this implementation is exactly two-party.
+The already implemented immediate Compact-DPF endpoint remains useful only if
+Shinzo needs sub-block notification. Its verified baseline is 0.00080 ms
+aggregate server work/subscription/event with a 640 B two-party registration,
+but total work and fixed delivery grow with every event and subscription. At
+the 5,000 TPS maximum, a two-second epoch contains 10,000 events: for 10,000
+subscribers, the measured models are about 1.56 ms aggregate packed GPU kernel
+per epoch versus about 78 seconds aggregate immediate CPU DPF work. At lower
+TPS the exact saving falls linearly, while packed presence remains one fixed
+retrieval per epoch.
 
 ## HTTP surface
 
@@ -430,11 +525,16 @@ POST /v1/tag/private
 POST /v1/tag/decoy
 POST /v1/shinzo/register
 POST /v1/shinzo/event
+POST /v1/shinzo/events
+POST /v1/shinzo/poll
 ```
 
 Private endpoints accept only one replica's opaque selector shares. Decoy
 endpoints accept visible candidates. Shinzo registration accepts one Compact-DPF
 key share for that party.
+`/v1/shinzo/events` is a direct, bearer-authenticated host-to-sidecar route and
+never returns result shares. `/v1/shinzo/poll` is admitted through direct HTTP
+or OHTTP and returns that replica's bounded mailbox entries.
 
 ## OHTTP origin-hiding POC
 

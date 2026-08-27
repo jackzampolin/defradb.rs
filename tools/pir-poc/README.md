@@ -5,7 +5,9 @@ DefraDB query execution or storage:
 
 1. a live Shieldd nullifier generation and fixed 2,008-byte witness;
 2. an encrypted tag projection with a fixed result class;
-3. a Shinzo wallet-event subscription using two-party Compact DPF.
+3. a Shinzo wallet-event subscription: immediate two-party Compact DPF in the
+   served demo, with packed-presence Dense as the measured block/epoch
+   production direction.
 
 Strict Dense XOR and the visible-candidate baseline share the same immutable
 serving rows. The benchmark uses 100 candidates; the decoy client decodes only
@@ -15,21 +17,40 @@ comparison and two-versus-three-server discussion live in
 [USE_CASES.md](USE_CASES.md). It is the single authoritative design document;
 this README is only the operating guide.
 
+Nine small Mizu, Shinzo and general DefraDB scenarios are catalogued and
+executable through [USE_CASE_GALLERY.md](USE_CASE_GALLERY.md).
+The optional [encrypted exact-search lane](ENCRYPTED_SEARCH.md) demonstrates
+the one-lookup/search-pattern-leakage tradeoff.
+
 The end-to-end threat model and research-backed privacy layers outside PIR—
 origin hiding, timing resistance, anonymous admission, live delivery and
 private transaction broadcast—are documented in [PRIVACY.md](PRIVACY.md).
 
 ## Commands
 
-The default binary deliberately has five top-level commands:
+The default binary deliberately has seven top-level commands:
 
 ```text
 pir-poc demo
+pir-poc use-cases [mizu|shinzo|defra]
+pir-poc encrypted-search [ROWS<=1000000]
 pir-poc build INPUT_JSON OUTPUT_ROOT
 pir-poc serve REPLICA_STORE BIND_ADDRESS
 pir-poc query ...
 pir-poc benchmark [quick|full]
 ```
+
+Run the application-shaped gallery without starting servers:
+
+```bash
+cargo run -p pir-poc --release -- use-cases
+cargo run -p pir-poc --release -- use-cases mizu
+```
+
+The gallery uses the same Dense XOR and Compact-DPF code as the served POC. Its
+256-row fixtures are correctness demonstrations; the research CUDA runner adds
+the packed-presence epoch protocol. Consult `USE_CASES.md` for production-scale
+measurements and the exact immediate-versus-epoch choice.
 
 Run the complete in-memory HTTP demo:
 
@@ -121,12 +142,39 @@ cargo run -p pir-poc --release -- query shinzo 1234 1234 \
   http://127.0.0.1:8080 http://127.0.0.1:8081
 ```
 
+For a real Shinzo event stream, set `SHINZO_PIR_INGEST_TOKEN` on each sidecar
+and enable `pir` in `shinzo-host-client/config/config.yaml`. The host posts
+authenticated public event batches to `/v1/shinzo/events`; each replica stores
+its own result shares for wallet retrieval through `/v1/shinzo/poll`. Ingest is
+deliberately excluded from OHTTP because it is an authenticated operator path;
+wallet registration and polling can use OHTTP.
+
+Register once, then poll using the returned unguessable subscription ID and
+cursor. Each poll advances only through the common ordered prefix available at
+both replicas, so a temporarily lagging operator cannot make the client skip an
+uncombined share:
+
+```bash
+TARGET_BUCKET=$(cargo run -q -p pir-poc --release -- bucket shinzo address \
+  0xA0b86991c6218b36c1d19D4a2E9Eb0cE3606eB48 | jq -r .bucket)
+
+cargo run -p pir-poc --release -- query shinzo-register "$TARGET_BUCKET" \
+  http://127.0.0.1:8080 http://127.0.0.1:8081
+
+cargo run -p pir-poc --release -- query shinzo-poll \
+  <subscription-id> <cursor> \
+  http://127.0.0.1:8080 http://127.0.0.1:8081
+```
+
 ## Security and admission boundaries
 
 - Dense XOR requires every configured replica answer and hides the target if at
   least one replica does not collude.
 - Compact DPF is computationally private under its construction and AES PRG and
   is two-party in this implementation.
+- Packed-presence Dense uses the same information-theoretic XOR sharing as
+  snapshot Dense, extends to three or more replicas, and deliberately reveals
+  the fixed public epoch cadence.
 - Decoys provide candidate-set privacy only. The server sees all candidates,
   cardinalities, popularity and longitudinal intersections.
 - The stable client ordinal directory is safe to parse but exposes populated

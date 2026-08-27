@@ -33,7 +33,7 @@ wallet private core -> scheduler -> anonymous admission -> one request per repli
       |                   |                   +-- Privacy Pass, or Semaphore/RLN
       |                   +-- public epochs, fixed classes, query-ahead
       |
-      +-- Dense XOR snapshot shares / Compact-DPF registration shares
+      +-- Dense snapshot or packed-epoch shares / immediate DPF shares
                     |                              |
              path A, independent            path B, independent
                     |                              |
@@ -50,7 +50,10 @@ wallet private core -> scheduler -> anonymous admission -> one request per repli
                    delayed separate write broadcaster
 ```
 
-For three-replica Dense XOR, add a third independent path. Dense target privacy survives if at least one replica does not collude, but all configured answers are still required. The current Compact DPF remains exactly two-party.
+For three-replica Dense XOR, including packed-presence live selectors, add a
+third independent path. Dense target privacy survives if at least one replica
+does not collude, but all configured answers are still required. The immediate
+Compact DPF remains exactly two-party.
 
 Independence is an organizational property, not a process count. Replicas and paths should not share the same operator, cloud account, CDN logs, observability pipeline, or administrative control. Different clouds, autonomous systems, and jurisdictions are useful where practical.
 
@@ -58,7 +61,7 @@ Independence is an organizational property, not a process count. Replicas and pa
 
 | Layer | Defense | Residual leakage |
 |---|---|---|
-| Query content | Dense XOR / Compact DPF | Protocol, generation, request class, timing |
+| Query content | Dense XOR / packed-presence Dense / Compact DPF | Protocol, generation or epoch, request class, timing |
 | Client origin | OHTTP | Relay/gateway collusion and global timing |
 | Strong origin | Tor/Arti, preferably onion gateway | End-to-end timing and traffic volume |
 | Global metadata | Anytrust batch mix, cover, anonymous replies | Participation in the service; configured privacy class |
@@ -108,7 +111,7 @@ The current protocols are too different to hide in one universal envelope. Use a
 
 | Class | Current example | Policy |
 |---|---|---|
-| Small | Compact DPF | Fixed 1 KiB request/response envelope |
+| Small | Packed-presence epoch result or Compact DPF | Fixed 1 KiB request/response envelope |
 | Medium | Active-nullifier path | Generation-specific fixed request and fixed response class |
 | Large | Billion-document tag projection | Fixed chunks, fixed maximum result/stripe class, constant chunk cadence |
 
@@ -130,7 +133,13 @@ Use Privacy Pass for simple bearer admission; use Semaphore/RLN only when anonym
 
 ## Live subscriptions and delivery
 
-Compact DPF already makes event evaluation cheap and hides the subscription predicate from two non-colluding replicas. The remaining privacy risk is delivery metadata.
+For block/epoch-capable alerts, registered packed-presence Dense is now the
+default: every public epoch produces one private hit bit per subscriber, and a
+hit triggers a separately padded snapshot read. It hides the subscription
+information-theoretically, supports three or more replicas, and avoids work and
+delivery per event. Immediate Compact DPF remains the lower-registration-state,
+two-party fallback when epoch latency is unacceptable. In both cases the
+remaining dominant privacy risk is delivery metadata.
 
 Do not push a match directly to APNs/FCM or a persistent wallet connection. Instead:
 

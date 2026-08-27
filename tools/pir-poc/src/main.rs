@@ -5,7 +5,8 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use pir_poc::selected::{TableUseCase, UseCaseBuildInput, UseCaseStore};
-use pir_poc::selected_http::{serve_selected, UseCaseClient};
+use pir_poc::selected_http::{serve_selected, ShinzoSubscription, UseCaseClient};
+use pir_poc::subscription::SubscriptionId;
 use pir_poc::verification::{decrypt_projection_values, verify_nullifier_witness};
 use pir_poc::Profile;
 use serde::Serialize;
@@ -21,6 +22,18 @@ async fn main() -> Result<()> {
         Some("build") => build(&args[1..]),
         Some("serve") => serve(&args[1..]).await,
         Some("query") => query(&args[1..]).await,
+        Some("bucket") => bucket(&args[1..]),
+        Some("use-cases") => print_json(&pir_poc::use_case_gallery::run(
+            args.get(1).map(String::as_str),
+        )?),
+        Some("encrypted-search") => {
+            let rows = args
+                .get(1)
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(1_000);
+            print_json(&pir_poc::encrypted_search::benchmark(rows)?)
+        }
         Some("benchmark") => {
             let profile = profile(args.get(1))?;
             print_json(&pir_poc::benchmark::run(profile)?)
@@ -36,6 +49,27 @@ async fn main() -> Result<()> {
             bail!("unknown pir-poc command {command:?}")
         }
     }
+}
+
+fn bucket(args: &[String]) -> Result<()> {
+    if args.len() < 3 || args.len() > 4 || args[0] != "shinzo" {
+        bail!("bucket requires shinzo FIELD HEX_VALUE [BUCKET_COUNT]");
+    }
+    let field = match args[1].as_str() {
+        "address" => pir_poc::shinzo::LOG_ADDRESS_FIELD,
+        "topic0" => pir_poc::shinzo::LOG_TOPIC0_FIELD,
+        other => bail!("unsupported Shinzo selector {other:?}; expected address or topic0"),
+    };
+    let bucket_count = args
+        .get(3)
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(pir_poc::shinzo::DEFAULT_BUCKET_COUNT);
+    print_json(&BucketOutput {
+        field,
+        bucket_count,
+        bucket: pir_poc::shinzo::ethereum_log_selector_bucket(field, &args[2], bucket_count)?,
+    })
 }
 
 fn build(args: &[String]) -> Result<()> {
@@ -74,7 +108,9 @@ async fn query(args: &[String]) -> Result<()> {
         Some("strict") => strict_query(&args[1..]).await,
         Some("decoy") => decoy_query(&args[1..]).await,
         Some("shinzo") => shinzo_query(&args[1..]).await,
-        _ => bail!("query requires strict, decoy, or shinzo mode"),
+        Some("shinzo-register") => shinzo_register(&args[1..]).await,
+        Some("shinzo-poll") => shinzo_poll(&args[1..]).await,
+        _ => bail!("query requires strict, decoy, shinzo, shinzo-register, or shinzo-poll mode"),
     }
 }
 
@@ -184,6 +220,41 @@ async fn shinzo_query(args: &[String]) -> Result<()> {
     })
 }
 
+async fn shinzo_register(args: &[String]) -> Result<()> {
+    if args.len() != 3 {
+        bail!("query shinzo-register requires TARGET_BUCKET SERVER_0 SERVER_1");
+    }
+    let target_bucket = args[0].parse::<usize>()?;
+    let client = UseCaseClient::connect(&args[1..], &operator_key()?).await?;
+    let subscription = client.register_shinzo_subscription(target_bucket).await?;
+    print_json(&ShinzoRegistrationOutput {
+        subscription_id_hex: subscription.id.to_string(),
+        cursor: subscription.cursor,
+    })
+}
+
+async fn shinzo_poll(args: &[String]) -> Result<()> {
+    if args.len() != 4 {
+        bail!("query shinzo-poll requires SUBSCRIPTION_ID AFTER_CURSOR SERVER_0 SERVER_1");
+    }
+    let id: [u8; 16] = hex::decode(&args[0])?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("subscription ID must be exactly 16 bytes"))?;
+    let mut subscription = ShinzoSubscription {
+        id: SubscriptionId::from_bytes(id),
+        cursor: args[1].parse::<u64>()?,
+    };
+    let client = UseCaseClient::connect(&args[2..], &operator_key()?).await?;
+    let notifications = client
+        .poll_shinzo_subscription(&mut subscription, 256)
+        .await?;
+    print_json(&ShinzoPollOutput {
+        subscription_id_hex: subscription.id.to_string(),
+        cursor: subscription.cursor,
+        notifications,
+    })
+}
+
 fn table_use_case(value: &str) -> Result<TableUseCase> {
     match value {
         "nullifier" => Ok(TableUseCase::Nullifier),
@@ -241,6 +312,9 @@ async fn research(args: &[String]) -> Result<()> {
         Some("end-to-end") => print_json(&pir_poc::benchmark::run_end_to_end(profile)?),
         Some("endpoints") => print_json(&pir_poc::benchmark::run_endpoints(profile).await?),
         Some("fuse") => print_json(&pir_poc::benchmark::run_fuse(profile)?),
+        Some("gpu-reference-decoy") => {
+            print_json(&pir_poc::benchmark::run_gpu_reference_decoy(profile)?)
+        }
         Some("mphf") => print_json(&pir_poc::benchmark::run_mphf(profile)?),
         Some("mphf-subset-xor") => print_json(&pir_poc::benchmark::run_mphf_subset_xor(profile)?),
         Some("optimization") => print_json(&pir_poc::benchmark::run_optimizations(profile)?),
@@ -279,9 +353,29 @@ struct ShinzoOutput {
     matched: bool,
 }
 
+#[derive(Serialize)]
+struct ShinzoRegistrationOutput {
+    subscription_id_hex: String,
+    cursor: u64,
+}
+
+#[derive(Serialize)]
+struct ShinzoPollOutput {
+    subscription_id_hex: String,
+    cursor: u64,
+    notifications: Vec<pir_poc::selected_http::ShinzoNotification>,
+}
+
+#[derive(Serialize)]
+struct BucketOutput {
+    field: &'static str,
+    bucket_count: usize,
+    bucket: usize,
+}
+
 fn usage() {
     eprintln!(
-        "pir-poc commands:\n  demo\n  build INPUT_JSON OUTPUT_ROOT\n  serve REPLICA_STORE BIND_ADDRESS\n  query strict nullifier NULLIFIER_HEX SERVER SERVER [SERVER ...]\n  query strict tag TAG_BASE64 SERVER SERVER [SERVER ...]\n  query decoy nullifier NULLIFIER_HEX CANDIDATE_JSON SERVER\n  query decoy tag TAG_BASE64 CANDIDATE_JSON SERVER\n  query shinzo TARGET_BUCKET EVENT_BUCKET SERVER_0 SERVER_1\n  benchmark [quick|full]\n\nBuild, serve, and query require {OPERATOR_KEY_ENV}=64_HEX_CHARS. Tag queries additionally require {PROJECTION_KEY_ENV}=64_HEX_CHARS. Historical experiments require --features research."
+        "pir-poc commands:\n  demo\n  use-cases [mizu|shinzo|defra]\n  encrypted-search [ROWS<=1000000]\n  build INPUT_JSON OUTPUT_ROOT\n  serve REPLICA_STORE BIND_ADDRESS\n  bucket shinzo address|topic0 HEX_VALUE [BUCKET_COUNT]\n  query strict nullifier NULLIFIER_HEX SERVER SERVER [SERVER ...]\n  query strict tag TAG_BASE64 SERVER SERVER [SERVER ...]\n  query decoy nullifier NULLIFIER_HEX CANDIDATE_JSON SERVER\n  query decoy tag TAG_BASE64 CANDIDATE_JSON SERVER\n  query shinzo TARGET_BUCKET EVENT_BUCKET SERVER_0 SERVER_1\n  query shinzo-register TARGET_BUCKET SERVER_0 SERVER_1\n  query shinzo-poll SUBSCRIPTION_ID AFTER_CURSOR SERVER_0 SERVER_1\n  benchmark [quick|full]\n\nBuild, serve, and query require {OPERATOR_KEY_ENV}=64_HEX_CHARS. Tag queries additionally require {PROJECTION_KEY_ENV}=64_HEX_CHARS. Historical experiments require --features research."
     );
 }
 

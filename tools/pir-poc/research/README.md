@@ -22,6 +22,7 @@ Available research benchmark names:
 - `end-to-end`
 - `endpoints`
 - `fuse`
+- `gpu-reference-decoy` (100 visible ordinal lookups at the published InsPIRe GPU geometries)
 - `mphf`
 - `mphf-subset-xor`
 - `optimization`
@@ -40,6 +41,18 @@ Primary evidence ledgers:
 
 Research results may use different privacy, result-shape, state and threat-model
 assumptions. Do not publish direct speed ratios unless those scopes match.
+
+The CUDA comparison pins the archived GPU-DPF artifact, checks every Dense and
+DPF reconstruction, measures NVML power, and includes the packed-presence live
+epoch design plus a matched 100-visible-bucket control:
+
+```bash
+bash tools/pir-poc/research/run-gpu-pir-defra.sh quick
+bash tools/pir-poc/research/run-gpu-pir-defra.sh full
+```
+
+See [`gpu_dpf_adapter/README.md`](gpu_dpf_adapter/README.md) for its exact scope,
+hardware/toolchain requirements and interpretation limits.
 
 `research defra-events` listens to updates from an embedded DefraDB node,
 evaluates a Compact-DPF subscription, seals a snapshot, and privately retrieves

@@ -14,10 +14,12 @@ research = [
     "dep:defra-node",
     "dep:epserde",
     "dep:events",
+    "dep:memmap2",
     "dep:memory-stats",
     "dep:ptr_hash",
     "dep:query",
     "dep:sha2",
+    "dep:tempfile",
     "dep:thiserror",
 ]
 
@@ -34,6 +36,7 @@ events = { path = "../../crates/events", optional = true }
 fss-rs = { version = "0.6", default-features = false, features = ["prg", "stable"] }
 hex.workspace = true
 memory-stats = { version = "1.2", optional = true }
+memmap2 = { version = "0.9", optional = true }
 ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
 poseidon377 = { version = "1.2.0", default-features = false, features = ["std"] }
 epserde = { version = "0.13", optional = true }
@@ -46,6 +49,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
+tempfile = { version = "3", optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 
 [lints]

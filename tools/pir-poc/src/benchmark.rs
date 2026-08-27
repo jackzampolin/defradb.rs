@@ -32,6 +32,8 @@ mod endpoints;
 #[cfg(feature = "research")]
 mod fuse;
 #[cfg(feature = "research")]
+mod gpu_reference_decoy;
+#[cfg(feature = "research")]
 mod kernels;
 #[cfg(feature = "research")]
 mod local;
@@ -66,6 +68,8 @@ pub use end_to_end::run as run_end_to_end;
 pub use endpoints::run as run_endpoints;
 #[cfg(feature = "research")]
 pub use fuse::run as run_fuse;
+#[cfg(feature = "research")]
+pub use gpu_reference_decoy::run as run_gpu_reference_decoy;
 #[cfg(feature = "research")]
 pub use mphf::run as run_mphf;
 #[cfg(feature = "research")]

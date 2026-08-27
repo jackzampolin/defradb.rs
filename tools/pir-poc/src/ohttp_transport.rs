@@ -34,7 +34,8 @@ use crate::selected::{decode_table_answer, TableUseCase, UseCaseStore};
 use crate::selected_http::{
     bounded_response_bytes, collect_indexed, DecoyAnswerResponse, DecoyClientResult,
     DecoyQueryRequest, PrivateAnswerResponse, PrivateQueryRequest, SelectedService,
-    ShinzoEventRequest, ShinzoEventResponse, ShinzoRegistrationRequest, UseCaseMetadata,
+    ShinzoEventRequest, ShinzoEventResponse, ShinzoNotification, ShinzoPollRequest,
+    ShinzoPollResponse, ShinzoRegistrationRequest, ShinzoSubscription, UseCaseMetadata,
 };
 use crate::subscription::{combine_compact, compact_registration, NotificationShare};
 use crate::verification::{decrypt_projection_values, verify_nullifier_witness};
@@ -540,6 +541,7 @@ fn is_admitted_route(method: &str, path: &str) -> bool {
             | ("POST", "/v1/tag/decoy")
             | ("POST", "/v1/shinzo/register")
             | ("POST", "/v1/shinzo/event")
+            | ("POST", "/v1/shinzo/poll")
     )
 }
 
@@ -1196,6 +1198,104 @@ impl OhttpUseCaseClient {
         }
         combine_compact(&shares)
     }
+
+    pub async fn register_shinzo_subscription(
+        &self,
+        target_bucket: usize,
+    ) -> Result<ShinzoSubscription> {
+        if self.replicas.len() != 2 {
+            bail!("Compact DPF subscriptions require exactly two OHTTP replica paths");
+        }
+        let registration = compact_registration(
+            target_bucket,
+            self.metadata.manifest.manifest.shinzo_bucket_count,
+            &mut OsRng,
+        )?;
+        let digest = hex::encode(self.metadata.manifest.manifest.body_digest);
+        for (replica, key) in self.replicas.iter().zip(&registration.server_keys) {
+            replica
+                .post_empty(
+                    "/v1/shinzo/register",
+                    &ShinzoRegistrationRequest {
+                        body_digest_hex: digest.clone(),
+                        subscription_id_hex: registration.id.to_string(),
+                        server_key_base64: STANDARD.encode(key),
+                    },
+                )
+                .await?;
+        }
+        Ok(ShinzoSubscription {
+            id: registration.id,
+            cursor: 0,
+        })
+    }
+
+    pub async fn poll_shinzo_subscription(
+        &self,
+        subscription: &mut ShinzoSubscription,
+        limit: usize,
+    ) -> Result<Vec<ShinzoNotification>> {
+        if self.replicas.len() != 2 {
+            bail!("Compact DPF subscriptions require exactly two OHTTP replica paths");
+        }
+        let digest = hex::encode(self.metadata.manifest.manifest.body_digest);
+        let request = ShinzoPollRequest {
+            body_digest_hex: digest.clone(),
+            subscription_id_hex: subscription.id.to_string(),
+            after_cursor: subscription.cursor,
+            limit,
+        };
+        let mut responses = Vec::with_capacity(2);
+        for replica in self.replicas.iter() {
+            let response = replica
+                .post_json::<_, ShinzoPollResponse>("/v1/shinzo/poll", &request)
+                .await?
+                .value;
+            if response.body_digest_hex != digest
+                || response.subscription_id_hex != subscription.id.to_string()
+            {
+                bail!("OHTTP Compact DPF replica returned a mismatched mailbox");
+            }
+            if response.gap {
+                bail!("OHTTP Compact DPF mailbox history was truncated before polling");
+            }
+            responses.push(response);
+        }
+        if responses[0].party_index == responses[1].party_index {
+            bail!("OHTTP Compact DPF mailboxes came from the same server party");
+        }
+        let common = responses[0].entries.len().min(responses[1].entries.len());
+        let mut notifications = Vec::with_capacity(common);
+        for index in 0..common {
+            let left = &responses[0].entries[index];
+            let right = &responses[1].entries[index];
+            if left.cursor != right.cursor || left.event_id != right.event_id {
+                bail!("OHTTP Compact DPF replicas returned divergent event streams");
+            }
+            let shares = [left, right]
+                .iter()
+                .zip(&responses)
+                .map(|(entry, response)| {
+                    let value: [u8; 16] = STANDARD
+                        .decode(&entry.value_base64)?
+                        .try_into()
+                        .map_err(|_| {
+                            anyhow::anyhow!("Compact DPF mailbox share has the wrong length")
+                        })?;
+                    NotificationShare::from_wire(subscription.id, response.party_index, value)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            notifications.push(ShinzoNotification {
+                cursor: left.cursor,
+                event_id: left.event_id.clone(),
+                matched: combine_compact(&shares)?,
+            });
+        }
+        if let Some(last) = notifications.last() {
+            subscription.cursor = last.cursor;
+        }
+        Ok(notifications)
+    }
 }
 
 fn elapsed_ms(duration: Duration) -> f64 {
@@ -1439,8 +1539,14 @@ mod tests {
             .unwrap();
         assert_eq!(ciphertexts[0], b"ciphertext-marker-37");
         assert!(client.subscribe_and_evaluate(12_345, 12_345).await.unwrap());
-        assert!(left.metrics.snapshot().forwarded_requests >= 4);
-        assert!(right.metrics.snapshot().forwarded_requests >= 4);
+        let mut live = client.register_shinzo_subscription(12_345).await.unwrap();
+        assert!(client
+            .poll_shinzo_subscription(&mut live, 8)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(left.metrics.snapshot().forwarded_requests >= 6);
+        assert!(right.metrics.snapshot().forwarded_requests >= 6);
     }
 
     #[tokio::test]

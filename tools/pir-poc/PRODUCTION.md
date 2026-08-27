@@ -53,10 +53,12 @@ incorrect bytes.
 ## Live path
 
 ```text
-committed Update event
+committed Update events
   -> projection/tag extractor
-  -> compact-DPF subscription evaluator on each replica
-  -> fixed-size answer share
+  -> fixed public-epoch 65,536-bucket presence bitmap
+  -> registered packed-Dense evaluator on each replica
+  -> one fixed hit share/subscriber/epoch
+  -> padded private snapshot fetch on hit
 ```
 
 The sidecar can subscribe to the existing update bus. The first implementation
@@ -68,8 +70,15 @@ to prove the protocol.
 Subscription state is generation-scoped and replicated independently to each
 server. Registration, renewal, cancellation, event batching, padding, and
 delivery cadence are all observable and must have an explicit leakage policy.
-Compact DPF hides the predicate from each of two non-colluding replicas; it
-does not hide collection, registration time, event rate, or response timing.
+Packed Dense hides the predicate information-theoretically while any replica
+remains non-colluding and extends to three or more replicas. It stores an 8 KiB
+selector/subscriber/server and deliberately reveals the public epoch cadence.
+
+Keep the already implemented Compact-DPF evaluator as the immediate fallback
+only when waiting for epoch close is unacceptable. It stores less registration
+state but is computational, exactly two-party, and scales with every event and
+subscription. Neither path hides collection, registration time, event rate or
+response timing; fixed anonymous polling remains a separate requirement.
 
 ## What a result contains
 
@@ -143,8 +152,9 @@ crates, then add those operational controls at the serving edge.
    query API; make its deterministic output digest the builder input.
 3. Replace JSON-loaded table images with a versioned, bounded binary artifact
    that servers can memory-map and publish atomically.
-4. Add an optional sidecar listener on `EventName::Update` for live Compact-DPF
-   evaluation, using the existing research demonstration as the seam test.
+4. Add an optional sidecar listener on `EventName::Update` that seals fixed
+   presence epochs and evaluates registered packed-Dense selectors; preserve
+   immediate Compact DPF behind an explicit low-latency policy.
 5. Extract only the stable manifest, client combine/verification and selected
    serving APIs into small crates. Do not move experimental layouts into core
    Defra crates.
