@@ -25,6 +25,11 @@ the rustffi client — `edjroz/ffi-rust-compat`, or a branch based on it. That
 branch is a maintained chore branch, not something upstream intends to merge;
 it holds the client plus the harness seams the client needs.
 
+The checkout must sit on the pinned client commit, `GO_FFI_CLIENT_COMMIT` in
+`crates/defra-version`, and `ffi-test run` fails fast when it does not. The pin
+keeps pass rates comparable: an unpinned checkout silently changes what the
+test corpus measures.
+
 `ffi-test` writes exactly two things into that checkout, both regenerated from
 `crates/ffi` on every run and neither ever committed:
 
