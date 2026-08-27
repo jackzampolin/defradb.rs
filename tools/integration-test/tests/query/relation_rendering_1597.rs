@@ -155,6 +155,65 @@ async fn duplicate_relation_selection_plans_one_join_test(cluster: TestCluster) 
     );
 }
 
+/// Mirrors Go `TestQueryOneToManyWithGroupByAndFilterOnParentRelation`: the `_docID`
+/// the relation filter needs internally must not leak into the rendered GROUP items.
+async fn group_by_with_parent_relation_filter_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_schema(&node);
+
+    let john = add_author(&node, "John Grisham", 65, true);
+    let voltaire = add_author(&node, "Voltaire", 327, true);
+
+    add_book(&node, "Painted House", 4.9, &john);
+    add_book(&node, "A Time for Mercy", 4.5, &john);
+    add_book(&node, "Candide", 4.95, &voltaire);
+    add_book(&node, "Zadig", 4.91, &voltaire);
+
+    let result = node
+        .query(
+            r#"query {
+                Book(filter: {author: {name: {_like: "John%"}}}, groupBy: [rating]) {
+                    rating
+                    GROUP {
+                        name
+                        author { name }
+                    }
+                }
+            }"#,
+        )
+        .expect("group by rating with parent relation filter");
+
+    let mut books = result["Book"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a Book array, got: {result}"))
+        .clone();
+    books.sort_by(|a, b| {
+        a["rating"]
+            .as_f64()
+            .unwrap()
+            .partial_cmp(&b["rating"].as_f64().unwrap())
+            .unwrap()
+    });
+
+    assert_eq!(
+        serde_json::Value::Array(books),
+        serde_json::json!([
+            {
+                "rating": 4.5,
+                "GROUP": [
+                    {"name": "A Time for Mercy", "author": {"name": "John Grisham"}}
+                ],
+            },
+            {
+                "rating": 4.9,
+                "GROUP": [
+                    {"name": "Painted House", "author": {"name": "John Grisham"}}
+                ],
+            },
+        ])
+    );
+}
+
 #[tokio::test]
 async fn rust_relation_rendering_1597_parent_group_by_relation_with_duplicate_selection() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
@@ -165,4 +224,10 @@ async fn rust_relation_rendering_1597_parent_group_by_relation_with_duplicate_se
 async fn rust_relation_rendering_1597_duplicate_relation_selection_plans_one_join() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     duplicate_relation_selection_plans_one_join_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_relation_rendering_1597_group_by_with_parent_relation_filter() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    group_by_with_parent_relation_filter_test(cluster).await;
 }
