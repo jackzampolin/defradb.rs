@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use embedded::{EmbeddedNodeConfig, Libp2pConfig, NodeBuilder, Persistence, TransportConfig};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -154,7 +155,9 @@ async fn concurrent_shutdown_callers_wait_for_teardown_completion() -> Result<()
         })
     };
 
-    store.wait_until_close_started().await;
+    tokio::time::timeout(Duration::from_secs(5), store.wait_until_close_started())
+        .await
+        .expect("database close did not start");
 
     let second = {
         let node = node.clone();
@@ -174,10 +177,14 @@ async fn concurrent_shutdown_callers_wait_for_teardown_completion() -> Result<()
         "concurrent shutdown caller returned before teardown completed"
     );
 
-    store.allow_close.notify_waiters();
+    store.allow_close.notify_one();
 
-    first.await.expect("first shutdown task should not panic");
-    second.await.expect("second shutdown task should not panic");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        first.await.expect("first shutdown task should not panic");
+        second.await.expect("second shutdown task should not panic");
+    })
+    .await
+    .expect("shutdown tasks did not finish");
 
     assert_eq!(
         store.close_calls.load(Ordering::SeqCst),
