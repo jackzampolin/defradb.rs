@@ -24,7 +24,7 @@ enum Inner {
     SecondarySide {
         parent_scan: Box<dyn PlanNode>,
         yielded_ids: SharedYieldedIds,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
         child_collection_name: String,
         child_fk_index_name: String,
     },
@@ -57,7 +57,7 @@ impl OrphanNode {
     pub fn secondary_side(
         parent_scan: Box<dyn PlanNode>,
         yielded_ids: SharedYieldedIds,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
         child_collection_name: String,
         child_fk_index_name: String,
         document_mapping: DocumentMapping,
@@ -155,24 +155,26 @@ impl PlanNode for OrphanNode {
                         continue;
                     }
 
-                    let scan_result = fetcher
-                        .get_by_index_scan(
-                            child_collection_name,
-                            &IndexScanParams {
-                                index_name: child_fk_index_name.clone(),
-                                scan_type: IndexScanType::ExactMatch {
-                                    values: vec![NormalValue::String(doc_id.to_string())],
+                    if let Some(fetcher) = fetcher {
+                        let scan_result = fetcher
+                            .get_by_index_scan(
+                                child_collection_name,
+                                &IndexScanParams {
+                                    index_name: child_fk_index_name.clone(),
+                                    scan_type: IndexScanType::ExactMatch {
+                                        values: vec![NormalValue::String(doc_id.to_string())],
+                                    },
+                                    limit: Some(1),
+                                    offset: 0,
+                                    value_filter: None,
+                                    cursor_seek: None,
                                 },
-                                limit: Some(1),
-                                offset: 0,
-                                value_filter: None,
-                                cursor_seek: None,
-                            },
-                        )
-                        .await?;
-                    self.exec_info.indexes_fetched += 1;
-                    if !scan_result.doc_ids().is_empty() {
-                        continue;
+                            )
+                            .await?;
+                        self.exec_info.indexes_fetched += 1;
+                        if !scan_result.doc_ids().is_empty() {
+                            continue;
+                        }
                     }
                 }
                 self.current_doc = doc.deep_clone();

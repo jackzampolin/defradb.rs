@@ -212,15 +212,17 @@ impl Planner {
                                 child_fk_field_name.trim_start_matches('_')
                             )
                         });
-                    let mut orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
-                        .with_fetcher(orphan_fetcher.unwrap());
+                    let mut orphan_scan = ScanNode::new(orphan_col, orphan_mapping);
+                    if let Some(fetcher) = orphan_fetcher {
+                        orphan_scan = orphan_scan.with_fetcher(fetcher);
+                    }
                     if let Some(filter) = parent_residual_filter.clone() {
                         orphan_scan = orphan_scan.with_filter(filter);
                     }
                     let orphan = OrphanNode::secondary_side(
                         Box::new(orphan_scan),
                         shared_ids.clone(),
-                        self.fetcher.clone().unwrap(),
+                        self.fetcher.clone(),
                         target_collection.name.clone(),
                         child_fk_index_name,
                         mapping.clone(),
@@ -296,9 +298,11 @@ impl Planner {
                         let orphan_filter = parent_residual_filter
                             .clone()
                             .map_or_else(|| null_filter.clone(), |filter| null_filter.and(filter));
-                        let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
-                            .with_filter(orphan_filter)
-                            .with_fetcher(orphan_fetcher.unwrap());
+                        let mut orphan_scan =
+                            ScanNode::new(orphan_col, orphan_mapping).with_filter(orphan_filter);
+                        if let Some(fetcher) = orphan_fetcher {
+                            orphan_scan = orphan_scan.with_fetcher(fetcher);
+                        }
                         let orphan =
                             OrphanNode::primary_side(Box::new(orphan_scan), mapping.clone());
                         let direction = parent_order_for_child
