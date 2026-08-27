@@ -1,3 +1,4 @@
+use crate::one_to_many_common::{add_author, add_book, add_schema};
 use integration_test::{DefraClient, TestCluster};
 
 /// Mirrors the Go `query/simple` fixture
@@ -23,47 +24,6 @@ fn add_user(node: &DefraClient, name: &str, age: i64) {
         r#"mutation {{ add_Users(input: {{Name: "{name}", Age: {age}}}) {{ _docID }} }}"#
     ))
     .unwrap_or_else(|e| panic!("add user {name}: {e}"));
-}
-
-/// Mirrors the Go `query/one_to_many` fixture
-/// (`tests/integration/query/one_to_many/utils.go`).
-fn add_book_author_schema(node: &DefraClient) {
-    node.schema_add(
-        r#"
-        type Book {
-            name: String
-            rating: Float
-            author: Author
-        }
-
-        type Author {
-            name: String
-            age: Int
-            verified: Boolean
-            published: [Book]
-        }
-        "#,
-    )
-    .expect("add schema");
-}
-
-fn add_author(node: &DefraClient, name: &str, age: i64, verified: bool) -> String {
-    let result = node
-        .query(&format!(
-            r#"mutation {{ add_Author(input: {{name: "{name}", age: {age}, verified: {verified}}}) {{ _docID }} }}"#
-        ))
-        .unwrap_or_else(|e| panic!("add author {name}: {e}"));
-    result["add_Author"][0]["_docID"]
-        .as_str()
-        .expect("author _docID")
-        .to_string()
-}
-
-fn add_book(node: &DefraClient, name: &str, rating: f64, author: &str) {
-    node.query(&format!(
-        r#"mutation {{ add_Book(input: {{name: "{name}", rating: {rating}, author: "{author}"}}) {{ _docID }} }}"#
-    ))
-    .unwrap_or_else(|e| panic!("add book {name}: {e}"));
 }
 
 fn count_for(result: &serde_json::Value, author: &str) -> i64 {
@@ -147,7 +107,7 @@ async fn group_by_and_filter_test(cluster: TestCluster) {
 /// Three books sharing one name -> 1 group.
 async fn relation_all_same_name_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    add_book_author_schema(&node);
+    add_schema(&node);
     let john = add_author(&node, "John Grisham", 65, true);
     add_book(&node, "Painted House", 4.9, &john);
     add_book(&node, "Painted House", 4.8, &john);
@@ -173,7 +133,7 @@ async fn relation_all_same_name_test(cluster: TestCluster) {
 /// John has three books under two distinct names, Cornelia has one.
 async fn relation_counting_distinct_names_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    add_book_author_schema(&node);
+    add_schema(&node);
     let john = add_author(&node, "John Grisham", 65, true);
     let cornelia = add_author(&node, "Cornelia Funke", 62, false);
     add_book(&node, "Painted House", 4.9, &john);
@@ -198,11 +158,50 @@ async fn relation_counting_distinct_names_test(cluster: TestCluster) {
     assert_eq!(count_for(&result, "Cornelia Funke"), 1);
 }
 
+/// Go: TestQuerySimple_WithCountWithGroupBy_OnEmptyCollection
+/// No documents -> 0 groups.
+async fn on_empty_collection_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_users_schema(&node);
+
+    let result = node
+        .query(r#"query { COUNT(Users: {groupBy: [Age]}) }"#)
+        .expect("count query");
+
+    assert_eq!(result["COUNT"], serde_json::json!(0));
+}
+
+/// Go: TestQueryOneToMany_WithCountWithGroupBy_CountingZero
+/// An author with no books -> 0 groups.
+async fn relation_counting_zero_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    add_schema(&node);
+    add_author(&node, "John Grisham", 65, true);
+
+    let result = node
+        .query(
+            r#"
+            query {
+                Author {
+                    name
+                    COUNT(published: {groupBy: [name]})
+                }
+            }
+            "#,
+        )
+        .expect("query authors");
+
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([{"name": "John Grisham", "COUNT": 0}])
+    );
+}
+
 /// Four books under John, three distinct names (one book has no name at all,
 /// which keys as a single null group). A grouped target must not share the
 /// plain target's join, so both counts must hold whichever is written first.
-async fn setup_mixed_names(node: &DefraClient) {
-    add_book_author_schema(node);
+fn setup_mixed_names(node: &DefraClient) {
+    add_schema(node);
     let john = add_author(node, "John Grisham", 65, true);
     add_book(node, "Painted House", 4.9, &john);
     add_book(node, "Painted House", 4.8, &john);
@@ -215,7 +214,7 @@ async fn setup_mixed_names(node: &DefraClient) {
 
 async fn grouped_count_plain_first_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    setup_mixed_names(&node).await;
+    setup_mixed_names(&node);
 
     let result = node
         .query(
@@ -239,7 +238,7 @@ async fn grouped_count_plain_first_test(cluster: TestCluster) {
 
 async fn grouped_count_grouped_first_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    setup_mixed_names(&node).await;
+    setup_mixed_names(&node);
 
     let result = node
         .query(
@@ -266,7 +265,7 @@ async fn grouped_count_grouped_first_test(cluster: TestCluster) {
 /// `author` keys on `_authorID`: two authors -> two groups.
 async fn top_level_group_by_relation_field_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    add_book_author_schema(&node);
+    add_schema(&node);
     let john = add_author(&node, "John Grisham", 65, true);
     let cornelia = add_author(&node, "Cornelia Funke", 62, false);
     add_book(&node, "Painted House", 4.9, &john);
@@ -284,7 +283,7 @@ async fn top_level_group_by_relation_field_test(cluster: TestCluster) {
 /// Go rejects grouping by an array relation (`NewErrInvalidFieldToGroupBy`).
 async fn top_level_group_by_array_relation_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    add_book_author_schema(&node);
+    add_schema(&node);
     add_author(&node, "John Grisham", 65, true);
 
     let err = node
@@ -301,7 +300,7 @@ async fn top_level_group_by_array_relation_test(cluster: TestCluster) {
 /// count. The group field has to reach the relation's child scan.
 async fn relation_group_by_doc_id_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    setup_mixed_names(&node).await;
+    setup_mixed_names(&node);
 
     let result = node
         .query(
@@ -323,7 +322,7 @@ async fn relation_group_by_doc_id_test(cluster: TestCluster) {
 /// (regression guard for the #1597 `_docID` leak).
 async fn relation_group_by_doc_id_no_leak_test(cluster: TestCluster) {
     let node = cluster.client(0);
-    add_book_author_schema(&node);
+    add_schema(&node);
     let john = add_author(&node, "John Grisham", 65, true);
     add_book(&node, "Painted House", 4.9, &john);
     add_book(&node, "A Time for Mercy", 4.5, &john);
@@ -384,6 +383,18 @@ async fn rust_aggregate_groupby_1595_relation_all_same_name() {
 async fn rust_aggregate_groupby_1595_relation_counting_distinct_names() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     relation_counting_distinct_names_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_on_empty_collection() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    on_empty_collection_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_relation_counting_zero() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    relation_counting_zero_test(cluster).await;
 }
 
 #[tokio::test]
