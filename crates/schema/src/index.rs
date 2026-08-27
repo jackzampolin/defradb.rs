@@ -2,7 +2,7 @@
 //!
 //! Matches Go's client/index.go and client/encrypted_index.go
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Describes a field within an index.
 /// Matches Go's IndexedFieldDescription.
@@ -19,34 +19,111 @@ pub struct IndexedFieldDescription {
 
 /// Describes a secondary index on a collection.
 /// Matches Go's IndexDescription.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IndexDescription {
     /// Name of the index.
-    #[serde(rename = "Name", default)]
     pub name: String,
 
     /// Local identifier for this index.
-    #[serde(rename = "ID", default)]
     pub id: u32,
 
     /// Fields that are being indexed.
-    #[serde(rename = "Fields", default)]
     pub fields: Vec<IndexedFieldDescription>,
 
     /// Whether the index enforces uniqueness.
-    #[serde(rename = "Unique", default)]
     pub unique: bool,
 
     /// Kind-specific configuration.
     ///
     /// `None` in a description written before kinds existed, or by a caller
     /// that set only `unique`; [`IndexDescription::normalized`] resolves that.
-    #[serde(rename = "Kind", default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<IndexKind>,
 
     /// Internal-only marker for auto-generated schema indexes.
-    #[serde(skip)]
     pub auto_generated: bool,
+}
+
+#[derive(Serialize)]
+struct IndexDescriptionRef<'a> {
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "ID")]
+    id: u32,
+    #[serde(rename = "Fields")]
+    fields: &'a [IndexedFieldDescription],
+    #[serde(rename = "Kind")]
+    kind: u8,
+    #[serde(rename = "KindDescription")]
+    kind_description: IndexKindDescriptionWire,
+    #[serde(rename = "Unique")]
+    unique: bool,
+}
+
+#[derive(Deserialize)]
+struct IndexDescriptionWire {
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "ID", default)]
+    id: u32,
+    #[serde(rename = "Fields", default)]
+    fields: Vec<IndexedFieldDescription>,
+    #[serde(rename = "Kind", default)]
+    kind: u8,
+    #[serde(rename = "KindDescription", default)]
+    kind_description: Option<serde_json::Value>,
+    #[serde(rename = "Unique", default)]
+    unique: bool,
+}
+
+impl Serialize for IndexDescription {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let kind = self
+            .kind
+            .unwrap_or(IndexKind::Ordered(OrderedIndexDescription {
+                unique: self.unique,
+            }));
+        let unique = match kind {
+            IndexKind::Ordered(ordered) => ordered.unique,
+            IndexKind::Vector(_) => false,
+        };
+        let (kind, kind_description) = kind.into_wire();
+
+        IndexDescriptionRef {
+            name: &self.name,
+            id: self.id,
+            fields: &self.fields,
+            kind,
+            kind_description,
+            unique,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IndexDescription {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = IndexDescriptionWire::deserialize(deserializer)?;
+        let kind = IndexKind::from_wire(wire.kind, wire.kind_description, wire.unique)?;
+        let unique = match kind {
+            IndexKind::Ordered(ordered) => ordered.unique,
+            IndexKind::Vector(_) => false,
+        };
+
+        Ok(Self {
+            name: wire.name,
+            id: wire.id,
+            fields: wire.fields,
+            unique,
+            kind: Some(kind),
+            auto_generated: false,
+        })
+    }
 }
 
 impl IndexDescription {
@@ -238,7 +315,7 @@ mod tests {
         assert!(json.contains("\"Fields\""));
 
         let parsed: IndexDescription = serde_json::from_str(&json).unwrap();
-        assert_eq!(index, parsed);
+        assert_eq!(index.normalized(), parsed);
     }
 
     #[test]
@@ -544,8 +621,7 @@ pub struct OrderedIndexDescription {
 ///
 /// The concrete variant *is* the kind, so an index can never be in a state
 /// where a kind tag and its config disagree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "IndexKindWire", into = "IndexKindWire")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     Ordered(OrderedIndexDescription),
     Vector(VectorIndexDescription),
@@ -557,74 +633,90 @@ impl Default for IndexKind {
     }
 }
 
-/// The flat form both kinds share on the wire.
-///
-/// There is no discriminator: the kind is sniffed from whether a vector-only
-/// field is present, matching Go's `parseIndexKind`. A tag would have been
-/// easier to read, but adding one here would mean a description this runtime
-/// writes is not one the other can parse.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct IndexKindWire {
-    #[serde(rename = "Algorithm", default, skip_serializing_if = "Option::is_none")]
-    algorithm: Option<VectorAlgorithm>,
-    #[serde(rename = "Metric", default, skip_serializing_if = "Option::is_none")]
-    metric: Option<DistanceMetric>,
-    #[serde(
-        rename = "Dimensions",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    dimensions: Option<u32>,
-    #[serde(rename = "HNSW", default, skip_serializing_if = "Option::is_none")]
-    hnsw: Option<HnswParams>,
-    #[serde(rename = "IVFPQ", default, skip_serializing_if = "Option::is_none")]
-    ivfpq: Option<IvfPqParams>,
-    #[serde(rename = "SSG", default, skip_serializing_if = "Option::is_none")]
-    ssg: Option<SsgParams>,
-    #[serde(rename = "Unique", default, skip_serializing_if = "Option::is_none")]
-    unique: Option<bool>,
+const INDEX_KIND_ORDERED: u8 = 0;
+const INDEX_KIND_VECTOR: u8 = 1;
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum IndexKindDescriptionWire {
+    Ordered(OrderedIndexDescription),
+    Vector(VectorIndexDescription),
 }
 
-impl From<IndexKindWire> for IndexKind {
-    fn from(wire: IndexKindWire) -> Self {
-        if wire.algorithm.is_some() || wire.dimensions.is_some() {
-            IndexKind::Vector(VectorIndexDescription {
-                algorithm: wire.algorithm.unwrap_or_default(),
-                metric: wire.metric.unwrap_or_default(),
-                dimensions: wire.dimensions.unwrap_or_default(),
-                hnsw: wire.hnsw,
-                ivfpq: wire.ivfpq,
-                ssg: wire.ssg,
-            })
-        } else {
-            IndexKind::Ordered(OrderedIndexDescription {
-                unique: wire.unique.unwrap_or_default(),
-            })
+#[derive(Serialize)]
+struct IndexKindRef {
+    #[serde(rename = "Kind")]
+    kind: u8,
+    #[serde(rename = "KindDescription")]
+    kind_description: IndexKindDescriptionWire,
+}
+
+#[derive(Deserialize)]
+struct IndexKindWire {
+    #[serde(rename = "Kind")]
+    kind: u8,
+    #[serde(rename = "KindDescription", default)]
+    kind_description: Option<serde_json::Value>,
+}
+
+impl IndexKind {
+    fn into_wire(self) -> (u8, IndexKindDescriptionWire) {
+        match self {
+            Self::Ordered(ordered) => (
+                INDEX_KIND_ORDERED,
+                IndexKindDescriptionWire::Ordered(ordered),
+            ),
+            Self::Vector(vector) => (INDEX_KIND_VECTOR, IndexKindDescriptionWire::Vector(vector)),
+        }
+    }
+
+    fn from_wire<E: serde::de::Error>(
+        kind: u8,
+        kind_description: Option<serde_json::Value>,
+        legacy_unique: bool,
+    ) -> std::result::Result<Self, E> {
+        match kind {
+            INDEX_KIND_ORDERED => {
+                let ordered = match kind_description {
+                    Some(value) => serde_json::from_value(value).map_err(E::custom)?,
+                    None => OrderedIndexDescription {
+                        unique: legacy_unique,
+                    },
+                };
+                Ok(Self::Ordered(ordered))
+            }
+            INDEX_KIND_VECTOR => {
+                let vector = match kind_description {
+                    Some(value) => serde_json::from_value(value).map_err(E::custom)?,
+                    None => VectorIndexDescription::default(),
+                };
+                Ok(Self::Vector(vector))
+            }
+            _ => Err(E::custom(format!("unknown index kind: {kind}"))),
         }
     }
 }
 
-impl From<IndexKind> for IndexKindWire {
-    fn from(kind: IndexKind) -> Self {
-        match kind {
-            IndexKind::Ordered(ordered) => Self {
-                algorithm: None,
-                metric: None,
-                dimensions: None,
-                hnsw: None,
-                ivfpq: None,
-                ssg: None,
-                unique: Some(ordered.unique),
-            },
-            IndexKind::Vector(vector) => Self {
-                algorithm: Some(vector.algorithm),
-                metric: Some(vector.metric),
-                dimensions: Some(vector.dimensions),
-                hnsw: vector.hnsw,
-                ivfpq: vector.ivfpq,
-                ssg: vector.ssg,
-                unique: None,
-            },
+impl Serialize for IndexKind {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (kind, kind_description) = self.into_wire();
+        IndexKindRef {
+            kind,
+            kind_description,
         }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IndexKind {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = IndexKindWire::deserialize(deserializer)?;
+        Self::from_wire(wire.kind, wire.kind_description, false)
     }
 }

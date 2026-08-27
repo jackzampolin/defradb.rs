@@ -1,10 +1,10 @@
 //! The exact JSON a Go node exchanges for an index description.
 //!
-//! Transcribed from `sourcenetwork/defradb` PR 5096 @ `e5dd907e`,
+//! Transcribed from `sourcenetwork/defradb` @ `f73a903f`,
 //! `client/index.go`. None of those structs carry json tags, so
 //! `encoding/json` uses the Go field names verbatim, and `IndexDescription`
 //! marshals through the `indexDescription` mirror: `Name`, `ID`, `Fields`,
-//! `Kind`, `Unique`.
+//! `Kind`, `KindDescription`, `Unique`.
 //!
 //! **This is read from source, not from a running Go node.** No Go toolchain is
 //! available here, and PR 5096 is not in `GO_COMPAT_COMMIT`, so nothing in CI
@@ -48,6 +48,25 @@ fn vector() -> VectorIndexDescription {
 }
 
 #[test]
+fn go_hnsw_fixture_is_byte_identical() {
+    let mut desc = IndexDescription::new("by_embedding")
+        .with_field("embedding", false)
+        .as_vector(VectorIndexDescription {
+            dimensions: 3,
+            ..vector()
+        })
+        .normalized();
+    desc.id = 1;
+
+    let fixture = r#"{"Name":"by_embedding","ID":1,"Fields":[{"Name":"embedding","Descending":false}],"Kind":1,"KindDescription":{"Algorithm":"HNSW","Metric":"COSINE","Dimensions":3,"HNSW":{"M":16,"EfConstruction":128,"EfSearch":64}},"Unique":false}"#;
+    assert_eq!(serde_json::to_string(&desc).unwrap(), fixture);
+    assert_eq!(
+        serde_json::from_str::<IndexDescription>(fixture).unwrap(),
+        desc
+    );
+}
+
+#[test]
 fn a_vector_index_matches_gos_marshalled_shape() {
     let desc = IndexDescription::new("by_embedding")
         .with_field("embedding", false)
@@ -60,7 +79,8 @@ fn a_vector_index_matches_gos_marshalled_shape() {
             "Name": "by_embedding",
             "ID": 0,
             "Fields": [{"Name": "embedding", "Descending": false}],
-            "Kind": {
+            "Kind": 1,
+            "KindDescription": {
                 "Algorithm": "HNSW",
                 "Metric": "COSINE",
                 "Dimensions": 768,
@@ -84,7 +104,8 @@ fn an_ordered_index_matches_gos_marshalled_shape() {
             "Name": "by_email",
             "ID": 0,
             "Fields": [{"Name": "email", "Descending": false}],
-            "Kind": {"Unique": true},
+            "Kind": 0,
+            "KindDescription": {"Unique": true},
             "Unique": true
         })
     );
@@ -98,39 +119,58 @@ fn no_level_carries_a_field_go_does_not() {
         .normalized();
     let json = serde_json::to_value(&desc).unwrap();
 
-    assert_eq!(keys(&json), ["Fields", "ID", "Kind", "Name", "Unique"]);
     assert_eq!(
-        keys(&json["Kind"]),
+        keys(&json),
+        ["Fields", "ID", "Kind", "KindDescription", "Name", "Unique"]
+    );
+    assert_eq!(
+        keys(&json["KindDescription"]),
         ["Algorithm", "Dimensions", "HNSW", "Metric"]
     );
     assert_eq!(
-        keys(&json["Kind"]["HNSW"]),
+        keys(&json["KindDescription"]["HNSW"]),
         ["EfConstruction", "EfSearch", "M"]
     );
     assert_eq!(keys(&json["Fields"][0]), ["Descending", "Name"]);
 
     let ordered =
         serde_json::to_value(IndexDescription::new("i").as_unique().normalized()).unwrap();
-    assert_eq!(keys(&ordered["Kind"]), ["Unique"]);
+    assert_eq!(keys(&ordered["KindDescription"]), ["Unique"]);
 }
 
-/// Go's `parseIndexKind` sniffs `Algorithm != nil || Dimensions != nil`, so a
-/// partial Kind a Go node could emit must resolve the same way here.
 #[test]
-fn a_partial_kind_resolves_as_go_resolves_it() {
-    let by_algorithm: IndexDescription =
-        serde_json::from_value(json!({"Name": "i", "ID": 1, "Kind": {"Algorithm": "HNSW"}}))
-            .unwrap();
-    assert!(by_algorithm.is_vector());
-
-    let by_dimensions: IndexDescription =
-        serde_json::from_value(json!({"Name": "i", "ID": 1, "Kind": {"Dimensions": 4}})).unwrap();
-    assert!(by_dimensions.is_vector());
-
-    let ordered: IndexDescription =
-        serde_json::from_value(json!({"Name": "i", "ID": 1, "Kind": {"Unique": true}})).unwrap();
+fn kind_is_the_sole_authority() {
+    let ordered: IndexDescription = serde_json::from_value(json!({
+        "Name": "i",
+        "ID": 1,
+        "Kind": 0,
+        "KindDescription": {"Algorithm": "HNSW", "Unique": true}
+    }))
+    .unwrap();
     assert!(!ordered.is_vector());
     assert!(ordered.resolved_unique());
+
+    let vector: IndexDescription = serde_json::from_value(json!({
+        "Name": "i",
+        "ID": 1,
+        "Kind": 1,
+        "KindDescription": {"Dimensions": 4, "Unique": true}
+    }))
+    .unwrap();
+    assert!(vector.is_vector());
+    assert!(!vector.resolved_unique());
+}
+
+#[test]
+fn an_unknown_kind_is_rejected() {
+    let error = serde_json::from_value::<IndexDescription>(json!({
+        "Name": "i",
+        "Kind": 42,
+        "KindDescription": {}
+    }))
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown index kind: 42"));
 }
 
 /// `HNSW` is a nil pointer in Go, which `encoding/json` emits as `null`; serde
@@ -146,7 +186,10 @@ fn an_absent_hnsw_block_is_omitted_and_parses_back() {
         .normalized();
     let json = serde_json::to_value(&desc).unwrap();
     assert!(
-        !json["Kind"].as_object().unwrap().contains_key("HNSW"),
+        !json["KindDescription"]
+            .as_object()
+            .unwrap()
+            .contains_key("HNSW"),
         "serde omits the key rather than emitting null"
     );
 
@@ -156,7 +199,8 @@ fn an_absent_hnsw_block_is_omitted_and_parses_back() {
     // Go's `null` must still parse, since that is what a Go node sends.
     let from_go: IndexDescription = serde_json::from_value(json!({
         "Name": "i", "ID": 1,
-        "Kind": {"Algorithm": "HNSW", "Metric": "COSINE", "Dimensions": 4, "HNSW": null}
+        "Kind": 1,
+        "KindDescription": {"Algorithm": "HNSW", "Metric": "COSINE", "Dimensions": 4, "HNSW": null}
     }))
     .unwrap();
     assert_eq!(from_go.vector().map(|v| v.hnsw), Some(None));
@@ -186,7 +230,7 @@ fn dot_is_the_one_metric_go_cannot_parse() {
         })
         .normalized();
     assert_eq!(
-        serde_json::to_value(&desc).unwrap()["Kind"]["Metric"],
+        serde_json::to_value(&desc).unwrap()["KindDescription"]["Metric"],
         json!("DOT")
     );
 }
@@ -199,7 +243,7 @@ fn the_compat_unique_field_tracks_the_kind() {
     desc.kind = Some(IndexKind::Ordered(OrderedIndexDescription { unique: true }));
     let json = serde_json::to_value(desc.normalized()).unwrap();
     assert_eq!(json["Unique"], true);
-    assert_eq!(json["Kind"]["Unique"], true);
+    assert_eq!(json["KindDescription"]["Unique"], true);
 }
 
 /// `FLAT` is the second divergence: Go's `VectorAlgorithm` defines only `HNSW`.
@@ -226,8 +270,11 @@ fn flat_is_an_algorithm_go_cannot_parse() {
         })
         .normalized();
     let json = serde_json::to_value(&desc).unwrap();
-    assert_eq!(json["Kind"]["Algorithm"], json!("FLAT"));
-    assert!(!json["Kind"].as_object().unwrap().contains_key("HNSW"));
+    assert_eq!(json["KindDescription"]["Algorithm"], json!("FLAT"));
+    assert!(!json["KindDescription"]
+        .as_object()
+        .unwrap()
+        .contains_key("HNSW"));
 
     let back: IndexDescription = serde_json::from_value(json).unwrap();
     assert_eq!(
@@ -288,12 +335,15 @@ fn ivfpq_is_an_algorithm_go_cannot_parse() {
         .normalized();
 
     let json = serde_json::to_value(&desc).unwrap();
-    assert_eq!(json["Kind"]["Algorithm"], json!("IVF_PQ"));
+    assert_eq!(json["KindDescription"]["Algorithm"], json!("IVF_PQ"));
     assert_eq!(
-        json["Kind"]["IVFPQ"],
+        json["KindDescription"]["IVFPQ"],
         json!({"NList": 256, "NProbe": 16, "M": 32, "SampleBytes": 1_048_576})
     );
-    assert!(!json["Kind"].as_object().unwrap().contains_key("HNSW"));
+    assert!(!json["KindDescription"]
+        .as_object()
+        .unwrap()
+        .contains_key("HNSW"));
 
     let back: IndexDescription = serde_json::from_value(json).unwrap();
     assert_eq!(
@@ -313,7 +363,7 @@ fn an_hnsw_description_carries_no_ivfpq_key() {
     let json =
         serde_json::to_value(IndexDescription::new("i").as_vector(vector()).normalized()).unwrap();
     assert_eq!(
-        keys(&json["Kind"]),
+        keys(&json["KindDescription"]),
         ["Algorithm", "Dimensions", "HNSW", "Metric"]
     );
 }
@@ -343,9 +393,9 @@ fn ssg_is_an_algorithm_go_cannot_parse() {
         .normalized();
 
     let json = serde_json::to_value(&desc).unwrap();
-    assert_eq!(json["Kind"]["Algorithm"], json!("SSG"));
+    assert_eq!(json["KindDescription"]["Algorithm"], json!("SSG"));
     assert_eq!(
-        json["Kind"]["SSG"],
+        json["KindDescription"]["SSG"],
         json!({"R": 32, "Angle": 45, "Pool": 200})
     );
 
