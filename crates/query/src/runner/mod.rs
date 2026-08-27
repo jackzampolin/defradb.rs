@@ -53,6 +53,7 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::{CollectionProvider, StaticCollectionProvider};
 use crate::limits::QueryLimits;
+use crate::mutator::CollectionTruncator;
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
@@ -195,6 +196,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) registry: Arc<R>,
     /// Document mutator for mutation operations (optional)
     pub(crate) mutator: Option<Arc<dyn DocMutator>>,
+    /// Collection truncator for local hard-delete mutations (optional).
+    pub(crate) collection_truncator: Option<Arc<dyn CollectionTruncator>>,
     /// Document ACP for permission checks.
     ///
     /// Defaults to a no-op ACP implementation that allows access and treats
@@ -236,6 +239,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             collection_provider: Arc::new(StaticCollectionProvider::new(collections)),
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
+            collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             node_did: None,
@@ -257,6 +261,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             collection_provider: provider,
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
+            collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             node_did: None,
@@ -280,6 +285,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collection_provider: Arc::new(StaticCollectionProvider::new(collections)),
             registry: Arc::new(registry),
             mutator: None,
+            collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             node_did: None,
@@ -306,6 +312,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collection_provider: provider,
             registry: Arc::new(registry),
             mutator: None,
+            collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             node_did: None,
@@ -331,6 +338,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collection_provider: provider,
             registry,
             mutator: None,
+            collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             node_did: None,
@@ -347,6 +355,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// This enables support for CREATE, UPDATE, and DELETE mutations.
     pub fn with_mutator(mut self, mutator: Arc<dyn DocMutator>) -> Self {
         self.mutator = Some(mutator);
+        self
+    }
+
+    /// Set the collection truncator for `truncate_<Collection>` mutations.
+    pub fn with_collection_truncator(mut self, truncator: Arc<dyn CollectionTruncator>) -> Self {
+        self.collection_truncator = Some(truncator);
         self
     }
 

@@ -120,6 +120,42 @@ fn test_parse_delete_with_filter() {
 }
 
 #[test]
+fn test_parse_truncate_mutation() {
+    let mutations =
+        parse_mutations(r#"mutation { truncate_Users(filter: {active: {_eq: false}}) }"#).unwrap();
+
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(mutations[0].mutation_type, MutationType::Truncate);
+    assert_eq!(mutations[0].collection_name, "Users");
+    assert!(mutations[0].filter.is_some());
+
+    let unfiltered = parse_mutations(r#"mutation { truncate_Users }"#).unwrap();
+    assert!(unfiltered[0].filter.is_none());
+}
+
+#[test]
+fn test_truncate_rejects_null_filter_and_selection() {
+    for query in [
+        r#"mutation { truncate_Users(filter: null) }"#,
+        r#"mutation { truncate_Users { _docID } }"#,
+    ] {
+        assert!(
+            parse_mutations(query).is_err(),
+            "query should fail: {query}"
+        );
+    }
+
+    let mut variables = HashMap::new();
+    variables.insert("filter".to_string(), JsonValue::Null);
+    let error = parse_mutations_with_variables(
+        r#"mutation ($filter: UsersFilterArg) { truncate_Users(filter: $filter) }"#,
+        Some(&variables),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("truncate filter cannot be null"));
+}
+
+#[test]
 fn test_parse_multiple_mutations() {
     let query = r#"
         mutation {

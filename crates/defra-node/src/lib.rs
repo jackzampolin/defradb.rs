@@ -1500,6 +1500,7 @@ impl NodeBuilder {
         let query_runner =
             query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry.clone())
                 .with_mutator(mutator)
+                .with_collection_truncator(db::DbCollectionTruncator::new_arc(database.clone()))
                 .with_acp(document_acp.clone())
                 .with_node_did(database.node_did())
                 .with_lens_store(database.lens_store().clone())

@@ -97,6 +97,65 @@ fn router_with_rest() -> axum::Router {
 }
 
 #[tokio::test]
+async fn truncate_collection_forwards_optional_filter() {
+    let operations = Arc::new(MockCollectionManagementOperations::new());
+    let router = router_with_collection_mgmt_operations(operations.clone());
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/v0/collections/Users/truncate")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"filter":{"name":{"_eq":"Alice"}}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/v0/collections/Users/truncate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        operations.truncated_collections(),
+        vec![
+            ("Users".to_string(), Some(json!({"name": {"_eq": "Alice"}}))),
+            ("Users".to_string(), None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn truncate_collection_rejects_missing_or_null_filter_body() {
+    for body in ["{}", r#"{"filter":null}"#, "not json"] {
+        let operations = Arc::new(MockCollectionManagementOperations::new());
+        let response = router_with_collection_mgmt_operations(operations.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/v0/collections/Users/truncate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(operations.truncated_collections().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn collection_doc_ids_returns_paginated_metadata() {
     let router = router_with_rest();
     let response = router

@@ -57,11 +57,27 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
             .map_err(|e| format!("{}", e))
     }
 
-    async fn truncate_collection(&self, name: &str) -> Result<(), String> {
-        self.database
-            .truncate_collection(name, None)
-            .await
-            .map_err(|e| format!("{}", e))
+    async fn truncate_collection(
+        &self,
+        name: &str,
+        filter: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        match filter {
+            Some(serde_json::Value::Object(conditions)) => {
+                self.database
+                    .truncate_collection_with_filter(
+                        name,
+                        query::Filter::from_conditions(conditions),
+                        None,
+                    )
+                    .await
+            }
+            Some(_) => Err(db::Error::Query(query::QueryError::invalid_filter(
+                "filter must be an object",
+            ))),
+            None => self.database.truncate_collection(name, None).await,
+        }
+        .map_err(|error| error.to_string())
     }
 
     async fn purge(&self) -> Result<(), String> {

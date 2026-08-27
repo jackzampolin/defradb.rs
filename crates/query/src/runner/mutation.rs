@@ -142,6 +142,38 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
+        if mutations
+            .iter()
+            .any(|mutation| mutation.mutation_type == MutationType::Truncate)
+        {
+            if mutations.len() != 1 || mutations[0].mutation_type != MutationType::Truncate {
+                return Err(QueryError::parse(
+                    "truncate mutation must be the only field in an operation",
+                ));
+            }
+            if fetcher_override.is_some() {
+                return Err(QueryError::execution(
+                    "truncate mutation cannot run in a transaction",
+                ));
+            }
+
+            let mutation = &mutations[0];
+            let truncator = self.collection_truncator.as_ref().ok_or_else(|| {
+                QueryError::execution(
+                    "truncate mutations require a collection truncator; call with_collection_truncator() first",
+                )
+            })?;
+            truncator
+                .truncate(
+                    &mutation.collection_name,
+                    mutation.filter.clone(),
+                    caller_identity.as_ref(),
+                )
+                .await?;
+
+            return Ok(serde_json::json!({ mutation.output_name(): true }));
+        }
+
         // Compute request time once for all mutations in this request.
         // This ensures UTC_NOW resolves to the same timestamp across all mutations,
         // matching Go DefraDB's behavior.
@@ -396,6 +428,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     // CREATE permission is checked implicitly -- anyone can create
                     // but ownership is established via registration after the write.
                 }
+                MutationType::Truncate => unreachable!("truncate bypasses document ACP checks"),
             }
         }
 
@@ -611,6 +644,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                 Box::new(node)
             }
+            MutationType::Truncate => unreachable!("truncate bypasses document mutation plans"),
         };
 
         // Execute the plan.
@@ -960,13 +994,35 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
-    use crate::mutator::{CreateResult, DeleteResult, UpdateResult};
+    use crate::mutator::{CollectionTruncator, CreateResult, DeleteResult, UpdateResult};
     use crate::test_utils::MockFetcher;
     use crate::{QueryExecutor, QueryRequest};
 
     struct CapturingMutator {
         created_docs: Mutex<Vec<Document>>,
         broadcast_creators: Mutex<Vec<Option<String>>>,
+    }
+
+    #[derive(Default)]
+    struct CapturingTruncator {
+        calls: Mutex<Vec<(String, bool)>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl CollectionTruncator for CapturingTruncator {
+        async fn truncate(
+            &self,
+            collection_name: &str,
+            filter: Option<crate::Filter>,
+            _identity: Option<&Did>,
+        ) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((collection_name.to_string(), filter.is_some()));
+            Ok(())
+        }
     }
 
     impl CapturingMutator {
@@ -984,6 +1040,65 @@ mod tests {
         fn broadcast_creators(&self) -> Vec<Option<String>> {
             self.broadcast_creators.lock().unwrap().clone()
         }
+    }
+
+    #[tokio::test]
+    async fn truncate_mutation_forwards_filter_and_returns_true() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        );
+        let truncator = Arc::new(CapturingTruncator::default());
+        let runner = QueryRunner::new(MockFetcher::new(), vec![collection])
+            .with_mutator(Arc::new(CapturingMutator::new()))
+            .with_collection_truncator(truncator.clone());
+
+        let result = runner
+            .execute_mutation(r#"mutation { truncate_User(filter: {_docID: {_eq: "bae-1"}}) }"#)
+            .await
+            .unwrap();
+
+        assert_eq!(result, serde_json::json!({"truncate_User": true}));
+        let calls = truncator.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "User");
+        assert!(calls[0].1);
+    }
+
+    #[tokio::test]
+    async fn filtered_truncate_rejects_transactions_and_sibling_mutations() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        );
+        let mutator = Arc::new(CapturingMutator::new());
+        let runner = QueryRunner::new(MockFetcher::new(), vec![collection])
+            .with_mutator(mutator.clone())
+            .with_collection_truncator(Arc::new(CapturingTruncator::default()));
+
+        let mixed = runner
+            .execute_mutation(
+                r#"mutation {
+                    truncate_User
+                    delete_User { _docID }
+                }"#,
+            )
+            .await
+            .unwrap_err();
+        assert!(mixed.to_string().contains("only field in an operation"));
+
+        let mutations = crate::parse_mutations(r#"mutation { truncate_User }"#).unwrap();
+        let transaction = runner
+            .execute_parsed_mutations(mutations, mutator, None, Some(Arc::new(MockFetcher::new())))
+            .await
+            .unwrap_err();
+        assert!(transaction
+            .to_string()
+            .contains("cannot run in a transaction"));
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

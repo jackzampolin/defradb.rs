@@ -20,6 +20,8 @@ pub enum MutationType {
     Delete,
     /// Create or update documents (insert if not exists, update if exists)
     Upsert,
+    /// Permanently remove all or matching documents from local storage.
+    Truncate,
 }
 
 impl MutationType {
@@ -38,6 +40,7 @@ impl MutationType {
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
             "upsert" => Some(Self::Upsert),
+            "truncate" => Some(Self::Truncate),
             _ => None,
         }
     }
@@ -49,6 +52,7 @@ impl MutationType {
             Self::Update => "update",
             Self::Delete => "delete",
             Self::Upsert => "upsert",
+            Self::Truncate => "truncate",
         }
     }
 }
@@ -138,6 +142,23 @@ impl Mutation {
     pub fn upsert(collection_name: impl Into<String>) -> Self {
         Self {
             mutation_type: MutationType::Upsert,
+            collection_name: collection_name.into(),
+            alias: None,
+            create_input: Vec::new(),
+            update_input: HashMap::new(),
+            doc_ids: None,
+            filter: None,
+            fields: Vec::new(),
+            document_mapping: DocumentMapping::new(),
+            encrypt_doc: false,
+            encrypt_fields: Vec::new(),
+        }
+    }
+
+    /// Create a new TRUNCATE mutation.
+    pub fn truncate(collection_name: impl Into<String>) -> Self {
+        Self {
+            mutation_type: MutationType::Truncate,
             collection_name: collection_name.into(),
             alias: None,
             create_input: Vec::new(),

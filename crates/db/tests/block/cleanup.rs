@@ -112,6 +112,59 @@ async fn deleting_a_dag_keeps_the_shared_subtree() {
 }
 
 #[tokio::test]
+async fn deleting_all_aliases_removes_the_owned_dag() {
+    let (blockstore, systemstore) = stores().await;
+    let encryption = b"encryption".to_vec();
+    let signature = b"signature".to_vec();
+    let encryption_cid = defra_core::block::generate_cid_from_bytes(&encryption).unwrap();
+    let signature_cid = defra_core::block::generate_cid_from_bytes(&signature).unwrap();
+    let block = Block::new_with_options(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "name".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: vec![1],
+        }),
+        vec![],
+        vec![],
+        Some(encryption_cid),
+        Some(signature_cid),
+    );
+    let cid = block.generate_cid().unwrap();
+    for (cid, bytes) in [
+        (cid, block.to_dag_cbor().unwrap()),
+        (encryption_cid, encryption),
+        (signature_cid, signature),
+    ] {
+        blockstore.set(&cid.to_bytes(), &bytes).await.unwrap();
+    }
+    for alias in ["doc-v0", "doc-v1"] {
+        for owned_cid in [cid, encryption_cid] {
+            db::docid::map::set_block_doc_id_mapping(&systemstore, &owned_cid.to_string(), alias)
+                .await
+                .unwrap();
+        }
+    }
+
+    delete_owned_dag_for_owners(
+        &blockstore,
+        &systemstore,
+        &[cid],
+        &["doc-v0".to_string(), "doc-v1".to_string()],
+    )
+    .await
+    .unwrap();
+
+    for deleted_cid in [cid, encryption_cid, signature_cid] {
+        assert!(blockstore
+            .get(&deleted_cid.to_bytes())
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
 async fn deleting_one_commit_owner_clears_child_ownership_but_keeps_shared_bytes() {
     let (blockstore, systemstore) = stores().await;
     let field = Block::new(

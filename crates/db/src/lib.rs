@@ -87,7 +87,7 @@ pub use collection::retriever::{resolve_collection_from_doc_id, DocCollectionInf
 pub use collection::selector::CollectionSelector;
 pub use collection::snapshot::CollectionSnapshot;
 #[allow(deprecated)]
-pub use collection::{collection_short_id, Collection};
+pub use collection::{collection_short_id, Collection, DbCollectionTruncator};
 pub use database::{
     DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES,
     DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE,

@@ -36,7 +36,10 @@ pub mod retriever;
 pub mod selector;
 pub mod snapshot;
 pub mod stream;
+mod truncator;
 pub mod validation;
+
+pub use truncator::DbCollectionTruncator;
 
 /// Derive the legacy short ID from a collection_id string.
 ///

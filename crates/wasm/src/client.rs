@@ -212,7 +212,9 @@ impl DefraClient {
         let fetcher = LensedAutoCommitFetcher::new(Arc::clone(&db));
         let provider = DbCollectionProvider::new_arc(Arc::clone(&db));
         let mutator = Arc::new(AutoCommitMutator::new(Arc::clone(&db)));
-        let runner = QueryRunner::with_provider(fetcher, provider).with_mutator(mutator);
+        let runner = QueryRunner::with_provider(fetcher, provider)
+            .with_mutator(mutator)
+            .with_collection_truncator(db::DbCollectionTruncator::new_arc(Arc::clone(&db)));
 
         Ok(Self {
             db: Some(db),

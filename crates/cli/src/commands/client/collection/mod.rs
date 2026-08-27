@@ -103,7 +103,11 @@ pub struct SetActiveArgs {
 
 /// Arguments for truncate command
 #[derive(Args, Debug)]
-pub struct TruncateArgs {}
+pub struct TruncateArgs {
+    /// JSON document filter. Without it, every document is removed.
+    #[arg(long)]
+    pub filter: Option<String>,
+}
 
 /// Arguments for delete command (Go #4688 parity).
 #[derive(Args, Debug)]

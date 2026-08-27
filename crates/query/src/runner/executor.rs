@@ -53,6 +53,11 @@ fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
         ParsedOperation::Mutation { mutations, .. } => {
             if mutations
                 .iter()
+                .any(|m| m.mutation_type == crate::mapper::MutationType::Truncate)
+            {
+                NodePermission::CollectionTruncate
+            } else if mutations
+                .iter()
                 .any(|m| m.mutation_type == crate::mapper::MutationType::Delete)
             {
                 NodePermission::DocumentDelete
@@ -553,6 +558,19 @@ mod tests {
     use crate::fetcher::{DocFetcher, FetchByIdsResult};
     use crate::test_utils::{MockFetcher, MockTxnRegistry};
     use crate::txn::{GetTransactionResult, TransactionContext, TransactionRegistry};
+
+    #[test]
+    fn truncate_uses_collection_truncate_permission() {
+        let parsed = ParsedOperation::Mutation {
+            mutations: vec![crate::mapper::Mutation::truncate("Users")],
+            explain: None,
+        };
+
+        assert_eq!(
+            permission_for_operation(&parsed),
+            NodePermission::CollectionTruncate
+        );
+    }
 
     struct ChangingFetcher {
         call_count: std::sync::atomic::AtomicUsize,

@@ -49,10 +49,28 @@ impl TruncateArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.collection_truncate(collection).await?;
+        let filter = self
+            .filter
+            .as_deref()
+            .map(parse_truncate_filter)
+            .transpose()?;
+
+        client
+            .collection_truncate(collection, filter.as_ref())
+            .await?;
         println!("Truncated collection {}", collection);
         Ok(())
     }
+}
+
+fn parse_truncate_filter(value: &str) -> Result<serde_json::Value> {
+    let filter = serde_json::from_str::<serde_json::Value>(value)?;
+    if !filter.is_object() {
+        return Err(Error::MissingInput(
+            "--filter must be a non-null JSON object".to_string(),
+        ));
+    }
+    Ok(filter)
 }
 
 impl CollectionDeleteArgs {
@@ -86,5 +104,18 @@ impl CollectionDeleteArgs {
             println!("Deleted collections {}", names.join(", "));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_truncate_filter;
+
+    #[test]
+    fn truncate_filter_requires_a_json_object() {
+        assert!(parse_truncate_filter(r#"{"name":{"_eq":"Alice"}}"#).is_ok());
+        for invalid in ["null", "[]", "not json"] {
+            assert!(parse_truncate_filter(invalid).is_err());
+        }
     }
 }
