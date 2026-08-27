@@ -1,69 +1,18 @@
+use crate::one_to_many_common::{add_author, add_book, add_schema};
 use integration_test::{DefraClient, TestCluster};
 
 /// Mirrors the Go one_to_many fixture: authors first, then books in the order
 /// listed by the Go tests, so child scan order == insertion order.
 fn setup(node: &DefraClient) {
-    node.schema_add(
-        r#"
-        type Book {
-            name: String
-            rating: Float
-            author: Author
-        }
+    add_schema(node);
 
-        type Author {
-            name: String
-            age: Int
-            verified: Boolean
-            published: [Book]
-        }
-        "#,
-    )
-    .expect("add schema");
+    let john = add_author(node, "John Grisham", 65, true);
+    let cornelia = add_author(node, "Cornelia Funke", 62, false);
 
-    let john = node
-        .query(
-            r#"mutation { add_Author(input: {name: "John Grisham", age: 65, verified: true}) { _docID } }"#,
-        )
-        .expect("add John");
-    let john_id = john["add_Author"][0]["_docID"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let cornelia = node
-        .query(
-            r#"mutation { add_Author(input: {name: "Cornelia Funke", age: 62, verified: false}) { _docID } }"#,
-        )
-        .expect("add Cornelia");
-    let cornelia_id = cornelia["add_Author"][0]["_docID"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    for (name, rating, author) in [
-        ("Painted House", 4.9, &john_id),
-        ("A Time for Mercy", 4.5, &john_id),
-        ("The Associate", 4.2, &john_id),
-        ("Theif Lord", 4.8, &cornelia_id),
-    ] {
-        node.query(&format!(
-            r#"mutation {{ add_Book(input: {{name: "{}", rating: {}, author: "{}"}}) {{ _docID }} }}"#,
-            name, rating, author
-        ))
-        .unwrap_or_else(|e| panic!("add {}: {}", name, e));
-    }
-}
-
-fn sum_for(result: &serde_json::Value, author: &str, key: &str) -> f64 {
-    result["Author"]
-        .as_array()
-        .expect("Author array")
-        .iter()
-        .find(|a| a["name"] == author)
-        .unwrap_or_else(|| panic!("author {} missing", author))[key]
-        .as_f64()
-        .expect("numeric aggregate")
+    add_book(node, "Painted House", 4.9, &john);
+    add_book(node, "A Time for Mercy", 4.5, &john);
+    add_book(node, "The Associate", 4.2, &john);
+    add_book(node, "Theif Lord", 4.8, &cornelia);
 }
 
 async fn sum_with_alias_order_test(cluster: TestCluster) {
@@ -113,8 +62,13 @@ async fn sum_with_limit_test(cluster: TestCluster) {
         )
         .expect("query authors");
 
-    assert_eq!(sum_for(&result, "John Grisham", "SUM"), 9.4);
-    assert_eq!(sum_for(&result, "Cornelia Funke", "SUM"), 4.8);
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([
+            {"name": "John Grisham", "SUM": 9.4},
+            {"name": "Cornelia Funke", "SUM": 4.8},
+        ])
+    );
 }
 
 async fn sum_with_offset_limit_test(cluster: TestCluster) {
@@ -134,8 +88,13 @@ async fn sum_with_offset_limit_test(cluster: TestCluster) {
         )
         .expect("query authors");
 
-    assert_eq!(sum_for(&result, "John Grisham", "SUM"), 8.7);
-    assert_eq!(sum_for(&result, "Cornelia Funke", "SUM"), 0.0);
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([
+            {"name": "John Grisham", "SUM": 8.7},
+            {"name": "Cornelia Funke", "SUM": 0},
+        ])
+    );
 }
 
 async fn relation_render_order_test(cluster: TestCluster) {
