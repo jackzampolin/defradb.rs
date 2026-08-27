@@ -767,8 +767,12 @@ pub trait CollectionManagementOperations: Send + Sync {
     /// of the same collection.
     async fn set_active_version(&self, version_id: &str) -> Result<(), String>;
 
-    /// Truncate a collection, deleting all documents while preserving the schema.
-    async fn truncate_collection(&self, name: &str) -> Result<(), String>;
+    /// Truncate a collection, optionally limiting removal to matching documents.
+    async fn truncate_collection(
+        &self,
+        name: &str,
+        filter: Option<serde_json::Value>,
+    ) -> Result<(), String>;
 
     /// Purge all data from all collections.
     async fn purge(&self) -> Result<(), String>;

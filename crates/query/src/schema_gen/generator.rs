@@ -456,6 +456,17 @@ pub fn generate_mutation_type(collections: &[&CollectionVersion]) -> GqlObjectTy
             format!("upsert_{}", type_name),
             GqlType::list(GqlType::named(type_name)),
         ));
+
+        mutation = mutation.with_field(
+            GqlField::new(
+                format!("truncate_{}", type_name),
+                GqlType::non_null(GqlType::boolean()),
+            )
+            .with_arg(GqlArg::new(
+                "filter",
+                GqlType::named(format!("{}FilterInput", type_name)),
+            )),
+        );
     }
 
     mutation
@@ -730,6 +741,14 @@ mod tests {
 
         let upsert = mutation.fields.iter().find(|f| f.name == "upsert_User");
         assert!(upsert.is_some());
+
+        let truncate = mutation
+            .fields
+            .iter()
+            .find(|f| f.name == "truncate_User")
+            .unwrap();
+        assert_eq!(truncate.field_type.to_sdl(), "Boolean!");
+        assert_eq!(truncate.args[0].to_sdl(), "filter: UserFilterInput");
     }
 
     #[test]

@@ -295,6 +295,34 @@ pub async fn set_doc_id_alias(
         .map_err(Error::Storage)
 }
 
+/// Return every public DocID mapped to a document short ID.
+pub async fn get_doc_id_aliases(
+    systemstore: &NamespaceView,
+    doc_short_id: u64,
+) -> Result<Vec<String>> {
+    use storage::corekv::IterOptions;
+
+    let prefix = DocShortIDToDocIDAliasKey::short_id_prefix(doc_short_id);
+    let prefix_len = prefix.len();
+    let mut iter = systemstore
+        .iterator(IterOptions::new().with_prefix(prefix))
+        .await
+        .map_err(Error::Storage)?;
+
+    let mut aliases = Vec::new();
+    while let Some(kv) = iter.next().await.map_err(Error::Storage)? {
+        if kv.key.len() > prefix_len {
+            aliases.push(
+                String::from_utf8(kv.key[prefix_len..].to_vec()).map_err(|e| {
+                    Error::InvalidDocument(format!("invalid utf-8 in doc-ID alias key: {e}"))
+                })?,
+            );
+        }
+    }
+    iter.close().await.map_err(Error::Storage)?;
+    Ok(aliases)
+}
+
 /// Record that a block belongs to a document.
 ///
 /// Field blocks can be byte-identical across documents, so ownership is a

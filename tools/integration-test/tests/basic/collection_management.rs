@@ -81,5 +81,33 @@ async fn collection_versioning_test(cluster: TestCluster) {
     assert_eq!(items[0]["name"], "widget");
 }
 
+async fn filtered_truncate_test(cluster: TestCluster) {
+    let client = cluster.client(0);
+    client
+        .schema_add("type TruncateUser { name: String age: Int }")
+        .expect("failed to add schema");
+    for (name, age) in [("Alice", 30), ("Bob", 40)] {
+        client
+            .query(&format!(
+                r#"mutation {{ add_TruncateUser(input: {{name: "{name}", age: {age}}}) {{ _docID }} }}"#
+            ))
+            .expect("failed to create document");
+    }
+
+    let result = client
+        .query(r#"mutation { truncate_TruncateUser(filter: {age: {_eq: 30}}) }"#)
+        .expect("filtered truncate failed");
+    assert_eq!(result["truncate_TruncateUser"], true);
+
+    let result = client
+        .query("query { TruncateUser { name age } }")
+        .expect("failed to query survivors");
+    assert_eq!(
+        result["TruncateUser"],
+        serde_json::json!([{"name": "Bob", "age": 40}])
+    );
+}
+
 for_each_runtime!(collection_patch, collection_patch_test);
 for_each_runtime!(collection_versioning, collection_versioning_test);
+for_each_runtime!(filtered_truncate, filtered_truncate_test);

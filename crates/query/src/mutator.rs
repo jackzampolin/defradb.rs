@@ -6,10 +6,24 @@
 use async_trait::async_trait;
 use cid::Cid;
 use document::{DocID, Document};
+use identity::Did;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
+use crate::Filter;
+
+/// Collection-level truncate operation used by GraphQL mutations.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait CollectionTruncator: MaybeSendSync {
+    async fn truncate(
+        &self,
+        collection_name: &str,
+        filter: Option<Filter>,
+        identity: Option<&Did>,
+    ) -> Result<()>;
+}
 
 /// Status of P2P broadcast after a mutation.
 ///

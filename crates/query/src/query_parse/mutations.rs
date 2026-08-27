@@ -40,6 +40,7 @@ pub(super) fn parse_field_to_mutation(
         MutationType::Update => Mutation::update(&collection_name),
         MutationType::Delete => Mutation::delete(&collection_name),
         MutationType::Upsert => Mutation::upsert(&collection_name),
+        MutationType::Truncate => Mutation::truncate(&collection_name),
     };
 
     // Capture GraphQL alias if present (e.g., "john: update_Users(...)")
@@ -125,6 +126,20 @@ pub(super) fn parse_field_to_mutation(
                 mutation.filter = Some(filter);
             }
 
+            (MutationType::Truncate, "filter") => {
+                let is_null = match arg_value {
+                    Value::Null => true,
+                    Value::Variable(name) => variables
+                        .and_then(|variables| variables.get(name.as_str()))
+                        .is_some_and(JsonValue::is_null),
+                    _ => false,
+                };
+                if is_null {
+                    return Err(QueryError::parse("truncate filter cannot be null"));
+                }
+                mutation.filter = Some(parse_filter_value(arg_value, variables)?);
+            }
+
             // Encryption: encrypt entire document
             (_, "encrypt") => {
                 if let Value::Boolean(b) = arg_value {
@@ -203,6 +218,17 @@ pub(super) fn parse_field_to_mutation(
                 )));
             }
         }
+        MutationType::Truncate => {}
+    }
+
+    if mutation_type == MutationType::Truncate {
+        if !field.selection_set.items.is_empty() {
+            return Err(QueryError::parse(format!(
+                "Field \"{}\" must not have a selection since type \"Boolean!\" has no subfields.",
+                field_name
+            )));
+        }
+        return Ok(mutation);
     }
 
     // Parse selection set (fields to return after mutation)

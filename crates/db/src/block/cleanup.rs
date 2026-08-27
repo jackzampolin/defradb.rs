@@ -127,6 +127,17 @@ pub async fn delete_owned_dag(
     roots: &[Cid],
     doc_id: &str,
 ) -> Result<()> {
+    delete_owned_dag_for_owners(blockstore, systemstore, roots, &[doc_id.to_owned()]).await
+}
+
+/// Remove several aliases' ownership from every block reachable from `roots`.
+/// Shared blocks and everything they still reference remain intact.
+pub async fn delete_owned_dag_for_owners(
+    blockstore: &NamespaceView,
+    systemstore: &NamespaceView,
+    roots: &[Cid],
+    doc_ids: &[String],
+) -> Result<()> {
     let mut stack = roots.to_vec();
     let mut edges: HashMap<Cid, Vec<Cid>> = HashMap::new();
     let mut signatures: HashMap<Cid, Cid> = HashMap::new();
@@ -152,7 +163,11 @@ pub async fn delete_owned_dag(
 
     let mut retained = HashSet::new();
     for cid in &visited {
-        if !remove_owner(systemstore, cid, doc_id).await? {
+        let mut has_owner = true;
+        for doc_id in doc_ids {
+            has_owner = !remove_owner(systemstore, cid, doc_id).await?;
+        }
+        if has_owner {
             retained.insert(*cid);
         }
     }

@@ -57,6 +57,20 @@ pub(super) fn build_mutation_type(collections: &[CollectionVersion]) -> Object {
                 TypeRef::named(format!("{}FilterArg", del_coll_name)),
             )),
         );
+
+        // truncate_<Collection>
+        let truncate_coll_name = coll_name.clone();
+        mutation = mutation.field(
+            Field::new(
+                format!("truncate_{}", coll_name),
+                TypeRef::named_nn(TypeRef::BOOLEAN),
+                |_| FieldFuture::new(async { Ok(Some(GqlValue::Null)) }),
+            )
+            .argument(InputValue::new(
+                "filter",
+                TypeRef::named(format!("{}FilterArg", truncate_coll_name)),
+            )),
+        );
     }
 
     mutation

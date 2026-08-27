@@ -295,6 +295,47 @@ pub unsafe extern "C" fn truncate_collection(
     }
 }
 
+/// Truncate documents matching a JSON filter while preserving the collection schema.
+///
+/// # Safety
+///
+/// `name` and `filter_json` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn truncate_collection_with_filter(
+    node_ptr: usize,
+    identity_did: *const std::ffi::c_char,
+    name: *const std::ffi::c_char,
+    filter_json: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionTruncate,
+        name => name_str: "name",
+        filter_json => filter_str: "filter_json";
+        {
+        let filter: serde_json::Value = serde_json::from_str(&filter_str)
+            .map_err(|error| format!("invalid filter JSON: {error}"))?;
+        let conditions = filter
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "filter must be a non-null JSON object".to_string())?;
+
+        database
+            .truncate_collection_with_filter(
+                &name_str,
+                query::Filter::from_conditions(conditions),
+                None,
+            )
+            .await
+            .map_err(|e| format!("failed to truncate collection: {}", e))?;
+
+        Ok("{}".to_string())
+    }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +432,43 @@ mod tests {
             let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
             assert_eq!(value, "false");
             unsafe { crate::types::defra_free_string(result.value) };
+        }
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_truncate_collection_with_filter_validates_json_object() {
+        assert!(crate::runtime::init_runtime());
+
+        let result = new_node(NodeInitOptions::default());
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+        let sdl = CString::new("type FilteredTruncate { field: String }").unwrap();
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        let name = CString::new("FilteredTruncate").unwrap();
+        let filter = CString::new("{}").unwrap();
+        let result = unsafe {
+            truncate_collection_with_filter(node, std::ptr::null(), name.as_ptr(), filter.as_ptr())
+        };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        for invalid in ["null", "[]"] {
+            let filter = CString::new(invalid).unwrap();
+            let result = unsafe {
+                truncate_collection_with_filter(
+                    node,
+                    std::ptr::null(),
+                    name.as_ptr(),
+                    filter.as_ptr(),
+                )
+            };
+            assert_eq!(result.status, 1);
+            unsafe { crate::types::defra_free_string(result.error) };
         }
 
         node_close(node);

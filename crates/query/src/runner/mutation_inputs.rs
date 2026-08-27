@@ -5,13 +5,54 @@ use std::collections::HashMap;
 
 use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::Result;
-use crate::mapper::{Mutation, Requestable};
+use crate::mapper::{Field, Filter, Mutation, Requestable, Select};
 use crate::plan::{CreateInput, UpdateInput, UpsertInput};
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+    /// Return the document IDs matching a filter, capped to `limit` results.
+    pub async fn matching_doc_ids(
+        &self,
+        collection_name: &str,
+        filter: Filter,
+        limit: usize,
+        show_deleted: bool,
+    ) -> Result<Vec<String>> {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add_render_key(0, "_docID");
+
+        let mut select = Select::new(collection_name)
+            .with_field(Field::new("_docID"))
+            .with_filter(filter)
+            .with_limit(limit as u64);
+        select.document_mapping = mapping;
+        select.show_deleted = show_deleted;
+
+        let result = self
+            .execute_select_internal(&select, self.fetcher.as_ref(), None)
+            .await?;
+        let items = result.as_array().ok_or_else(|| {
+            crate::error::QueryError::internal("filtered document selection returned a non-list")
+        })?;
+
+        items
+            .iter()
+            .map(|item| {
+                item.get("_docID")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        crate::error::QueryError::internal(
+                            "filtered document selection returned an invalid document ID",
+                        )
+                    })
+            })
+            .collect()
+    }
+
     fn normalize_mutation_input_fields(
         &self,
         collection: &schema::CollectionVersion,

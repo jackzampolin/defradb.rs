@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::router::{CollectionManagementOperations, CollectionVersionOperations};
 
+type TruncateCall = (String, Option<serde_json::Value>);
+
 fn mock_collection_version(name: &str) -> schema::CollectionVersion {
     serde_json::from_value(json!({
         "Name": name,
@@ -23,6 +25,7 @@ pub struct MockCollectionManagementOperations {
     /// document delete from a collection drop. A no-op mock cannot: it lets a
     /// route wired back to the drop keep every assertion green.
     dropped_collections: Arc<Mutex<Vec<String>>>,
+    truncated_collections: Arc<Mutex<Vec<TruncateCall>>>,
 }
 
 impl MockCollectionManagementOperations {
@@ -37,6 +40,10 @@ impl MockCollectionManagementOperations {
     /// Collections dropped through `delete_collection`.
     pub fn dropped_collections(&self) -> Vec<String> {
         self.dropped_collections.lock().unwrap().clone()
+    }
+
+    pub fn truncated_collections(&self) -> Vec<TruncateCall> {
+        self.truncated_collections.lock().unwrap().clone()
     }
 }
 
@@ -67,7 +74,15 @@ impl CollectionManagementOperations for MockCollectionManagementOperations {
         Ok(())
     }
 
-    async fn truncate_collection(&self, _name: &str) -> Result<(), String> {
+    async fn truncate_collection(
+        &self,
+        name: &str,
+        filter: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        self.truncated_collections
+            .lock()
+            .unwrap()
+            .push((name.to_string(), filter));
         Ok(())
     }
 

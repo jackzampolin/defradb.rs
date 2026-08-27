@@ -55,7 +55,7 @@ pub use limits::{
 };
 pub use mapper::{Filter, Mutation, MutationType, Select};
 pub use mutator::{
-    BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatch,
+    BroadcastStatus, CollectionTruncator, CreateResult, DeleteResult, DocMutator, MutationBatch,
     MutationBatchController, UpdateResult,
 };
 pub use plan::{

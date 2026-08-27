@@ -50,13 +50,20 @@ impl HttpClient {
         Ok(())
     }
 
-    pub async fn collection_truncate(&self, name: &str) -> Result<()> {
+    pub async fn collection_truncate(
+        &self,
+        name: &str,
+        filter: Option<&serde_json::Value>,
+    ) -> Result<()> {
         let url = format!(
             "{}/api/v0/collections/{}/truncate",
             self.base_url,
             encode(name)
         );
-        self.request_void("DELETE", &url, None).await
+        let body = filter
+            .map(|filter| serde_json::to_string(&serde_json::json!({ "filter": filter })))
+            .transpose()?;
+        self.request_void("DELETE", &url, body.as_deref()).await
     }
 
     /// Delete one or more collections by name via Go-compatible

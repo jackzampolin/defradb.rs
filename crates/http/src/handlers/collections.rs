@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::collection_selector::CollectionSelectorQuery;
@@ -310,25 +310,45 @@ pub async fn set_active(
     Ok(StatusCode::OK)
 }
 
-/// Truncate all documents in a collection.
+#[derive(Deserialize)]
+struct TruncateCollectionRequest {
+    filter: Option<serde_json::Value>,
+}
+
+/// Truncate all or matching documents in a collection.
 ///
 /// DELETE /api/v0/collections/{name}/truncate
 ///
 /// Deletes all documents, heads, blocks, and index entries while
 /// preserving the collection schema.
 ///
-/// Requires `DocumentDelete` permission when NAC is enabled.
+/// Requires `CollectionTruncate` permission when NAC is enabled.
 pub async fn truncate_collection(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(name): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionTruncate).await?;
 
     let collection_mgmt = state.require_collection_mgmt()?;
 
+    let filter = if body.is_empty() {
+        None
+    } else {
+        let request: TruncateCollectionRequest = serde_json::from_slice(&body)
+            .map_err(|error| HttpError::BadRequest(format!("invalid request body: {error}")))?;
+        match request.filter {
+            Some(serde_json::Value::Object(filter)) => Some(serde_json::Value::Object(filter)),
+            Some(serde_json::Value::Null) | None => {
+                return Err(HttpError::BadRequest("filter is required".into()))
+            }
+            Some(_) => return Err(HttpError::BadRequest("filter must be an object".into())),
+        }
+    };
+
     collection_mgmt
-        .truncate_collection(&name)
+        .truncate_collection(&name, filter)
         .await
         .map_err(http_error_from_backend_message)?;
 

@@ -10,6 +10,7 @@ mod create;
 mod delete;
 mod lookup;
 mod resolve;
+mod truncate_filtered;
 mod version;
 
 use crate::collection::name::CollectionName;

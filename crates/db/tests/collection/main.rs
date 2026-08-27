@@ -10,4 +10,5 @@ mod retriever;
 mod selector;
 mod snapshot;
 mod stream;
+mod truncate;
 mod validation;

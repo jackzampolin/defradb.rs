@@ -248,7 +248,7 @@ pub use collection::{
     delete_collections_in_txn, delete_documents, find_collection_by_id, gc_downsample_histories,
     get_collection_by_name, get_collection_by_version_id, has_collection, materialize_collection,
     patch_collection, refresh_views, set_active_collection_version, set_collection_active_in_txn,
-    set_migration, truncate_collection,
+    set_migration, truncate_collection, truncate_collection_with_filter,
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use encrypted_index::{

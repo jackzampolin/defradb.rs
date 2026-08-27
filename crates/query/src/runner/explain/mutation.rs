@@ -92,11 +92,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<(JsonValue, usize, u64)> {
         use crate::mapper::MutationType;
 
+        if mutation.mutation_type == MutationType::Truncate {
+            return Err(QueryError::execution(
+                "truncate mutations cannot be explained",
+            ));
+        }
+
         let node_kind = match mutation.mutation_type {
             MutationType::Create => "addNode",
             MutationType::Update => "updateNode",
             MutationType::Delete => "deleteNode",
             MutationType::Upsert => "upsertNode",
+            MutationType::Truncate => unreachable!(),
         };
 
         // Build a select with the mutation's filter/doc_ids for metric collection.
@@ -222,6 +229,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                     Box::new(node)
                 }
+                MutationType::Truncate => unreachable!(),
             };
 
             // Execute the mutation plan (ignore results, we just need the side effects)
@@ -310,6 +318,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             MutationType::Upsert => {
                 // Go's upsertNode returns empty map for execute explain (no iterations)
             }
+            MutationType::Truncate => unreachable!(),
         }
 
         mutation_inner.insert("selectTopNode".to_string(), select_node_content);
@@ -403,12 +412,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         use crate::mapper::MutationType;
 
+        if mutation.mutation_type == MutationType::Truncate {
+            return Err(QueryError::execution(
+                "truncate mutations cannot be explained",
+            ));
+        }
+
         // Get the mutation node kind name
         let node_kind = match mutation.mutation_type {
             MutationType::Create => "addNode",
             MutationType::Update => "updateNode",
             MutationType::Delete => "deleteNode",
             MutationType::Upsert => "upsertNode",
+            MutationType::Truncate => unreachable!(),
         };
 
         // Build the inner select plan explanation
@@ -544,6 +560,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     mutation_attrs.insert("update".to_string(), JsonValue::Object(update_obj));
                 }
             }
+            MutationType::Truncate => unreachable!(),
         }
 
         // Add selectTopNode containing the inner select explanation
