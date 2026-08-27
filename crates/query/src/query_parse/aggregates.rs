@@ -21,6 +21,19 @@ use super::filters::parse_filter_value;
 use super::ordering::{parse_order_from_json, parse_order_value};
 use super::values::parse_int_value;
 
+/// Parse a JSON array of group field names into GroupBy.
+fn parse_group_by_json_array(arr: &[JsonValue]) -> Result<GroupBy> {
+    let fields: Result<Vec<String>> = arr
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| QueryError::parse("groupBy items must be strings"))
+        })
+        .collect();
+    Ok(GroupBy::new(fields?))
+}
+
 /// Parse groupBy argument into GroupBy.
 pub(super) fn parse_group_by_value(
     value: &Value<'_, String>,
@@ -67,15 +80,7 @@ pub(super) fn parse_group_by_value(
             let arr = json_val.as_array().ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" must be of type [String]", name))
             })?;
-            let fields: Result<Vec<String>> = arr
-                .iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| QueryError::parse("groupBy items must be strings"))
-                })
-                .collect();
-            Ok(GroupBy::new(fields?))
+            parse_group_by_json_array(arr)
         }
         _ => Err(QueryError::parse("groupBy must be a list")),
     }
@@ -184,15 +189,7 @@ pub(super) fn parse_aggregate_target_from_json(
                     let arr = val
                         .as_array()
                         .ok_or_else(|| QueryError::parse("groupBy must be a list"))?;
-                    let fields: Result<Vec<String>> = arr
-                        .iter()
-                        .map(|v| {
-                            v.as_str()
-                                .map(|s| s.to_string())
-                                .ok_or_else(|| QueryError::parse("groupBy items must be strings"))
-                        })
-                        .collect();
-                    target.group_by = Some(GroupBy::new(fields?));
+                    target.group_by = Some(parse_group_by_json_array(arr)?);
                 }
                 _ => {}
             }
