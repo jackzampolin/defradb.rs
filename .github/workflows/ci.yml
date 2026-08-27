@@ -4,51 +4,24 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Every base branch, not just main. GitHub stacks evaluate each layer as
-    # if it targeted the stack base, but a `main`-only filter still misses
-    # layers whose literal base is the branch below. `ci-scope` then drops
-    # the expensive jobs on middle layers.
     branches: ['**']
-  # Merge-queue entries. Inert until a ruleset on main requires a merge queue —
-  # nothing emits merge_group events before then. Present first so that
-  # enabling the queue does not strand entries waiting on checks that never run.
   merge_group:
     branches: [main]
 
-# Only the tip of each non-main ref keeps a run. Main includes the commit SHA
-# because GitHub replaces an existing pending run even when cancel-in-progress
-# is false; each merged commit must keep its post-merge validation. PR close is
-# handled by cancel-pr-ci.yml (closed events do not re-enter this concurrency
-# group once the merge ref is gone).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'tip' }}
-  # Two refs are never cancelled, for different reasons:
-  #   merge_group — cancelling a queue run ejects that PR from the queue, so
-  #     the queue would stall instead of merging.
-  #   main — a push to main is the only validation merged code ever gets, and
-  #     during a merge train each merge would otherwise cancel the previous
-  #     merge's run, leaving main untested exactly when it changes fastest.
-  # Every other ref keeps tip-only behaviour.
   cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
-  # Cache-server communication failures should fall back to direct compilation.
-  SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
-  # Two defradb.rs runner slots per studio host can now co-run jobs (plus
-  # other repos' runners on the same hosts). Bound each Cargo process so two
-  # simultaneous compiles fit inside a 32-core host with room for linking and
-  # sibling services — same allocation the gents fleet runs. Override without
-  # a workflow edit: gh variable set CARGO_BUILD_JOBS --body <n>
-  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS || '12' }}
-  PROTOC: /opt/homebrew/bin/protoc
+  CARGO_INCREMENTAL: '0'
+  # Standard hosted runners have 14 GB of storage. Keep test artifacts small
+  # enough for a clean runner without changing runtime behavior.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_PROFILE_SUPER_DEV_DEBUG: '0'
 
 jobs:
-  # GitHub stacks fire a full `pull_request` workflow per layer. Lint and
-  # Lean stay on every layer (cheap; the graph harness lives in Lint). The
-  # self-hosted node suites run only on standalone PRs, the stack tip
-  # (whole change), and the lowest unmerged layer (what would land on
-  # main next). Middle layers skip them.
   ci-scope:
     name: CI scope
     runs-on: ubuntu-latest
@@ -72,374 +45,257 @@ jobs:
             }
             core.setOutput('full', full ? 'true' : 'false');
 
-            // Integration matrix. Defined here rather than statically on the
-            // `integration` job so the suite list can depend on the event.
-            //
-            // signed-docs (#978) sets DEFRA_MULTIPLIERS=signed-docs so every
-            // cluster gets .with_signing() auto-applied. Signing is the
-            // node's DEFAULT configuration, so this leg is the primary
-            // integration signal and runs on every PR. The `rust` suite is
-            // the --no-signing mirror of the same test set; it runs only on
-            // non-PR events (push to main, merge queue) so each PR occupies
-            // the studio-1 slot with one full suite instead of two. An
-            // unsigned-only regression therefore surfaces on the main run
-            // after merge rather than at PR time — accepted trade, revert to
-            // unconditional if that starts biting.
-            //
-            // Each host uses sccache with incremental compilation disabled so
-            // jobs sharing its persistent target tree keep consistent flags.
-            const slot = { cargo_incremental: '0', rustc_wrapper: 'sccache' };
             const suites = [
-              { suite: 'signed-docs', needs_go: false, multipliers: 'signed-docs', host: 'studio-1', ...slot },
-              { suite: 'go-compat', needs_go: true, host: 'studio-2', ...slot },
-              { suite: 'iroh', needs_go: false, host: 'studio-2', ...slot },
+              { suite: 'signed-docs', needs_go: false, multipliers: 'signed-docs' },
+              { suite: 'go-compat', needs_go: true },
+              { suite: 'iroh', needs_go: false },
             ];
             if (context.eventName !== 'pull_request') {
-              suites.push({ suite: 'rust', needs_go: false, host: 'studio-1', ...slot });
+              suites.push({ suite: 'rust', needs_go: false });
             }
             core.setOutput('integration_matrix', JSON.stringify({ include: suites }));
 
-  # Studio jobs are pinned to a runner slot so each job's incremental target
-  # state stays warm on one machine (a suite that bounces between hosts turns
-  # a small rebuild into a full one) and so same-host exclusivity is
-  # deterministic. Each host runs two defradb.rs runner processes:
-  #
-  #   primary (labels ...,studio,studio-N) — one job at a time, so two
-  #   node-spawning jobs can only co-run on DIFFERENT hosts, where they
-  #   cannot contend on localhost ports. studio-1 carries signed-docs (plus
-  #   the unsigned rust mirror on non-PR runs); studio-2 carries conformance,
-  #   go-compat, and iroh. `build` floats between the two and publishes its
-  #   binaries to both, so every suite restores from its own host's cache
-  #   whichever host built them.
-  #
-  #   light (labels ...,defra-light,studio-N-b) — deliberately NOT labeled
-  #   `studio`/`studio-N`, so node-spawning jobs can never land there. Serves
-  #   the non-node jobs: lint (studio-1-b) and artifacts (studio-2-b).
-  #
-  # If a slot is offline its jobs queue until an operator restores the runner
-  # or moves its label — deliberate tradeoff, same as the gents fleet.
-  lint:
-    name: Lint
-    runs-on: [self-hosted, macOS, ARM64, defra-light, studio-1-b]
+  lint-default:
+    name: Lint (default)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false
-
       - uses: dtolnay/rust-toolchain@stable
-
+        with:
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
-
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all -- -D warnings
 
-      # Release builds use explicit feature contracts rather than Cargo defaults.
-      - run: cargo clippy -p cli --no-default-features --features release-full --all-targets -- -D warnings
-      - run: cargo clippy -p cli --no-default-features --features rocksdb,lark --all-targets -- -D warnings
-      - run: cargo clippy -p cli --no-default-features --features lark --all-targets -- -D warnings
+  feature-checks:
+    name: Feature checks (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: release
+            commands: |
+              cargo clippy -p cli --no-default-features --features release-full --all-targets -- -D warnings
+              cargo clippy -p cli --no-default-features --features rocksdb,lark --all-targets -- -D warnings
+              cargo clippy -p cli --no-default-features --features lark --all-targets -- -D warnings
+          - group: optional
+            commands: |
+              cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
+              cargo clippy -p cli --features otel --all-targets -- -D warnings
+              cargo clippy -p defra-node --features otel --all-targets -- -D warnings
+              cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
+              cargo clippy -p db --features p2p --all-targets -- -D warnings
+          - group: minimal
+            commands: |
+              cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
+              cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
+              cargo check -p p2p --no-default-features --features iroh-transport
+              cargo check -p db --no-default-features --features native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: feature-${{ matrix.group }}
+      - name: Run feature checks
+        run: ${{ matrix.commands }}
 
-      # OTel feature paths are opt-in (mirror Go's `//go:build telemetry`),
-      # so the default clippy pass doesn't exercise them. These checks keep
-      # the feature-gated code from rotting silently. Issue #977.
-      - run: cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
-      - run: cargo clippy -p cli --features otel --all-targets -- -D warnings
-      - run: cargo clippy -p defra-node --features otel --all-targets -- -D warnings
-
-      # `p2p` is off by default on both crates that gate on it, so no other job
-      # ever builds that dependency set. A dependency missing from the feature
-      # list therefore compiles fine here and only breaks in a downstream
-      # consumer that turns the feature on (which is how a missing `cid` on
-      # defra-node reached a release).
-      - run: cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
-      - run: cargo clippy -p db --features p2p --all-targets -- -D warnings
-      - run: cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
-      - run: cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
-      - run: cargo check -p p2p --no-default-features --features iroh-transport
-      - run: cargo check -p db --no-default-features --features native
-
-      # Dead-dependency gate (#1329). Matches `just machete`; ignores live in
-      # each crate's [package.metadata.cargo-machete] for known false positives.
-      - name: Unused dependencies (cargo-machete)
-        run: |
-          command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete --locked
-          cargo machete
-
-      # Feature-graph contracts for defra-node (#1398–#1400). Not a size check.
-      # Stdout-based; never `--workspace`. Lint does not install `just`.
-      - name: Feature-graph contracts (defra-node)
+  dependency-checks:
+    name: Dependency checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-machete
+        run: command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete --locked
+      - name: Check unused dependencies
+        run: cargo machete
+      - name: Check defra-node feature graph
         run: bash .github/scripts/assert-defra-node-graph.sh
 
-      - name: Show sccache stats
-        if: always()
-        run: .github/scripts/show-sccache-stats.sh
+  lint:
+    name: Lint
+    needs: [lint-default, feature-checks, dependency-checks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check lint results
+        env:
+          DEFAULT: ${{ needs.lint-default.result }}
+          FEATURES: ${{ needs.feature-checks.result }}
+          DEPENDENCIES: ${{ needs.dependency-checks.result }}
+        run: |
+          test "$DEFAULT" = success
+          test "$FEATURES" = success
+          test "$DEPENDENCIES" = success
+
+  unit-tests:
+    name: Unit tests (${{ matrix.os }}, ${{ matrix.group }})
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            group: core
+            packages: >-
+              -p defra-core -p crdt -p storage -p blockstore -p schema
+              -p document -p crypto -p cursor -p datastore -p keyring -p kms
+              -p identity -p zanzibar -p acp -p defra-version -p events -p lens
+              -p replication-filter -p telemetry
+          - os: ubuntu-latest
+            group: data
+            packages: -p query -p db -p sourcehub -p pg-compat
+          - os: ubuntu-latest
+            group: network
+            packages: -p p2p -p defra-p2p-adapter -p orbis
+          - os: ubuntu-latest
+            group: surfaces
+            packages: >-
+              -p defra-http -p embedded -p cli -p ffi -p defra-node
+              -p lens-host -p defra-wasm -p benches
+          - os: macos-latest
+            group: core
+            packages: >-
+              -p defra-core -p crdt -p storage -p blockstore -p schema
+              -p document -p crypto -p cursor -p datastore -p keyring -p kms
+              -p identity -p zanzibar -p acp -p defra-version -p events -p lens
+              -p replication-filter -p telemetry
+          - os: macos-latest
+            group: data
+            packages: -p query -p db -p sourcehub -p pg-compat
+          - os: macos-latest
+            group: network
+            packages: -p p2p -p defra-p2p-adapter -p orbis
+          - os: macos-latest
+            group: surfaces
+            packages: >-
+              -p defra-http -p embedded -p cli -p ffi -p defra-node
+              -p lens-host -p defra-wasm -p benches
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-linux-ci-deps.sh
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: unit-${{ matrix.group }}
+      - run: cargo test --profile super-dev ${{ matrix.packages }}
+
+  build-binaries:
+    name: Build integration binaries
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-binaries
+      - name: Build binaries
+        run: |
+          mkdir -p artifacts/ci
+          cargo build -p cli --profile super-dev
+          cp target/super-dev/defra artifacts/ci/defra
+          cargo build -p cli --profile super-dev --features iroh
+          cp target/super-dev/defra artifacts/ci/defra-iroh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: defra-ci-binaries
+          path: artifacts/ci
+          retention-days: 1
+
+  build:
+    name: Build & Test
+    needs: [ci-scope, unit-tests, build-binaries, feature-tests]
+    if: always() && needs.ci-scope.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check build results
+        env:
+          UNIT_TESTS: ${{ needs.unit-tests.result }}
+          BINARIES: ${{ needs.build-binaries.result }}
+          FEATURE_TESTS: ${{ needs.feature-tests.result }}
+        run: |
+          test "$UNIT_TESTS" = success
+          test "$BINARIES" = success
+          test "$FEATURE_TESTS" = success
+
+  feature-tests:
+    name: Feature tests
+    needs: ci-scope
+    if: needs.ci-scope.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: feature-tests
+      - run: cargo test --profile super-dev -p telemetry --features otlp
+      - run: cargo test --profile super-dev -p cli --features otel --test telemetry_dedup
+      - run: cargo test --profile super-dev -p defra-node --features p2p
 
   wasm-check:
     name: WASM Build Check
     needs: ci-scope
     if: needs.ci-scope.outputs.full == 'true'
-    # Share the Linux runner with p2p-linux rather than depending on a
-    # dedicated host; the two jobs serialize when both are selected.
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-
-      - name: Install system dependencies
-        # clang is needed because lz4-sys (transitive C dep) builds
-        # wasm-shim C sources via cc-rs when the target is wasm32.
-        # protoc is needed by prost-build.
-        run: |
-          bash .github/scripts/apt-update-without-nodesource.sh
-          sudo apt-get install -y protobuf-compiler clang
-
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
       - name: Isolate the WASM dependency graph
-        # Cargo resolves every workspace member even for a package-specific build.
-        # These test-only members pin Git revisions that the WASM build does not use.
         run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
-
       - name: Clippy (wasm32)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
-
-      # The panic hook is default-on; this keeps the opt-out path compiling.
       - name: Clippy (wasm32, no default features)
         run: cargo clippy -p defra-wasm --target wasm32-unknown-unknown --no-default-features --all-targets -- -D warnings
-
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
-
+        run: command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
       - name: Build WASM
-        # simd128 is not a default wasm32 target feature. Without it the vector
-        # kernels' SIMD tier is compiled out and every browser distance runs the
-        # scalar fallback. Baseline in Chrome 91, Firefox 89, Safari 16.4.
+        run: >-
+          CARGO_PROFILE_RELEASE_OPT_LEVEL=z RUSTFLAGS="-C target-feature=+simd128"
+          wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1
+      - uses: browser-actions/setup-geckodriver@bf8266f624ca122cedb6d0381a031f18f6c431cd
+      - name: Install lockfile-matched wasm-bindgen-cli
         run: |
-          CARGO_PROFILE_RELEASE_OPT_LEVEL=z RUSTFLAGS="-C target-feature=+simd128" \
-            wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
-
-      # The wasm tests are browser tests: storage_tests.rs exercises OPFS, which
-      # only exists in a browser, so `wasm_bindgen_test_configure!(run_in_browser)`
-      # is load-bearing and node is not an option. Firefox because Chrome ships
-      # no official Linux arm64 build. Both are pinned and cached on the runner.
-      - name: Install headless browser
-        env:
-          FIREFOX_VERSION: "153.0.3"
-          GECKODRIVER_VERSION: "0.37.1"
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            x86_64)
-              FIREFOX_PLATFORM="linux-x86_64"
-              GECKODRIVER_PLATFORM="linux64"
-              ;;
-            aarch64|arm64)
-              FIREFOX_PLATFORM="linux-aarch64"
-              GECKODRIVER_PLATFORM="linux-aarch64"
-              ;;
-            *)
-              echo "::error::unsupported browser host architecture: $(uname -m)"
-              exit 1
-              ;;
-          esac
-          CACHE="$HOME/.cache/defra-wasm-browser/${FIREFOX_VERSION}-${GECKODRIVER_VERSION}-${FIREFOX_PLATFORM}"
-          echo "BROWSER_CACHE=$CACHE" >> "$GITHUB_ENV"
-          if [ -x "$CACHE/firefox/firefox" ] && [ -x "$CACHE/geckodriver" ]; then
-            echo "Browser cache hit — $CACHE"
-            exit 0
-          fi
-          sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libasound2t64 || \
-            sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libasound2
-          rm -rf "$CACHE"; mkdir -p "$CACHE"
-          TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-
-          FF_URL="https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/${FIREFOX_PLATFORM}/en-US/firefox-${FIREFOX_VERSION}.tar.xz"
-          curl -fsSL -o "$TMP/firefox.tar.xz" "$FF_URL"
-          # Mozilla publishes a digest per release; verify rather than trust.
-          WANT="$(curl -fsSL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/SHA256SUMS" \
-                  | awk -v p="${FIREFOX_PLATFORM}/en-US/firefox-${FIREFOX_VERSION}.tar.xz" '$2 == p {print $1}')"
-          GOT="$(sha256sum "$TMP/firefox.tar.xz" | awk '{print $1}')"
-          if [ "$WANT" != "$GOT" ]; then
-            echo "::error::Firefox checksum mismatch (expected $WANT, got $GOT)"; exit 1
-          fi
-          tar -C "$CACHE" -xJf "$TMP/firefox.tar.xz"
-
-          GD_URL="https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-${GECKODRIVER_PLATFORM}.tar.gz"
-          curl -fsSL -o "$TMP/gd.tar.gz" "$GD_URL"
-          tar -C "$CACHE" -xzf "$TMP/gd.tar.gz"
-          "$CACHE/firefox/firefox" --version
-          "$CACHE/geckodriver" --version | head -1
-
-      # wasm-bindgen-cli must match the wasm-bindgen crate exactly or the runner
-      # refuses the module ("rust Wasm file schema version" mismatch). Derive it
-      # from the lockfile so it can never drift from what we build against.
-      - name: Install wasm-bindgen-cli (lockfile-matched)
-        run: |
-          set -euo pipefail
           VER="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[",]/,""); print $3; exit}' Cargo.lock)"
-          if [ -z "$VER" ]; then echo "::error::could not read wasm-bindgen version from Cargo.lock"; exit 1; fi
-          if [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$VER" ]; then
-            cargo install wasm-bindgen-cli --version "$VER" --locked
-          fi
-          echo "wasm-bindgen-cli $VER"
-
-      - name: Run wasm tests (Firefox, headless)
+          test -n "$VER"
+          cargo install wasm-bindgen-cli --version "$VER" --locked
+      - name: Run wasm tests
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-          # Must match the Build WASM step, or the tests exercise a different
-          # kernel tier than the artifact ships.
-          RUSTFLAGS: "-C target-feature=+simd128"
+          RUSTFLAGS: -C target-feature=+simd128
         run: |
-          set -euo pipefail
-          export GECKODRIVER="$BROWSER_CACHE/geckodriver"
-          export PATH="$BROWSER_CACHE/firefox:$PATH"
-          # --tests picks up tests/vector.rs, the only place the wasm SIMD
-          # kernels are ever executed.
           cargo test -p defra-wasm --target wasm32-unknown-unknown --lib --tests 2>&1 | tee wasm-test.log
-          # A binary that registers no tests prints "running 0 tests" and exits 0,
-          # which is indistinguishable from success. Fail loudly instead.
           if grep -q "running 0 tests" wasm-test.log; then
-            echo "::error::a wasm test binary registered zero tests"; exit 1
+            echo "::error::a wasm test binary registered zero tests"
+            exit 1
           fi
-          if ! grep -qE "^test result: ok\. [1-9][0-9]* passed" wasm-test.log; then
-            echo "::error::no passing wasm tests were reported"; exit 1
-          fi
-
-      - name: Show sccache stats
-        if: always()
-        run: .github/scripts/show-sccache-stats.sh
-
-      - name: Cleanup
-        if: always()
-        run: git checkout -- Cargo.toml
-
-  build:
-    name: Build & Test
-    needs: ci-scope
-    if: needs.ci-scope.outputs.full == 'true'
-    # Either studio host. Port isolation comes from there being exactly one
-    # `studio`-labelled runner process per box, not from naming a host, so
-    # floating this job still permits only one node-spawning job per box.
-    # Cache warmth is preserved by the peer pull in "Restore or build
-    # binaries" rather than by pinning the producer.
-    runs-on: [self-hosted, macOS, ARM64, studio]
-    env:
-      # The full workspace test suite launches roughly 187 test executables.
-      # Incremental artifacts caused a ~25s startup delay per executable on
-      # this macOS host, turning this step from minutes into more than an hour.
-      # Prefer sccache here; the edit-only incremental benchmark does not
-      # represent this test workload.
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      CARGO_BUILD_RUSTC_WRAPPER: sccache
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: false
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - run: cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
-
-      # The cached node binaries are built with the `super-dev` profile
-      # (Cargo.toml): dependencies at opt-level 2 with no debug info,
-      # workspace crates with line tables. Integration nodes spend their time
-      # in dependency code (crypto, storage, tokio), so opt-level 2 deps make
-      # the suites materially faster at runtime, and the slimmer objects cut
-      # the link time that dominates warm rebuilds. The separate
-      # target/super-dev tree also means the otel feature builds below can
-      # never pollute what gets cached. Kept before the otel steps so the
-      # publish to the sibling happens as early as possible.
-      - name: Cache pre-built binaries
-        run: |
-          HASH=$(git rev-parse HEAD)
-          CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          mkdir -p "$CACHE_DIR"
-
-          cargo build -p cli --profile super-dev
-          cp target/super-dev/defra "$CACHE_DIR/defra"
-
-          cargo build -p cli --profile super-dev --features iroh
-          cp target/super-dev/defra "$CACHE_DIR/defra-iroh"
-
-          # Symlink for backbone CI consumption
-          ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
-
-      # This job floats across both studio hosts but in practice lands on
-      # whichever one is idle, and studio-1's single `studio` slot is usually
-      # still occupied by the previous run's ~100-minute suites — so the
-      # producer keeps landing on studio-2 while the two most expensive
-      # consumers (rust, signed-docs) sit on studio-1 with an empty cache.
-      # Pushing now, while nothing is waiting on this job, is what turns the
-      # sibling's first integration job from a full rebuild into a file copy;
-      # its own pull fallback only ever runs once the clock is already
-      # ticking. Best-effort: a failure is a warning, never a red run, and the
-      # consumer still falls back to building.
-      - name: Publish binaries to sibling studio
-        run: |
-          HASH=$(git rev-parse HEAD)
-          CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          PEER=$(.github/scripts/studio-peer.sh)
-
-          if [ -z "$PEER" ]; then
-            echo "No sibling studio for this host — nothing to publish"
-            exit 0
-          fi
-
-          # ServerAlive* bounds a transfer that stalls after connecting: the
-          # whole integration matrix waits on this job, so a hung scp here
-          # would cost more than the rebuild it is trying to avoid.
-          SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
-
-          # Staged through .tmp and renamed on the peer, so an interrupted
-          # copy cannot leave a truncated binary that the peer would later
-          # treat as a valid cache hit. Two attempts: on 2026-08-14 a single
-          # transient SSH failure here (and on the consumer's pull) cost the
-          # sibling's first integration job a 40-minute rebuild.
-          published=""
-          for attempt in 1 2; do
-            if ssh $SSH_OPTS "$PEER" "mkdir -p '$CACHE_DIR'" \
-              && scp -p $SSH_OPTS "$CACHE_DIR/defra" "$PEER:$CACHE_DIR/defra.tmp" \
-              && scp -p $SSH_OPTS "$CACHE_DIR/defra-iroh" "$PEER:$CACHE_DIR/defra-iroh.tmp" \
-              && ssh $SSH_OPTS "$PEER" \
-                   "mv '$CACHE_DIR/defra.tmp' '$CACHE_DIR/defra' \
-                    && mv '$CACHE_DIR/defra-iroh.tmp' '$CACHE_DIR/defra-iroh'"; then
-              echo "Published binaries to $PEER:$CACHE_DIR (attempt $attempt)"
-              published=1
-              break
-            fi
-            [ "$attempt" -eq 1 ] && sleep 10
-          done
-          if [ -z "$published" ]; then
-            echo "::warning::could not publish binary cache to $PEER after 2 attempts — its first integration job will rebuild"
-          fi
-
-      # OTel-only tests. These build in target/debug, a different tree from
-      # the cached super-dev binaries, so ordering is publish-latency only.
-      # The cli otel test spawns a real node against an unreachable collector
-      # and asserts the dedup hint fires exactly once — the Docker-free
-      # regression guard for the SDK's `internal-logs` feature. Issue #977 / #1004.
-      - run: cargo test -p telemetry --features otlp
-      - run: cargo test -p cli --features otel --test telemetry_dedup
-
-      # defra-node's p2p suite is feature-gated, so the default-feature
-      # `cargo test --workspace` above skips it entirely and the only other
-      # reference to it is a clippy compile. Its restart/shutdown tests were
-      # therefore type-checked and discarded, which is how #1309 (sweep tasks
-      # outliving shutdown and holding the store lock) shipped green. Runs
-      # after caching, with the other feature-on steps, so a feature build
-      # never becomes the cached "standard" binary. Nodes bind port 0, so this
-      # is safe on the shared studio-1 slot.
-      - run: cargo test -p defra-node --features p2p
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git checkout -- .
-          git clean -fd
-          pkill -f "target/debug/defra" || true
+          grep -qE "^test result: ok\. [1-9][0-9]* passed" wasm-test.log
 
   lean-conformance:
     name: Lean Conformance
@@ -447,22 +303,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
-
+          java-version: '21'
       - name: Check TLA ownership and convergence models
         run: proofs/tla/run-all.sh
-
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-ci"
-          shared-key: "lean-conformance"
-
+          shared-key: lean-conformance
       - name: Build Lean proofs
         uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
         with:
@@ -471,57 +321,34 @@ jobs:
           build: true
           test: false
           use-mathlib-cache: false
-
       - name: Check Lean-to-Rust conformance
         run: cargo test -p conformance --lib --test lean_conformance
 
   conformance:
     name: Conformance
-    needs: ci-scope
+    needs: [ci-scope, build-binaries]
     if: needs.ci-scope.outputs.full == 'true'
-    # Spawns real `defra` nodes, so it must never co-run with another
-    # node-spawning job on the SAME host (harness port allocator TOCTOU bind
-    # race — "failed to start rust-0"). Host pinning provides that: this job
-    # runs on studio-2, whose single runner process serializes it against the
-    # go-compat/iroh suites, while the studio-1 suites run on a different
-    # host and cannot contend on its localhost ports. No `needs` edge — the
-    # job builds its own release binary and starts as soon as a slot frees.
-    runs-on: [self-hosted, macOS, ARM64, studio, studio-2]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release-fast/defra
+      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
-      # The conformance harness waits on INFO-level node readiness/P2P log lines.
-      # Pin the child-node filter so an inherited runner-level RUST_LOG=warn
-      # cannot make healthy nodes look unready.
+      DEFRA_E2E_KEEP: '1'
       RUST_LOG: info
-      # Retain per-test node dirs (target/e2e/**) so the failure-only artifact
-      # upload below can capture node logs; Cleanup removes them afterwards.
-      DEFRA_E2E_KEEP: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false
-
       - uses: dtolnay/rust-toolchain@stable
-
-      # release-fast (thin LTO, 16 CGUs) exists exactly for this: measured
-      # 1m40s cold vs 6m44s for the fat-LTO release profile, and this binary
-      # is test-only — release.yml still ships full-release artifacts.
-      - name: Build release binary under test
-        run: |
-          cargo build --profile release-fast -p cli
-          "$DEFRA_CONFORMANCE_BINARY" version --format json
-
-      # The behavioral conformance tests drive real `defra` subprocesses. Run
-      # them serially so concurrent node startup doesn't contend on ports/CPU
-      # and flake ("failed to start rust-0"). Lean is gated independently by
-      # the `lean-conformance` job above.
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: conformance
+      - uses: actions/download-artifact@v4
+        with:
+          name: defra-ci-binaries
+          path: target/ci
+      - run: chmod +x target/ci/defra target/ci/defra-iroh
       - name: Run conformance tests
-        run: cargo test -p conformance --lib --test tla_conformance -- --test-threads=1
-
-      # Node logs are the only forensics for a poll-timeout failure; without
-      # this upload a red run leaves nothing to diagnose.
+        run: cargo test --profile super-dev -p conformance --lib --test tla_conformance -- --test-threads=1
       - name: Upload harness node logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -531,156 +358,73 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Show sccache stats
-        if: always()
-        run: .github/scripts/show-sccache-stats.sh
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git checkout -- .
-          git clean -fd
-          rm -rf target/e2e
-          pkill -f "target/release-fast/defra" || true
-          pkill -f "target/release/defra" || true
-          pkill -f "target/debug/defra" || true
-
   integration:
     name: Integration (${{ matrix.suite }})
-    needs: [ci-scope, build]
+    needs: [ci-scope, build-binaries]
     if: needs.ci-scope.outputs.full == 'true'
-    runs-on: [self-hosted, macOS, ARM64, studio, "${{ matrix.host }}"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
-      # The harness still allocates localhost ports via a release-then-spawn
-      # sequence, so two suites on the SAME host can hit a bind race. Each
-      # host runs one defradb.rs runner process (one job at a time), so
-      # pinning suites to hosts serializes same-host suites for free while
-      # letting the two hosts run in parallel — replacing the old
-      # `max-parallel: 1` whole-matrix serialization. Both hosts restore from
-      # a host-local binary cache that `build` publishes to each of them; the
-      # self-build below is the fallback for when that publish did not land.
-      #
-      # The suite list comes from `ci-scope`: signed-docs (the node default)
-      # runs on every full run, while the unsigned `rust` mirror is scoped to
-      # non-PR events. See the matrix construction there for the rationale.
       matrix: ${{ fromJson(needs.ci-scope.outputs.integration_matrix) }}
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
       DEFRA_MULTIPLIERS: ${{ matrix.multipliers || '' }}
-      CARGO_INCREMENTAL: ${{ matrix.cargo_incremental }}
-      RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
-      CARGO_BUILD_RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
+      DEFRA_E2E_KEEP: '1'
+      RUST_LOG: info
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-
-      - name: Restore or build binaries
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-${{ matrix.suite }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: defra-ci-binaries
+          path: target/ci
+      - name: Check binaries
         run: |
-          HASH=$(git rev-parse HEAD)
-          CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
-          mkdir -p target/ci "$CACHE_DIR"
-
-          # The `build` job pushes its binaries to both hosts, so the local
-          # branch below is the expected path. Pulling from the sibling is the
-          # backstop for when that push failed. Best-effort by design: any
-          # failure here falls through to the build path below, so an
-          # unreachable or rebooting peer costs time, never a red run. Errors
-          # are NOT discarded — a silent pull failure is indistinguishable from
-          # a peer that never had the binaries, and that ambiguity is what let
-          # a 41-minute rebuild hide on every run for days.
-          PEER=$(.github/scripts/studio-peer.sh)
-          SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
-
-          # Staged via .tmp so an interrupted copy cannot leave a truncated
-          # binary that later runs would treat as a valid cache hit. Two
-          # attempts, matching the producer's publish: a transient SSH
-          # failure on this pull is what turned 2026-08-14's runs into
-          # 40-minute rebuilds.
-          pulled=""
-          if ! { [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; } && [ -n "$PEER" ]; then
-            for attempt in 1 2; do
-              if scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra" "$CACHE_DIR/defra.tmp" \
-                && scp -p $SSH_OPTS "$PEER:$CACHE_DIR/defra-iroh" "$CACHE_DIR/defra-iroh.tmp"; then
-                pulled=1
-                break
-              fi
-              rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
-              [ "$attempt" -eq 1 ] && sleep 10
-            done
-          fi
-
-          if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
-            echo "Cache hit (local) — restoring from $CACHE_DIR"
-            cp "$CACHE_DIR/defra" target/ci/defra
-            cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
-          elif [ -n "$pulled" ]; then
-            mv "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra"
-            mv "$CACHE_DIR/defra-iroh.tmp" "$CACHE_DIR/defra-iroh"
-            echo "Cache hit (peer $PEER over Thunderbolt)"
-            cp "$CACHE_DIR/defra" target/ci/defra
-            cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
-          else
-            rm -f "$CACHE_DIR/defra.tmp" "$CACHE_DIR/defra-iroh.tmp"
-            echo "::warning::binary cache missed on this host and on peer '${PEER:-none}' — rebuilding (~40 min)"
-            echo "Cache miss (local and peer ${PEER:-none}) — building binaries"
-            cargo build -p cli --profile super-dev
-            cp target/super-dev/defra target/ci/defra
-            cp target/super-dev/defra "$CACHE_DIR/defra"
-            cargo build -p cli --profile super-dev --features iroh
-            cp target/super-dev/defra target/ci/defra-iroh
-            cp target/super-dev/defra "$CACHE_DIR/defra-iroh"
-          fi
-
           chmod +x target/ci/defra target/ci/defra-iroh
           target/ci/defra version --format json
-
       - name: Install Go toolchain
         if: matrix.suite == 'go-compat'
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-
+      - name: Cache Go DefraDB
+        if: matrix.suite == 'go-compat'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/defra-harness
+          key: go-defradb-${{ runner.os }}-${{ hashFiles('crates/defra-version/src/lib.rs') }}
       - name: Prepare Go DefraDB binary
         if: matrix.needs_go
         run: |
-          GO_REF=$(grep 'pub const GO_COMPAT_COMMIT' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
-          GO_BRANCH=$(grep 'pub const GO_COMPAT_BRANCH' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
-          GO_TAG=$(grep 'pub const GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+          GO_REF=$(grep 'pub const GO_COMPAT_COMMIT' crates/defra-version/src/lib.rs | sed 's/.*"\(.*\)".*/\1/')
+          GO_BRANCH=$(grep 'pub const GO_COMPAT_BRANCH' crates/defra-version/src/lib.rs | sed 's/.*"\(.*\)".*/\1/')
+          GO_TAG=$(grep 'pub const GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed 's/.*"\(.*\)".*/\1/')
 
           if [ -n "$GO_TAG" ]; then
             VER_NUM="${GO_TAG#v}"
-            ASSET="defradb_${VER_NUM}_darwin_arm64"
-            URL="https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
+            ASSET="defradb_${VER_NUM}_linux_x86_64"
             CACHE_DIR="$HOME/.cache/defra-harness/${GO_TAG}"
             mkdir -p "$CACHE_DIR"
             if [ ! -x "$CACHE_DIR/defradb" ]; then
-              echo "Downloading Go DefraDB ${GO_TAG}..."
-              curl -fSL -o "$CACHE_DIR/defradb" "$URL"
+              curl -fSL -o "$CACHE_DIR/defradb" \
+                "https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
               chmod +x "$CACHE_DIR/defradb"
             fi
           else
-            if [ -z "$GO_REF" ]; then
-              echo "::error::GO_COMPAT_COMMIT is empty in crates/defra-version/src/lib.rs"
-              exit 1
-            fi
-            if [ -z "$GO_BRANCH" ]; then
-              echo "::error::GO_COMPAT_BRANCH is empty in crates/defra-version/src/lib.rs"
-              exit 1
-            fi
-
+            test -n "$GO_REF"
+            test -n "$GO_BRANCH"
             CACHE_DIR="$HOME/.cache/defra-harness/${GO_REF}"
             mkdir -p "$CACHE_DIR"
             if [ ! -x "$CACHE_DIR/defradb" ]; then
-              echo "Building Go DefraDB ${GO_REF} from ${GO_BRANCH}..."
               WORK_DIR="$RUNNER_TEMP/defradb-${GO_REF}"
-              rm -rf "$WORK_DIR"
               git clone --filter=blob:none --branch "$GO_BRANCH" https://github.com/sourcenetwork/defradb "$WORK_DIR"
               git -C "$WORK_DIR" checkout "$GO_REF"
               make -C "$WORK_DIR" build path="$CACHE_DIR/defradb"
@@ -690,142 +434,60 @@ jobs:
 
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
-
-      # Guards against silent drift between the committed Go-parity hex
-      # constants in `crates/p2p/**/*.rs` and what upstream Go actually
-      # emits. Both generators print hex to stdout (no files written);
-      # every `(N bytes): <hex>` or `(N): <hex>` line is checked against
-      # the Rust crate. If upstream reorders a struct field the
-      # hex changes, the grep misses, and the job fails — instead of
-      # Rust tests passing against stale constants.
       - name: Verify Go fixtures still match Rust constants
         if: matrix.suite == 'go-compat'
         run: |
-          set -euo pipefail
           OUT=$(mktemp)
-          # Each generator has its own go.mod; `go run <path>/main.go`
-          # uses single-file mode and ignores it, so cd into each module.
-          (cd crates/p2p/testdata/gen_message_fixtures   && go run .) >> "$OUT"
+          (cd crates/p2p/testdata/gen_message_fixtures && go run .) >> "$OUT"
           (cd crates/p2p/testdata/gen_pubsub_rpc_fixture && go run .) >> "$OUT"
-          # Extract every hex token emitted after a "(N bytes): " or
-          # "(N): " marker. Lowercase hex, length >= 4.
           HEXES=$(grep -Eo '\(([0-9]+)( bytes)?\): [0-9a-f]+' "$OUT" | awk '{print $NF}')
-          if [ -z "$HEXES" ]; then
-            echo "::error::no hex fixtures extracted from generator output" >&2
-            cat "$OUT" >&2
-            exit 1
-          fi
-          STALE=0
+          test -n "$HEXES"
           while IFS= read -r H; do
-            if ! grep -qR --include='*.rs' -F "$H" crates/p2p/; then
-              echo "::error::Go fixture hex not found in crates/p2p/**/*.rs: $H" >&2
-              STALE=1
-            fi
+            grep -qR --include='*.rs' -F "$H" crates/p2p/
           done <<< "$HEXES"
-          if [ "$STALE" -ne 0 ]; then
-            echo "::error::Go fixture drift detected — regenerate the Rust fixture constants under crates/p2p" >&2
-            exit 1
-          fi
-
-      # A bind failure can reach the harness log watcher before the child-exit
-      # path classifies it for retry. Keep node-spawning suites serial until
-      # the harness handles both readiness failure paths.
-      # `--profile super-dev` matches the cached node binaries: the test
-      # binaries link ~7.5x less debug object volume, which is where the
-      # first leg's in-step compile toll went, and sccache keys per flag set
-      # so the profile costs one warmup compile per host.
       - name: Run rust integration tests (basic)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test --profile super-dev -p integration-test
-          --test basic
+          cargo test --profile super-dev -p integration-test --test basic
           -- --test-threads=1 --skip ::go_
-
       - name: Run rust integration tests (core suites)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test --profile super-dev -p integration-test
-          --test query --test acp --test nac
-          --test encryption --test identity
+          --test query --test acp --test nac --test encryption --test identity
           --test backup --test fts
           -- --test-threads=1 --skip ::go_
-
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
-          cargo test --profile super-dev -p integration-test
-          --test p2p
+          cargo test --profile super-dev -p integration-test --test p2p
           -- --test-threads=1 --skip ::go_
-
-      # go-compat runs the `go_*` half of every dual-runtime test against
-      # the upstream Go DefraDB binary. Catches cross-implementation
-      # regressions at PR time. The binary is selected by GO_COMPAT_TAG
-      # when a release exists, otherwise it is built from GO_COMPAT_COMMIT.
-      #
-      # The 5 `link_collection::go_acp_link_collection_*_reject` tests
-      # cover #746 (Rust schema loader silently accepts invalid DRIs).
-      # They will pass on Go but fail on the divergence-guard form
-      # currently on main. Once #756 lands, those tests are flipped to
-      # positive assertions and the skip filters below should be removed.
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
         run: >-
           cargo test --profile super-dev -p integration-test
-          --test basic --test query --test acp --test nac --test backup --test p2p
-          --test identity
+          --test basic --test query --test acp --test nac --test backup --test p2p --test identity
           -- --test-threads=1 go_
           --skip go_acp_link_collection_nonexistent_policy_reject
           --skip go_acp_link_collection_nonexistent_resource_reject
           --skip go_acp_link_collection_missing_read_perm_reject
           --skip go_acp_link_collection_missing_update_perm_reject
           --skip go_acp_link_collection_missing_delete_perm_reject
-
-      # Rust<->Go CONVERGENCE parity (asserting). These parity tests need a Go
-      # `defradb` on PATH (added by "Prepare Go DefraDB binary" above) and are
-      # `#[ignore]` so the no-Go conformance run skips them. We select ONLY the
-      # asserting tests by name (filters after `--` are OR'd by libtest) — the
-      # report-only `parity_samedoc_*`/`parity_delete_update_*` probes are
-      # deliberately excluded: they `eprintln!` mixed state rather than assert, so
-      # in a blocking leg they add runtime and hard-fail surface without gating
-      # value. `parity_counter_storm_go_go` (Go-only oracle) IS selected; the
-      # mixed Rust<->Go counter storm (`parity_counter_storm_mixed`) is NOT — it
-      # exposes a known, timing-sensitive double-apply on the GO reference side
-      # (Rust materializes the identical DAG correctly; Go over-counts). It stays
-      # asserting for manual diagnosis but is kept out of the blocking leg until
-      # the upstream race is resolved (see #1043). The mixed `Counter×LWW`
-      # convergence (`parity_mixed_fields_3node_*`) and equal-priority LWW-tie
-      # (`parity_lww_tie_partition_*`) probes ARE selected — they assert the exact
-      # convergent state (name=alice, views=17 / tie winner) identically across
-      # Rust-only, Go-only, and mixed Rust<->Go clusters. The
-      # `parity_unique_twins_*` probes (#1134) are a KNOWN-DIVERGENCE pin, not a
-      # convergence contract: rust_rust asserts #1126 canonical-pick semantics
-      # and go_go asserts upstream Go's atomic twin rejection + silent
-      # success-ack, while mixed pins the Go v1 asymmetry (Rust accepts both
-      # twins; Go atomically rejects Rust's). These probes MUST fail and force
-      # a pin update when upstream Go starts converging. The historical
-      # `characterize_unique_twins_pre_v1_partial_materialization` repro is
-      # excluded because Go #4838 closed that delivery artifact before v1.0.0.
-      # DEFRA_CONFORMANCE_BINARY points the harness at the restored Rust binary
-      # (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
         env:
           DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/ci/defra
         run: >-
-          cargo test -p conformance --test tla_conformance
+          cargo test --profile super-dev -p conformance --test tla_conformance
           -- --ignored --test-threads=1
           parity_counter_3node parity_counter_storm_go_go parity_indexed_lww
           parity_mixed_fields_3node parity_lww_tie_partition
-          parity_unique_twins_rust_rust parity_unique_twins_go_go
-          parity_unique_twins_mixed
-
+          parity_unique_twins_rust_rust parity_unique_twins_go_go parity_unique_twins_mixed
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'
         run: >-
-          cargo test --profile super-dev -p integration-test
-          --test p2p_iroh
+          cargo test --profile super-dev -p integration-test --test p2p_iroh
           -- --test-threads=1 connection::
-
       - name: Run iroh sync ownership fences
         if: matrix.suite == 'iroh'
         run: |
@@ -833,89 +495,43 @@ jobs:
             peer::create::create_propagates_to_last_node_in_chain -- --test-threads=1
           cargo test --profile super-dev -p integration-test --test p2p_iroh \
             peer::create::head_hint_fanout_above_car_worker_bound_quiesces -- --test-threads=1
-
-      # Every other studio job reports these; this matrix did not, which left
-      # the fallback rebuild above as the one compile in CI with no visibility
-      # into whether sccache was serving it.
-      - name: Show sccache stats
-        if: always()
-        run: .github/scripts/show-sccache-stats.sh
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git checkout -- .
-          git clean -fd
-          pkill -f "target/(debug|ci)/defra" || true
+      - name: Upload harness node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-${{ matrix.suite }}-e2e-logs
+          path: target/e2e/**/logs/*.log
+          retention-days: 7
+          if-no-files-found: ignore
 
   p2p-linux:
-    # The macOS `integration` matrix above only runs the P2P suite on the studio
-    # host. Several P2P sync races are exposed only by Linux's socket/thread
-    # scheduling (e.g. duplicate connections that form under multi-core
-    # kqueue-vs-epoll timing), so mirror the pure-Rust P2P leg on a self-hosted
-    # Linux runner. Builds its own binary — the `build` job caches Mach-O
-    # binaries that cannot run here.
-    #
-    # Share the Linux runner with wasm-check. This remains Linux/epoll, and the
-    # scheduling-race coverage is architecture-independent.
     name: P2P Integration (Linux)
-    needs: ci-scope
+    needs: [ci-scope, build-binaries]
     if: needs.ci-scope.outputs.full == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      # The workflow-level PROTOC points at a macOS Homebrew path; override it
-      # with the apt-installed protoc for this Linux job.
-      PROTOC: /usr/bin/protoc
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
       DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
-      # The harness waits on INFO-level p2p_listening / readiness log lines; pin
-      # the child filter so an inherited RUST_LOG=warn can't hide readiness.
+      DEFRA_E2E_KEEP: '1'
       RUST_LOG: info
-      # Retain per-test node dirs (target/e2e/**) so the failure-only artifact
-      # upload below can capture node logs; Cleanup removes them afterwards.
-      DEFRA_E2E_KEEP: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false
-
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
-        # protobuf-compiler: prost-build. clang/libclang-dev: bindgen (rocksdb).
-        # cmake: librocksdb-sys. libdbus-1-dev: keyring secret-service backend.
-        run: |
-          bash .github/scripts/apt-update-without-nodesource.sh
-          sudo apt-get install -y --no-install-recommends protobuf-compiler clang libclang-dev cmake pkg-config libssl-dev libdbus-1-dev
-
-      # Build both the standard and iroh-enabled binaries — the p2p suite's
-      # `rust_*_iroh` filtered-replication tests spawn iroh-transport nodes via
-      # DEFRA_IROH_BINARY, which must be built with `--features iroh`. Mirrors the
-      # macOS build/integration jobs' target/ci/{defra,defra-iroh} layout.
-      - name: Build defra binaries
-        run: |
-          mkdir -p target/ci
-          cargo build -p cli --profile super-dev
-          cp target/super-dev/defra target/ci/defra
-          cargo build -p cli --profile super-dev --features iroh
-          cp target/super-dev/defra target/ci/defra-iroh
-          "$DEFRA_RUST_BINARY" version --format json
-          "$DEFRA_IROH_BINARY" version --format json
-
-      # Same selection as the macOS signed-docs/rust legs: pure-Rust P2P topologies only
-      # (`--skip ::go_` drops the go_go_/go_rust_ variants). Kept serial while
-      # the macOS legs run at 8: this leg exists to expose Linux scheduling
-      # races, so a fixed serial schedule keeps a failure attributable to the
-      # code under test rather than to harness contention, and at ~6 minutes
-      # it is nowhere near the critical path.
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: p2p-linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: defra-ci-binaries
+          path: target/ci
+      - run: chmod +x target/ci/defra target/ci/defra-iroh
       - name: Run rust P2P integration tests
         run: >-
-          cargo test --profile super-dev -p integration-test
-          --test p2p
+          cargo test --profile super-dev -p integration-test --test p2p
           -- --test-threads=1 --skip ::go_
-
       - name: Run P2P ownership durability fences
         run: |
           cargo test --profile super-dev -p integration-test --test p2p_admission -- --test-threads=1
@@ -923,9 +539,6 @@ jobs:
           cargo test --profile super-dev -p integration-test --test p2p_admission_fairness -- --test-threads=1
           cargo test --profile super-dev -p integration-test --test p2p_backlog -- --test-threads=1
           cargo test --profile super-dev -p integration-test --test issue1154_repro -- --test-threads=1
-
-      # Node logs are the only forensics for a poll-timeout failure; without
-      # this upload a red run leaves nothing to diagnose.
       - name: Upload harness node logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -935,56 +548,45 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Show sccache stats
-        if: always()
-        run: .github/scripts/show-sccache-stats.sh
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git checkout -- .
-          git clean -fd
-          rm -rf target/e2e
-          pkill -f "target/(debug|ci)/defra" || true
-
   artifacts:
-    name: Release Artifacts
-    # Light slot: no nodes spawned here, and running beside (not behind) the
-    # studio-2 primary chain gets main-push artifacts out without queueing.
-    runs-on: [self-hosted, macOS, ARM64, defra-light, studio-2-b]
-    needs: [build]
+    name: Release Artifacts (${{ matrix.platform }})
+    needs: build-binaries
     if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            platform: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-linux-ci-deps.sh
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.platform }}
       - name: Build release binaries
         run: |
-          cargo build --release -p cli
           mkdir -p artifacts
+          cargo build --release -p cli
           cp target/release/defra artifacts/defra
           cargo build --release -p cli --features iroh
           cp target/release/defra artifacts/defra-iroh
-
-      - name: Upload defra
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: defra-aarch64-apple-darwin
+          name: defra-${{ matrix.platform }}
           path: artifacts/defra
           retention-days: 30
-
-      - name: Upload defra-iroh
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: defra-iroh-aarch64-apple-darwin
+          name: defra-iroh-${{ matrix.platform }}
           path: artifacts/defra-iroh
           retention-days: 30
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git checkout -- .
-          git clean -fd
