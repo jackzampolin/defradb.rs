@@ -148,7 +148,7 @@ jobs:
             group: core
             packages: >-
               -p defra-core -p crdt -p storage -p blockstore -p schema
-              -p document -p crypto -p cursor -p datastore -p keyring -p kms
+              -p document -p crypto -p cursor -p datastore -p keyring@0.5.0 -p kms
               -p identity -p zanzibar -p acp -p defra-version -p events -p lens
               -p replication-filter -p telemetry
           - os: ubuntu-latest
@@ -166,7 +166,7 @@ jobs:
             group: core
             packages: >-
               -p defra-core -p crdt -p storage -p blockstore -p schema
-              -p document -p crypto -p cursor -p datastore -p keyring -p kms
+              -p document -p crypto -p cursor -p datastore -p keyring@0.5.0 -p kms
               -p identity -p zanzibar -p acp -p defra-version -p events -p lens
               -p replication-filter -p telemetry
           - os: macos-latest
@@ -279,7 +279,7 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL=z RUSTFLAGS="-C target-feature=+simd128"
           wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
       - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1
-      - uses: browser-actions/setup-geckodriver@bf8266f624ca122cedb6d0381a031f18f6c431cd
+      - uses: browser-actions/setup-geckodriver@eb8b0670366f719ca31703766a8cb7e3ea2c56ed # v0.0.0
       - name: Install lockfile-matched wasm-bindgen-cli
         run: |
           VER="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[",]/,""); print $3; exit}' Cargo.lock)"
