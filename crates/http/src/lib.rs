@@ -38,6 +38,7 @@
 //! - `GET /api/v1/p2p/shareable-address` - Get the single best shareable P2P address (`handlers/p2p/peers.rs`)
 //! - `GET /api/v1/p2p/active-peers` - List connected peers in Go-compatible format (`handlers/p2p/peers.rs`)
 //! - `POST /api/v1/p2p/connect` - Connect to peers in Go-compatible format (`handlers/p2p/peers.rs`)
+//! - `POST /api/v1/p2p/disconnect` - Disconnect from peers in Go-compatible format (`handlers/p2p/peers.rs`)
 //! - `GET /api/v1/p2p/peers` - List connected peers (`handlers/p2p/peers.rs`)
 //! - `POST /api/v1/p2p/peers` - Connect to peer (`handlers/p2p/peers.rs`)
 //! - `GET /api/v1/p2p/replicators` - List replicators (`handlers/p2p/replicators.rs`)
