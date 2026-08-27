@@ -290,14 +290,20 @@ fn test_execution_error(package_output: &[String], stderr: &str) -> String {
 ///
 /// Without this every paired worktree shares one cgo cache and concurrent runs
 /// poison each other. Mirrors the Go Makefile's `gocache-$RUST_LIB-$PKG`.
+/// The digest keeps same-named checkouts under different parents isolated.
 fn gocache_dir(rust_path: &std::path::Path, package: &str) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+
     let worktree = rust_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown".to_string());
-    let package = package.replace('/', "-");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rust_path.hash(&mut hasher);
 
-    std::env::temp_dir().join(format!("gocache-{worktree}-{package}"))
+    std::env::temp_dir()
+        .join(format!("gocache-{worktree}-{:016x}", hasher.finish()))
+        .join(package)
 }
 
 /// Build environment variables for Go test
@@ -483,6 +489,23 @@ mod tests {
         );
         assert_ne!(here, other_package);
         assert!(here.to_string_lossy().contains("defradb.rs-ffi-port"));
+    }
+
+    #[test]
+    fn same_basename_worktrees_do_not_share_a_go_build_cache() {
+        assert_ne!(
+            gocache_dir(std::path::Path::new("/a/defradb.rs"), "query/simple"),
+            gocache_dir(std::path::Path::new("/b/defradb.rs"), "query/simple"),
+            "checkouts sharing a basename must not share a cgo cache"
+        );
+    }
+
+    #[test]
+    fn hyphenated_package_paths_do_not_collide() {
+        assert_ne!(
+            gocache_dir(std::path::Path::new("/r/defradb.rs-ffi-port"), "a/b-c"),
+            gocache_dir(std::path::Path::new("/r/defradb.rs-ffi-port"), "a-b/c"),
+        );
     }
 
     #[test]
