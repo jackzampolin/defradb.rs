@@ -364,6 +364,98 @@ async fn rust_filtered_replication_backfill_respects_filter() {
     );
 }
 
+#[tokio::test]
+async fn rust_filtered_replication_backfill_controlled_mode() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+    let alice = generate_identity(node0.binary_path()).expect("generate identity");
+
+    let policy = node0
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node0");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("policy id");
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node1");
+
+    let schema = format!(
+        r#"type User @policy(id: "{policy_id}", resource: "users") {{ agent_did: String @immutable  name: String }}"#
+    );
+    node0
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node0");
+    node1
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node1");
+
+    let mk = |did: &str, name: &str| {
+        format!(
+            r#"mutation {{ add_User(input: {{agent_did: "{did}", name: "{name}"}}) {{ _docID }} }}"#
+        )
+    };
+    let matching = node0
+        .query_with_identity(&mk(ALICE, "matching"), &alice.private_key_hex)
+        .expect("create matching");
+    let matching_id = extract_doc_id(&matching, "add_User");
+    node0
+        .query_with_identity(&mk(BOB, "excluded"), &alice.private_key_hex)
+        .expect("create non-matching");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["User"]).expect("subscribe 0");
+    add_filtered_replicator_with_identity(
+        &cluster,
+        0,
+        &["User"],
+        &addr1,
+        "agent_did",
+        ALICE,
+        &alice.private_key_hex,
+    );
+
+    let node1_for_poll = cluster.client(1);
+    let matching_id_poll = matching_id.clone();
+    poll_until(
+        || {
+            let result = node1_for_poll
+                .query("query { User { _docID } }")
+                .unwrap_or_default();
+            result["User"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["_docID"].as_str() == Some(matching_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching document did not backfill to controlled filtered peer",
+    )
+    .await;
+
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { User { agent_did } }")
+        .expect("query node1");
+    let dids: Vec<&str> = result["User"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["agent_did"].as_str())
+        .collect();
+    assert_eq!(dids, vec![ALICE], "controlled backfill leaked: {dids:?}");
+}
+
 /// #4: `@immutable` enforcement on the LOCAL write path. Updating the immutable
 /// field must be rejected; updating other fields must succeed.
 #[tokio::test]
@@ -459,10 +551,10 @@ async fn rust_filtered_replicator_cli_requires_filter_field() {
     );
 }
 
-/// #8: the filter must gate the encrypted (SE-artifact) push path too. A
-/// non-matching encrypted document must not reach the filtered peer; matching
-/// documents must arrive with decrypted secrets, proving their field blocks
-/// triggered DEK resolution.
+/// #8: the filter must gate encrypted (SE-artifact) backfill too. A non-matching
+/// encrypted document must not reach the filtered peer; matching documents must
+/// arrive with decrypted secrets, proving composite replay fetched their linked
+/// field blocks and triggered DEK resolution.
 #[tokio::test]
 async fn rust_filtered_replication_encrypted_respects_filter() {
     const SECRET_SCHEMA: &str = "type SecretDoc { agent_did: String @immutable  secret: String }";
@@ -485,8 +577,6 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
     node0
         .p2p_collection_add(&["SecretDoc"])
         .expect("subscribe 0");
-    // Receiver relies on the filtered replicator push only (see note above).
-    add_filtered_replicator(&cluster, 0, &["SecretDoc"], &addr1, "agent_did", ALICE);
 
     let matching = node0
         .query(&format!(
@@ -508,6 +598,9 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
         ))
         .expect("create second matching encrypted doc");
     let matching2_id = extract_doc_id(&matching2, "add_SecretDoc");
+
+    // Add the replicator after all writes so delivery can only come from backfill.
+    add_filtered_replicator(&cluster, 0, &["SecretDoc"], &addr1, "agent_did", ALICE);
 
     let node1_for_poll = cluster.client(1);
     let matching_id_poll = matching_id.clone();
