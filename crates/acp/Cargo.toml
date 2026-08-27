@@ -13,6 +13,9 @@ default = ["native"]
 native = []
 redb = ["storage/redb"]
 
+[lib]
+bench = false
+
 [dependencies]
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }

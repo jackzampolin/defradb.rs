@@ -11,7 +11,11 @@
 //! call [`revoke_capability`], or use [`ExplicitReplayRevocationRegistry`] with
 //! [`verify_capability_with_revocations`] for a custom synced deny-list.
 
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
+use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -32,6 +36,82 @@ pub const MAX_CAPABILITY_TTL: Duration = DEFAULT_CAPABILITY_TTL;
 
 static PROCESS_REVOCATIONS: LazyLock<ExplicitReplayRevocationRegistry> =
     LazyLock::new(ExplicitReplayRevocationRegistry::default);
+
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
+#[derive(Debug, Clone)]
+struct CachedExplicitReplayCapability {
+    capability: String,
+    authorizer_did: String,
+}
+
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExplicitReplayCapabilityCache {
+    capabilities: Arc<RwLock<HashMap<(String, String), CachedExplicitReplayCapability>>>,
+}
+
+#[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
+impl ExplicitReplayCapabilityCache {
+    pub(crate) fn set(
+        &self,
+        source_peer_id: &str,
+        target_peer_id: &str,
+        collection_id: &str,
+        capability: &str,
+    ) -> Result<()> {
+        let authorization =
+            verify_capability(capability, source_peer_id, target_peer_id, collection_id)?;
+        self.capabilities.write().insert(
+            (target_peer_id.to_string(), collection_id.to_string()),
+            CachedExplicitReplayCapability {
+                capability: capability.to_string(),
+                authorizer_did: authorization.authorizer_did,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn clear(&self, target_peer_id: &str, collections: &[String]) {
+        let mut capabilities = self.capabilities.write();
+        for collection_id in collections {
+            capabilities.remove(&(target_peer_id.to_string(), collection_id.clone()));
+        }
+    }
+
+    pub(crate) fn clear_all(&self, target_peer_id: &str) {
+        self.capabilities
+            .write()
+            .retain(|(stored_peer_id, _), _| stored_peer_id != target_peer_id);
+    }
+
+    pub(crate) fn matches(
+        &self,
+        target_peer_id: &str,
+        collection_id: &str,
+        capability: Option<&str>,
+    ) -> bool {
+        self.capabilities
+            .read()
+            .get(&(target_peer_id.to_string(), collection_id.to_string()))
+            .map(|existing| existing.capability.as_str())
+            == capability
+    }
+
+    pub(crate) fn attach(&self, target_peer_id: &str, request: &mut crate::PushLogRequest) {
+        if request.explicit_replay_capability.is_some() {
+            return;
+        }
+
+        let cached = self
+            .capabilities
+            .read()
+            .get(&(target_peer_id.to_string(), request.collection_id.clone()))
+            .cloned();
+        if let Some(cached) = cached.filter(|cached| request.creator == cached.authorizer_did) {
+            request.explicit_replay_capability = Some(cached.capability);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExplicitReplayCapabilityClaims {

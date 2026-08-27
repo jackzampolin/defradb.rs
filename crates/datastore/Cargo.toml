@@ -11,6 +11,9 @@ description = "Transaction wrapper for DefraDB providing multistore access and c
 [package.metadata.cargo-machete]
 ignored = ["cid"]
 
+[lib]
+bench = false
+
 [dependencies]
 # Async runtime
 async-trait.workspace = true

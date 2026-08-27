@@ -10,6 +10,9 @@ repository.workspace = true
 [package.metadata.cargo-machete]
 ignored = ["thiserror"]
 
+[lib]
+bench = false
+
 [dependencies]
 # Internal crates
 query = { path = "../query" }

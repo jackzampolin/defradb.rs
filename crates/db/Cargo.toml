@@ -20,6 +20,9 @@ rocksdb = ["storage/rocksdb"]
 fjall = ["storage/fjall"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
 
+[lib]
+bench = false
+
 [dependencies]
 web-time.workspace = true
 # Async runtime
@@ -107,28 +110,7 @@ proptest.workspace = true
 blst = "0.3"
 getrandom = "0.2"
 tempfile = "3"
-criterion.workspace = true
 ed25519-dalek.workspace = true
 
 [lints]
 workspace = true
-
-[[bench]]
-name = "block_write"
-harness = false
-
-[[bench]]
-name = "merge_dag"
-harness = false
-
-[[bench]]
-name = "vector_mutations"
-harness = false
-
-[[bench]]
-name = "vector_search"
-harness = false
-
-[[bench]]
-name = "sift"
-harness = false

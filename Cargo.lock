@@ -1444,6 +1444,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "benches"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "blockstore",
+ "cid",
+ "crdt",
+ "criterion 0.6.0",
+ "crypto",
+ "datastore",
+ "db",
+ "defra-core",
+ "defra-http",
+ "document",
+ "lru 0.16.4",
+ "multihash",
+ "query",
+ "schema",
+ "serde_json",
+ "sha2 0.10.9",
+ "storage",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1644,7 +1672,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "cid",
- "criterion 0.6.0",
  "crypto",
  "defra-core",
  "lru 0.16.4",
@@ -2897,7 +2924,6 @@ name = "crdt"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "criterion 0.6.0",
  "defra-core",
  "proptest",
  "serde",
@@ -3382,7 +3408,6 @@ dependencies = [
  "ciborium",
  "cid",
  "crdt",
- "criterion 0.6.0",
  "crypto",
  "datastore",
  "defra-core",
@@ -3466,7 +3491,6 @@ dependencies = [
  "bytes",
  "ciborium",
  "cid",
- "criterion 0.6.0",
  "futures",
  "ipld-core",
  "multibase",
@@ -3515,7 +3539,6 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "cid",
- "criterion 0.6.0",
  "crypto",
  "db",
  "defra-core",
@@ -9420,7 +9443,6 @@ dependencies = [
  "chrono",
  "ciborium",
  "cid",
- "criterion 0.6.0",
  "cursor",
  "defra-core",
  "document",
@@ -11384,7 +11406,6 @@ dependencies = [
  "bm25",
  "chrono",
  "cid",
- "criterion 0.6.0",
  "crypto",
  "defra-core",
  "document",

@@ -19,6 +19,10 @@ fn mock_collection_version(name: &str) -> schema::CollectionVersion {
 #[derive(Debug, Clone, Default)]
 pub struct MockCollectionManagementOperations {
     last_migration: Arc<Mutex<Option<lens::LensConfig>>>,
+    /// Names passed to `delete_collection`, so a test can tell a filtered
+    /// document delete from a collection drop. A no-op mock cannot: it lets a
+    /// route wired back to the drop keep every assertion green.
+    dropped_collections: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockCollectionManagementOperations {
@@ -28,6 +32,11 @@ impl MockCollectionManagementOperations {
 
     pub fn last_migration(&self) -> Option<lens::LensConfig> {
         self.last_migration.lock().unwrap().clone()
+    }
+
+    /// Collections dropped through `delete_collection`.
+    pub fn dropped_collections(&self) -> Vec<String> {
+        self.dropped_collections.lock().unwrap().clone()
     }
 }
 
@@ -99,7 +108,11 @@ impl CollectionManagementOperations for MockCollectionManagementOperations {
         CollectionVersionOperations::get_all_collections(self).await
     }
 
-    async fn delete_collection(&self, _name: &str) -> Result<(), String> {
+    async fn delete_collection(&self, name: &str) -> Result<(), String> {
+        self.dropped_collections
+            .lock()
+            .unwrap()
+            .push(name.to_string());
         Ok(())
     }
 

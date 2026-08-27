@@ -125,7 +125,8 @@ pub(crate) fn create_router_with_state_and_body_limits(
             "/{name}",
             get(handlers::get_collection_doc_ids)
                 .post(handlers::create_document)
-                .delete(handlers::delete_collection),
+                .patch(handlers::update_documents_with_filter)
+                .delete(handlers::delete_documents_with_filter),
         )
         .route("/{name}/describe", get(handlers::describe_collection))
         .route("/{name}/exists", get(handlers::collection_exists))
@@ -344,9 +345,11 @@ pub(crate) fn create_router_with_state_and_body_limits(
         .route("/node/identity", get(handlers::utility::get_node_identity))
         .with_state(state);
 
-    root_routes
-        .nest("/api/v0", api_routes.clone())
-        .nest("/api/v1", api_routes)
+    crate::go_paths::API_PREFIXES
+        .iter()
+        .fold(root_routes, |router, prefix| {
+            router.nest(prefix, api_routes.clone())
+        })
 }
 
 #[cfg(test)]

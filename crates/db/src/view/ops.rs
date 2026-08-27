@@ -3,6 +3,7 @@
 //! This module contains operations for refreshing and managing
 //! materialized view caches.
 
+use crate::collection::selector::CollectionSelector;
 use crate::error::{Error, Result};
 use datastore::NamespaceView;
 use schema::CollectionVersion;
@@ -17,71 +18,6 @@ use storage::keys::datastore::ViewCacheKey;
 use tokio::task::JoinHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time::{self, Instant, MissedTickBehavior};
-
-/// Options for refreshing materialized views.
-///
-/// The selectors mirror Go's collection lookup (`internal/db/collection.go`
-/// `getCollections`), which is what Go's `RefreshViews` selects with.
-#[derive(Debug, Clone, Default)]
-pub struct RefreshViewsOptions {
-    /// Only refresh views with these names (None = all views)
-    pub names: Option<Vec<String>>,
-    /// Only refresh the view with this collection version id.
-    pub version_id: Option<String>,
-    /// Only refresh views belonging to this collection id.
-    pub collection_id: Option<String>,
-    /// Include inactive collection versions.
-    pub get_inactive: bool,
-}
-
-impl RefreshViewsOptions {
-    /// Create options that refresh all views.
-    pub fn all() -> Self {
-        Self::default()
-    }
-
-    /// Create options that refresh only the named views.
-    pub fn with_names(names: Vec<String>) -> Self {
-        Self {
-            names: Some(names),
-            ..Self::default()
-        }
-    }
-
-    /// Whether inactive versions have to be loaded to answer this selection.
-    ///
-    /// A named version is returned whether or not it is active, so asking for
-    /// one requires the full listing just as `get_inactive` does.
-    pub fn needs_all_versions(&self) -> bool {
-        self.get_inactive || self.version_id.is_some()
-    }
-
-    /// Whether this collection version is selected.
-    pub fn selects(&self, collection: &CollectionVersion) -> bool {
-        let version_matches = self
-            .version_id
-            .as_ref()
-            .is_none_or(|id| &collection.version_id == id);
-        let name_matches = self
-            .names
-            .as_ref()
-            .is_none_or(|names| names.contains(&collection.name));
-        let collection_matches = !self.applies_collection_id()
-            || self
-                .collection_id
-                .as_ref()
-                .is_none_or(|id| &collection.collection_id == id);
-        let visible = self.get_inactive || collection.is_active || self.version_id.is_some();
-
-        version_matches && name_matches && collection_matches && visible
-    }
-
-    /// Go picks candidates by collection id only when neither a name nor a
-    /// version already picked them, so those two take precedence over it.
-    fn applies_collection_id(&self) -> bool {
-        (self.get_inactive || self.names.is_none()) && self.version_id.is_none()
-    }
-}
 
 /// Whether this collection version is a view whose cache can be rebuilt.
 ///
@@ -134,7 +70,7 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Clears and rebuilds the view cache for each materialized view the
     /// options select. Without options, every materialized view is refreshed.
-    pub async fn refresh_views(&self, options: RefreshViewsOptions) -> Result<()>
+    pub async fn refresh_views(&self, options: CollectionSelector) -> Result<()>
     where
         S: 'static,
     {
@@ -144,10 +80,12 @@ impl<S: Store> crate::database::DB<S> {
             self.get_all_active_collections_internal()?
         };
 
-        // A selector that matches nothing is a caller mistake, not an empty
-        // refresh. Go looks a version up directly and propagates not-found
-        // (`internal/db/collection.go:211`), so a typo must not read as success.
-        if let Some(version_id) = &options.version_id {
+        // A direct version lookup that matches nothing is a caller mistake, not
+        // an empty refresh. Go propagates that not-found error
+        // (`internal/db/collection.go:211`).
+        if let (true, Some(version_id)) =
+            (options.resolves_by_version_lookup(), &options.version_id)
+        {
             if !collections.iter().any(|col| &col.version_id == version_id) {
                 return Err(Error::Other(format!(
                     "no active collection version {version_id}"
@@ -297,7 +235,7 @@ impl<S: Store> crate::database::DB<S> {
 
                 for name in due_names {
                     if let Err(error) = self
-                        .refresh_views(RefreshViewsOptions::with_names(vec![name.clone()]))
+                        .refresh_views(CollectionSelector::with_names(vec![name.clone()]))
                         .await
                     {
                         tracing::warn!(
@@ -465,6 +403,11 @@ impl<S: Store> crate::database::DB<S> {
             .collections
             .read()
             .map_err(|_| Error::Other("failed to acquire collections lock".to_string()))?;
-        Ok(cache.values().map(|c| c.schema().clone()).collect())
+        Ok(cache
+            .values()
+            .map(|collection| collection.schema())
+            .filter(|schema| schema.is_active)
+            .cloned()
+            .collect())
     }
 }

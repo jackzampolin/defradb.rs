@@ -33,6 +33,7 @@ pub mod name;
 pub(crate) mod ops;
 pub(crate) mod provider;
 pub mod retriever;
+pub mod selector;
 pub mod snapshot;
 pub mod stream;
 pub mod validation;

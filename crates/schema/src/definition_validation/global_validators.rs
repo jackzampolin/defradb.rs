@@ -4,6 +4,160 @@ use super::helpers::*;
 use super::DefinitionState;
 use crate::{FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
 
+fn format_relation_kind(kind: &FieldKind) -> String {
+    let (name, is_array) = match kind {
+        FieldKind::Named { name, is_array } => (name.clone(), *is_array),
+        FieldKind::Relation {
+            collection_id,
+            is_array,
+        } => (collection_id.clone(), *is_array),
+        FieldKind::SelfRef {
+            relative_id,
+            is_array,
+        } => {
+            let name = if relative_id.is_empty() {
+                "Self".to_string()
+            } else {
+                format!("Self-{relative_id}")
+            };
+            (name, *is_array)
+        }
+        _ => return format_field_kind(kind),
+    };
+
+    if is_array {
+        format!("[{name}]")
+    } else {
+        name
+    }
+}
+
+/// Matches Go's validateRelationPointsToValidKind.
+pub(super) fn validate_relation_points_to_valid_kind(
+    new_state: &DefinitionState,
+    old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for collection in &new_state.collections {
+        for field in collection.relation_fields() {
+            if new_state
+                .collection_for_kind(collection, &field.kind)
+                .is_some()
+            {
+                continue;
+            }
+
+            if let Some(removed) = old_state.collection_for_kind(collection, &field.kind) {
+                errs.push(format!(
+                    "cannot remove a collection while another field references it. Removed: {}, ReferencedBy: {}, Field: {}",
+                    removed.name, collection.name, field.name
+                ));
+            } else {
+                errs.push(format!(
+                    "no type found for given name. Field: {}, Kind: {}",
+                    field.name,
+                    format_relation_kind(&field.kind)
+                ));
+            }
+        }
+    }
+    errs
+}
+
+/// Matches Go's validateSecondaryFieldsPairUp.
+pub(super) fn validate_secondary_fields_pair_up(
+    new_state: &DefinitionState,
+    _old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for collection in &new_state.collections {
+        if collection.query.is_some() {
+            continue;
+        }
+
+        for field in collection
+            .relation_fields()
+            .filter(|field| !field.is_primary)
+        {
+            let Some(relation_name) = field.relation_name.as_deref() else {
+                continue;
+            };
+            let Some(target) = new_state.collection_for_kind(collection, &field.kind) else {
+                continue;
+            };
+            if target.is_embedded_only {
+                continue;
+            }
+
+            let paired = target
+                .field_by_relation(relation_name, &collection.name, &field.name)
+                .is_some_and(|other| other.is_primary);
+            if !paired {
+                errs.push(format!(
+                    "relation missing field. Object: {}, RelationName: {}",
+                    target.name, relation_name
+                ));
+            }
+        }
+    }
+    errs
+}
+
+/// Matches Go's validateSingleSidePrimary.
+pub(super) fn validate_single_side_primary(
+    new_state: &DefinitionState,
+    _old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for collection in &new_state.collections {
+        for field in collection
+            .relation_fields()
+            .filter(|field| field.is_primary)
+        {
+            let Some(relation_name) = field.relation_name.as_deref() else {
+                continue;
+            };
+            let Some(target) = new_state.collection_for_kind(collection, &field.kind) else {
+                continue;
+            };
+            if target
+                .field_by_relation(relation_name, &collection.name, &field.name)
+                .is_some_and(|other| other.is_primary)
+            {
+                errs.push("relation can only have a single field set as primary".to_string());
+            }
+        }
+    }
+    errs
+}
+
+/// Matches Go's validateSelfReferences.
+pub(super) fn validate_self_references(
+    new_state: &DefinitionState,
+    _old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for collection in &new_state.collections {
+        for field in collection.relation_fields() {
+            if matches!(field.kind, FieldKind::SelfRef { .. }) {
+                continue;
+            }
+            let Some(target) = new_state.collection_for_kind(collection, &field.kind) else {
+                continue;
+            };
+            if target.collection_id == collection.collection_id
+                || target.collection_id == collection.version_id
+            {
+                errs.push(format!(
+                    "must specify 'Self' kind for self referencing relations. Field: {}",
+                    field.name
+                ));
+            }
+        }
+    }
+    errs
+}
+
 /// Matches Go's validateCollectionNameUnique.
 pub(super) fn validate_collection_name_unique(
     new_state: &DefinitionState,

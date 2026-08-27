@@ -1,14 +1,10 @@
-//! `RefreshViewsOptions` selects the views Go's collection lookup would.
+//! Which views a refresh touches, and which it refuses.
 //!
-//! Go's `RefreshViews` selects with `options.GetCollectionsOptions`, resolved
-//! by `getCollections` (`internal/db/collection.go`). That runs in two stages:
-//! a switch that picks the candidate set, then a filter over it. The switch is
-//! what makes `collection_id` yield to a name or a version, and what lets a
-//! name plus `get_inactive` reach an inactive version at all. A single flat
-//! AND over the four selectors gets both wrong.
+//! The selector precedence itself is `collection::selector`; these are the
+//! refresh-specific rules layered on top of it.
 
 use db::is_refreshable_view;
-use db::RefreshViewsOptions;
+use db::CollectionSelector;
 use schema::CollectionVersion;
 use schema::QuerySource;
 
@@ -22,77 +18,6 @@ fn materialized(name: &str) -> CollectionVersion {
     version.query = Some(QuerySource::new(serde_json::json!({})));
     version.is_materialized = true;
     version
-}
-
-fn inactive(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
-    let mut version = view(name, version_id, collection_id);
-    version.is_active = false;
-    version
-}
-
-#[test]
-fn no_selectors_select_everything_active() {
-    let options = RefreshViewsOptions::all();
-    assert!(options.selects(&view("Orders", "v1", "c1")));
-    assert!(!options.needs_all_versions());
-}
-
-#[test]
-fn no_selectors_skip_inactive_versions() {
-    assert!(!RefreshViewsOptions::all().selects(&inactive("Orders", "v1", "c1")));
-}
-
-#[test]
-fn names_select_only_the_named_views() {
-    let options = RefreshViewsOptions::with_names(vec!["Orders".to_string()]);
-    assert!(options.selects(&view("Orders", "v1", "c1")));
-    assert!(!options.selects(&view("Invoices", "v2", "c2")));
-}
-
-#[test]
-fn a_version_id_selects_only_that_version() {
-    let options = RefreshViewsOptions {
-        version_id: Some("v1".to_string()),
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&view("Orders", "v1", "c1")));
-    assert!(!options.selects(&view("Orders", "v2", "c1")));
-}
-
-/// Go exempts a requested version from the inactive drop, so asking for a
-#[test]
-fn a_collection_id_selects_that_collections_views() {
-    let options = RefreshViewsOptions {
-        collection_id: Some("c1".to_string()),
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&view("Orders", "v1", "c1")));
-    assert!(!options.selects(&view("Invoices", "v2", "c2")));
-}
-
-/// `collection_id` picks candidates in Go rather than filtering them, so a
-/// name selection takes precedence and a disagreeing collection id is ignored.
-/// A flat AND over all four selectors would select nothing here.
-#[test]
-fn a_name_wins_over_a_disagreeing_collection_id() {
-    let options = RefreshViewsOptions {
-        names: Some(vec!["Orders".to_string()]),
-        collection_id: Some("other".to_string()),
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&view("Orders", "v1", "c1")));
-}
-
-/// Same rule for a version selection: it is picked in stage 1, ahead of any
-/// collection id.
-#[test]
-fn a_version_id_wins_over_a_disagreeing_collection_id() {
-    let options = RefreshViewsOptions {
-        version_id: Some("v1".to_string()),
-        collection_id: Some("other".to_string()),
-        ..RefreshViewsOptions::all()
-    };
-    assert!(options.selects(&view("Orders", "v1", "c1")));
 }
 
 /// Eligibility is separate from selection: a version has to be a materialized,
@@ -123,7 +48,7 @@ fn an_embedded_only_view_is_never_refreshed() {
     assert!(!is_refreshable_view(&embedded));
 
     assert!(
-        RefreshViewsOptions::with_names(vec!["OrdersView".to_string()]).selects(&embedded),
+        CollectionSelector::with_names(vec!["OrdersView".to_string()]).selects(&embedded),
         "the selector still matches it; eligibility is what excludes it"
     );
 }
@@ -140,9 +65,9 @@ async fn an_unknown_version_id_is_an_error_not_a_silent_success() {
         .expect("open");
 
     let error = db
-        .refresh_views(RefreshViewsOptions {
+        .refresh_views(CollectionSelector {
             version_id: Some("bae-does-not-exist".to_string()),
-            ..RefreshViewsOptions::all()
+            ..CollectionSelector::all()
         })
         .await
         .expect_err("an unknown version must be reported");
@@ -154,15 +79,33 @@ async fn an_unknown_version_id_is_an_error_not_a_silent_success() {
 }
 
 #[tokio::test]
+async fn a_name_precedes_an_unknown_version_id() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+    db.create_collection(materialized("OrdersView"))
+        .await
+        .expect("store view");
+
+    db.refresh_views(CollectionSelector {
+        names: Some(vec!["OrdersView".to_string()]),
+        version_id: Some("bae-does-not-exist".to_string()),
+        ..CollectionSelector::all()
+    })
+    .await
+    .expect("the version id only filters the active name candidate");
+}
+
+#[tokio::test]
 async fn an_unknown_collection_id_is_an_error() {
     let db = db::DB::open(storage::backends::MemoryStore::new())
         .await
         .expect("open");
 
     let error = db
-        .refresh_views(RefreshViewsOptions {
+        .refresh_views(CollectionSelector {
             collection_id: Some("no-such-collection".to_string()),
-            ..RefreshViewsOptions::all()
+            ..CollectionSelector::all()
         })
         .await
         .expect_err("an unknown collection must be reported");
@@ -176,9 +119,9 @@ async fn get_inactive_is_allowed_when_no_inactive_view_is_selected() {
         .await
         .expect("open");
 
-    db.refresh_views(RefreshViewsOptions {
+    db.refresh_views(CollectionSelector {
         get_inactive: true,
-        ..RefreshViewsOptions::all()
+        ..CollectionSelector::all()
     })
     .await
     .expect("including inactive candidates must not fail an active-only selection");
@@ -199,9 +142,9 @@ async fn refreshing_a_selected_inactive_view_is_refused() {
         .expect("store inactive view");
 
     let error = db
-        .refresh_views(RefreshViewsOptions {
+        .refresh_views(CollectionSelector {
             get_inactive: true,
-            ..RefreshViewsOptions::all()
+            ..CollectionSelector::all()
         })
         .await
         .expect_err("inactive selection must be refused, not silently wrong");

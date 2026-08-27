@@ -171,7 +171,7 @@ pub unsafe extern "C" fn add_view(
 
             if !materialized_names.is_empty() {
                 database
-                    .refresh_views(db::RefreshViewsOptions::with_names(
+                    .refresh_views(db::CollectionSelector::with_names(
                         materialized_names,
                     ))
                     .await
@@ -234,7 +234,7 @@ pub unsafe extern "C" fn refresh_views(
 
         let refresh_options =
             parse_view_names_options(c_str_to_string(options))
-                .map(db::RefreshViewsOptions::with_names)
+                .map(db::CollectionSelector::with_names)
                 .unwrap_or_default();
 
         ffi_async!(rt, {

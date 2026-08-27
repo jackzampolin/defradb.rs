@@ -78,6 +78,10 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::CollectionPatch),
             Method::PATCH => RoutePermission::Required(NodePermission::CollectionPatch),
+            // Dropping collections by name. This fell to the read default
+            // while `delete_collections_by_names` enforced `CollectionPatch`
+            // itself, so the outer gate was weaker than the handler.
+            Method::DELETE => RoutePermission::Required(NodePermission::CollectionPatch),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },
         "/api/v0/collections/default" => RoutePermission::Required(NodePermission::CollectionPatch),
@@ -92,10 +96,15 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
         "/api/v0/collections/indexes" => RoutePermission::Required(NodePermission::IndexList),
+        // PATCH and DELETE here are Go's filtered document operations, not
+        // collection ones, so they are document permissions. Dropping a
+        // collection is `DELETE /collections?name=...`, which keeps
+        // `CollectionPatch`.
         "/api/v0/collections/:name" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::DocumentUpdate),
-            Method::DELETE => RoutePermission::Required(NodePermission::CollectionPatch),
+            Method::PATCH => RoutePermission::Required(NodePermission::DocumentUpdate),
+            Method::DELETE => RoutePermission::Required(NodePermission::DocumentDelete),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },
         "/api/v0/collections/:name/describe" => {
@@ -305,12 +314,31 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
     }
 }
 
+/// Fold every mount of the API router onto its `/api/v0` key.
+///
+/// `go_paths::API_PREFIXES` is what `routes.rs` mounts the one route set at,
+/// so it is also what has to be folded here. Deriving from the same constant
+/// is the point: a prefix added there without a matching arm here would mount
+/// the whole route set unfolded, and every route under it would fall to the
+/// `_` arm and be enforced as `DocumentRead`.
+///
+/// The longest match wins, so the list stays order-independent: `/api/v0/x`
+/// must fold on `/api/v0` and not on the bare `/api`.
+///
+/// Note this rewrites rather than rejects: `/api/v2/collections` becomes
+/// `/api/v0/v2/collections`, which is safe only because no table key begins
+/// with `/api/v0/v`, and which lands on the `_` arm as it should.
 fn normalize_api_version(path: &str) -> Cow<'_, str> {
-    if path == "/api/v1" {
-        Cow::Borrowed("/api/v0")
-    } else if let Some(suffix) = path.strip_prefix("/api/v1/") {
-        Cow::Owned(format!("/api/v0/{suffix}"))
-    } else {
-        Cow::Borrowed(path)
+    let matched = crate::go_paths::API_PREFIXES
+        .iter()
+        .filter_map(|prefix| {
+            path.strip_prefix(*prefix)
+                .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        })
+        .max_by_key(|suffix| path.len() - suffix.len());
+
+    match matched {
+        Some(suffix) => Cow::Owned(format!("/api/v0{suffix}")),
+        None => Cow::Borrowed(path),
     }
 }

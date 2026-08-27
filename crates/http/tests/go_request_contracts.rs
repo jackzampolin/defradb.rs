@@ -121,7 +121,7 @@ async fn a_view_without_a_query_or_sdl_is_rejected() {
 // RefreshViews request contract
 // ---------------------------------------------------------------------------
 
-async fn refresh_options_for(call: Call) -> (StatusCode, Option<db::RefreshViewsOptions>) {
+async fn refresh_options_for(call: Call) -> (StatusCode, Option<db::CollectionSelector>) {
     let view = Arc::new(RecordingViewOps::default());
     let (status, _) = call.send_to(router_with(Arc::clone(&view))).await;
     let seen = view.refresh.lock().unwrap().clone();

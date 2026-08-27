@@ -165,6 +165,7 @@ impl FieldDescription {
             );
         }
 
+        // Matches Go's validateRelationNameSet.
         if self.kind.is_relation() && self.relation_name.is_none() {
             return Err(SchemaError::MissingRequiredField(format!(
                 "relation name cannot be empty. Field: {}",

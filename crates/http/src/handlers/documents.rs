@@ -9,10 +9,12 @@
 //! Go DefraDB behavior. Go returns only HTTP 200 status with no body.
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::error::HttpError;
@@ -207,6 +209,185 @@ pub async fn delete_document(
                 doc_id = %doc_id,
                 error = %e,
                 "Failed to delete document"
+            );
+            Err(e.into())
+        }
+    }
+}
+
+/// Go's `DeleteCollectionRequest` (`http/handler_collection.go:32`).
+#[derive(Debug, Deserialize)]
+pub struct DeleteDocumentsRequest {
+    pub filter: Option<JsonValue>,
+}
+
+/// Go's `client.DeleteResult` / `client.UpdateResult` (`client/collection.go`).
+///
+/// Go's fields carry no json tags, so they marshal capitalised. A client
+/// reading `Count` off a lowercase `count` sees nothing.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DocumentsResult {
+    #[serde(rename = "Count")]
+    pub count: usize,
+    #[serde(rename = "DocIDs")]
+    pub doc_ids: Vec<String>,
+}
+
+impl From<Vec<String>> for DocumentsResult {
+    fn from(doc_ids: Vec<String>) -> Self {
+        Self {
+            count: doc_ids.len(),
+            doc_ids,
+        }
+    }
+}
+
+/// Parse a filtered mutation's request body.
+fn request_body(body: &Bytes) -> Result<JsonValue, HttpError> {
+    serde_json::from_slice(body)
+        .map_err(|e| HttpError::BadRequest(format!("invalid request body: {e}")))
+}
+
+/// Read the `filter` a filtered mutation must have.
+///
+/// Go types it as `any` and accepts three forms
+/// (`internal/db/document_update.go:163-183`): a `map`, GraphQL source as a
+/// `string`, and nothing else. Its own HTTP client marshals whatever the
+/// caller handed it (`http/client_document.go:299-321`), and the JS client
+/// always sends a string, so both forms arrive in practice.
+///
+/// A missing or null filter is refused, which is parity rather than caution:
+/// nil reaches Go's `default:` arm as `ErrUnsupportedFilterType`, a 400. An
+/// empty string is Go's `ErrEmptyFilter`, also a 400.
+///
+/// The string form is parsed into conditions rather than pasted into the
+/// mutation, so it is validated exactly like a filter that arrived as an
+/// object.
+fn required_filter(request: &JsonValue) -> Result<JsonValue, HttpError> {
+    match request.get("filter") {
+        Some(JsonValue::Object(conditions)) => Ok(JsonValue::Object(conditions.clone())),
+        Some(JsonValue::String(source)) => {
+            query::parse_filter_string(source).map_err(|e| HttpError::BadRequest(e.to_string()))
+        }
+        Some(JsonValue::Null) | None => Err(HttpError::BadRequest(
+            "'filter' is required; send a filter object to select the documents to act on".into(),
+        )),
+        Some(_) => Err(HttpError::BadRequest("unsupported filter type".into())),
+    }
+}
+
+/// Read the `updater` patch.
+///
+/// Go types this as a `string` holding JSON (`UpdateCollectionRequest`,
+/// `http/handler_collection.go:36-39`), so a string is parsed as JSON. An
+/// object is accepted as-is because a hand-written client is likelier to send
+/// one than to double-encode, and refusing it would buy nothing.
+fn required_updater(request: &JsonValue) -> Result<JsonValue, HttpError> {
+    let updater = match request.get("updater") {
+        Some(JsonValue::Null) | None => {
+            return Err(HttpError::BadRequest(
+                "'updater' is required; send the update to apply".into(),
+            ))
+        }
+        Some(updater) => updater,
+    };
+
+    let parsed = match updater {
+        JsonValue::String(encoded) => serde_json::from_str(encoded)
+            .map_err(|e| HttpError::BadRequest(format!("'updater' is not valid JSON: {e}")))?,
+        other => other.clone(),
+    };
+
+    if !parsed.is_object() {
+        return Err(HttpError::BadRequest(
+            "'updater' must be a JSON object of fields to update".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Delete every document matching a filter.
+///
+/// DELETE /api/v0/collections/{name}
+///
+/// This is Go's `DeleteDocumentsWithFilter` (`http/handler_collection.go:511`),
+/// which its own client calls by `DELETE`ing this path with `{"filter": ...}`
+/// (`http/client_document.go:299-321`). Rust used to drop the collection and
+/// every one of its versions here, and answer success, so a Go-compatible
+/// client asking to delete a few documents destroyed the collection instead.
+///
+/// Dropping a collection lives on `DELETE /api/v0/collections?name=...`.
+///
+/// Requires `DocumentDelete` permission when NAC is enabled.
+pub async fn delete_documents_with_filter(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(collection): Path<String>,
+    body: Bytes,
+) -> Result<Json<DocumentsResult>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentDelete).await?;
+
+    let filter = required_filter(&request_body(&body)?)?;
+
+    let rest = state
+        .rest
+        .as_ref()
+        .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
+
+    match rest
+        .delete_documents_with_filter(&collection, &filter, identity.did())
+        .await
+    {
+        Ok(doc_ids) => Ok(Json(doc_ids.into())),
+        Err(e) => {
+            tracing::warn!(
+                collection = %collection,
+                error = %e,
+                "Failed to delete documents with filter"
+            );
+            Err(e.into())
+        }
+    }
+}
+
+/// Apply an update to every document matching a filter.
+///
+/// PATCH /api/v0/collections/{name}
+///
+/// This is Go's `UpdateDocumentsWithFilter` (`http/handler_collection.go:510`),
+/// which its own client reaches by `PATCH`ing this path with
+/// `{"filter": ..., "updater": "..."}` (`http/client_document.go:263-296`).
+/// Rust registered no `PATCH` here, so the request answered 405 and filtered
+/// update had no HTTP-level equivalent at all.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
+pub async fn update_documents_with_filter(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(collection): Path<String>,
+    body: Bytes,
+) -> Result<Json<DocumentsResult>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
+    let request = request_body(&body)?;
+    let filter = required_filter(&request)?;
+    let updater = required_updater(&request)?;
+
+    let rest = state
+        .rest
+        .as_ref()
+        .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
+
+    match rest
+        .update_documents_with_filter(&collection, &filter, &updater, identity.did())
+        .await
+    {
+        Ok(doc_ids) => Ok(Json(doc_ids.into())),
+        Err(e) => {
+            tracing::warn!(
+                collection = %collection,
+                error = %e,
+                "Failed to update documents with filter"
             );
             Err(e.into())
         }

@@ -36,6 +36,9 @@ otlp = [
     "opentelemetry_sdk/internal-logs",
     "opentelemetry-otlp/internal-logs",
 ]
+[lib]
+bench = false
+
 [dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["blocking"], optional = true }
 tracing.workspace = true

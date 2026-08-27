@@ -158,6 +158,70 @@ async fn document_lifecycle_test(cluster: TestCluster) {
 
 for_each_runtime!(document_lifecycle, document_lifecycle_test);
 
+async fn filtered_document_update_http_contract(cluster: TestCluster) {
+    let client = cluster.client(0);
+    client
+        .schema_add("type HttpFilterUser { name: String  age: Int }")
+        .expect("failed to add schema");
+
+    let alice = client
+        .query(r#"mutation { add_HttpFilterUser(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .expect("create Alice");
+    let alice_id = alice["add_HttpFilterUser"][0]["_docID"]
+        .as_str()
+        .expect("Alice has a document ID");
+    client
+        .query(r#"mutation { add_HttpFilterUser(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .expect("create Bob");
+
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "{}/api/v0/collections/HttpFilterUser",
+            cluster.api_url(0)
+        ))
+        .json(&serde_json::json!({
+            "filter": r#"{name: {_eq: "Alice"}}"#,
+            "updater": r#"{"age":31}"#,
+        }))
+        .send()
+        .await
+        .expect("filtered update request");
+    let status = response.status();
+    let body = response.text().await.expect("filtered update response");
+    assert!(
+        status.is_success(),
+        "filtered update failed: {status} {body}"
+    );
+
+    let result: Value = serde_json::from_str(&body).expect("filtered update JSON");
+    assert_eq!(result["Count"], 1);
+    assert_eq!(result["DocIDs"], serde_json::json!([alice_id]));
+
+    let stored = client
+        .query("query { HttpFilterUser { name age } }")
+        .expect("query updated documents");
+    let users = stored["HttpFilterUser"]
+        .as_array()
+        .expect("HttpFilterUser result is an array");
+    assert!(
+        users
+            .iter()
+            .any(|user| user["name"] == "Alice" && user["age"] == 31),
+        "Alice was not updated: {users:?}"
+    );
+    assert!(
+        users
+            .iter()
+            .any(|user| user["name"] == "Bob" && user["age"] == 25),
+        "Bob was unexpectedly updated: {users:?}"
+    );
+}
+
+for_each_runtime!(
+    filtered_document_update_http_contract,
+    filtered_document_update_http_contract
+);
+
 async fn filter_mutations_return_post_update_docs(cluster: TestCluster) {
     let client = cluster.client(0);
 
@@ -245,3 +309,55 @@ async fn rust_filter_mutations_return_post_update_docs() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     filter_mutations_return_post_update_docs(cluster).await;
 }
+
+async fn filtered_document_delete_http_contract(cluster: TestCluster) {
+    let client = cluster.client(0);
+    client
+        .schema_add("type HttpDeleteUser { name: String }")
+        .expect("failed to add schema");
+
+    let alice = client
+        .query(r#"mutation { add_HttpDeleteUser(input: {name: "Alice"}) { _docID } }"#)
+        .expect("create Alice");
+    let alice_id = alice["add_HttpDeleteUser"][0]["_docID"]
+        .as_str()
+        .expect("Alice has a document ID");
+    client
+        .query(r#"mutation { add_HttpDeleteUser(input: {name: "Bob"}) { _docID } }"#)
+        .expect("create Bob");
+
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "{}/api/v0/collections/HttpDeleteUser",
+            cluster.api_url(0)
+        ))
+        .json(&serde_json::json!({
+            "filter": r#"{name: {_eq: "Alice"}}"#,
+        }))
+        .send()
+        .await
+        .expect("filtered delete request");
+    let status = response.status();
+    let body = response.text().await.expect("filtered delete response");
+    assert!(
+        status.is_success(),
+        "filtered delete failed: {status} {body}"
+    );
+
+    let result: Value = serde_json::from_str(&body).expect("filtered delete JSON");
+    assert_eq!(result["Count"], 1);
+    assert_eq!(result["DocIDs"], serde_json::json!([alice_id]));
+
+    let stored = client
+        .query("query { HttpDeleteUser { name } }")
+        .expect("query remaining documents");
+    assert_eq!(
+        stored["HttpDeleteUser"],
+        serde_json::json!([{"name": "Bob"}])
+    );
+}
+
+for_each_runtime!(
+    filtered_document_delete_http_contract,
+    filtered_document_delete_http_contract
+);

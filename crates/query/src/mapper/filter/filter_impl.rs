@@ -306,6 +306,8 @@ impl Filter {
                 continue;
             }
 
+            let value = super::op::normalize_field_condition(value);
+
             // Value should be an object with operator keys or nested field conditions
             let ops = value
                 .as_object()

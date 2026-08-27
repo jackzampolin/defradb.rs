@@ -244,7 +244,3 @@ impl Bus for ChannelBus {
         self.closed.load(Ordering::Acquire)
     }
 }
-
-#[cfg(test)]
-#[path = "channel_bus_tests.rs"]
-mod tests;

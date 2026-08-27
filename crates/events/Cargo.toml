@@ -15,6 +15,9 @@ ignored = ["async-trait", "thiserror"]
 default = ["channel"]
 channel = ["dep:async-channel", "dep:parking_lot"]
 
+[lib]
+bench = false
+
 [dependencies]
 defra-core = { path = "../defra-core" }
 

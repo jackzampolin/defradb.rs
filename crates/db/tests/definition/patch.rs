@@ -6,6 +6,7 @@ use schema::FieldKind;
 use schema::ScalarArrayKind;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
+use storage::keys::datastore::ViewCacheKey;
 use storage::keys::systemstore::LensConfigKey;
 
 async fn agent_response_db() -> DB<MemoryStore> {
@@ -28,6 +29,22 @@ async fn users_db() -> DB<MemoryStore> {
     let collections = query::parse_sdl("type Users { name: String }").unwrap();
     db.create_collections_atomic(collections).await.unwrap();
     db
+}
+
+#[tokio::test]
+async fn patch_rejects_an_invalid_default_value() {
+    let db = users_db().await;
+    let patch = r#"[{
+        "op": "add",
+        "path": "/Users/Fields/-",
+        "value": {"Name": "age", "Kind": "Int", "DefaultValue": "unknown"}
+    }]"#;
+
+    let error = db.patch_collection("Users", patch, None).await.unwrap_err();
+
+    assert!(error.to_string().contains(
+        "default field value is invalid. Collection: Users, Inner: Field 'age' has incompatible type"
+    ));
 }
 
 const ADD_AGE_PATCH: &str = r#"
@@ -272,6 +289,72 @@ async fn patch_view_query_creates_new_version() {
         Some(original.version_id())
     );
     assert_eq!(db.get_all_collection_versions().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn patch_dematerialization_requires_an_empty_view() {
+    let db = DB::new(MemoryStore::new()).unwrap();
+    let users = query::parse_sdl("type Users { name: String }").unwrap();
+    db.create_collections_atomic(users).await.unwrap();
+
+    let mut views = query::parse_sdl("type UserView { name: String }").unwrap();
+    let select = query::parse_query("query { Users { name } }").unwrap();
+    views[0].query = Some(schema::QuerySource::new(query::select_to_go_json(
+        &select[0],
+    )));
+    views[0].is_materialized = true;
+    db.create_collections_atomic(views).await.unwrap();
+    let dematerialized = db
+        .patch_collection(
+            "UserView",
+            r#"[{"op":"replace","path":"/UserView/IsMaterialized","value":false}]"#,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!dematerialized.is_materialized);
+
+    let view = db
+        .patch_collection(
+            "UserView",
+            r#"[{"op":"replace","path":"/UserView/IsMaterialized","value":true}]"#,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(view.is_materialized);
+
+    let txn = db.new_txn(false).await.unwrap();
+    let cache_key = ViewCacheKey::new(view.root_id, 0).bytes();
+    txn.datastore()
+        .unwrap()
+        .set(&cache_key, b"cached")
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = db.new_txn(true).await.unwrap();
+    assert!(txn
+        .datastore()
+        .unwrap()
+        .get(&cache_key)
+        .await
+        .unwrap()
+        .is_some());
+    txn.force_discard().unwrap();
+
+    let error = db
+        .patch_collection(
+            "UserView",
+            r#"[{"op":"replace","path":"/UserView/IsMaterialized","value":false}]"#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains(
+        "cannot dematerialize a materialized view that has data, first truncate it and then try again"
+    ));
 }
 
 #[tokio::test]

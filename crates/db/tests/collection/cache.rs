@@ -92,3 +92,23 @@ fn test_cache_populate() {
     assert!(cache.contains("Users"));
     assert!(cache.contains("Posts"));
 }
+
+#[tokio::test]
+async fn active_collection_versions_exclude_inactive_cache_entries() {
+    let db = db::DB::open(storage::backends::MemoryStore::new())
+        .await
+        .expect("open");
+
+    let active = test_collection("Users").schema().clone();
+    let mut inactive = test_collection("Orders").schema().clone();
+    inactive.is_active = false;
+    db.add_collection_to_cache(active).expect("cache active");
+    db.add_collection_to_cache(inactive)
+        .expect("cache inactive");
+
+    let versions = db
+        .get_active_collection_versions()
+        .expect("read active versions");
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].name, "Users");
+}

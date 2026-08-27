@@ -723,6 +723,21 @@ pub trait SchemaOperations: Send + Sync {
 pub trait CollectionVersionOperations: Send + Sync {
     /// Get all collection versions (active + inactive) from the system store.
     async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// The active collection versions only.
+    ///
+    /// Defaults to filtering the full listing, so an implementation that has
+    /// no cheaper path stays correct. A backend that can answer without
+    /// scanning every stored version should override this: it is the path a
+    /// selector takes whenever `needs_all_versions` is false.
+    async fn get_active_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        Ok(self
+            .get_all_collections()
+            .await?
+            .into_iter()
+            .filter(|version| version.is_active)
+            .collect())
+    }
 }
 
 /// Trait for collection management operations beyond basic CRUD.
@@ -784,6 +799,17 @@ pub trait CollectionManagementOperations: Send + Sync {
 
     /// Get all collection versions (active + inactive) from the system store.
     async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// The active collection versions only. See
+    /// `CollectionVersionOperations::get_active_collections`.
+    async fn get_active_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        Ok(self
+            .get_all_collections()
+            .await?
+            .into_iter()
+            .filter(|version| version.is_active)
+            .collect())
+    }
 
     /// Delete a collection by name.
     async fn delete_collection(&self, name: &str) -> Result<(), String>;
@@ -960,7 +986,7 @@ pub trait ViewOperations: Send + Sync {
     ///
     /// The options select which views to refresh, mirroring Go's collection
     /// lookup. Default options refresh every materialized view.
-    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String>;
+    async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String>;
 
     /// Run manual downsample history GC.
     ///

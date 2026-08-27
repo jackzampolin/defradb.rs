@@ -15,6 +15,20 @@ struct MockDocument {
     data: JsonValue,
 }
 
+/// Whether `filter` selects `data`, using the production filter engine.
+///
+/// Not a hand-rolled matcher: one that understood a different filter language
+/// than the server would make every test here green on requests the real path
+/// rejects, which is the whole hazard on a route that deletes documents.
+fn matches_filter(data: &JsonValue, filter: &JsonValue) -> RestResult<bool> {
+    let conditions = filter
+        .as_object()
+        .ok_or_else(|| RestError::invalid_input("filter must be an object"))?;
+    query::Filter::from_conditions(conditions.clone())
+        .matches_json_object(data)
+        .map_err(|e| RestError::invalid_input(e.to_string()))
+}
+
 /// Mock REST operations for testing collection and document handlers.
 #[derive(Debug)]
 pub struct MockRestOperations {
@@ -230,6 +244,56 @@ impl RestOperations for MockRestOperations {
             None => Err(RestError::collection_not_found(collection)),
         }
     }
+
+    /// Matches on equality of each filter key against the stored document,
+    /// which is enough to tell "the filter was applied" from "it was ignored".
+    async fn delete_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        let mut collections = self.collections.write().unwrap();
+        let docs = collections
+            .get_mut(collection)
+            .ok_or_else(|| RestError::collection_not_found(collection))?;
+
+        let mut matched = Vec::new();
+        for doc in docs.iter() {
+            if matches_filter(&doc.data, filter)? {
+                matched.push(doc.doc_id.clone());
+            }
+        }
+        docs.retain(|doc| !matched.contains(&doc.doc_id));
+        Ok(matched)
+    }
+
+    async fn update_documents_with_filter(
+        &self,
+        collection: &str,
+        filter: &JsonValue,
+        updater: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        let mut collections = self.collections.write().unwrap();
+        let docs = collections
+            .get_mut(collection)
+            .ok_or_else(|| RestError::collection_not_found(collection))?;
+
+        let mut updated = Vec::new();
+        for doc in docs.iter_mut() {
+            if !matches_filter(&doc.data, filter)? {
+                continue;
+            }
+            if let (Some(data), Some(patch)) = (doc.data.as_object_mut(), updater.as_object()) {
+                for (key, value) in patch {
+                    data.insert(key.clone(), value.clone());
+                }
+            }
+            updated.push(doc.doc_id.clone());
+        }
+        Ok(updated)
+    }
 }
 
 /// Mock REST operations that always fails (for error path testing).
@@ -332,6 +396,25 @@ impl RestOperations for FailingMockRestOperations {
         _doc_id: &str,
         _identity: Option<&Did>,
     ) -> RestResult<bool> {
+        Err(self.error.clone())
+    }
+
+    async fn delete_documents_with_filter(
+        &self,
+        _collection: &str,
+        _filter: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
+        Err(self.error.clone())
+    }
+
+    async fn update_documents_with_filter(
+        &self,
+        _collection: &str,
+        _filter: &JsonValue,
+        _updater: &JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
         Err(self.error.clone())
     }
 }

@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+bench = false
+
 [dependencies]
 web-time.workspace = true
 # Internal crates
@@ -61,24 +64,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.35", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
-criterion.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-
-[[bench]]
-name = "parsing"
-harness = false
-
-[[bench]]
-name = "filter"
-harness = false
-
-[[bench]]
-name = "groupby"
-harness = false
-
-[[bench]]
-name = "planner"
-harness = false
 
 [lints]
 workspace = true

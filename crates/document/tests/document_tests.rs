@@ -413,3 +413,72 @@ fn test_doc_id_string_format() {
         uuid_part
     );
 }
+
+#[test]
+fn test_cbor_encoding_matches_go_nested_json() {
+    // Go's JSON type encodes numbers as float64, which CBOR canonical
+    // encoding with ShortestFloat16 encodes as float16 when possible.
+    //
+    // Go canonical CBOR output for:
+    // {"name": "John", "custom": {"tree": "maple", "age": 250}}
+    // where "custom" is stored as NormalValue::Json (Go's JSON type)
+    //
+    // Expected bytes (37 bytes):
+    // a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65
+    //
+    // Breakdown:
+    // a2                 - map(2)
+    // 64 6e616d65        - text(4) "name"
+    // 64 4a6f686e        - text(4) "John"
+    // 66 637573746f6d    - text(6) "custom"
+    // a2                 - map(2)
+    // 63 616765          - text(3) "age"
+    // f9 5bd0            - float16(250.0)
+    // 64 74726565        - text(4) "tree"
+    // 65 6d61706c65      - text(5) "maple"
+    let expected_hex = "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
+    let expected_bytes: Vec<u8> = (0..expected_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&expected_hex[i..i + 2], 16).unwrap())
+        .collect();
+
+    // Create the same document in Rust
+    let json = r#"{"name": "John", "custom": {"tree": "maple", "age": 250}}"#;
+    let doc = Document::from_json_str(json).expect("should parse");
+
+    let cbor_bytes = doc.to_cbor().expect("should encode");
+
+    assert_eq!(
+        cbor_bytes, expected_bytes,
+        "CBOR encoding should match Go's JSON-type canonical encoding"
+    );
+}
+
+#[test]
+fn get_mut_does_not_dirty_on_field_miss() {
+    // Regression for #812: Document::get_mut used to unconditionally set
+    // is_dirty = true before checking whether the field existed. A caller
+    // that probes for an optional field with get_mut and gets None would
+    // trigger unnecessary saves + CRDT delta generation without ever
+    // modifying the document. Match Go's document.go, which only sets
+    // the dirty flag inside doc.set() after a value is written.
+    let json = r#"{"name": "Alice"}"#;
+    let mut doc = Document::from_json_str(json).expect("should parse");
+    doc.clean(); // start from a fully-clean state
+
+    // Probe a field that doesn't exist.
+    let missing = doc.get_mut("does_not_exist");
+    assert!(missing.is_none(), "missing field must return None");
+    assert!(
+        !doc.is_dirty(),
+        "probing a missing field must not mark the document dirty"
+    );
+
+    // Probe a field that exists — now it should mark dirty.
+    let present = doc.get_mut("name");
+    assert!(present.is_some(), "existing field must return Some");
+    assert!(
+        doc.is_dirty(),
+        "mutating an existing field via get_mut must mark the document dirty"
+    );
+}

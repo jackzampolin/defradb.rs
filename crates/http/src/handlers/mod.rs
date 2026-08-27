@@ -15,6 +15,7 @@ pub mod backup;
 pub mod batch;
 pub mod block;
 pub mod browser_sync;
+pub mod collection_selector;
 pub mod collections;
 pub mod documents;
 pub mod encrypted_index;
@@ -39,9 +40,12 @@ pub use graphql::{
 
 // Re-export REST handlers
 pub use collections::{
-    collection_exists, delete_collection, delete_collection_versions, delete_collections_by_names,
+    collection_exists, delete_collection_versions, delete_collections_by_names,
     describe_collection, find_collection_by_id, get_all_collections, get_collection_by_version_id,
     get_collection_doc_ids, list_collections, patch_collection, set_active, truncate_collection,
     CollectionDocIdsResponse, CollectionsResponse,
 };
-pub use documents::{create_document, delete_document, get_document, update_document};
+pub use documents::{
+    create_document, delete_document, delete_documents_with_filter, get_document, update_document,
+    update_documents_with_filter, DocumentsResult,
+};

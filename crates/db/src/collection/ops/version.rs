@@ -180,6 +180,16 @@ impl<S: Store> crate::database::DB<S> {
             .map(Collection::new))
     }
 
+    /// Get the active collection versions, from the in-memory cache.
+    ///
+    /// The cheap counterpart to `get_all_collection_versions`, which scans the
+    /// whole `/collection/` prefix. A selector that does not ask for inactive
+    /// versions is answerable from the cache alone, which is the distinction
+    /// `CollectionSelector::needs_all_versions` draws.
+    pub fn get_active_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
+        self.get_all_active_collections_internal()
+    }
+
     /// Get all collection versions from storage (active and inactive).
     ///
     /// This scans `/collection/id/` prefix to load ALL versions, matching

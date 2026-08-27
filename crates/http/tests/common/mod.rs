@@ -16,7 +16,7 @@ use axum::{
     },
     Router,
 };
-use identity::{new_token, RawIdentity};
+use identity::{new_token, Identity, RawIdentity};
 use tower::ServiceExt;
 
 #[allow(unused_imports)]
@@ -33,7 +33,7 @@ pub const POLICY: &str = "name: test\nresources:\n  doc:\n    permissions:\n";
 #[derive(Debug, Default)]
 pub struct RecordingViewOps {
     pub add_view_transform: std::sync::Mutex<Option<Option<String>>>,
-    pub refresh: std::sync::Mutex<Option<db::RefreshViewsOptions>>,
+    pub refresh: std::sync::Mutex<Option<db::CollectionSelector>>,
 }
 
 #[async_trait]
@@ -48,7 +48,7 @@ impl ViewOperations for RecordingViewOps {
         Ok(vec![])
     }
 
-    async fn refresh_views(&self, options: db::RefreshViewsOptions) -> Result<(), String> {
+    async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String> {
         *self.refresh.lock().unwrap() = Some(options);
         Ok(())
     }
@@ -81,6 +81,22 @@ pub fn bearer_token() -> String {
     )
     .unwrap();
     format!("Bearer {}", String::from_utf8(token).unwrap())
+}
+
+/// A NAC owner and a bearer token that authenticates as them, for tests that
+/// go through the real auth middleware rather than calling a handler direct.
+pub fn nac_owner() -> (identity::Did, String) {
+    let private_key = crypto::generate_ed25519().unwrap();
+    let identity = RawIdentity::from_private_key(private_key).unwrap();
+    let did = identity.did().expect("mock identity has a did");
+    let token = new_token(
+        &identity,
+        Duration::from_secs(3600),
+        Some(TEST_HOST.to_lowercase()),
+        None,
+    )
+    .unwrap();
+    (did, format!("Bearer {}", String::from_utf8(token).unwrap()))
 }
 
 pub struct Call {

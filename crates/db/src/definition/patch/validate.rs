@@ -224,6 +224,8 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
+        Collection::validate_default_values(&new_schema)?;
+
         Ok(new_schema)
     }
 }
