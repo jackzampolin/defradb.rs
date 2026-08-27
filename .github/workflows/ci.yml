@@ -8,6 +8,9 @@ on:
   merge_group:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'tip' }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
@@ -280,6 +283,8 @@ jobs:
           wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
       - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1
       - uses: browser-actions/setup-geckodriver@eb8b0670366f719ca31703766a8cb7e3ea2c56ed # v0.0.0
+        with:
+          geckodriver-version: '0.37.1'
       - name: Install lockfile-matched wasm-bindgen-cli
         run: |
           VER="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[",]/,""); print $3; exit}' Cargo.lock)"
