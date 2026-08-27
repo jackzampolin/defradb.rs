@@ -384,7 +384,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 
     async fn get_documents_at_cid(
         &self,
-        collection_name: &str,
+        collection_short_id: u32,
         cid: &str,
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
@@ -395,25 +395,12 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 
         let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
 
-        let collection =
-            crate::collection::loader::get_collection_with_lazy_load(&txn_holder, collection_name)
-                .await
-                .map(|(collection, _, _)| collection);
-
-        let result = match collection {
-            Ok(collection) => {
-                let versioned_fetcher = VersionedFetcher::with_kms(
-                    txn_holder.clone(),
-                    self.db.kms(),
-                    caller_identity.cloned(),
-                );
-                versioned_fetcher
-                    .get_documents_at_cid(cid, expected_doc_id, Some(collection.resolved_root_id()))
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))
-            }
-            Err(e) => Err(e),
-        };
+        let versioned_fetcher =
+            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
+        let result = versioned_fetcher
+            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()));
 
         if let Some(txn) = txn_holder.lock().await.take() {
             let _ = txn.discard();

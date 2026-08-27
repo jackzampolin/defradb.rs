@@ -123,21 +123,11 @@ async fn unknown_cid_errors_test(cluster: TestCluster) {
     node.schema_add("type Users { name: String }")
         .expect("add schema");
 
-    let result = node.query(
-        r#"query { Users(cid: "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist") { name } }"#,
-    );
-
-    let error_text = match result {
-        Err(err) => format!("{err:#}"),
-        Ok(value) => {
-            let errors = value["errors"].as_array().cloned().unwrap_or_default();
-            assert!(
-                !errors.is_empty(),
-                "unknown CID must error, got success: {value}"
-            );
-            Value::Array(errors).to_string()
-        }
-    };
+    let error_text = node
+        .query_expect_error(
+            r#"query { Users(cid: "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist") { name } }"#,
+        )
+        .expect("unknown CID must error");
     assert!(
         error_text.contains("failed to get block in blockstore: ipld: could not find"),
         "unknown CID must surface the blockstore miss, got: {error_text}"

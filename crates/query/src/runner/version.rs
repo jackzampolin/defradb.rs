@@ -48,6 +48,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get expected docID from select.doc_ids (optional validation)
         let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
 
+        // Collection schema: scopes the fetch below, then builds the mapping.
+        let collection = self.get_collection(&select.collection_name).await?;
+
         // Fetch document(s) at the specified CIDs.
         // For collection-level CIDs (branchable), this returns multiple documents.
         // For document-level CIDs, this returns a single document.
@@ -60,7 +63,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             match fetcher
                 .get_documents_at_cid(
-                    &select.collection_name,
+                    collection.resolved_root_id(),
                     cid,
                     expected_doc_id.map(|s| s.as_str()),
                     caller_identity.as_ref(),
@@ -81,24 +84,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
-
-        // docID is a post-filter when cid is set, for every CID kind
-        // (Go parity: selectNode.Next). Mismatch is a skip, not an error.
-        let documents = if let Some(ref doc_ids) = select.doc_ids {
-            documents
-                .into_iter()
-                .filter(|(doc, _)| {
-                    doc.id()
-                        .map(|id| doc_ids.iter().any(|expected| *expected == id.to_string()))
-                        .unwrap_or(false)
-                })
-                .collect()
-        } else {
-            documents
-        };
-
-        // Get collection schema for building the mapping
-        let collection = self.get_collection(&select.collection_name).await?;
 
         // Apply ACP filtering: check read permission for each reconstructed document.
         // CID-based time-travel queries must enforce the same ACP rules as regular queries.
