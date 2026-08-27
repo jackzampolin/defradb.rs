@@ -198,6 +198,69 @@ async fn relation_counting_distinct_names_test(cluster: TestCluster) {
     assert_eq!(count_for(&result, "Cornelia Funke"), 1);
 }
 
+/// Four books under John, three distinct names (one book has no name at all,
+/// which keys as a single null group). A grouped target must not share the
+/// plain target's join, so both counts must hold whichever is written first.
+async fn setup_mixed_names(node: &DefraClient) {
+    add_book_author_schema(node);
+    let john = add_author(node, "John Grisham", 65, true);
+    add_book(node, "Painted House", 4.9, &john);
+    add_book(node, "Painted House", 4.8, &john);
+    add_book(node, "A Time for Mercy", 4.5, &john);
+    node.query(&format!(
+        r#"mutation {{ add_Book(input: {{rating: 4.2, author: "{john}"}}) {{ _docID }} }}"#
+    ))
+    .expect("add unnamed book");
+}
+
+async fn grouped_count_plain_first_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    setup_mixed_names(&node).await;
+
+    let result = node
+        .query(
+            r#"
+            query {
+                Author {
+                    name
+                    a: COUNT(published: {})
+                    b: COUNT(published: {groupBy: [name]})
+                }
+            }
+            "#,
+        )
+        .expect("query authors");
+
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([{"name": "John Grisham", "a": 4, "b": 3}])
+    );
+}
+
+async fn grouped_count_grouped_first_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    setup_mixed_names(&node).await;
+
+    let result = node
+        .query(
+            r#"
+            query {
+                Author {
+                    name
+                    b: COUNT(published: {groupBy: [name]})
+                    a: COUNT(published: {})
+                }
+            }
+            "#,
+        )
+        .expect("query authors");
+
+    assert_eq!(
+        result["Author"],
+        serde_json::json!([{"name": "John Grisham", "b": 3, "a": 4}])
+    );
+}
+
 #[tokio::test]
 async fn rust_aggregate_groupby_1595_on_single_field() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
@@ -232,4 +295,16 @@ async fn rust_aggregate_groupby_1595_relation_all_same_name() {
 async fn rust_aggregate_groupby_1595_relation_counting_distinct_names() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     relation_counting_distinct_names_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_grouped_count_plain_first() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    grouped_count_plain_first_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_aggregate_groupby_1595_grouped_count_grouped_first() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    grouped_count_grouped_first_test(cluster).await;
 }

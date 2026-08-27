@@ -49,27 +49,33 @@ impl Planner {
                     // limit/offset/order in post-processing.
                     // Go also shares joins between selections and aggregates targeting
                     // the same relation (e.g., books(filter: X) + _count(books: {filter: X})).
-                    let already_joined = aggregate_joined_relations
-                        .contains(relation_field_name.as_str())
-                        || selection_join_info
-                            .get(relation_field_name.as_str())
-                            .is_some_and(|info| {
-                                if info.has_limit {
-                                    return false;
-                                }
-                                // If aggregate has no filter but specifies a field_name, it's a
-                                // field-level operation (e.g. _avg(books: {field: rating})) that
-                                // piggybacks on the selection's join. Share unconditionally.
-                                if target.filter.is_none() {
-                                    return target.field_name.is_some();
-                                }
-                                // If aggregate has a filter, share only if it matches the
-                                // selection's filter exactly.
-                                let agg_filter_json = target.filter.as_ref().map(|f| {
-                                    serde_json::to_string(f.conditions()).unwrap_or_default()
-                                });
-                                info.filter_json == agg_filter_json
-                            });
+                    //
+                    // A grouped target is the exception: it needs its group fields in the
+                    // child scan, and a join captures the mapping by value, so a mapping
+                    // edit made after the join was built would never reach it. Give it its
+                    // own join instead. This diverges from Go, whose Targetable.equal
+                    // ignores groupBy and silently degrades the grouped count.
+                    let already_joined = target.group_by.is_none()
+                        && (aggregate_joined_relations.contains(relation_field_name.as_str())
+                            || selection_join_info
+                                .get(relation_field_name.as_str())
+                                .is_some_and(|info| {
+                                    if info.has_limit {
+                                        return false;
+                                    }
+                                    // If aggregate has no filter but specifies a field_name, it's a
+                                    // field-level operation (e.g. _avg(books: {field: rating})) that
+                                    // piggybacks on the selection's join. Share unconditionally.
+                                    if target.filter.is_none() {
+                                        return target.field_name.is_some();
+                                    }
+                                    // If aggregate has a filter, share only if it matches the
+                                    // selection's filter exactly.
+                                    let agg_filter_json = target.filter.as_ref().map(|f| {
+                                        serde_json::to_string(f.conditions()).unwrap_or_default()
+                                    });
+                                    info.filter_json == agg_filter_json
+                                }));
 
                     // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
@@ -207,36 +213,6 @@ impl Planner {
                                 }
                             }
                         }
-                        // Add groupBy fields from aggregate target to existing child
-                        // mapping, so group keys can be built during post-processing.
-                        if let Some(ref group_by) = target.group_by {
-                            for group_field in &group_by.fields {
-                                if group_field.starts_with('_') {
-                                    continue;
-                                }
-                                if let Some(idx) = target_collection
-                                    .fields
-                                    .iter()
-                                    .position(|f| f.name == *group_field)
-                                {
-                                    if let Some(child_mapping) =
-                                        mapping.child_at_mut(relation_field_index)
-                                    {
-                                        if child_mapping.first_index_of_name(group_field).is_none()
-                                        {
-                                            child_mapping.add(idx, group_field);
-                                        }
-                                        if !child_mapping
-                                            .render_keys
-                                            .iter()
-                                            .any(|rk| rk.key == *group_field)
-                                        {
-                                            child_mapping.add_render_key(idx, group_field);
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         continue;
                     }
 
@@ -340,28 +316,31 @@ impl Planner {
                             false
                         }
                     });
-                    let effective_relation_index = if selection_has_relation {
-                        // Selection already uses relation_field_index with its own filter/limit.
-                        // Use a new index and a unique internal key for the aggregate's data
-                        // to avoid collision with the selection's data in rendered JSON.
-                        let idx = mapping.next_index();
-                        let internal_key =
-                            format!("__agg_{}_{}", relation_field_name, agg.output_name());
-                        mapping.add(idx, relation_field_name);
-                        mapping.add_render_key(idx, &internal_key);
-                        // Store the mapping so the runner can look up data using the internal key
-                        aggregate_internal_keys.insert(
-                            agg.output_name().to_string(),
-                            (relation_field_name.clone(), internal_key),
-                        );
-                        idx
-                    } else {
-                        if mapping.first_index_of_name(relation_field_name).is_none() {
-                            mapping.add(relation_field_index, relation_field_name);
-                        }
-                        mapping.add_render_key(relation_field_index, relation_field_name);
-                        relation_field_index
-                    };
+                    // A grouped target also needs a private slot: its child items carry the
+                    // group fields, which must not surface in rendered relation output.
+                    let effective_relation_index =
+                        if selection_has_relation || target.group_by.is_some() {
+                            // Selection already uses relation_field_index with its own filter/limit.
+                            // Use a new index and a unique internal key for the aggregate's data
+                            // to avoid collision with the selection's data in rendered JSON.
+                            let idx = mapping.next_index();
+                            let internal_key =
+                                format!("__agg_{}_{}", relation_field_name, agg.output_name());
+                            mapping.add(idx, relation_field_name);
+                            mapping.add_render_key(idx, &internal_key);
+                            // Store the mapping so the runner can look up data using the internal key
+                            aggregate_internal_keys.insert(
+                                agg.output_name().to_string(),
+                                (relation_field_name.clone(), internal_key),
+                            );
+                            idx
+                        } else {
+                            if mapping.first_index_of_name(relation_field_name).is_none() {
+                                mapping.add(relation_field_index, relation_field_name);
+                            }
+                            mapping.add_render_key(relation_field_index, relation_field_name);
+                            relation_field_index
+                        };
 
                     // Build child plan (simple scan with fetcher)
                     let mut child_scan =
@@ -569,7 +548,9 @@ impl Planner {
                         mapping.clone(),
                     )?);
 
-                    aggregate_joined_relations.insert(relation_field_name.to_string());
+                    if target.group_by.is_none() {
+                        aggregate_joined_relations.insert(relation_field_name.to_string());
+                    }
                 }
             }
         }
