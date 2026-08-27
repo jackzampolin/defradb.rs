@@ -17,7 +17,7 @@ use crate::state::NODES;
 use crate::types::c_str_to_string;
 
 // Re-export all public items so external imports remain unchanged.
-pub use exec::exec_request;
+pub use exec::{exec_request, exec_request_with_signing};
 pub(crate) use subscription::{
     subscription_accepts_doc_id, subscription_doc_ids, subscription_to_scoped_query,
 };

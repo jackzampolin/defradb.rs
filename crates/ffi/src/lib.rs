@@ -319,6 +319,9 @@ pub extern "C" fn defra_version() -> *mut c_char {
 mod negative_tests;
 
 #[cfg(test)]
+mod signing_override_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crypto::encryption::nonce::{deterministic_nonce_enabled, set_deterministic_nonce};
