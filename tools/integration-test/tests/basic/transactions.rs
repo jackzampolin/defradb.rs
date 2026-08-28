@@ -579,3 +579,87 @@ async fn rust_txn_discard_publishes_no_events() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     txn_discard_publishes_no_events(cluster).await;
 }
+
+/// Two overlapping interactive txns creating different documents that share a
+/// field value must not both commit. See crates/db/src/write/doc.rs (#1599).
+async fn txn_create_conflicting_block_aborts_second_commit(cluster: TestCluster) {
+    let client = cluster.client(0);
+
+    client
+        .schema_add("type Book { name: String  rating: Float }")
+        .expect("add schema");
+
+    let tx0 = client.tx_create().expect("tx0 create");
+    let tx1 = client.tx_create().expect("tx1 create");
+
+    client
+        .query_with_tx(
+            r#"mutation { add_Book(input: {name: "Book By Website", rating: 4.0}) { _docID } }"#,
+            &tx0,
+        )
+        .expect("tx0 create Book By Website");
+    client
+        .query_with_tx(
+            r#"mutation { add_Book(input: {name: "Book By Online", rating: 4.0}) { _docID } }"#,
+            &tx1,
+        )
+        .expect("tx1 create Book By Online");
+
+    client.tx_commit(&tx0).expect("tx0 commit");
+    let err = client
+        .tx_commit(&tx1)
+        .expect_err("tx1 commit must abort: both creates write the same rating block");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("transaction conflict"),
+        "expected a transaction conflict, got: {msg}"
+    );
+
+    let books = client
+        .query("query { Book { name } }")
+        .expect("query Book after commits");
+    let books = books["Book"].as_array().expect("Book result not array");
+    assert_eq!(books.len(), 1, "only tx0's Book should survive: {books:?}");
+    assert_eq!(books[0]["name"], "Book By Website");
+}
+
+#[tokio::test]
+async fn rust_txn_create_conflicting_block_aborts_second_commit() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_create_conflicting_block_aborts_second_commit(cluster).await;
+}
+
+/// An `encrypt: true` create inside an interactive txn must commit: the KMS
+/// writes the DEK block in its own txn, so reading it back would abort every
+/// encrypted create. See crates/db/src/write/doc.rs (#1599).
+async fn txn_encrypted_create_commits(cluster: TestCluster) {
+    let client = cluster.client(0);
+
+    client
+        .schema_add("type TxnVault { name: String }")
+        .expect("add schema");
+
+    let tx_id = client.tx_create().expect("tx_create");
+    client
+        .query_with_tx(
+            r#"mutation { add_TxnVault(input: {name: "Alice"}, encrypt: true) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("encrypted create in tx");
+    client
+        .tx_commit(&tx_id)
+        .expect("an encrypted interactive create must commit");
+
+    let read = client
+        .query("query { TxnVault { name } }")
+        .expect("query after commit");
+    assert_eq!(read["TxnVault"][0]["name"], "Alice");
+}
+
+#[tokio::test]
+async fn rust_txn_encrypted_create_commits() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_encrypted_create_commits(cluster).await;
+}

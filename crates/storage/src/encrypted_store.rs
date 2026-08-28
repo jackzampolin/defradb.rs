@@ -129,6 +129,10 @@ impl Reader for EncryptedTxn {
         self.inner.has(key).await
     }
 
+    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
+        self.inner.has_for_update(key).await
+    }
+
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         match self.inner.get(key).await? {
             Some(ct) => Ok(Some(decrypt_value(&self.key, key, &ct)?.len())),

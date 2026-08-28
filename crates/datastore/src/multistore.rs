@@ -42,6 +42,14 @@ impl SharedTxn {
         txn.has(&prefixed).await
     }
 
+    /// Existence check that enters the key into the transaction's read set.
+    /// See [`storage::corekv::Reader::has_for_update`].
+    pub async fn has_for_update(&self, namespace: Namespace, key: &[u8]) -> Result<bool> {
+        let prefixed = prefix_key(namespace, key);
+        let txn = self.txn.read().await;
+        txn.has_for_update(&prefixed).await
+    }
+
     /// Get value size with namespace prefix.
     pub async fn get_size(&self, namespace: Namespace, key: &[u8]) -> Result<Option<usize>> {
         let prefixed = prefix_key(namespace, key);
@@ -140,6 +148,12 @@ impl NamespaceView {
         self.txn.has(self.namespace, key).await
     }
 
+    /// Existence check that enters the key into the transaction's read set.
+    /// See [`storage::corekv::Reader::has_for_update`].
+    pub async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
+        self.txn.has_for_update(self.namespace, key).await
+    }
+
     /// Get value size.
     pub async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         self.txn.get_size(self.namespace, key).await
@@ -182,6 +196,10 @@ impl Reader for NamespaceView {
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
         self.txn.has(self.namespace, key).await
+    }
+
+    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
+        self.txn.has_for_update(self.namespace, key).await
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {

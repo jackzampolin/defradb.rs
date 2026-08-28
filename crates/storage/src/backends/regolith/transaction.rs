@@ -141,6 +141,23 @@ impl Reader for RegolithTxn {
         }
     }
 
+    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        match self.handle()?.as_ref() {
+            // A snapshot is never validated at commit, so there is no read
+            // set to enter and this is a plain existence check.
+            Handle::ReadOnly(snapshot) => snapshot
+                .has(key)
+                .map_err(|error| Error::Backend(error.to_string())),
+            // `get_for_update` records the read *before* consulting the write
+            // buffer, which `get_slice` does not, so a key this transaction
+            // already wrote still lands in the read set.
+            Handle::Writable(txn) => Ok(txn.get_for_update(key).map_err(map_txn_error)?.is_some()),
+        }
+    }
+
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
