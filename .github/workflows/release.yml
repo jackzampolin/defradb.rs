@@ -37,48 +37,28 @@ jobs:
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--no-default-features --features release-full"
-          # rocksdb (regolith included: default runtime backend)
-          - variant: rocksdb
+          # minimal: no optional capabilities. There is one storage engine, so
+          # a build no longer varies by backend, only by what it can talk to.
+          - variant: minimal
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features rocksdb,regolith"
-          - variant: rocksdb
+            features: "--no-default-features"
+          - variant: minimal
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features rocksdb,regolith"
-          - variant: rocksdb
+            features: "--no-default-features"
+          - variant: minimal
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,regolith"
-          - variant: rocksdb
+            features: "--no-default-features"
+          - variant: minimal
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,regolith"
-          # regolith (minimal: single default-runtime backend)
-          - variant: regolith
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features regolith"
-          - variant: regolith
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features regolith"
-          - variant: regolith
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features regolith"
-          - variant: regolith
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features regolith"
+            features: "--no-default-features"
     steps:
       - uses: actions/checkout@v4
 
@@ -103,10 +83,6 @@ jobs:
           if ! command -v protoc >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
-          if [ "${{ matrix.variant }}" != "regolith" ] && ! command -v clang >/dev/null 2>&1; then
-            NEEDS_APT=1
-          fi
-
           if [ "$NEEDS_APT" -eq 0 ]; then
             echo "Linux build dependencies already installed; skipping apt."
             exit 0
@@ -119,9 +95,6 @@ jobs:
 
           bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-          if [ "${{ matrix.variant }}" != "regolith" ]; then
-            sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
-          fi
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -212,54 +185,28 @@ jobs:
           git clean -fd
 
   build-ffi:
-    name: FFI ${{ matrix.variant }} (${{ matrix.platform }})
+    name: FFI (${{ matrix.platform }})
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # redb (default; regolith included: default runtime backend)
-          - variant: redb
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
-          - variant: redb
-            target: aarch64-unknown-linux-gnu
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
+          - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
-          - variant: redb
-            target: x86_64-apple-darwin
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
+          - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
-          - variant: redb
-            target: aarch64-apple-darwin
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
+          - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
-          # rocksdb (redb stays: ffi hard-requires it; regolith: default runtime backend)
-          - variant: rocksdb
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
-          - variant: rocksdb
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
-          - variant: rocksdb
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
-          - variant: rocksdb
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
     steps:
       - uses: actions/checkout@v4
 
@@ -284,10 +231,6 @@ jobs:
           if ! command -v protoc >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
-          if [ "${{ matrix.variant }}" = "rocksdb" ] && ! command -v clang >/dev/null 2>&1; then
-            NEEDS_APT=1
-          fi
-
           if [ "$NEEDS_APT" -eq 0 ]; then
             echo "Linux build dependencies already installed; skipping apt."
             exit 0
@@ -300,9 +243,6 @@ jobs:
 
           bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-          if [ "${{ matrix.variant }}" = "rocksdb" ]; then
-            sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
-          fi
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -330,7 +270,7 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="defra-ffi-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
+          ARCHIVE="defra-ffi_${TAG}_${{ matrix.platform }}.tar.gz"
           RELEASE_DIR="target/${{ matrix.target }}/release"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             LIB="libdefra_ffi.dylib"
@@ -348,7 +288,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-ffi-${{ matrix.variant }}-${{ matrix.platform }}
+          name: defra-ffi-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
 
       - name: Cleanup
@@ -384,7 +324,7 @@ jobs:
 
       - name: Build Apple FFI
         env:
-          FEATURES: redb,iroh,native
+          FEATURES: iroh,native
           NO_DEFAULT_FEATURES: "1"
           OUT_DIR: ${{ github.workspace }}/target/apple-ffi
         run: |
@@ -480,13 +420,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: defra-regolith-*
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: defra-rocksdb-*
+          pattern: defra-minimal-*
           merge-multiple: true
 
       - uses: actions/download-artifact@v4

@@ -22,7 +22,7 @@ tools/apple/build-ffi.sh
 ```
 
 The script defaults to an iroh-capable Redb build by setting
-`FEATURES=redb,iroh,native` and `NO_DEFAULT_FEATURES=1`.
+`FEATURES=iroh,native` and `NO_DEFAULT_FEATURES=1`.
 It also defaults to `APPLE_DEPLOYMENT_TARGET=15.0` so Rust and native dependencies
 are linked against a modern iOS target instead of Rust's legacy iOS 10 default.
 The default iOS feature set avoids desktop-only FFI defaults such as RocksDB,
@@ -32,7 +32,7 @@ Override the defaults with environment variables when needed:
 
 ```bash
 APPLE_DEPLOYMENT_TARGET=16.0 \
-FEATURES="redb,iroh,native" \
+FEATURES="iroh,native" \
 OUT_DIR="$PWD/dist/apple" \
 FRAMEWORK_NAME="DefraMobile" \
 tools/apple/build-ffi.sh
@@ -100,7 +100,7 @@ includes newly added symbols such as `defra_mobile_add_replicator` and
 
 ```json
 {
-  "dbPath": "/path/to/defra.redb",
+  "dbPath": "/path/to/defra-data",
   "defaultIdentityDid": "did:key:z...",
   "p2p": {
     "transport": "iroh",

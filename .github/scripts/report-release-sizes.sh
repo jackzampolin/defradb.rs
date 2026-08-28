@@ -126,7 +126,7 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       report_row "$label" "$current" "$previous_size"
       ffi_count=$((ffi_count + 1))
       ;;
-    defra_*.tar.gz|defra-lark_*.tar.gz|defra-rocksdb_*.tar.gz)
+    defra_*.tar.gz|defra-minimal_*.tar.gz)
       current=$(member_size "$archive" defra)
       previous_size=
       if [ -n "$previous" ]; then
