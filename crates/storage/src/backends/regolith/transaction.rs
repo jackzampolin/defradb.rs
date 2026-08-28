@@ -85,7 +85,22 @@ impl Drop for RegolithTxn {
 
 fn map_txn_error(error: TransactionError) -> Error {
     match error {
-        TransactionError::Conflict { .. } => Error::TxnConflict,
+        TransactionError::Conflict {
+            key,
+            observed_seq,
+            latest_seq,
+        } => {
+            // `Error::TxnConflict` carries no key, and a conflict without one
+            // sends the reader guessing at which of a transaction's writes
+            // collided. The engine knows; say so.
+            tracing::warn!(
+                key = %String::from_utf8_lossy(&key),
+                observed_seq,
+                latest_seq,
+                "transaction conflict"
+            );
+            Error::TxnConflict
+        }
         TransactionError::Busy(_) => Error::TxnConflict,
         other => Error::Backend(other.to_string()),
     }
