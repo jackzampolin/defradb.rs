@@ -1,5 +1,3 @@
-#![cfg(feature = "regolith")]
-
 use std::process::Command;
 use std::sync::Arc;
 

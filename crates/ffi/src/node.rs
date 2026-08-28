@@ -90,7 +90,7 @@ fn resolve_store(
     // embedder that still passes one keeps working rather than failing at
     // startup on a name that no longer selects anything.
     match backend_name.as_str() {
-        "" | "regolith" | "regolith" | "redb" | "fjall" | "rocksdb" => {}
+        "" | "regolith" | "lark" | "redb" | "fjall" | "rocksdb" => {}
         other => {
             return Err(format!(
                 "unknown datastore backend '{}'. Supported: regolith, memory",

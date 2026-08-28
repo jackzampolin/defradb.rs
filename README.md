@@ -23,7 +23,7 @@ Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API,
 - **Full-text search** — (rust only) BM25 ranking with language-aware tokenization
 - **Schema migration** — non-destructive evolution via WASM transforms (Lens)
 - **Searchable encryption** — encrypted indexes with ACP integration
-- **[Regolith](https://github.com/sourcenetwork/regolith) storage engine** — one ACID, pure-Rust LSM-tree store on every target, on disk or in memory
+- **[Regolith](https://github.com/sourcenetwork/regolith) storage engine**: one ACID, pure-Rust LSM-tree store on every target, on disk or in memory
 - **Postgres compatibility** — connect with `psql` or any Postgres client/ORM (experimental!)
 - **WASM client** — full database client compiled to WebAssembly for browsers
 - **FFI bindings** — C-compatible static library for embedding in Go and other languages

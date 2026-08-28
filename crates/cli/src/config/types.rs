@@ -256,7 +256,7 @@ impl std::str::FromStr for DatastoreType {
         match s.to_lowercase().as_str() {
             // The old backend names all resolve to regolith rather than
             // failing, so an existing config file keeps starting.
-            "regolith" | "regolith" | "redb" | "badger" | "fjall" | "rocksdb" => {
+            "regolith" | "lark" | "redb" | "badger" | "fjall" | "rocksdb" => {
                 Ok(DatastoreType::Regolith)
             }
             "memory" => Ok(DatastoreType::Memory),

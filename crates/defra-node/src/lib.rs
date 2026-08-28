@@ -1506,10 +1506,6 @@ mod tests {
     use super::HttpConfig;
 
     pub(super) static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    #[cfg(feature = "rocksdb")]
-    static ROCKS_ENV_GUARD: LazyLock<std::sync::Mutex<()>> =
-        LazyLock::new(|| std::sync::Mutex::new(()));
-
     #[cfg(feature = "http")]
     #[test]
     fn http_config_accepts_extra_routes() {
