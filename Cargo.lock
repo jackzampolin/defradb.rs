@@ -3569,6 +3569,7 @@ name = "defra-wasm"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cid",
  "console_error_panic_hook",
  "crypto",
@@ -9719,9 +9720,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "regolith"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db05a65206bfa1c8d0436d2ae30df356807ed4144f87c9b415c6778634a409ba"
+checksum = "f55657ec83ac884b56f6f3744a01891af5ffe682b3ced632435d0ab3e0db433b"
 dependencies = [
  "js-sys",
  "kovan",
