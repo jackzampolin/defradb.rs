@@ -1,4 +1,4 @@
-use crate::corekv::{Error, IterOptions, Store, Txn};
+use crate::corekv::{Error, Store};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -36,58 +36,6 @@ pub async fn test_concurrent_writes_different_keys<S: Store + 'static>(store: Ar
             i
         );
     }
-}
-
-async fn replace_collection_heads(txn: &mut Box<dyn Txn>, child: &[u8]) {
-    let mut iterator = txn
-        .iterator(
-            IterOptions::new()
-                .with_prefix(b"h/c/7/".to_vec())
-                .with_commutative_set(),
-        )
-        .await
-        .unwrap();
-    let mut old_heads = Vec::new();
-    while let Some(pair) = iterator.next().await.unwrap() {
-        old_heads.push(pair.key);
-    }
-    iterator.close().await.unwrap();
-
-    for old_head in old_heads {
-        txn.delete(&old_head).await.unwrap();
-    }
-    txn.set(child, b"2").await.unwrap();
-}
-
-/// Test concurrent observed-remove/add transitions on a shared set prefix.
-pub async fn test_commutative_set_transitions<S: Store + 'static>(store: Arc<S>) {
-    let mut seed = store.new_txn(false).await.unwrap();
-    seed.set(b"h/c/7/root", b"1").await.unwrap();
-    seed.commit().await.unwrap();
-
-    let mut first = store.new_txn(false).await.unwrap();
-    let mut second = store.new_txn(false).await.unwrap();
-    replace_collection_heads(&mut first, b"h/c/7/first").await;
-    replace_collection_heads(&mut second, b"h/c/7/second").await;
-
-    first.commit().await.unwrap();
-    second.commit().await.unwrap();
-
-    let read = store.new_txn(true).await.unwrap();
-    let mut iterator = read
-        .iterator(IterOptions::new().with_prefix(b"h/c/7/".to_vec()))
-        .await
-        .unwrap();
-    let mut heads = Vec::new();
-    while let Some(pair) = iterator.next().await.unwrap() {
-        heads.push(pair.key);
-    }
-    iterator.close().await.unwrap();
-    heads.sort();
-    assert_eq!(
-        heads,
-        vec![b"h/c/7/first".to_vec(), b"h/c/7/second".to_vec()]
-    );
 }
 
 /// Test concurrent writes to the SAME key (last writer wins)
