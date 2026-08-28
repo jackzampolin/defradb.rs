@@ -10,9 +10,9 @@ use wasm_bindgen::prelude::*;
 use db::{AutoCommitMutator, DbCollectionProvider, LensedAutoCommitFetcher, DB};
 use events::Bus;
 use query::runner::QueryRunner;
-use storage::LevelDbStore;
+use storage::RegolithStore;
 
-type WasmRunner = QueryRunner<LensedAutoCommitFetcher<LevelDbStore>>;
+type WasmRunner = QueryRunner<LensedAutoCommitFetcher<RegolithStore>>;
 
 use crate::bindings::{from_js, to_js, ClientConfig, CollectionInfo, FieldInfo};
 use crate::error::{Result, WasmError};
@@ -47,7 +47,7 @@ use crate::error::{Result, WasmError};
 /// ```
 #[wasm_bindgen]
 pub struct DefraClient {
-    db: Option<Arc<DB<LevelDbStore>>>,
+    db: Option<Arc<DB<RegolithStore>>>,
     runner: Option<WasmRunner>,
     event_bus: Arc<events::ChannelBus>,
     sync_task: Option<crate::sync::SyncTask>,
@@ -61,13 +61,13 @@ impl DefraClient {
     /// # Configuration
     ///
     /// Pass a JavaScript object with:
-    /// - `storage`: "memory" (default) or "leveldb"
+    /// - `db_name`: the OPFS directory the store lives in
     /// - `db_name`: Database name (optional)
     ///
     /// # Example
     ///
     /// ```javascript
-    /// const client = await DefraClient.create({ storage: 'leveldb' });
+    /// const client = await DefraClient.create({ db_name: 'defradb' });
     /// ```
     #[wasm_bindgen(js_name = create)]
     pub async fn create(config: JsValue) -> std::result::Result<DefraClient, JsValue> {
@@ -190,11 +190,12 @@ impl DefraClient {
             from_js(config)?
         };
 
-        // Create LevelDB store with OPFS persistence
+        // A regolith store on the origin-private filesystem, which is the
+        // only filesystem this target has.
         let db_name = config.db_name.as_deref().unwrap_or("defradb");
-        let store = LevelDbStore::open_with_opfs(db_name)
+        let store = RegolithStore::open_opfs(db_name)
             .await
-            .map_err(|e| WasmError::Storage(format!("Failed to open LevelDB store: {}", e)))?;
+            .map_err(|e| WasmError::Storage(format!("Failed to open store: {}", e)))?;
 
         // Create the database
         let event_bus = Arc::new(events::ChannelBus::new());
@@ -225,7 +226,7 @@ impl DefraClient {
         })
     }
 
-    fn ensure_open(&self) -> Result<&Arc<DB<LevelDbStore>>> {
+    fn ensure_open(&self) -> Result<&Arc<DB<RegolithStore>>> {
         if self.closed {
             return Err(WasmError::Closed);
         }
