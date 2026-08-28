@@ -32,12 +32,6 @@ fn snap_collection() -> CollectionVersion {
     )
 }
 
-// Red until the storage engine ships the fix. regolith validates every written
-// key, so two transactions writing one byte-identical block collide even though
-// the write is idempotent; sourcenetwork/regolith#184 elides such a write at
-// commit. Left visible rather than deleted: the gap is real, and a suite that
-// simply does not mention it reads as though the case were covered.
-#[ignore = "sourcenetwork/regolith#184: byte-identical concurrent writes conflict"]
 #[tokio::test]
 async fn identical_field_writes_to_distinct_documents_do_not_conflict() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
