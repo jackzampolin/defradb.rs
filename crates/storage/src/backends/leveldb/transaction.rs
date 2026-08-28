@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusty_leveldb::{WriteBatch, DB};
@@ -68,7 +69,7 @@ impl crate::corekv::private::Sealed for LevelDbTxn {}
 
 #[async_trait(?Send)]
 impl Reader for LevelDbTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }

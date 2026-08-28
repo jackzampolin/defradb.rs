@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -264,7 +265,7 @@ impl crate::corekv::private::Sealed for LarkTxn {}
 
 #[async_trait]
 impl Reader for LarkTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
@@ -272,10 +273,10 @@ impl Reader for LarkTxn {
             return Err(Error::EmptyKey);
         }
         if self.readonly {
-            return self.snapshot_get(key);
+            return self.snapshot_get(key).map(|o| o.map(Bytes::from));
         }
         self.read_set.lock().record_key(key);
-        self.get_internal(key)
+        self.get_internal(key).map(|o| o.map(Bytes::from))
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {

@@ -12,6 +12,7 @@ pub(crate) mod helpers;
 mod read;
 pub mod update;
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use cid::Cid;
 use document::{DocID, Document};
@@ -29,7 +30,7 @@ use crate::read::lensed::fetcher::LensedDocFetcher;
 
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).
-pub(super) type CommitArtifacts = (Cid, Vec<u8>, Option<(Cid, Vec<u8>)>);
+pub(super) type CommitArtifacts = (Cid, Bytes, Option<(Cid, Bytes)>);
 use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 

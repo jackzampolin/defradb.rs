@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use super::*;
 
 use crate::block::builder::BlockResult;
@@ -16,7 +17,7 @@ pub(crate) async fn write_branchable_collection_block(
     headstore: &NamespaceView,
     doc_cid: Cid,
     signing_config: Option<&defra_core::signing::SigningConfig>,
-) -> query::error::Result<Option<(Cid, Vec<u8>)>> {
+) -> query::error::Result<Option<(Cid, Bytes)>> {
     if !collection.schema().is_branchable {
         return Ok(None);
     }
@@ -726,8 +727,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         collection: &Collection,
         doc_id_str: &str,
         doc_cid: Cid,
-        doc_block: Vec<u8>,
-        collection_block: Option<(Cid, Vec<u8>)>,
+        doc_block: Bytes,
+        collection_block: Option<(Cid, Bytes)>,
     ) {
         if let Some(bus) = self.db.event_bus() {
             let update = Update::new(

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use blockstore::Blockstore;
@@ -25,24 +26,24 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 
 struct PendingBroadcast {
     cid: Cid,
-    block: Vec<u8>,
+    block: Bytes,
     doc_id: String,
     collection_id: String,
     collection_name: String,
     document_json: Option<serde_json::Value>,
     creator_did: Option<String>,
     broadcast_cid: Option<Cid>,
-    broadcast_block: Option<Vec<u8>>,
+    broadcast_block: Option<Bytes>,
 }
 
 struct BroadcastCapture<'a> {
     collection_name: &'a str,
     doc_id: &'a str,
     commit_cid: Option<Cid>,
-    commit_block: Option<&'a Vec<u8>>,
+    commit_block: Option<&'a Bytes>,
     document_json: Option<serde_json::Value>,
     broadcast_cid: Option<Cid>,
-    broadcast_block: Option<&'a Vec<u8>>,
+    broadcast_block: Option<&'a Bytes>,
 }
 
 pub(crate) struct BroadcastBatchMutator<S: Store, B: Blockstore, T: P2PTransport> {

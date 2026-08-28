@@ -3,6 +3,7 @@
 //! Kept in `crates/db` (not `crates/kms`) so the KMS crate doesn't depend on
 //! `db`. Shared by both the embedded node and the CLI node.
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use std::sync::{Arc, Weak};
 
@@ -143,7 +144,7 @@ where
     S: storage::corekv::Store + Send + Sync + 'static,
     B: blockstore::Blockstore + 'static,
 {
-    async fn get_block(&self, cid: &EncryptionCid) -> kms::Result<Option<Vec<u8>>> {
+    async fn get_block(&self, cid: &EncryptionCid) -> kms::Result<Option<Bytes>> {
         let Some(db) = self.db.upgrade() else {
             // DB dropped → node shutting down → nothing to serve.
             return Ok(None);
@@ -173,12 +174,12 @@ where
             .await
             .map_err(|e| kms::Error::Storage(e.to_string()))?
         {
-            Some(bytes) => Ok(Some(bytes.to_vec())),
+            Some(bytes) => Ok(Some(bytes)),
             None => Ok(None),
         }
     }
 
-    async fn put_block(&self, cid: EncryptionCid, bytes: Vec<u8>) -> kms::Result<()> {
+    async fn put_block(&self, cid: EncryptionCid, bytes: Bytes) -> kms::Result<()> {
         let Some(blockstore) = self.blockstore.upgrade() else {
             return Err(kms::Error::Storage("blockstore gone".into()));
         };

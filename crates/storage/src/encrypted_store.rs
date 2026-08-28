@@ -29,6 +29,7 @@
 //! reading encrypted data without the matching key (or vice versa) produces a
 //! decrypt error, never a silent wrong result.
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use zeroize::Zeroizing;
 
@@ -117,9 +118,9 @@ impl Sealed for EncryptedTxn {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for EncryptedTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         match self.inner.get(key).await? {
-            Some(ct) => Ok(Some(decrypt_value(&self.key, key, &ct)?)),
+            Some(ct) => Ok(Some(decrypt_value(&self.key, key, &ct)?.into())),
             None => Ok(None),
         }
     }

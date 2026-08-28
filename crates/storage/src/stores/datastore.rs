@@ -3,6 +3,7 @@
 /// The Datastore handles storage of document field values, primary keys,
 /// secondary indexes, search engine artifacts, and view caching. It includes
 /// automatic chunking for values larger than 1MB.
+use bytes::Bytes;
 use crate::corekv::{Error, IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
@@ -86,7 +87,7 @@ impl DatastoreTxn {
     /// This method automatically handles both chunked and non-chunked values:
     /// - Chunked values are stored at chunk_key(base, 0), chunk_key(base, 1), etc.
     /// - Non-chunked values are stored directly at the base key
-    pub async fn get_value<K: Key>(&self, key: &K) -> Result<Option<Vec<u8>>> {
+    pub async fn get_value<K: Key>(&self, key: &K) -> Result<Option<Bytes>> {
         let key_bytes = key.bytes();
 
         // Check if this is a chunked value by looking for chunk 0
@@ -225,7 +226,7 @@ impl DatastoreTxn {
     }
 
     /// Get a chunked value (internal)
-    async fn get_chunked(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get_chunked(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let mut result = Vec::new();
         let mut chunks_found = 0;
 
@@ -246,7 +247,7 @@ impl DatastoreTxn {
                 total_size = result.len(),
                 "Reconstructed chunked value"
             );
-            Ok(Some(result))
+            Ok(Some(result.into()))
         } else {
             Ok(None)
         }
@@ -258,7 +259,7 @@ impl crate::corekv::private::Sealed for DatastoreTxn {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for DatastoreTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(key).await
     }
 

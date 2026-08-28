@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
@@ -103,7 +104,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             if decoded_blocks.insert(cid, decoded).is_some() {
                 return Err(BrowserSyncError::Invalid(format!("duplicate block {cid}")));
             }
-            blocks.push((cid, data));
+            blocks.push((cid, data.into()));
         }
 
         let roots = document
@@ -296,7 +297,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
                 Some(sig_cid) => {
                     let sig_data = blocks
                         .iter()
-                        .find_map(|(cid, data)| (*cid == sig_cid).then_some(data.as_slice()))
+                        .find_map(|(cid, data): &(Cid, Bytes)| (*cid == sig_cid).then_some(data.as_ref()))
                         .ok_or_else(|| {
                             BrowserSyncError::Invalid(format!(
                                 "genesis signature block {sig_cid} is missing"

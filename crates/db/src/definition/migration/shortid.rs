@@ -1,5 +1,6 @@
 //! v0.15 document-storage migration to the v0.16 short-ID layout.
 
+use bytes::Bytes;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use acp::{RelationTuple, Relationship, Subject};
@@ -24,9 +25,9 @@ const DOC_SHORT_ID_MIGRATION_MARKER: &[u8] = b"/migration/doc-short-id/v1";
 struct LegacyDocument {
     collection: Collection,
     old_doc_id: String,
-    blob: Vec<u8>,
-    version: Option<Vec<u8>>,
-    deleted: Option<Vec<u8>>,
+    blob: Bytes,
+    version: Option<Bytes>,
+    deleted: Option<Bytes>,
     canonical_doc_id: String,
     doc_short_id: u64,
     owned_block_cids: HashSet<Cid>,
@@ -316,14 +317,14 @@ async fn migrate_document_keys(
             datastore,
             &legacy_version_key(collection_id, &document.old_doc_id),
             &document.collection.version_key(document.doc_short_id),
-            document.version.as_deref(),
+            document.version.as_ref(),
         )
         .await?;
         move_optional_exact(
             datastore,
             &legacy_deleted_key(collection_id, &document.old_doc_id),
             &storage::keys::deleted_doc_key(collection_id, document.doc_short_id),
-            document.deleted.as_deref(),
+            document.deleted.as_ref(),
         )
         .await?;
 
@@ -527,7 +528,7 @@ async fn move_terminal_doc_ids(
             if let Ok(Some(rewritten)) =
                 storage::stores::rewrite_legacy_push_retry_doc_id(&value, old_doc_id, canonical)
             {
-                value = rewritten;
+                value = rewritten.into();
             }
         }
         moves.push((pair.key, new_key, value));
@@ -561,9 +562,9 @@ async fn migrate_local_acp(
         moves.push((
             pair.key,
             migrated.storage_key().into_bytes(),
-            serde_json::to_vec(&migrated).map_err(|error| {
+            (serde_json::to_vec(&migrated).map_err(|error| {
                 Error::Serialization(format!("encode migrated ACP tuple: {error}"))
-            })?,
+            })?).into(),
         ));
     }
     iter.close().await.map_err(Error::Storage)?;
@@ -626,9 +627,9 @@ async fn migrate_zanzibar_acp(
         moves.push((
             pair.key,
             new_key,
-            serde_json::to_vec(&relationship).map_err(|error| {
+            (serde_json::to_vec(&relationship).map_err(|error| {
                 Error::Serialization(format!("encode migrated Zanzibar relationship: {error}"))
-            })?,
+            })?).into(),
         ));
     }
     iter.close().await.map_err(Error::Storage)?;
@@ -654,10 +655,10 @@ async fn move_exact(
     store: &NamespaceView,
     old_key: &[u8],
     new_key: &[u8],
-    known_value: Option<&[u8]>,
+    known_value: Option<&Bytes>,
 ) -> Result<()> {
     let value = match known_value {
-        Some(value) => Some(value.to_vec()),
+        Some(value) => Some(value.clone()),
         None => store.get(old_key).await.map_err(Error::Storage)?,
     };
     if let Some(value) = value {
@@ -670,12 +671,12 @@ async fn move_optional_exact(
     store: &NamespaceView,
     old_key: &[u8],
     new_key: &[u8],
-    known_value: Option<&[u8]>,
+    known_value: Option<&Bytes>,
 ) -> Result<()> {
     move_exact(store, old_key, new_key, known_value).await
 }
 
-async fn apply_moves(store: &NamespaceView, moves: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>) -> Result<()> {
+async fn apply_moves(store: &NamespaceView, moves: Vec<(Vec<u8>, Vec<u8>, Bytes)>) -> Result<()> {
     for (old_key, new_key, value) in moves {
         if old_key == new_key {
             continue;

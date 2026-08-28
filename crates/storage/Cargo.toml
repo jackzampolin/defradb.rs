@@ -17,6 +17,7 @@ document = { path = "../document" }
 schema = { path = "../schema" }
 crypto = { path = "../crypto" }
 zeroize = "1.8"
+bytes.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime

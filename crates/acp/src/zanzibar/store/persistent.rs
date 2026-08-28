@@ -153,7 +153,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
 
             let last_issued = match stored {
                 Some(bytes) => {
-                    let value: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                    let value: [u8; 8] = bytes.as_ref().try_into().map_err(|_| {
                         Error::Serialization(format!(
                             "next_policy_counter: expected 8 bytes, found {}",
                             bytes.len()

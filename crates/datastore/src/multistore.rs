@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_lock::RwLock;
 /// Transaction-aware Multistore for the datastore layer.
 ///
@@ -28,7 +29,7 @@ impl SharedTxn {
     }
 
     /// Get a value with namespace prefix.
-    pub async fn get(&self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn get(&self, namespace: Namespace, key: &[u8]) -> Result<Option<Bytes>> {
         let prefixed = prefix_key(namespace, key);
         let txn = self.txn.read().await;
         txn.get(&prefixed).await
@@ -75,7 +76,7 @@ impl SharedTxn {
     }
 
     /// Get from rootstore (no namespace prefix).
-    pub async fn root_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn root_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let txn = self.txn.read().await;
         txn.get(key).await
     }
@@ -130,7 +131,7 @@ impl NamespaceView {
     }
 
     /// Get a value.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(self.namespace, key).await
     }
 
@@ -175,7 +176,7 @@ impl storage::corekv::private::Sealed for NamespaceView {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for NamespaceView {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(self.namespace, key).await
     }
 
@@ -220,7 +221,7 @@ impl RootView {
     }
 
     /// Get a value.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.root_get(key).await
     }
 

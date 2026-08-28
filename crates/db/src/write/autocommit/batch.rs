@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_lock::{Mutex as TokioMutex, MutexGuardArc};
 use async_trait::async_trait;
 use cid::Cid;
@@ -117,8 +118,8 @@ impl<S: Store + 'static> BatchMutator<S> {
         collection_id: String,
         doc_id: String,
         doc_cid: Cid,
-        doc_block: Vec<u8>,
-        collection_block: Option<(Cid, Vec<u8>)>,
+        doc_block: Bytes,
+        collection_block: Option<(Cid, Bytes)>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
         let txn = txn_guard.as_mut().ok_or_else(|| {

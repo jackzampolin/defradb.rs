@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -91,7 +92,7 @@ impl crate::corekv::private::Sealed for MemoryTxn {}
 
 #[async_trait]
 impl Reader for MemoryTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
@@ -101,7 +102,7 @@ impl Reader for MemoryTxn {
         }
 
         self.read_set.lock().record_key(key);
-        Ok(self.get_internal(key))
+        Ok(self.get_internal(key).map(Bytes::from))
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {

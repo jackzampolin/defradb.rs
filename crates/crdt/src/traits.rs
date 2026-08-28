@@ -1,5 +1,6 @@
 //! Core traits for CRDT operations
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use defra_core::{types::DocId, Result};
 use std::any::Any;
@@ -111,7 +112,7 @@ pub trait ReplicatedData: MaybeSendSync {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ValueReader: ReplicatedData {
     /// Get the current value from storage
-    async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>>;
+    async fn value(&self, reader: &dyn Reader) -> Result<Bytes>;
 }
 
 /// Trait for CRDTs that support priority retrieval

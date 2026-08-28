@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::collections::HashSet;
 use std::str::FromStr;
 
@@ -11,8 +12,8 @@ pub async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>(
     block_reader: &R,
     enc_reader: &E,
     root_cid: Cid,
-    root_data: Vec<u8>,
-) -> Vec<(Cid, Vec<u8>)> {
+    root_data: Bytes,
+) -> Vec<(Cid, Bytes)> {
     let mut ordered = Vec::new();
     let mut visited = HashSet::new();
     let mut stack = vec![(root_cid, root_data, false)];

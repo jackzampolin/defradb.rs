@@ -5,6 +5,7 @@
 //! iteration order stable, so a brute-force baseline built from it is
 //! reproducible.
 
+use bytes::Bytes;
 use std::collections::BTreeMap;
 
 use defra_core::thread_bounds::MaybeSend;
@@ -17,7 +18,7 @@ use crate::index::error::Result;
 pub struct MemoryNodeStore {
     nodes: BTreeMap<NodeId, Node>,
     meta: Option<Meta>,
-    aux: BTreeMap<(u8, Vec<u8>), Vec<u8>>,
+    aux: BTreeMap<(u8, Vec<u8>), Bytes>,
 }
 
 impl MemoryNodeStore {
@@ -69,12 +70,12 @@ impl VectorNodeStore for MemoryNodeStore {
         Ok(())
     }
 
-    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Bytes>> {
         Ok(self.aux.get(&(kind, key.to_vec())).cloned())
     }
 
     async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()> {
-        self.aux.insert((kind, key.to_vec()), value.to_vec());
+        self.aux.insert((kind, key.to_vec()), Bytes::copy_from_slice(value));
         Ok(())
     }
 

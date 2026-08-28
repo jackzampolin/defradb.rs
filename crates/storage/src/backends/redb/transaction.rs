@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use redb::{Database, ReadTransaction};
@@ -165,7 +166,7 @@ impl crate::corekv::private::Sealed for RedbTxn {}
 #[async_trait]
 impl Reader for RedbTxn {
     #[instrument(level = "trace", skip(self))]
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
@@ -175,7 +176,7 @@ impl Reader for RedbTxn {
         }
 
         self.read_set.lock().record_key(key);
-        self.get_internal(key)
+        self.get_internal(key).map(|o| o.map(Bytes::from))
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {

@@ -3,6 +3,7 @@
 //! This module provides the `DocFetcher` trait which abstracts storage access
 //! for query execution, along with result types for handling partial fetches.
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use document::Document;
 use identity::Did;
@@ -370,7 +371,7 @@ pub trait DocFetcher: MaybeSendSync {
     ///
     /// Default implementation returns an empty vector - implementations that support
     /// materialized views should override this.
-    async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Vec<u8>>> {
+    async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Bytes>> {
         let _ = collection_id;
         Ok(Vec::new())
     }

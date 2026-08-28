@@ -1,5 +1,6 @@
 //! Document fetcher for transaction-scoped queries.
 
+use bytes::Bytes;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
@@ -586,7 +587,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             })
     }
 
-    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Bytes>> {
         use storage::corekv::IterOptions;
         use storage::keys::datastore::ViewCacheKey;
 

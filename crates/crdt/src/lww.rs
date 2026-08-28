@@ -4,6 +4,7 @@
 //! When two concurrent writes occur, the one with higher priority wins.
 //! On tie, lexicographic comparison of values provides deterministic resolution.
 
+use bytes::Bytes;
 use crate::priority::{decode_priority, encode_priority};
 use crate::traits::{Context, Delta, MergeResult, PriorityReader, ReplicatedData, ValueReader};
 use async_trait::async_trait;
@@ -210,7 +211,7 @@ impl Lww {
                     // Current value wins if incoming data <= current (lexicographically)
                     // This means: incoming data must be strictly greater to win
                     // Note: Store errors propagate via ?, None (uninitialized) treated as empty
-                    let current_value: Vec<u8> = rw
+                    let current_value: Bytes = rw
                         .get(&self.value_key)
                         .await
                         .map_err(|e| Error::Storage(e.to_string()))?
@@ -247,7 +248,7 @@ impl Lww {
     }
 
     /// Internal method to get current value
-    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Bytes> {
         reader
             .get(&self.value_key)
             .await
@@ -318,7 +319,7 @@ impl ReplicatedData for Lww {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ValueReader for Lww {
-    async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+    async fn value(&self, reader: &dyn Reader) -> Result<Bytes> {
         self.get_value_internal(reader).await
     }
 }

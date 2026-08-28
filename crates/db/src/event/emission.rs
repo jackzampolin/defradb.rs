@@ -4,6 +4,7 @@
 //! use this to register a callback at mutation time. The underlying tx machinery
 //! fires success callbacks only on commit; discards skip them.
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use cid::Cid;
 use events::{Bus, Message, Update};
@@ -20,9 +21,9 @@ pub struct TxnBroadcastEvent {
     pub collection_id: String,
     pub doc_id: String,
     pub doc_cid: Cid,
-    pub doc_block: Vec<u8>,
+    pub doc_block: Bytes,
     pub document_json: Option<serde_json::Value>,
-    pub collection_block: Option<(Cid, Vec<u8>)>,
+    pub collection_block: Option<(Cid, Bytes)>,
     pub creator_did: Option<String>,
 }
 
@@ -59,9 +60,9 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
     collection_id: String,
     doc_id: String,
     doc_cid: Cid,
-    doc_block: Vec<u8>,
+    doc_block: Bytes,
     document_json: Option<serde_json::Value>,
-    collection_block: Option<(Cid, Vec<u8>)>,
+    collection_block: Option<(Cid, Bytes)>,
     creator_did: Option<String>,
 ) -> Result<()> {
     if bus.is_none() && broadcaster.is_none() {

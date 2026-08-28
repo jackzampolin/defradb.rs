@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -185,7 +186,7 @@ impl crate::corekv::private::Sealed for RocksDbTxn {}
 
 #[async_trait]
 impl Reader for RocksDbTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
@@ -193,7 +194,7 @@ impl Reader for RocksDbTxn {
             return Err(Error::EmptyKey);
         }
         self.read_set.lock().record_key(key);
-        self.get_internal(key)
+        self.get_internal(key).map(|o| o.map(Bytes::from))
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {

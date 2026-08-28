@@ -102,8 +102,8 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                 .map_err(|e| QueryError::execution(e.to_string()))?;
 
             if let Some(data) = maybe_version_id {
-                let version_id = match String::from_utf8(data.clone()) {
-                    Ok(vid) if !vid.starts_with('{') => vid,
+                let version_id = match std::str::from_utf8(&data) {
+                    Ok(vid) if !vid.starts_with('{') => vid.to_string(),
                     _ => {
                         let mut schema: CollectionVersion = serde_json::from_slice(&data)
                             .map_err(|e| QueryError::execution(e.to_string()))?;

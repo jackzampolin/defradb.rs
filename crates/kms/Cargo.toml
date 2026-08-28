@@ -28,6 +28,7 @@ sourcehub = ["dep:sourcehub"]
 bench = false
 
 [dependencies]
+bytes.workspace = true
 ciborium.workspace = true
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }

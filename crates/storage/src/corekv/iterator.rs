@@ -7,6 +7,7 @@
 /// # WASM Compatibility
 ///
 /// For WASM targets, the `Send` bound is removed since WASM is single-threaded.
+use bytes::Bytes;
 use async_trait::async_trait;
 
 use super::errors::Result;
@@ -24,13 +25,13 @@ pub struct KvPair {
     /// The value as a byte vector.
     ///
     /// This may be empty if the iterator was created with `keys_only` option.
-    pub value: Vec<u8>,
+    pub value: Bytes,
 }
 
 impl KvPair {
     /// Create a new key-value pair.
-    pub fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
-        Self { key, value }
+    pub fn new(key: Vec<u8>, value: impl Into<Bytes>) -> Self {
+        Self { key, value: value.into() }
     }
 
     /// Create a key-only pair (empty value).
@@ -39,7 +40,7 @@ impl KvPair {
     pub fn key_only(key: Vec<u8>) -> Self {
         Self {
             key,
-            value: Vec::new(),
+            value: Bytes::new(),
         }
     }
 

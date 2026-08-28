@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use super::*;
 
 /// Write a collection-level block for branchable collections.
@@ -14,7 +15,7 @@ pub async fn write_collection_block(
     schema_version_id: &str,
     doc_composite_cid: Cid,
     signing_config: Option<&SigningConfig>,
-) -> Result<(Cid, Vec<u8>), String> {
+) -> Result<(Cid, Bytes), String> {
     use storage::corekv::IterOptions;
 
     // Get existing collection head (if any)
@@ -120,5 +121,5 @@ pub async fn write_collection_block(
         defra_core::batch_signing::batch_collect_cid(&session_key, collection_cid);
     }
 
-    Ok((collection_cid, collection_bytes))
+    Ok((collection_cid, collection_bytes.into()))
 }

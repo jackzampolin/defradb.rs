@@ -8,6 +8,7 @@
 //!   Legacy stats: /[col_id]/[idx_id]/_stats             -> [total_docs, total_field_len]
 //!   Stats shard:  /[col_id]/[idx_id]/0xff/s/[shard]     -> [doc_delta, field_len_delta]
 
+use bytes::Bytes;
 use async_trait::async_trait;
 use bm25::{DefaultTokenizer, Language, Tokenizer};
 use document::NormalValue;
@@ -135,7 +136,7 @@ impl FullTextIndex {
         freqs
     }
 
-    fn decode_stats(value: Option<Vec<u8>>) -> (u64, u64) {
+    fn decode_stats(value: Option<Bytes>) -> (u64, u64) {
         match value {
             Some(bytes) if bytes.len() == 16 => {
                 let total_docs = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
@@ -146,7 +147,7 @@ impl FullTextIndex {
         }
     }
 
-    fn decode_stats_delta(value: Option<Vec<u8>>) -> (i128, i128) {
+    fn decode_stats_delta(value: Option<Bytes>) -> (i128, i128) {
         match value {
             Some(bytes) if bytes.len() == 32 => {
                 let docs = i128::from_be_bytes(bytes[0..16].try_into().unwrap());
@@ -190,7 +191,7 @@ impl FullTextIndex {
             if kv.key.len() != prefix.len() + 1 {
                 continue;
             }
-            let (shard_docs, shard_field_len) = Self::decode_stats_delta(Some(kv.value));
+            let (shard_docs, shard_field_len) = Self::decode_stats_delta(Some(kv.value.into()));
             total_docs = total_docs.checked_add(shard_docs).ok_or_else(|| {
                 crate::corekv::Error::Other("full-text stats overflow".to_string())
             })?;

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use super::helpers::{
     ensure_collection_is_active, register_created_doc, write_branchable_collection_block,
     write_local_create,
@@ -65,7 +66,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to get headstore: {}", e))
         })?;
 
-        let result: query::error::Result<(DocID, Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = async {
+        let result: query::error::Result<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)> = async {
             // Create an IndexManager for unique constraint enforcement
             let short_id = collection.resolved_root_id();
             let index_manager = IndexManager::from_indexes(
@@ -362,7 +363,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
 
         // === Phase 3: Sequential writes ===
-        let mut results: Vec<(DocID, Document, Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> =
+        let mut results: Vec<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)> =
             Vec::with_capacity(prepared_docs.len());
 
         for ((mut doc, identity), computed) in prepared_docs
