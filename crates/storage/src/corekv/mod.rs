@@ -35,7 +35,7 @@
 /// ```ignore
 /// use storage::corekv::{Store, Reader, Writer, IterOptions};
 ///
-/// // Create a store (memory or redb)
+/// // Create a store (on disk or in memory)
 /// let store = RegolithStore::in_memory().unwrap();
 ///
 /// // Create a transaction

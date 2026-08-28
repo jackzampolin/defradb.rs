@@ -96,36 +96,13 @@
 /// - API documentation
 /// - Architecture guides
 pub mod backends;
-/// Shared by backends that read snapshot ranges in bounded windows.
-///
-/// Gated on `not(wasm32)` alone: `memory` has no feature flag and is always
-/// compiled on native targets, so it already covers `redb`, `fjall`, and
-/// `rocksdb`, which are feature-gated but also `not(wasm32)`-only.
-#[cfg(not(target_arch = "wasm32"))]
-mod chunked;
 pub mod corekv;
 pub mod dyn_store;
-/// Iterator over a range that cannot contain any key.
-///
-/// Gated identically to `chunked`, whose readers are its only consumers.
-#[cfg(not(target_arch = "wasm32"))]
-mod empty_iterator;
 pub mod encoding;
 pub mod encrypted_store;
 pub mod field_value;
 pub mod keys;
-/// Merges a `chunked` snapshot read against a transaction's pending writes.
-///
-/// Gated identically to `chunked`, whose readers are its only consumers.
-#[cfg(not(target_arch = "wasm32"))]
-mod merging;
 pub mod namespace;
-/// Computes range-query bounds shared by every backend, guarding against
-/// disjoint start/end bounds.
-///
-/// Gated identically to `chunked`, whose readers are its only consumers.
-#[cfg(not(target_arch = "wasm32"))]
-mod range_bounds;
 
 pub mod index;
 pub mod stores;
