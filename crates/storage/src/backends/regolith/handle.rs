@@ -18,9 +18,3 @@ pub(crate) enum Handle {
     /// transaction it does not have.
     Writable(Box<OwnedTransaction>),
 }
-
-impl Handle {
-    pub(crate) fn is_writable(&self) -> bool {
-        matches!(self, Self::Writable(_))
-    }
-}

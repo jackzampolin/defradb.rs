@@ -118,13 +118,6 @@ pub(crate) struct RegolithIterator {
 
 impl RegolithIterator {
     pub(crate) fn open(handle: Arc<Handle>, opts: &IterOptions) -> Result<Self> {
-        if opts.reverse() && handle.is_writable() {
-            return Err(Error::Other(
-                "reverse iteration over a transaction with pending writes is not supported: \
-                 open a read-only transaction to scan backwards"
-                    .to_string(),
-            ));
-        }
         let (start, end) = range_bounds(opts);
         let mut iter = Self {
             source: Source::Paged {
@@ -222,18 +215,46 @@ impl RegolithIterator {
             return;
         };
         let (target, already_returned) = anchor.seek_target();
+        let mut page_bytes = 0usize;
+
+        // Going back, the page's own upper bound is what resumes it: an
+        // exclusive end just below the last key returned. That is expressible,
+        // so a reverse page needs no skip, where a forward one resumes *at*
+        // the last key and drops it.
+        let reverse_end = self.reverse.then(|| match &anchor {
+            Anchor::RangeStart => self.end.clone(),
+            // A seek includes its target, so the exclusive bound sits one
+            // byte above it.
+            Anchor::At(key) => Some(above(key)),
+            Anchor::After(key) => Some(key.clone()),
+        });
+        let reverse_end = reverse_end.map(|end| match (end, self.end.as_ref()) {
+            // A seek past the range's end is clamped back into it.
+            (Some(end), Some(limit)) if end > *limit => Some(limit.clone()),
+            (end, _) => end,
+        });
         let from = match &anchor {
             Anchor::RangeStart => self.start.as_deref(),
             Anchor::At(key) | Anchor::After(key) => Some(key.as_slice()),
         };
-        let mut page_bytes = 0usize;
 
         // The borrow of the transaction opens and closes inside this
         // call, so the iterator outlives no borrow.
-        for (key, value) in txn.scan_stream(from, self.end.as_deref()) {
+        let entries: Box<dyn std::iter::Iterator<Item = (Vec<u8>, regolith::DbSlice)>> =
+            match &reverse_end {
+                Some(end) => Box::new(txn.scan_stream_in(
+                    self.start.as_deref(),
+                    end.as_deref(),
+                    regolith::ScanDirection::Reverse,
+                )),
+                None => Box::new(txn.scan_stream(from, self.end.as_deref())),
+            };
+        for (key, value) in entries {
             // A resume key was returned by the previous page; a seek key was
             // not, and skipping it would make `seek` land past its target.
-            if already_returned && target == Some(key.as_slice()) {
+            // Only forward pages need this: a reverse page excludes the key
+            // it resumes below through its own bound.
+            if !self.reverse && already_returned && target == Some(key.as_slice()) {
                 continue;
             }
             last = Some(key.clone());
@@ -331,6 +352,19 @@ fn range_bounds(opts: &IterOptions) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
         }
     }
     (start, end)
+}
+
+/// The smallest key strictly greater than `key`.
+///
+/// Appending a zero byte works for any key, where raising the last byte does
+/// not: `key` followed by anything sorts above `key`, and nothing sorts
+/// between the two. Used to turn an inclusive seek target into the exclusive
+/// upper bound a backward scan takes.
+fn above(key: &[u8]) -> Vec<u8> {
+    let mut next = Vec::with_capacity(key.len() + 1);
+    next.extend_from_slice(key);
+    next.push(0);
+    next
 }
 
 fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
