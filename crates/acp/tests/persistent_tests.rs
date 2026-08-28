@@ -1,6 +1,4 @@
-#![cfg(feature = "redb")]
-
-//! Tests for PersistentAcpStore backed by redb.
+//! Tests for `PersistentAcpStore`.
 
 use acp::{AcpStore, PersistentAcpStore, RelationTuple};
 use bytes::Bytes;

@@ -75,7 +75,8 @@ impl<S: Store> PersistentAcpStore<S> {
 impl PersistentAcpStore<RegolithStore> {
     /// Open a persistent ACP store at the given directory path.
     ///
-    /// Creates the directory and database file (`acp.regolith`) if they don't exist.
+    /// Creates the directory and the store directory (`acp.regolith`) if they do
+    /// not exist.
     /// The path should be a directory (e.g., `<root>/local_document_acp/`).
     ///
     /// This method provides backward compatibility for standalone ACP stores.
@@ -123,9 +124,9 @@ impl PersistentAcpStore<RegolithStore> {
                 ))
             })?;
 
-            if !metadata.is_file() {
+            if !metadata.is_dir() {
                 return Err(Error::Storage(format!(
-                    "ACP database path is not a file: {}",
+                    "ACP database path is not a directory: {}",
                     db_path.display()
                 )));
             }
@@ -419,12 +420,20 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::storage_iter("register_doc_atomic:iterator", e))?;
 
-        if iter
+        let already_registered = iter
             .next()
             .await
             .map_err(|e| Error::storage_iter("register_doc_atomic:next", e))?
-            .is_some()
-        {
+            .is_some();
+
+        // The scan has to be finished before the transaction can commit, and
+        // dropping the handle is what releases the transaction's hold on it.
+        iter.close()
+            .await
+            .map_err(|e| Error::storage_iter("register_doc_atomic:close", e))?;
+        drop(iter);
+
+        if already_registered {
             return Ok(false);
         }
 
