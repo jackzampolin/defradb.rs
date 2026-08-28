@@ -8,7 +8,10 @@ pub(crate) mod shared;
 
 pub mod regolith;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// Public rather than `cfg(test)`: the suite is the backend contract, and an
+// integration test links the library without its test cfg. Gated off wasm
+// only because it drives concurrent transactions.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod test_suite;
 
 pub use regolith::{RegolithStore, RegolithStoreOptions, RegolithTxn};

@@ -43,7 +43,7 @@ impl RegolithTxn {
         let handle = if readonly {
             Handle::ReadOnly(db.db().snapshot())
         } else {
-            Handle::Writable(db.begin_transaction_owned(isolation))
+            Handle::Writable(Box::new(db.begin_transaction_owned(isolation)))
         };
         Self {
             handle: Some(Arc::new(handle)),

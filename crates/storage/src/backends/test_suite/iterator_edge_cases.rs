@@ -54,7 +54,7 @@ pub async fn test_iterator_sees_pending_deletes<S: Store>(store: &S) {
 /// Indices are derived from `DEFAULT_CHUNK_SIZE` so that retuning the window
 /// moves the seam this exercises instead of silently leaving it untested.
 pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S) {
-    let chunk = crate::chunked::DEFAULT_CHUNK_SIZE;
+    let chunk = crate::backends::regolith::iterator::PAGE_ENTRIES;
     let last_of_window = chunk - 1;
     let committed: Vec<Vec<u8>> = (0..chunk * 2 + 88)
         .map(|i| format!("key_{:05}", i).into_bytes())
@@ -108,7 +108,7 @@ pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S)
 /// keyspace on each side so an over-wide scan has something to pick up.
 /// Returns the number of `doc/` keys written.
 async fn seed_flanked_keyspace<S: Store>(store: &S) -> usize {
-    let total = crate::chunked::DEFAULT_CHUNK_SIZE * 3;
+    let total = crate::backends::regolith::iterator::PAGE_ENTRIES * 3;
 
     let mut txn = store.new_txn(false).await.unwrap();
     for i in 0..total {
@@ -135,7 +135,7 @@ async fn seed_flanked_keyspace<S: Store>(store: &S) -> usize {
 /// lower bound re-yields keys. Neither shows up in a scan that fits in a
 /// single window, so this one spans three.
 pub async fn test_iterator_bounded_scan_across_chunks<S: Store>(store: &S) {
-    let chunk = crate::chunked::DEFAULT_CHUNK_SIZE;
+    let chunk = crate::backends::regolith::iterator::PAGE_ENTRIES;
     seed_flanked_keyspace(store).await;
 
     // Off a chunk multiple, so the bounds fall inside windows rather than on
@@ -193,7 +193,7 @@ pub async fn test_iterator_prefix_scan_across_chunks<S: Store>(store: &S) {
         seen.len(),
         expected.len(),
         "prefix scan spanning {} chunks returned the wrong count",
-        total / crate::chunked::DEFAULT_CHUNK_SIZE
+        total / crate::backends::regolith::iterator::PAGE_ENTRIES
     );
     assert_eq!(seen, expected, "prefix not held across a refill");
 }

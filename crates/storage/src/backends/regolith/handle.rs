@@ -12,7 +12,11 @@ pub(crate) enum Handle {
     /// at commit and no conflict to detect.
     ReadOnly(Snapshot),
     /// Buffers its own writes, tracks its own read set, validates itself.
-    Writable(OwnedTransaction),
+    ///
+    /// Boxed because it is by far the larger of the two and read-only is the
+    /// common case: inline it would cost every query's handle the size of a
+    /// transaction it does not have.
+    Writable(Box<OwnedTransaction>),
 }
 
 impl Handle {

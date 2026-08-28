@@ -61,9 +61,11 @@ uuid = { version = "1.0", features = ["v4", "js"] }
 # Tokio is only available on non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+# Used by backends::test_suite, which is part of the library so an integration
+# test can link it.
+futures.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]

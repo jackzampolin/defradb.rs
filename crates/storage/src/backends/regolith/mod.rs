@@ -2,7 +2,7 @@
 
 mod config;
 mod handle;
-mod iterator;
+pub(crate) mod iterator;
 mod store;
 mod transaction;
 
