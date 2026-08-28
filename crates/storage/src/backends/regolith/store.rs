@@ -34,6 +34,13 @@ struct StoreInner {
     active_txns: Arc<AtomicUsize>,
     stats: TransactionStatsHandle,
     path: PathBuf,
+    /// The mounted OPFS environment, kept so `persist` can reach it.
+    ///
+    /// Where the browser refuses synchronous access handles the database is
+    /// resident in linear memory, and only `OpfsEnv::persist` writes it back.
+    /// Dropping the handle at mount would leave no way to ask.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    opfs: Option<Arc<regolith::env::opfs::OpfsEnv>>,
 }
 
 impl RegolithStore {
@@ -69,6 +76,8 @@ impl RegolithStore {
                 active_txns: Arc::new(AtomicUsize::new(0)),
                 stats: TransactionStatsHandle::for_backend("regolith"),
                 path,
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                opfs: None,
             }),
         })
     }
@@ -77,6 +86,62 @@ impl RegolithStore {
     /// the store for a test or a deliberately ephemeral node.
     pub fn in_memory() -> Result<Self> {
         Self::open_with_options("regolith-memory", RegolithStoreOptions::memory())
+    }
+
+    /// Open a store persisted in the browser's origin-private filesystem.
+    ///
+    /// `wasm32-unknown-unknown` has no filesystem of its own, so the engine
+    /// takes one: this mounts OPFS on `db_name` and installs it before
+    /// opening. The mount is asynchronous because acquiring the OPFS root is,
+    /// which is why this cannot be a plain `open`.
+    ///
+    /// The mount probes for synchronous access handles and falls back to a
+    /// resident mirror when the browser refuses them, which it does outside a
+    /// Worker. The fallback keeps the database in linear memory, so it is
+    /// bounded rather than unlimited.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub async fn open_opfs(db_name: &str) -> Result<Self> {
+        use std::sync::Arc;
+
+        let env = Arc::new(
+            regolith::env::opfs::OpfsEnv::mount(
+                db_name,
+                regolith::env::opfs::OpfsOptions::default(),
+            )
+            .await
+            .map_err(|error| Error::Backend(format!("failed to mount OPFS: {error}")))?,
+        );
+
+        let mut options = RegolithStoreOptions::wasm();
+        options.engine.env = env.as_env();
+        let store = Self::open_with_options(db_name, options)?;
+        // Safe to reach in: nothing else holds this store yet.
+        let mut inner = Arc::try_unwrap(store.inner)
+            .map_err(|_| Error::Backend("store handle escaped during open".to_string()))?;
+        inner.opfs = Some(env);
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Write everything buffered in linear memory back to OPFS.
+    ///
+    /// A no-op when the browser granted synchronous access handles, because
+    /// those write through. In the mirror fallback this is what makes the
+    /// database survive the tab.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub async fn persist(&self) -> Result<()> {
+        let Some(env) = self.inner.opfs.as_ref() else {
+            return Ok(());
+        };
+        self.inner
+            .db
+            .db()
+            .flush()
+            .map_err(|error| Error::Backend(format!("flush before persist failed: {error}")))?;
+        env.persist()
+            .await
+            .map_err(|error| Error::Backend(format!("OPFS persist failed: {error}")))
     }
 
     /// Where the database lives.
