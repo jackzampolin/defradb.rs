@@ -10,55 +10,24 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.variant }} (${{ matrix.platform }})
+    name: Build (${{ matrix.platform }})
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # full (all supported release integrations)
-          - variant: full
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features release-full"
-          - variant: full
-            target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features release-full"
-          - variant: full
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features release-full"
-          - variant: full
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features release-full"
-          # minimal: no optional capabilities. There is one storage engine, so
-          # a build no longer varies by backend, only by what it can talk to.
-          - variant: minimal
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features"
-          - variant: minimal
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features"
-          - variant: minimal
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features"
-          - variant: minimal
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features"
     steps:
       - uses: actions/checkout@v4
 
@@ -111,23 +80,21 @@ jobs:
           fi
 
       - name: Build
-        run: cargo build --release -p cli --target ${{ matrix.target }} ${{ matrix.features }}
+        run: >-
+          cargo build --release -p cli --target ${{ matrix.target }}
+          --no-default-features --features release-full
 
       - name: Package
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if [ "${{ matrix.variant }}" = "full" ]; then
-            ARCHIVE="defra_${TAG}_${{ matrix.platform }}.tar.gz"
-          else
-            ARCHIVE="defra-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
-          fi
+          ARCHIVE="defra_${TAG}_${{ matrix.platform }}.tar.gz"
           tar czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" defra
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-${{ matrix.variant }}-${{ matrix.platform }}
+          name: defra-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
 
       - name: Cleanup
@@ -414,13 +381,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: defra-full-*
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: defra-minimal-*
+          pattern: defra-*
           merge-multiple: true
 
       - uses: actions/download-artifact@v4
