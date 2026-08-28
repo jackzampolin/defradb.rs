@@ -1,6 +1,5 @@
 //! Opening options for the regolith backend.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use regolith::{DurabilityMode as EngineDurability, IsolationLevel, Options};
@@ -63,15 +62,21 @@ impl RegolithStoreOptions {
     /// Keep the database in memory. For tests and for a node that is
     /// explicitly ephemeral.
     pub fn memory() -> Self {
+        // Take the environment constraints from the engine's own preset,
+        // which is where the knowledge lives: `MemEnv` starts no threads, so
+        // a compaction worker cannot exist, and nothing is being made durable,
+        // so an fsync per commit would buy nothing.
+        //
+        // The size limits stay the server ones. `Options::memory()` is sized
+        // from the embedded profile, whose 256 KiB value ceiling is a limit a
+        // caller can hit rather than a memory-tuning knob: a document larger
+        // than that is ordinary here, and an in-memory store that refuses what
+        // the on-disk one accepts is a different database, not a faster one.
+        let preset = Options::memory();
         let mut opts = Self::new();
-        opts.engine.env = Arc::new(regolith::MemEnv::new());
-        // `MemEnv` starts no threads, so a background compaction worker
-        // cannot exist and asking for one fails the open. Zero runs
-        // compaction on the calling thread instead.
-        opts.engine.max_background_compactions = 0;
-        // Nothing is being made durable, so paying for an fsync per
-        // commit would buy nothing.
-        opts.engine.durability = EngineDurability::Eventual;
+        opts.engine.env = preset.env;
+        opts.engine.max_background_compactions = preset.max_background_compactions;
+        opts.engine.durability = preset.durability;
         opts
     }
 
