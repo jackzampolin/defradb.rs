@@ -5,33 +5,28 @@ use std::sync::Arc;
 #[test]
 fn test_looks_like_cidv1() {
     assert!(
-        VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
+        VersionedFetcher::<storage::RegolithStore>::looks_like_cidv1(
             "bafyreiajq6jmyblg2b6vupjdapzkaodbt7kkwqp4fijekdvydnyxvr4y7q"
         )
     );
     assert!(
-        VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
+        VersionedFetcher::<storage::RegolithStore>::looks_like_cidv1(
             "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist"
         )
     );
-    assert!(
-        !VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
-            "fhbnjfahfhfhanfhga"
-        )
-    );
-    assert!(!VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1("short"));
+    assert!(!VersionedFetcher::<storage::RegolithStore>::looks_like_cidv1("fhbnjfahfhfhanfhga"));
+    assert!(!VersionedFetcher::<storage::RegolithStore>::looks_like_cidv1("short"));
 }
 #[tokio::test]
 async fn kms_identity_prefers_caller_then_task_then_thread() {
     let txn = Arc::new(TokioMutex::new(None));
     let caller = identity::Did::new("did:key:caller").unwrap();
-    let fetcher = VersionedFetcher::<storage::backends::memory::MemoryStore>::with_kms(
+    let fetcher = VersionedFetcher::<storage::RegolithStore>::with_kms(
         txn.clone(),
         None,
         Some(caller.clone()),
     );
-    let ambient =
-        VersionedFetcher::<storage::backends::memory::MemoryStore>::with_kms(txn, None, None);
+    let ambient = VersionedFetcher::<storage::RegolithStore>::with_kms(txn, None, None);
     let _thread =
         defra_core::current_identity::scoped_current_identity(Some("did:key:thread".into()));
 

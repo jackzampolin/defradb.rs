@@ -261,7 +261,7 @@ impl KvIterator for EncryptedIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::MemoryStore;
+    use crate::backends::RegolithStore;
 
     fn key_a() -> [u8; 32] {
         [7u8; 32]
@@ -277,20 +277,20 @@ mod tests {
         txn.commit().await.unwrap();
     }
 
-    async fn get(store: &dyn Store, k: &[u8]) -> Option<Vec<u8>> {
+    async fn get(store: &dyn Store, k: &[u8]) -> Option<Bytes> {
         let txn = store.new_txn(true).await.unwrap();
         txn.get(k).await.unwrap()
     }
 
     /// Read a raw value directly from a backing store (bypassing decryption).
-    async fn raw_get(store: &dyn Store, k: &[u8]) -> Option<Vec<u8>> {
+    async fn raw_get(store: &dyn Store, k: &[u8]) -> Option<Bytes> {
         let txn = store.new_txn(true).await.unwrap();
         txn.get(k).await.unwrap()
     }
 
     #[tokio::test]
     async fn roundtrip_store_returns_plaintext_inner_holds_ciphertext() {
-        let inner = MemoryStore::new();
+        let inner = RegolithStore::in_memory().unwrap();
         let enc = EncryptedStore::new(inner, key_a());
 
         // store-level set goes through the txn path; use a txn here, then read
@@ -299,17 +299,20 @@ mod tests {
         txn.set(b"k1", b"hello world").await.unwrap();
         txn.commit().await.unwrap();
 
-        assert_eq!(get(&enc, b"k1").await, Some(b"hello world".to_vec()));
+        assert_eq!(
+            get(&enc, b"k1").await,
+            Some(Bytes::from_static(b"hello world"))
+        );
 
         // Raw inner value must be ciphertext: different and longer than plaintext.
         let raw = raw_get(&enc.inner, b"k1").await.unwrap();
-        assert_ne!(raw, b"hello world");
+        assert_ne!(raw, &b"hello world"[..]);
         assert!(raw.len() > b"hello world".len());
     }
 
     #[tokio::test]
     async fn prefix_iteration_returns_keys_and_decrypted_values() {
-        let enc = EncryptedStore::new(MemoryStore::new(), key_a());
+        let enc = EncryptedStore::new(RegolithStore::in_memory().unwrap(), key_a());
 
         let mut txn = enc.new_txn(false).await.unwrap();
         txn.set(b"user:1", b"alice").await.unwrap();
@@ -326,14 +329,14 @@ mod tests {
 
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].key, b"user:1");
-        assert_eq!(pairs[0].value, b"alice");
+        assert_eq!(pairs[0].value, &b"alice"[..]);
         assert_eq!(pairs[1].key, b"user:2");
-        assert_eq!(pairs[1].value, b"bob");
+        assert_eq!(pairs[1].value, &b"bob"[..]);
     }
 
     #[tokio::test]
     async fn keys_only_iteration_passes_through() {
-        let enc = EncryptedStore::new(MemoryStore::new(), key_a());
+        let enc = EncryptedStore::new(RegolithStore::in_memory().unwrap(), key_a());
         set(&enc, b"k1", b"value").await;
 
         let ro = enc.new_txn(true).await.unwrap();
@@ -349,12 +352,15 @@ mod tests {
 
     #[tokio::test]
     async fn txn_commit_persists_discard_rolls_back() {
-        let enc = EncryptedStore::new(MemoryStore::new(), key_a());
+        let enc = EncryptedStore::new(RegolithStore::in_memory().unwrap(), key_a());
 
         let mut txn = enc.new_txn(false).await.unwrap();
         txn.set(b"c", b"committed").await.unwrap();
         txn.commit().await.unwrap();
-        assert_eq!(get(&enc, b"c").await, Some(b"committed".to_vec()));
+        assert_eq!(
+            get(&enc, b"c").await,
+            Some(Bytes::from_static(b"committed"))
+        );
 
         let mut txn = enc.new_txn(false).await.unwrap();
         txn.set(b"d", b"discarded").await.unwrap();
@@ -364,16 +370,16 @@ mod tests {
 
     #[tokio::test]
     async fn empty_value_roundtrips() {
-        let enc = EncryptedStore::new(MemoryStore::new(), key_a());
+        let enc = EncryptedStore::new(RegolithStore::in_memory().unwrap(), key_a());
         set(&enc, b"e", b"").await;
-        assert_eq!(get(&enc, b"e").await, Some(b"".to_vec()));
+        assert_eq!(get(&enc, b"e").await, Some(Bytes::from_static(b"")));
     }
 
     #[tokio::test]
     async fn delete_removes_value() {
-        let enc = EncryptedStore::new(MemoryStore::new(), key_a());
+        let enc = EncryptedStore::new(RegolithStore::in_memory().unwrap(), key_a());
         set(&enc, b"k", b"v").await;
-        assert_eq!(get(&enc, b"k").await, Some(b"v".to_vec()));
+        assert_eq!(get(&enc, b"k").await, Some(Bytes::from_static(b"v")));
 
         let mut txn = enc.new_txn(false).await.unwrap();
         txn.delete(b"k").await.unwrap();
@@ -384,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_key_fails_loudly() {
         // Encrypt with key A into a shared inner store, then read via key B.
-        let inner = MemoryStore::new();
+        let inner = RegolithStore::in_memory().unwrap();
         {
             let enc_a = EncryptedStore::new(inner.clone(), key_a());
             set(&enc_a, b"k", b"secret").await;
@@ -401,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn aad_binding_rejects_value_relocation() {
         // A ciphertext written under k1 must not decrypt when read under k2.
-        let inner = MemoryStore::new();
+        let inner = RegolithStore::in_memory().unwrap();
         let enc = EncryptedStore::new(inner.clone(), key_a());
         set(&enc, b"k1", b"payload").await;
 
@@ -423,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_size_returns_plaintext_length() {
-        let enc = EncryptedStore::new(MemoryStore::new(), key_a());
+        let enc = EncryptedStore::new(RegolithStore::in_memory().unwrap(), key_a());
         set(&enc, b"k", b"0123456789").await;
         let txn = enc.new_txn(true).await.unwrap();
         assert_eq!(txn.get_size(b"k").await.unwrap(), Some(10));

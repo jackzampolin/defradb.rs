@@ -1,4 +1,5 @@
 use crate::corekv::{IterOptions, Store};
+use bytes::Bytes;
 
 /// Test iterator sees pending (uncommitted) writes
 pub async fn test_iterator_sees_pending_writes<S: Store>(store: &S) {
@@ -92,7 +93,7 @@ pub async fn test_iterator_pending_writes_at_chunk_boundary<S: Store>(store: &S)
     let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
     let mut seen: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     while let Some(kv) = iter.next().await.unwrap() {
-        seen.push((kv.key, kv.value));
+        seen.push((kv.key, kv.value.to_vec()));
     }
 
     assert_eq!(
@@ -321,7 +322,7 @@ pub async fn test_empty_value_handling<S: Store>(store: &S) {
 
     // Empty value key should exist
     assert!(txn.has(b"empty_value").await.unwrap());
-    assert_eq!(txn.get(b"empty_value").await.unwrap(), Some(vec![]));
+    assert_eq!(txn.get(b"empty_value").await.unwrap(), Some(Bytes::new()));
 
     // Non-existent key should be None, not empty vec
     assert!(!txn.has(b"nonexistent").await.unwrap());

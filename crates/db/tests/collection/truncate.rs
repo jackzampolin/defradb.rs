@@ -4,9 +4,9 @@ use db::{AutoCommitFetcher, AutoCommitMutator, DB};
 use document::{DocID, Document, NormalValue};
 use query::{DocFetcher, DocMutator, Filter};
 use schema::{CollectionVersion, FieldDescription, FieldKind, IndexDescription};
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::DatastoreSE;
+use storage::RegolithStore;
 
 fn users_schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -32,7 +32,7 @@ fn age_filter(age: i64) -> Filter {
     Filter::from_conditions(conditions)
 }
 
-async fn create_user(mutator: &AutoCommitMutator<MemoryStore>, name: &str, age: i64) -> DocID {
+async fn create_user(mutator: &AutoCommitMutator<RegolithStore>, name: &str, age: i64) -> DocID {
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
     doc.set("age", NormalValue::Int(age));
@@ -41,7 +41,7 @@ async fn create_user(mutator: &AutoCommitMutator<MemoryStore>, name: &str, age: 
 
 #[tokio::test]
 async fn filtered_truncate_removes_only_matching_documents_and_indexes() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let alice = create_user(&mutator, "Alice", 30).await;
@@ -75,7 +75,7 @@ async fn filtered_truncate_removes_only_matching_documents_and_indexes() {
 
 #[tokio::test]
 async fn filtered_truncate_includes_soft_deleted_documents() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
 
@@ -102,7 +102,7 @@ async fn filtered_truncate_includes_soft_deleted_documents() {
 
 #[tokio::test]
 async fn filtered_truncate_rejects_branchable_collections() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(users_schema().as_branchable())
         .await
         .unwrap();
@@ -120,7 +120,7 @@ async fn filtered_truncate_rejects_branchable_collections() {
 
 #[tokio::test]
 async fn filtered_truncate_removes_only_matching_searchable_encryption_records() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let alice = create_user(&mutator, "Alice", 30).await;
@@ -149,7 +149,7 @@ async fn filtered_truncate_removes_only_matching_searchable_encryption_records()
 
 #[tokio::test]
 async fn filtered_truncate_processes_more_than_one_chunk() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let schema = CollectionVersion::new(
         "Users",
         "users-v1",

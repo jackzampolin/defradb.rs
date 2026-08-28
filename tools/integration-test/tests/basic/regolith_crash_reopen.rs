@@ -37,7 +37,7 @@ async fn graphql_query(
 }
 
 fn crash_reopen_ack_target() -> usize {
-    std::env::var("LARK_CRASH_REOPEN_ACK_TARGET")
+    std::env::var("Regolith_CRASH_REOPEN_ACK_TARGET")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(50)
@@ -59,15 +59,15 @@ async fn wait_for_acked_writes(acked: &Arc<Mutex<Vec<i64>>>, target: usize) {
 }
 
 #[tokio::test]
-async fn rust_lark_survives_sigkill_and_reopen_after_acknowledged_writes() {
+async fn rust_regolith_survives_sigkill_and_reopen_after_acknowledged_writes() {
     let _root = integration_test::workspace_root();
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
-        .with_store("lark")
+        .with_store("regolith")
         .health_timeout(Duration::from_secs(60))
         .build()
         .await
-        .expect("build lark cluster");
+        .expect("build regolith cluster");
 
     let node = cluster.client(0);
     node.schema_add(
@@ -123,7 +123,7 @@ async fn rust_lark_survives_sigkill_and_reopen_after_acknowledged_writes() {
     cluster
         .restart_node(0, Duration::from_secs(60))
         .await
-        .expect("restart lark node after kill");
+        .expect("restart regolith node after kill");
 
     let restarted = cluster.client(0);
     let data = restarted

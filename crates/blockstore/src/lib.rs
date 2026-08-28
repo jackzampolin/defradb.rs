@@ -19,11 +19,11 @@
 //!
 //! ```ignore
 //! use blockstore::{Blockstore, DefraBlockstore};
-//! use storage::backends::MemoryStore;
+//! use storage::RegolithStore;
 //! use std::sync::Arc;
 //!
 //! // Create a blockstore
-//! let store = Arc::new(MemoryStore::new());
+//! let store = Arc::new(RegolithStore::in_memory().unwrap());
 //! let blockstore = DefraBlockstore::new(store, false);
 //!
 //! // Store a block

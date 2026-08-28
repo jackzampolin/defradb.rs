@@ -98,7 +98,7 @@ fn test_log_output_display_roundtrip() {
 fn test_datastore_type_from_str_valid() {
     assert_eq!(
         "redb".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Redb
+        DatastoreType::Regolith
     );
     assert_eq!(
         "memory".parse::<DatastoreType>().unwrap(),
@@ -106,15 +106,15 @@ fn test_datastore_type_from_str_valid() {
     );
     assert_eq!(
         "rocksdb".parse::<DatastoreType>().unwrap(),
-        DatastoreType::RocksDb
+        DatastoreType::Regolith
     );
     assert_eq!(
         "badger".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Redb
+        DatastoreType::Regolith
     );
     assert_eq!(
-        "lark".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Lark
+        "regolith".parse::<DatastoreType>().unwrap(),
+        DatastoreType::Regolith
     );
 }
 
@@ -130,9 +130,9 @@ fn test_datastore_type_from_str_invalid() {
 #[test]
 fn test_datastore_type_display_roundtrip() {
     for store in [
-        DatastoreType::Lark,
-        DatastoreType::RocksDb,
-        DatastoreType::Redb,
+        DatastoreType::Regolith,
+        DatastoreType::Regolith,
+        DatastoreType::Regolith,
         DatastoreType::Memory,
     ] {
         let display = store.to_string();

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use acp::policy_yaml::{generate_policy_id, parse_policy_yaml};
 use acp::PersistentZanzibarStore;
-use storage::MemoryStore;
+use storage::RegolithStore;
 use zanzibar::store::{MemoryZanzibarStore, ZanzibarStore};
 use zanzibar::types::Policy;
 
@@ -71,7 +71,7 @@ async fn memory_store_counter_starts_at_one_and_increments() {
 
 #[tokio::test]
 async fn persistent_store_counter_starts_at_one_and_increments() {
-    let store = PersistentZanzibarStore::from_store(Arc::new(MemoryStore::new()));
+    let store = PersistentZanzibarStore::from_store(Arc::new(RegolithStore::in_memory().unwrap()));
 
     assert_eq!(store.next_policy_counter().await.unwrap(), 1);
     assert_eq!(store.next_policy_counter().await.unwrap(), 2);
@@ -82,7 +82,7 @@ async fn persistent_store_counter_starts_at_one_and_increments() {
 /// continue the sequence, not restart at 1.
 #[tokio::test]
 async fn persistent_store_counter_survives_reopen() {
-    let backing = Arc::new(MemoryStore::new());
+    let backing = Arc::new(RegolithStore::in_memory().unwrap());
 
     let before = PersistentZanzibarStore::from_store(backing.clone());
     assert_eq!(before.next_policy_counter().await.unwrap(), 1);
@@ -102,7 +102,7 @@ async fn persistent_store_counter_survives_reopen() {
 /// seeded from the number of policies already stored.
 #[tokio::test]
 async fn persistent_store_counter_seeds_from_existing_policies() {
-    let store = PersistentZanzibarStore::from_store(Arc::new(MemoryStore::new()));
+    let store = PersistentZanzibarStore::from_store(Arc::new(RegolithStore::in_memory().unwrap()));
 
     for id in ["policy-a", "policy-b", "policy-c"] {
         store
@@ -124,7 +124,7 @@ async fn persistent_store_counter_seeds_from_existing_policies() {
 /// always counter 1.
 #[tokio::test]
 async fn persistent_store_counter_seed_ignores_the_nac_policy() {
-    let store = PersistentZanzibarStore::from_store(Arc::new(MemoryStore::new()));
+    let store = PersistentZanzibarStore::from_store(Arc::new(RegolithStore::in_memory().unwrap()));
 
     store
         .store_policy(&Policy::new(
@@ -143,7 +143,7 @@ async fn persistent_store_counter_seed_ignores_the_nac_policy() {
 
 #[tokio::test]
 async fn persistent_store_counter_seeds_at_one_when_empty() {
-    let store = PersistentZanzibarStore::from_store(Arc::new(MemoryStore::new()));
+    let store = PersistentZanzibarStore::from_store(Arc::new(RegolithStore::in_memory().unwrap()));
 
     assert_eq!(store.next_policy_counter().await.unwrap(), 1);
 }
@@ -152,7 +152,7 @@ async fn persistent_store_counter_seeds_at_one_when_empty() {
 /// in-process lock, so transaction conflicts must be retried by the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn persistent_store_counter_never_repeats_across_instances() {
-    let backing = Arc::new(MemoryStore::new());
+    let backing = Arc::new(RegolithStore::in_memory().unwrap());
 
     let mut handles = Vec::new();
     for _ in 0..8 {
@@ -181,7 +181,7 @@ async fn persistent_store_counter_never_repeats_across_instances() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn persistent_store_counter_is_atomic_under_concurrency() {
     let store = Arc::new(PersistentZanzibarStore::from_store(Arc::new(
-        MemoryStore::new(),
+        RegolithStore::in_memory().unwrap(),
     )));
 
     let mut handles = Vec::new();

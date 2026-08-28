@@ -116,7 +116,7 @@ fn test_apply_to_config_redb_store_succeeds() {
 
     let result = args.apply_to_config(&mut config);
     assert!(result.is_ok());
-    assert_eq!(config.datastore.store, DatastoreType::Redb);
+    assert_eq!(config.datastore.store, DatastoreType::Regolith);
 }
 
 #[test]

@@ -331,12 +331,12 @@ impl Iterator for NamespacedIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use storage::backends::MemoryStore;
     use storage::corekv::Store;
+    use storage::RegolithStore;
 
     #[tokio::test]
     async fn test_shared_txn_namespace_isolation() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 
@@ -355,17 +355,17 @@ mod tests {
         // Read back - each should see its own value
         assert_eq!(
             shared.get(Namespace::Datastore, b"key").await.unwrap(),
-            Some(b"datastore_value".to_vec())
+            Some(Bytes::from_static(b"datastore_value"))
         );
         assert_eq!(
             shared.get(Namespace::Systemstore, b"key").await.unwrap(),
-            Some(b"systemstore_value".to_vec())
+            Some(Bytes::from_static(b"systemstore_value"))
         );
     }
 
     #[tokio::test]
     async fn test_namespace_view() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 
@@ -379,17 +379,17 @@ mod tests {
         // Read back
         assert_eq!(
             ds.get(b"key").await.unwrap(),
-            Some(b"datastore_value".to_vec())
+            Some(Bytes::from_static(b"datastore_value"))
         );
         assert_eq!(
             ss.get(b"key").await.unwrap(),
-            Some(b"systemstore_value".to_vec())
+            Some(Bytes::from_static(b"systemstore_value"))
         );
     }
 
     #[tokio::test]
     async fn test_root_view_sees_prefixed() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 
@@ -401,12 +401,12 @@ mod tests {
 
         // Root should see it with 'd' prefix
         let value = root.get(b"dmykey").await.unwrap();
-        assert_eq!(value, Some(b"value".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"value")));
     }
 
     #[tokio::test]
     async fn test_namespace_iterator() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 

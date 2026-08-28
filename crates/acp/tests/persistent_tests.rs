@@ -3,6 +3,7 @@
 //! Tests for PersistentAcpStore backed by redb.
 
 use acp::{AcpStore, PersistentAcpStore, RelationTuple};
+use bytes::Bytes;
 use identity::Did;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Reader, Store, Writer};
@@ -176,7 +177,7 @@ async fn test_unified_store_basic_operations() {
     let db_path = tmp_dir.path().join("data");
 
     // Create main redb store (simulating the main database)
-    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
 
     // Create ACP store from main database using unified mode
     let acp_store = PersistentAcpStore::from_store(redb_store.clone());
@@ -202,7 +203,7 @@ async fn test_unified_store_namespace_isolation() {
     let db_path = tmp_dir.path().join("data");
 
     // Create main redb store
-    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
 
     // Create ACP store from main database
     let acp_store = PersistentAcpStore::from_store(redb_store.clone());
@@ -248,7 +249,7 @@ async fn test_unified_store_multiple_documents() {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("data");
 
-    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
     let acp_store = PersistentAcpStore::from_store(redb_store.clone());
 
     let did1 = test_did();
@@ -287,7 +288,7 @@ async fn test_unified_store_atomic_registration() {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("data");
 
-    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
     let acp_store = PersistentAcpStore::from_store(redb_store.clone());
 
     let owner = test_did();
@@ -318,7 +319,7 @@ async fn test_unified_store_atomic_registration_concurrent() {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("data");
 
-    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
     let acp_store = Arc::new(PersistentAcpStore::from_store(redb_store.clone()));
 
     let owner1 = test_did();
@@ -354,7 +355,7 @@ async fn test_unified_store_isolation_from_namespaced_stores() {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("data");
 
-    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
 
     // Create both ACP and Datastore using the NamespacedStore pattern
     let acp_store = PersistentAcpStore::from_store(redb_store.clone());
@@ -396,6 +397,6 @@ async fn test_unified_store_isolation_from_namespaced_stores() {
     {
         let txn = datastore.new_txn(true).await.unwrap();
         let value = txn.get(b"collection/doc").await.unwrap();
-        assert_eq!(value, Some(b"document data".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"document data")));
     }
 }

@@ -352,7 +352,7 @@ mod runner {
         match value.as_str() {
             // The old backend names still parse and all mean regolith, so
             // an existing bench invocation keeps running.
-            "regolith" | "lark" | "redb" | "rocksdb" | "rocks" => Ok(StorageBackend::Regolith),
+            "regolith" | "regolith" | "redb" | "rocksdb" | "rocks" => Ok(StorageBackend::Regolith),
             other => bail!("unknown backend: {other} (expected regolith)"),
         }
     }
@@ -440,7 +440,7 @@ mod runner {
              \n\
              Options:\n\
                --profile NAME            Fixture profile: smoke, default, or large\n\
-               --backend NAME            Backend: lark, redb, or rocksdb (default: lark)\n\
+               --backend NAME            Backend: regolith, redb, or rocksdb (default: regolith)\n\
                --store NAME              Alias for --backend\n\
                --durability NAME         Durability: immediate or eventual (default: immediate)\n\
                --data-dir PATH            Persist the store at PATH\n\

@@ -24,7 +24,7 @@ use query::QueryRequest;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::MemoryStore;
+use storage::RegolithStore;
 
 const COLLECTION_SIZE: usize = 50;
 const FAIL_AFTER: usize = 3;
@@ -53,7 +53,7 @@ impl DocStream for FailingStream {
 }
 
 struct FailingFetcher {
-    inner: LensedAutoCommitFetcher<MemoryStore>,
+    inner: LensedAutoCommitFetcher<RegolithStore>,
     closed: Arc<AtomicBool>,
 }
 
@@ -133,8 +133,8 @@ impl DocFetcher for FailingFetcher {
     }
 }
 
-async fn seeded_db() -> Arc<DB<MemoryStore>> {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+async fn seeded_db() -> Arc<DB<RegolithStore>> {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(users_schema()).await.unwrap();
 
     let docs = (0..COLLECTION_SIZE)

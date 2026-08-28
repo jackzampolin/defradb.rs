@@ -81,8 +81,8 @@ jobs:
           - group: release
             commands: |
               cargo clippy -p cli --no-default-features --features release-full --all-targets -- -D warnings
-              cargo clippy -p cli --no-default-features --features rocksdb,lark --all-targets -- -D warnings
-              cargo clippy -p cli --no-default-features --features lark --all-targets -- -D warnings
+              cargo clippy -p cli --no-default-features --features rocksdb,regolith --all-targets -- -D warnings
+              cargo clippy -p cli --no-default-features --features regolith --all-targets -- -D warnings
           - group: optional
             commands: |
               cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
@@ -92,8 +92,8 @@ jobs:
               cargo clippy -p db --features p2p --all-targets -- -D warnings
           - group: minimal
             commands: |
-              cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
-              cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
+              cargo clippy -p defra-node --no-default-features --features regolith,redb,native --all-targets -- -D warnings
+              cargo clippy -p defra-node --no-default-features --features regolith,redb,native,p2p --all-targets -- -D warnings
               cargo check -p p2p --no-default-features --features iroh-transport
               cargo check -p db --no-default-features --features native
     steps:

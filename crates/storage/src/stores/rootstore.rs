@@ -1,10 +1,11 @@
+use crate::corekv::{Result, Store, Txn};
+use async_trait::async_trait;
 /// RootStore - Foundation store wrapper
 ///
 /// The RootStore provides direct access to the underlying store without
 /// namespace prefixing. It serves as the foundation for all other stores
 /// and is used for operations that need to span multiple namespaces.
-use crate::corekv::{Result, Store, Txn};
-use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::Arc;
 
 /// RootStore wraps a backend store and provides the foundation for
@@ -47,11 +48,11 @@ impl<S: Store> Store for RootStore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::MemoryStore;
+    use crate::backends::RegolithStore;
 
     #[tokio::test]
     async fn test_rootstore_basic() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let rootstore = RootStore::new(store);
 
         // Write data
@@ -62,12 +63,12 @@ mod tests {
         // Read back
         let txn = rootstore.new_txn(true).await.unwrap();
         let value = txn.get(b"key1").await.unwrap();
-        assert_eq!(value, Some(b"value1".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"value1")));
     }
 
     #[tokio::test]
     async fn test_rootstore_no_namespace_prefix() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let rootstore = RootStore::new(store);
 
         // Write with explicit key
@@ -78,7 +79,7 @@ mod tests {
         // Read back with same key - no automatic prefixing
         let txn = rootstore.new_txn(true).await.unwrap();
         let value = txn.get(b"d/key1").await.unwrap();
-        assert_eq!(value, Some(b"value1".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
         // Different prefix is different key
         let value = txn.get(b"b/key1").await.unwrap();

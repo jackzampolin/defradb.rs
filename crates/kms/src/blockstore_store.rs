@@ -126,7 +126,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEncBlockStore {
-        inner: RwLock<HashMap<EncryptionCid, Vec<u8>>>,
+        inner: RwLock<HashMap<EncryptionCid, Bytes>>,
     }
 
     #[async_trait]
@@ -171,7 +171,9 @@ mod tests {
         };
         let block_bytes = block.to_dag_cbor().unwrap();
         let cid = generate_cid_from_bytes(&block_bytes).unwrap();
-        fake.put_block(cid, block_bytes.clone()).await.unwrap();
+        fake.put_block(cid, block_bytes.clone().into())
+            .await
+            .unwrap();
 
         let store = BlockstoreKeyStore::new(fake);
         let got = store.get(&cid).await.unwrap().unwrap();

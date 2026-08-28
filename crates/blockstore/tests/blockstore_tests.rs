@@ -15,9 +15,9 @@ use std::sync::Arc;
 use blockstore::{Blockstore, DefraBlockstore, Error};
 use bytes::Bytes;
 use cid::Cid;
-use storage::backends::MemoryStore;
 use storage::corekv::{Key, Store};
 use storage::stores::blockstore::BlockstoreTxn;
+use storage::RegolithStore;
 
 fn test_cid() -> Cid {
     Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
@@ -49,7 +49,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn put_get() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -63,7 +63,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn get_nonexistent_block() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let result = blockstore.get(&test_cid()).await.unwrap();
@@ -72,7 +72,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn has() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -85,7 +85,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn delete() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -102,7 +102,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn get_size() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -118,7 +118,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn put_many() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid1 = test_cid();
@@ -141,7 +141,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn put_many_empty() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let blocks: Vec<(&Cid, &[u8])> = vec![];
@@ -150,7 +150,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn all_cids() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid1 = test_cid();
@@ -173,7 +173,7 @@ mod basic_crud {
 
     #[tokio::test]
     async fn deduplication() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -193,14 +193,14 @@ mod hash_verification {
 
     #[tokio::test]
     async fn disabled_by_default() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
         assert!(!blockstore.rehash_enabled());
     }
 
     #[tokio::test]
     async fn enable_disable() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         blockstore.hash_on_read(true);
@@ -212,7 +212,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn valid_data() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let data = b"test data for hash verification";
@@ -227,7 +227,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn corrupted_data() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let original_data = b"original data";
@@ -258,7 +258,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn nonexistent_block() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         blockstore.hash_on_read(true);
@@ -269,7 +269,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn unsupported_algorithm_skipped() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         use multihash::Multihash;
@@ -286,7 +286,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn blake2b_skipped() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         use multihash::Multihash;
@@ -304,7 +304,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn empty_block() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let data: &[u8] = b"";
@@ -324,7 +324,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn large_block() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let data: Vec<u8> = (0..262144).map(|i| (i % 256) as u8).collect();
@@ -343,7 +343,7 @@ mod hash_verification {
 
     #[tokio::test]
     async fn large_block_many() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let data1: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
@@ -381,7 +381,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn p2p_lifecycle() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -402,7 +402,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn local_mode_no_tracking() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -416,21 +416,21 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn is_merged_nonexistent_p2p() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
         assert!(!blockstore.is_merged(&test_cid()).await.unwrap());
     }
 
     #[tokio::test]
     async fn is_merged_nonexistent_local() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
         assert!(!blockstore.is_merged(&test_cid()).await.unwrap());
     }
 
     #[tokio::test]
     async fn unmerged_filtering() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid1 = test_cid();
@@ -452,7 +452,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn all_cids_excludes_merge_markers() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid1 = test_cid();
@@ -469,7 +469,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn delete_removes_merge_marker() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -487,7 +487,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn mark_nonexistent_is_noop() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -499,7 +499,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn delete_then_is_merged() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -525,7 +525,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn delete_unmerged_block() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -542,7 +542,7 @@ mod merge_tracking {
 
     #[tokio::test]
     async fn merge_delete_reput() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -574,7 +574,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn get_with_default_cid_returns_none() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let zero_bytes = vec![0x12, 0x20];
@@ -588,7 +588,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn operations_with_cidv0() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cidv0 = Cid::from_str("QmdfTbBqBPQ7VNxZEYEj14VmRuZBkqFbiwReogJgS1zR1n").unwrap();
@@ -611,7 +611,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn put_already_merged_stays_merged() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -639,7 +639,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn put_many_with_existing_merged() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid1 = test_cid();
@@ -667,7 +667,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn same_cid_different_data_no_overwrite() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -683,7 +683,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn put_many_duplicate_cids_in_batch() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -702,7 +702,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn delete_nonexistent_is_noop() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         let cid = test_cid();
@@ -713,7 +713,7 @@ mod go_compat {
 
     #[tokio::test]
     async fn delete_nonexistent_p2p() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let cid = test_cid();
@@ -760,7 +760,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn put_different_cids() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let cid1 = test_cid();
@@ -800,7 +800,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn put_same_cid() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let cid = test_cid();
@@ -829,7 +829,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn get_and_put() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let cid = test_cid();
@@ -855,7 +855,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn hash_on_read_toggle() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let data = b"hash verification data";
@@ -881,7 +881,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn p2p_merge_tracking() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
         let cid1 = test_cid();
@@ -909,7 +909,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn delete_during_read() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let cid = test_cid();
@@ -943,7 +943,7 @@ mod concurrency {
 
     #[tokio::test]
     async fn delete_and_has() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let cid = test_cid();
@@ -974,7 +974,7 @@ mod stress {
 
     #[tokio::test]
     async fn many_blocks() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         const NUM_BLOCKS: usize = 500;
@@ -1012,7 +1012,7 @@ mod stress {
 
     #[tokio::test]
     async fn many_blocks_p2p_merge() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         const NUM_BLOCKS: usize = 200;
@@ -1054,7 +1054,7 @@ mod stress {
 
     #[tokio::test]
     async fn put_many_batch() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, false);
 
         const BATCH_SIZE: usize = 100;
@@ -1085,7 +1085,7 @@ mod stress {
     async fn concurrent_operations() {
         use std::sync::atomic::AtomicUsize;
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
 
         let mut cids = Vec::new();
@@ -1141,7 +1141,7 @@ mod error_paths {
 
     #[tokio::test]
     async fn all_cids_skips_malformed_keys() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store.clone(), false);
 
         let cid1 = test_cid();

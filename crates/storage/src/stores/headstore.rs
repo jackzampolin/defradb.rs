@@ -1,10 +1,11 @@
+use crate::corekv::{Result, Store, Txn};
+use crate::namespace::{Namespace, NamespacedStore};
+use async_trait::async_trait;
 /// Headstore - Merkle tree heads and definitions
 ///
 /// The Headstore handles storage of document heads, collection heads,
 /// field definitions, collection definitions, and collection set definitions.
-use crate::corekv::{Result, Store, Txn};
-use crate::namespace::{Namespace, NamespacedStore};
-use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::Arc;
 
 /// Headstore provides storage for merkle tree heads and schema definitions
@@ -43,7 +44,7 @@ impl<S: Store> Store for Headstore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::MemoryStore;
+    use crate::backends::RegolithStore;
     use crate::corekv::Key;
     use crate::keys::headstore::HeadstoreDocKey;
     use cid::Cid;
@@ -51,7 +52,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_headstore_basic() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let headstore = Headstore::new(store);
 
         let cid =
@@ -66,6 +67,6 @@ mod tests {
         // Read
         let txn = headstore.new_txn(true).await.unwrap();
         let value = txn.get(&key.bytes()).await.unwrap();
-        assert_eq!(value, Some(b"head_data".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"head_data")));
     }
 }

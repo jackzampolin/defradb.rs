@@ -11,8 +11,8 @@ mod common;
 /// Fixture holding a seeded store plus the keys the benchmarks read against.
 ///
 /// Generic over the backend so the same workload runs identically against
-/// every enabled store (`redb`, `lark`, `rocksdb`), giving a side-by-side
-/// comparison of the DefraDB transaction wrapper on each. Lark and RocksDB
+/// every enabled store (`redb`, `regolith`, `rocksdb`), giving a side-by-side
+/// comparison of the DefraDB transaction wrapper on each. Regolith and RocksDB
 /// are constructed through their `*_`-prefixed environment options, so a
 /// configured backend is measured rather than just raw defaults; redb has no
 /// environment-configuration path and is built with its defaults (#1009).
@@ -280,34 +280,34 @@ fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStor
 
 fn bench_storage(c: &mut Criterion) {
     // Each backend is gated on its feature; run
-    // `cargo bench -p storage --features "redb,lark,rocksdb"` for a full
+    // `cargo bench -p storage --features "redb,regolith,rocksdb"` for a full
     // side-by-side. The temp dir for each store outlives its `bench_backend`
     // call because that call measures synchronously before the block ends.
     #[cfg(feature = "redb")]
     {
         let dir = TempDir::new().unwrap();
-        let store = Arc::new(storage::RedbStore::open(dir.path().join("bench.redb")).unwrap());
+        let store = Arc::new(storage::RegolithStore::open(dir.path().join("bench.redb")).unwrap());
         bench_backend(c, "redb", &BenchStore::new(store));
     }
 
-    #[cfg(feature = "lark")]
+    #[cfg(feature = "regolith")]
     {
         let dir = TempDir::new().unwrap();
         let store = Arc::new(
-            storage::LarkStore::open_with_options(
+            storage::RegolithStore::open_with_options(
                 dir.path(),
-                storage::LarkStoreOptions::from_env(),
+                storage::RegolithStoreOptions::from_env(),
             )
             .unwrap(),
         );
-        bench_backend(c, "lark", &BenchStore::new(store));
+        bench_backend(c, "regolith", &BenchStore::new(store));
     }
 
     #[cfg(feature = "rocksdb")]
     {
         let dir = TempDir::new().unwrap();
         let store = Arc::new(
-            storage::RocksDbStore::open_with_options(
+            storage::RegolithStore::open_with_options(
                 dir.path(),
                 storage::RocksDbStoreOptions::from_env(),
             )

@@ -78,7 +78,7 @@ async fn test_receive_and_store_reports_stored_doc_ids() {
         "users",
         vec![("doc2", "age", tag.clone()), ("doc1", "age", tag.clone())],
     );
-    let store = storage::MemoryStore::new();
+    let store = storage::RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let result = receive_and_store(&mut txn, &data).await.unwrap();

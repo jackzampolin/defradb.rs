@@ -13,7 +13,7 @@ use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn test_schema() -> Vec<CollectionVersion> {
     vec![CollectionVersion::new(
@@ -29,8 +29,8 @@ fn test_schema() -> Vec<CollectionVersion> {
 }
 
 /// Create a test DB with collections pre-registered.
-async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+async fn test_db_with_collections() -> Arc<DB<RegolithStore>> {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     for schema in test_schema() {
         db.create_collection(schema).await.unwrap();
     }
@@ -40,11 +40,11 @@ async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
 /// Create a Users doc through the interactive mutator inside an open txn.
 /// Returns the txn (for the caller to commit or discard) and the derived DocID.
 async fn seed_user_in_txn(
-    db: &Arc<DB<MemoryStore>>,
-    txn: db::txn::DbTxn<MemoryStore>,
+    db: &Arc<DB<RegolithStore>>,
+    txn: db::txn::DbTxn<RegolithStore>,
     name: &str,
     age: Option<i64>,
-) -> (db::txn::DbTxn<MemoryStore>, document::DocID) {
+) -> (db::txn::DbTxn<RegolithStore>, document::DocID) {
     let mutator = db::write::doc::DbDocMutator::new(db.clone(), txn);
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_string()));
@@ -58,7 +58,7 @@ async fn seed_user_in_txn(
 
 /// Create and commit a Users doc, returning its derived DocID.
 async fn seed_committed_user(
-    db: &Arc<DB<MemoryStore>>,
+    db: &Arc<DB<RegolithStore>>,
     name: &str,
     age: Option<i64>,
 ) -> document::DocID {
@@ -103,7 +103,7 @@ async fn test_begin_readwrite_transaction() {
 
 #[tokio::test]
 async fn add_schema_in_txn_rejects_an_unpaired_relation() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let registry = DbTransactionRegistry::new(db);
     let txn_id = registry.begin(false).await.unwrap();
 
@@ -965,7 +965,7 @@ async fn test_snapshot_isolation_after_external_commit() {
 #[tokio::test]
 async fn test_new_transaction_sees_recently_created_collection() {
     // Test that a transaction started AFTER a collection is created can see that collection
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let registry = DbTransactionRegistry::new(db.clone());
 
     // Create collection after registry is created

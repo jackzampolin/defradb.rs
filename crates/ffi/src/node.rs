@@ -90,7 +90,7 @@ fn resolve_store(
     // embedder that still passes one keeps working rather than failing at
     // startup on a name that no longer selects anything.
     match backend_name.as_str() {
-        "" | "regolith" | "lark" | "redb" | "fjall" | "rocksdb" => {}
+        "" | "regolith" | "regolith" | "redb" | "fjall" | "rocksdb" => {}
         other => {
             return Err(format!(
                 "unknown datastore backend '{}'. Supported: regolith, memory",
@@ -368,7 +368,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let path = CString::new(directory.path().to_string_lossy().as_bytes()).unwrap();
-        let backend = CString::new("lark").unwrap();
+        let backend = CString::new("regolith").unwrap();
         let options = || NodeInitOptions {
             db_path: path.as_ptr(),
             in_memory: 0,
@@ -393,7 +393,7 @@ mod tests {
         let first_path = CString::new(first_directory.path().to_string_lossy().as_bytes()).unwrap();
         let second_path =
             CString::new(second_directory.path().to_string_lossy().as_bytes()).unwrap();
-        let backend = CString::new("lark").unwrap();
+        let backend = CString::new("regolith").unwrap();
         let listen_addr = CString::new("/ip4/127.0.0.1/tcp/0").unwrap();
         let options = |path: &CString| NodeInitOptions {
             db_path: path.as_ptr(),

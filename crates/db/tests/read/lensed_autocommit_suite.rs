@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn unknown_document_version_passes_through() {
-    let db = Arc::new(db::DB::new(storage::MemoryStore::new()).unwrap());
+    let db = Arc::new(db::DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap());
     let fetcher = LensedAutoCommitFetcher::new(db.clone());
 
     let collection = db::Collection::new(schema::CollectionVersion::new(

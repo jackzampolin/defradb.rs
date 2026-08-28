@@ -1,10 +1,11 @@
+use crate::corekv::{Result, Store, Txn};
+use crate::namespace::{Namespace, NamespacedStore};
+use async_trait::async_trait;
 /// Systemstore - Metadata and configuration
 ///
 /// The Systemstore handles storage of collection metadata, field metadata,
 /// sequence counters, P2P tracking, and access control policies.
-use crate::corekv::{Result, Store, Txn};
-use crate::namespace::{Namespace, NamespacedStore};
-use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::Arc;
 
 /// Systemstore provides storage for metadata and configuration
@@ -43,13 +44,13 @@ impl<S: Store> Store for Systemstore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::MemoryStore;
+    use crate::backends::RegolithStore;
     use crate::corekv::Key;
     use crate::keys::systemstore::CollectionKey;
 
     #[tokio::test]
     async fn test_systemstore_basic() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let systemstore = Systemstore::new(store);
 
         let key = CollectionKey::new("users_v1");
@@ -64,6 +65,6 @@ mod tests {
         // Read
         let txn = systemstore.new_txn(true).await.unwrap();
         let value = txn.get(&key.bytes()).await.unwrap();
-        assert_eq!(value, Some(b"collection_definition".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"collection_definition")));
     }
 }

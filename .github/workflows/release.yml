@@ -37,48 +37,48 @@ jobs:
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--no-default-features --features release-full"
-          # rocksdb (lark included: default runtime backend)
+          # rocksdb (regolith included: default runtime backend)
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features rocksdb,lark"
+            features: "--no-default-features --features rocksdb,regolith"
           - variant: rocksdb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features rocksdb,lark"
+            features: "--no-default-features --features rocksdb,regolith"
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,lark"
+            features: "--no-default-features --features rocksdb,regolith"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,lark"
-          # lark (minimal: single default-runtime backend)
-          - variant: lark
+            features: "--no-default-features --features rocksdb,regolith"
+          # regolith (minimal: single default-runtime backend)
+          - variant: regolith
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features lark"
-          - variant: lark
+            features: "--no-default-features --features regolith"
+          - variant: regolith
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features lark"
-          - variant: lark
+            features: "--no-default-features --features regolith"
+          - variant: regolith
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features lark"
-          - variant: lark
+            features: "--no-default-features --features regolith"
+          - variant: regolith
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features lark"
+            features: "--no-default-features --features regolith"
     steps:
       - uses: actions/checkout@v4
 
@@ -103,7 +103,7 @@ jobs:
           if ! command -v protoc >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
-          if [ "${{ matrix.variant }}" != "lark" ] && ! command -v clang >/dev/null 2>&1; then
+          if [ "${{ matrix.variant }}" != "regolith" ] && ! command -v clang >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
 
@@ -119,7 +119,7 @@ jobs:
 
           bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-          if [ "${{ matrix.variant }}" != "lark" ]; then
+          if [ "${{ matrix.variant }}" != "regolith" ]; then
             sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
           fi
 
@@ -218,48 +218,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # redb (default; lark included: default runtime backend)
+          # redb (default; regolith included: default runtime backend)
           - variant: redb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
           - variant: redb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
           - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
           - variant: redb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
-          # rocksdb (redb stays: ffi hard-requires it; lark: default runtime backend)
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,iroh"
+          # rocksdb (redb stays: ffi hard-requires it; regolith: default runtime backend)
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
           - variant: rocksdb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,regolith,redb,rocksdb,iroh"
     steps:
       - uses: actions/checkout@v4
 
@@ -480,7 +480,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: defra-lark-*
+          pattern: defra-regolith-*
           merge-multiple: true
 
       - uses: actions/download-artifact@v4

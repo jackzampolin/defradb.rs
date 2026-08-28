@@ -23,10 +23,10 @@
 /// ```ignore
 /// use db::{DB, Collection};
 /// use document::Document;
-/// use storage::backends::MemoryStore;
+/// use storage::RegolithStore;
 ///
 /// // Create database
-/// let store = MemoryStore::new();
+/// let store = RegolithStore::in_memory().unwrap();
 /// let db = DB::new(store)?;
 ///
 /// // Create a transaction

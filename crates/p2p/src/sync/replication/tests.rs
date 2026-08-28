@@ -18,12 +18,13 @@ use crate::QueryId;
 use crate::ReplicatorInfo;
 use async_trait::async_trait;
 use blockstore::{Blockstore, DefraBlockstore};
+use bytes::Bytes;
 use cid::Cid;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 use tokio::sync::mpsc;
 
 fn test_cid() -> Cid {
@@ -145,10 +146,10 @@ impl NoopTransport {
 struct PollFetchTransport {
     peer_id: PeerId,
     pubkey: Vec<u8>,
-    blockstore: Arc<DefraBlockstore<MemoryStore>>,
+    blockstore: Arc<DefraBlockstore<RegolithStore>>,
     child_cid: Cid,
     child_data: Vec<u8>,
-    source_blockstore: Option<Arc<DefraBlockstore<MemoryStore>>>,
+    source_blockstore: Option<Arc<DefraBlockstore<RegolithStore>>>,
     car_request_calls: Arc<AtomicUsize>,
     car_requested_cids: Arc<AtomicUsize>,
     car_present_blocks: Arc<AtomicUsize>,
@@ -166,7 +167,7 @@ struct PollFetchTransport {
 
 impl PollFetchTransport {
     fn new(
-        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        blockstore: Arc<DefraBlockstore<RegolithStore>>,
         child_cid: Cid,
         child_data: Vec<u8>,
     ) -> Self {
@@ -193,8 +194,8 @@ impl PollFetchTransport {
     }
 
     fn with_car_source(
-        blockstore: Arc<DefraBlockstore<MemoryStore>>,
-        source_blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        blockstore: Arc<DefraBlockstore<RegolithStore>>,
+        source_blockstore: Arc<DefraBlockstore<RegolithStore>>,
     ) -> Self {
         Self {
             peer_id: PeerId::new("local-peer".to_string()),
@@ -1099,7 +1100,7 @@ impl MergeHandler for RecoveryMetadataHandler {
 
 #[tokio::test]
 async fn test_process_block_received_success() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     // Store a block
@@ -1193,7 +1194,7 @@ async fn test_handler_recovery_mode() {
 
 #[tokio::test]
 async fn test_retryable_skip_remains_unmerged_until_replayed() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1262,11 +1263,11 @@ async fn test_retryable_skip_remains_unmerged_until_replayed() {
 /// installed and a live registration for `cid`, mirroring a push-driven
 /// registration awaiting merge.
 async fn coordinator_with_live_pending_dag(
-    blockstore: Arc<DefraBlockstore<MemoryStore>>,
+    blockstore: Arc<DefraBlockstore<RegolithStore>>,
     cid: Cid,
 ) -> (
-    crate::sync::coordinator::SyncCoordinator<DefraBlockstore<MemoryStore>, NoopTransport>,
-    Arc<crate::sync::pending_store::PendingDagStore<MemoryStore>>,
+    crate::sync::coordinator::SyncCoordinator<DefraBlockstore<RegolithStore>, NoopTransport>,
+    Arc<crate::sync::pending_store::PendingDagStore<RegolithStore>>,
 ) {
     use crate::sync::pending_store::PendingDagStorage;
 
@@ -1283,7 +1284,7 @@ async fn coordinator_with_live_pending_dag(
     .unwrap();
 
     let pending_store = Arc::new(crate::sync::pending_store::PendingDagStore::new(Arc::new(
-        MemoryStore::new(),
+        RegolithStore::in_memory().unwrap(),
     )));
     pending_store
         .put(
@@ -1316,7 +1317,7 @@ async fn coordinator_with_live_pending_dag(
 async fn test_rejected_merge_quarantines_and_leaves_block_unmerged() {
     use crate::sync::pending_store::PendingDagStorage;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1364,7 +1365,7 @@ async fn test_rejected_merge_quarantines_and_leaves_block_unmerged() {
 async fn test_transient_merge_error_stays_failed_and_does_not_quarantine() {
     use crate::sync::pending_store::PendingDagStorage;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1417,7 +1418,7 @@ fn dag_ready_event(cid: Cid) -> SyncEvent {
 async fn dag_ready_merge_failure_retains_receiver_obligation() {
     use crate::sync::pending_store::PendingDagStorage;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1459,7 +1460,7 @@ async fn dag_ready_merge_failure_retains_receiver_obligation() {
 async fn batched_dag_ready_merge_failure_retains_receiver_obligation() {
     use crate::sync::pending_store::PendingDagStorage;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1494,7 +1495,7 @@ async fn batched_dag_ready_merge_failure_retains_receiver_obligation() {
 
 #[tokio::test]
 async fn test_batch_rejected_block_not_marked_merged_while_sibling_merges() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let rejected_cid = make_cid(b"batch-reject");
     let merged_cid = make_cid(b"batch-merge");
@@ -1578,7 +1579,7 @@ async fn test_batch_rejected_block_not_marked_merged_while_sibling_merges() {
 
 #[tokio::test]
 async fn test_recovery_refuses_blocks_without_recovered_metadata() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1620,7 +1621,7 @@ async fn test_recovery_refuses_blocks_without_recovered_metadata() {
 
 #[tokio::test]
 async fn two_stream_pushlog_merge_denial_leaves_block_unmerged() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = make_cid(b"two-stream-acp-denied");
     blockstore
@@ -1670,7 +1671,7 @@ async fn two_stream_pushlog_merge_denial_leaves_block_unmerged() {
 
 #[tokio::test]
 async fn test_recovery_forwards_handler_recovered_metadata() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -1706,7 +1707,7 @@ async fn test_recovery_forwards_handler_recovered_metadata() {
 async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let child_block = Block::new(
@@ -1925,7 +1926,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     let root_data = root.to_dag_cbor().unwrap();
     let root_cid = root.generate_cid().unwrap();
 
-    let source_store = Arc::new(MemoryStore::new());
+    let source_store = Arc::new(RegolithStore::in_memory().unwrap());
     let source = Arc::new(DefraBlockstore::new(source_store, true));
     source.put(&signature_cid, &signature_data).await.unwrap();
     source.put(&field_cid, &field_data).await.unwrap();
@@ -1933,7 +1934,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     source.put(&root_cid, &root_data).await.unwrap();
     source.mark_as_merged(&root_cid).await.unwrap();
 
-    let receiver_store = Arc::new(MemoryStore::new());
+    let receiver_store = Arc::new(RegolithStore::in_memory().unwrap());
     let receiver = Arc::new(DefraBlockstore::new(receiver_store, true));
     let transport = PollFetchTransport::with_car_source(receiver.clone(), source.clone());
     let transport_handle = transport.clone();
@@ -1953,7 +1954,9 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
     .await
     .unwrap();
     transport_handle.set_sync_completion(coordinator.manager().block_sync_completion_tracker());
-    let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+        RegolithStore::in_memory().unwrap(),
+    )));
     coordinator
         .install_pending_dag_store(pending_store.clone())
         .await;
@@ -2262,7 +2265,7 @@ async fn test_replication_result_merged_but_broadcast_failed() {
 
 #[tokio::test]
 async fn test_run_serializes_duplicate_cids() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = test_cid();
     blockstore.put(&cid, b"test data").await.unwrap();
@@ -2347,7 +2350,7 @@ async fn test_run_serializes_duplicate_cids() {
 
 #[tokio::test]
 async fn test_run_uses_one_observable_batch_merge_pipeline() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (coordinator, _events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
         NoopTransport::new(),
@@ -2404,7 +2407,7 @@ async fn test_run_uses_one_observable_batch_merge_pipeline() {
 
 #[tokio::test]
 async fn test_process_next_batch_caps_drain_at_config_batch_size() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (coordinator, _events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
         NoopTransport::new(),
@@ -2454,7 +2457,7 @@ async fn test_process_next_batch_caps_drain_at_config_batch_size() {
 
 #[tokio::test]
 async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = make_cid(b"rebroadcast-batch");
     blockstore.put(&cid, b"rebroadcast-batch").await.unwrap();
@@ -2504,7 +2507,7 @@ async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
 
 #[tokio::test]
 async fn merged_head_forwards_to_configured_replicator_without_gossip_rebroadcast() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = make_cid(b"forward-merged-head");
     let block = b"forward-merged-head";
@@ -2582,7 +2585,7 @@ async fn merged_head_forwards_to_configured_replicator_without_gossip_rebroadcas
 async fn rapid_collection_commits_publish_only_the_current_head() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let transport = NoopTransport::new();
     let transport_handle = transport.clone();
@@ -2634,7 +2637,7 @@ async fn rapid_collection_commits_publish_only_the_current_head() {
 
 #[tokio::test]
 async fn test_batch_validates_explicit_replay_before_merge() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let cid = make_cid(b"auth-rejected");
     blockstore.put(&cid, b"auth-rejected").await.unwrap();

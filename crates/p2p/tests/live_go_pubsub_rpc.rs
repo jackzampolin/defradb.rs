@@ -39,9 +39,9 @@ use blockstore::DefraBlockstore;
 use p2p::host::libp2p_transport::{convert_host_event, Libp2pTransport};
 use p2p::testutil::MockBitswapStore;
 use p2p::P2PHost;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
-type TestBlockstore = DefraBlockstore<MemoryStore>;
+type TestBlockstore = DefraBlockstore<RegolithStore>;
 
 #[tokio::test]
 #[ignore = "requires a pre-running Go defradb with DEFRADB_GO_PEER / DEFRADB_GO_DOC_ID set"]
@@ -70,7 +70,10 @@ async fn doc_sync_against_go_defradb() {
     eprintln!("connected to Go peer {go_peer_id}");
 
     let transport = Libp2pTransport::new(handle.clone());
-    let blockstore = Arc::new(TestBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(TestBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let (coord, _sync_events) =
         p2p::sync::SyncCoordinator::new(transport, blockstore, p2p::sync::SyncConfig::default())
             .await
@@ -155,7 +158,10 @@ async fn branchable_sync_against_go_defradb() {
     eprintln!("connected to Go peer {go_peer_id}");
 
     let transport = Libp2pTransport::new(handle.clone());
-    let blockstore = Arc::new(TestBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(TestBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let (coord, _sync_events) =
         p2p::sync::SyncCoordinator::new(transport, blockstore, p2p::sync::SyncConfig::default())
             .await

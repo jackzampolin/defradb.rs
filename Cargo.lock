@@ -1450,6 +1450,7 @@ dependencies = [
  "async-trait",
  "axum",
  "blockstore",
+ "bytes",
  "cid",
  "crdt",
  "criterion 0.6.0",

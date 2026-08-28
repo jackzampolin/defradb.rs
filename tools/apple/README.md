@@ -26,7 +26,7 @@ The script defaults to an iroh-capable Redb build by setting
 It also defaults to `APPLE_DEPLOYMENT_TARGET=15.0` so Rust and native dependencies
 are linked against a modern iOS target instead of Rust's legacy iOS 10 default.
 The default iOS feature set avoids desktop-only FFI defaults such as RocksDB,
-Lark, and the Wasmtime lens runtime.
+Regolith, and the Wasmtime lens runtime.
 
 Override the defaults with environment variables when needed:
 

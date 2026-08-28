@@ -38,7 +38,7 @@ pub fn wrap_for_requester(
             requester_pub.len()
         )));
     }
-    let arr: [u8; 32] = requester_pub.try_into().unwrap();
+    let arr: [u8; 32] = requester_pub.as_ref().try_into().unwrap();
     let public = x25519_dalek::PublicKey::from(arr);
     let options = crypto::EciesOptions::builder()
         .prepend_public_key(false)

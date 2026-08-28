@@ -18,7 +18,16 @@ use crate::backends::shared::TransactionStatsHandle;
 use crate::corekv::{Dropable, Error, Result, Store, Txn};
 
 /// Key-value store backed by regolith.
+///
+/// Cloning hands back another handle on the same database, not another
+/// database: the close flag and the in-flight count are shared, so
+/// closing through one handle closes it for all of them.
+#[derive(Clone)]
 pub struct RegolithStore {
+    inner: Arc<StoreInner>,
+}
+
+struct StoreInner {
     db: Arc<OptimisticTransactionDb>,
     options: RegolithStoreOptions,
     closed: AtomicBool,
@@ -53,12 +62,14 @@ impl RegolithStore {
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
             .with_isolation(options.isolation);
         Ok(Self {
-            db: Arc::new(db),
-            options,
-            closed: AtomicBool::new(false),
-            active_txns: Arc::new(AtomicUsize::new(0)),
-            stats: TransactionStatsHandle::for_backend("regolith"),
-            path,
+            inner: Arc::new(StoreInner {
+                db: Arc::new(db),
+                options,
+                closed: AtomicBool::new(false),
+                active_txns: Arc::new(AtomicUsize::new(0)),
+                stats: TransactionStatsHandle::for_backend("regolith"),
+                path,
+            }),
         })
     }
 
@@ -70,7 +81,7 @@ impl RegolithStore {
 
     /// Where the database lives.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.inner.path
     }
 
     /// A writer that bounds its own memory rather than the caller's
@@ -79,7 +90,7 @@ impl RegolithStore {
     /// Each flush is atomic; the stream as a whole is not. Work that must
     /// land all-or-nothing belongs in a transaction.
     pub fn streaming_writer(&self, opts: StreamOptions) -> regolith::StreamingWriter<'_> {
-        self.db.db().streaming_writer(opts)
+        self.inner.db.db().streaming_writer(opts)
     }
 
     /// Wait for in-flight transactions to finish, up to the configured
@@ -91,9 +102,9 @@ impl RegolithStore {
     /// let it finish. Report it instead.
     #[cfg(not(target_arch = "wasm32"))]
     async fn await_quiescence(&self) -> Result<()> {
-        let deadline = web_time::Instant::now() + self.options.close_timeout;
+        let deadline = web_time::Instant::now() + self.inner.options.close_timeout;
         let mut backoff = std::time::Duration::from_millis(1);
-        while self.active_txns.load(Ordering::Acquire) > 0 {
+        while self.inner.active_txns.load(Ordering::Acquire) > 0 {
             if web_time::Instant::now() >= deadline {
                 return Err(self.in_flight_error());
             }
@@ -105,7 +116,7 @@ impl RegolithStore {
 
     #[cfg(target_arch = "wasm32")]
     async fn await_quiescence(&self) -> Result<()> {
-        if self.active_txns.load(Ordering::Acquire) > 0 {
+        if self.inner.active_txns.load(Ordering::Acquire) > 0 {
             return Err(self.in_flight_error());
         }
         Ok(())
@@ -114,12 +125,12 @@ impl RegolithStore {
     fn in_flight_error(&self) -> Error {
         Error::Backend(format!(
             "closed with {} transaction(s) still in flight",
-            self.active_txns.load(Ordering::Acquire)
+            self.inner.active_txns.load(Ordering::Acquire)
         ))
     }
 
     fn ensure_open(&self) -> Result<()> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(Error::DBClosed);
         }
         Ok(())
@@ -132,34 +143,35 @@ impl crate::corekv::private::Sealed for RegolithStore {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Store for RegolithStore {
     fn transaction_stats_handle(&self) -> Option<TransactionStatsHandle> {
-        Some(self.stats.clone())
+        Some(self.inner.stats.clone())
     }
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.ensure_open()?;
-        self.active_txns.fetch_add(1, Ordering::AcqRel);
+        self.inner.active_txns.fetch_add(1, Ordering::AcqRel);
         // Closing between the check and the count would leak the count,
         // so re-check and hand it back rather than leaving `close`
         // waiting on a transaction that was never handed out.
-        if self.closed.load(Ordering::Acquire) {
-            self.active_txns.fetch_sub(1, Ordering::AcqRel);
+        if self.inner.closed.load(Ordering::Acquire) {
+            self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
             return Err(Error::DBClosed);
         }
         Ok(Box::new(RegolithTxn::new(
-            &self.db,
+            &self.inner.db,
             readonly,
-            self.options.isolation,
-            Arc::clone(&self.active_txns),
-            self.stats.clone(),
+            self.inner.options.isolation,
+            Arc::clone(&self.inner.active_txns),
+            self.inner.stats.clone(),
         )))
     }
 
     async fn close(&self) -> Result<()> {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.inner.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         self.await_quiescence().await?;
-        self.db
+        self.inner
+            .db
             .db()
             .close()
             .map_err(|error| Error::Backend(format!("failed to close regolith: {error}")))
@@ -171,7 +183,8 @@ impl Store for RegolithStore {
 impl Dropable for RegolithStore {
     async fn drop_all(&self) -> Result<()> {
         self.ensure_open()?;
-        self.db
+        self.inner
+            .db
             .db()
             .drop_all()
             .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))

@@ -65,6 +65,10 @@ impl RegolithStoreOptions {
     pub fn memory() -> Self {
         let mut opts = Self::new();
         opts.engine.env = Arc::new(regolith::MemEnv::new());
+        // `MemEnv` starts no threads, so a background compaction worker
+        // cannot exist and asking for one fails the open. Zero runs
+        // compaction on the calling thread instead.
+        opts.engine.max_background_compactions = 0;
         // Nothing is being made durable, so paying for an fsync per
         // commit would buy nothing.
         opts.engine.durability = EngineDurability::Eventual;

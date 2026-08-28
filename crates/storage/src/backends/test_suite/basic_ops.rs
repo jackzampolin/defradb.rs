@@ -1,4 +1,5 @@
 use crate::corekv::{Error, IterOptions, Store};
+use bytes::Bytes;
 
 /// Test basic set/get operations
 pub async fn test_basic_set_get<S: Store>(store: &S) {
@@ -7,16 +8,28 @@ pub async fn test_basic_set_get<S: Store>(store: &S) {
     txn.set(b"key1", b"value1").await.unwrap();
     txn.set(b"key2", b"value2").await.unwrap();
 
-    assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
-    assert_eq!(txn.get(b"key2").await.unwrap(), Some(b"value2".to_vec()));
+    assert_eq!(
+        txn.get(b"key1").await.unwrap(),
+        Some(Bytes::from_static(b"value1"))
+    );
+    assert_eq!(
+        txn.get(b"key2").await.unwrap(),
+        Some(Bytes::from_static(b"value2"))
+    );
     assert_eq!(txn.get(b"nonexistent").await.unwrap(), None);
 
     txn.commit().await.unwrap();
 
     // Verify after commit
     let txn = store.new_txn(true).await.unwrap();
-    assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
-    assert_eq!(txn.get(b"key2").await.unwrap(), Some(b"value2".to_vec()));
+    assert_eq!(
+        txn.get(b"key1").await.unwrap(),
+        Some(Bytes::from_static(b"value1"))
+    );
+    assert_eq!(
+        txn.get(b"key2").await.unwrap(),
+        Some(Bytes::from_static(b"value2"))
+    );
 }
 
 /// Test delete operation
@@ -30,7 +43,7 @@ pub async fn test_delete<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
     assert_eq!(
         txn.get(b"to_delete").await.unwrap(),
-        Some(b"value".to_vec())
+        Some(Bytes::from_static(b"value"))
     );
     txn.delete(b"to_delete").await.unwrap();
     assert_eq!(txn.get(b"to_delete").await.unwrap(), None);
@@ -111,11 +124,17 @@ pub async fn test_read_your_writes<S: Store>(store: &S) {
 
     // Write
     txn.set(b"key", b"value1").await.unwrap();
-    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value1".to_vec()));
+    assert_eq!(
+        txn.get(b"key").await.unwrap(),
+        Some(Bytes::from_static(b"value1"))
+    );
 
     // Update
     txn.set(b"key", b"value2").await.unwrap();
-    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value2".to_vec()));
+    assert_eq!(
+        txn.get(b"key").await.unwrap(),
+        Some(Bytes::from_static(b"value2"))
+    );
 
     // Delete
     txn.delete(b"key").await.unwrap();
@@ -123,7 +142,10 @@ pub async fn test_read_your_writes<S: Store>(store: &S) {
 
     // Re-add
     txn.set(b"key", b"value3").await.unwrap();
-    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value3".to_vec()));
+    assert_eq!(
+        txn.get(b"key").await.unwrap(),
+        Some(Bytes::from_static(b"value3"))
+    );
 
     txn.commit().await.unwrap();
 }
@@ -155,26 +177,26 @@ pub async fn test_binary_data<S: Store>(store: &S) {
 
     assert_eq!(
         txn.get(key_with_null).await.unwrap(),
-        Some(b"value1".to_vec()),
+        Some(Bytes::from_static(b"value1")),
         "Key with null bytes should work"
     );
 
     assert_eq!(
         txn.get(key_with_high).await.unwrap(),
-        Some(b"value2".to_vec()),
+        Some(Bytes::from_static(b"value2")),
         "Key with high bytes should work"
     );
 
     assert_eq!(
         txn.get(b"normal_key").await.unwrap(),
-        Some(value_with_null.to_vec()),
+        Some(Bytes::from(value_with_null.to_vec())),
         "Value with null bytes should work"
     );
 
     all_bytes = (0u8..=255u8).collect();
     assert_eq!(
         txn.get(b"all_bytes_key").await.unwrap(),
-        Some(all_bytes),
+        Some(Bytes::from(all_bytes)),
         "Value with all byte values should work"
     );
 }

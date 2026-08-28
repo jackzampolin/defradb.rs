@@ -159,7 +159,7 @@ async fn malformed_v015_store_rolls_back_the_entire_migration() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = materialize_fixture(directory.path())?;
 
-    let store = Arc::new(storage::RedbStore::open(
+    let store = Arc::new(storage::RegolithStore::open(
         path.to_str().context("fixture path contains non-UTF-8")?,
     )?);
     {

@@ -1105,11 +1105,11 @@ mod tests {
     use super::*;
     use blockstore::DefraBlockstore;
     use p2p::BitswapStoreAdapter;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     #[tokio::test]
     async fn merged_doc_sync_heads_are_not_pending() {
-        let blockstore = DefraBlockstore::new(Arc::new(MemoryStore::new()), true);
+        let blockstore = DefraBlockstore::new(Arc::new(RegolithStore::in_memory().unwrap()), true);
         let merged =
             cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
                 .unwrap();
@@ -1131,7 +1131,7 @@ mod tests {
     /// must read the raw advertisement and only then drop merged heads.
     #[tokio::test]
     async fn already_merged_head_from_one_peer_is_not_a_timeout() {
-        let blockstore = DefraBlockstore::new(Arc::new(MemoryStore::new()), true);
+        let blockstore = DefraBlockstore::new(Arc::new(RegolithStore::in_memory().unwrap()), true);
         let merged =
             cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
                 .unwrap();

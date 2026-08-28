@@ -4,6 +4,13 @@ Rust implementation of [DefraDB](https://github.com/sourcenetwork/defradb) — a
 
 Targets embedded, edge, browser (WASM), and server deployments with **full Go DefraDB network interoperability**.
 
+Storage is [Regolith](https://github.com/sourcenetwork/regolith), an ACID,
+pure-Rust embedded LSM-tree engine built for edge systems. It is the only
+backend, and the same engine runs on a server, on an embedded device, and in a
+browser tab: no C toolchain, no linker surprises, and nothing to select between.
+Reads and scans stream rather than materialize, so memory is bounded by the page
+being held and not by the size of the data.
+
 ## Status
 
 Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API, GraphQL query engine, and P2P replication. Go and Rust nodes can connect and replicate data.
@@ -16,7 +23,7 @@ Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API,
 - **Full-text search** — (rust only) BM25 ranking with language-aware tokenization
 - **Schema migration** — non-destructive evolution via WASM transforms (Lens)
 - **Searchable encryption** — encrypted indexes with ACP integration
-- **Multiple storage backends** — rocksdb (default), redb, fjall, in-memory
+- **[Regolith](https://github.com/sourcenetwork/regolith) storage engine** — one ACID, pure-Rust LSM-tree store on every target, on disk or in memory
 - **Postgres compatibility** — connect with `psql` or any Postgres client/ORM (experimental!)
 - **WASM client** — full database client compiled to WebAssembly for browsers
 - **FFI bindings** — C-compatible static library for embedding in Go and other languages
@@ -57,26 +64,6 @@ just fmt               # Format
 just gate              # fmt + lint + docs + tests, before asking for a review
 just ci                # Reproduce the CI pipeline locally
 ```
-
-Run `just` on its own to list every target, grouped.
-
-The build and test recipes take a `profile` variable, default `dev`:
-
-```bash
-just profile=super-dev test        # lean build, into target/super-dev/
-```
-
-`super-dev` compiles workspace crates with line-tables-only debug info and
-dependencies with none, for ~7.5x less debug object volume than `dev` at the
-same build time. Every worktree keeps its own `target/`, so that adds up:
-prefer it for day-to-day work, agent worktrees, and disk-constrained machines.
-Panic backtraces still carry real `file:line` frames. Stay on `dev` when
-stepping through code in lldb, where full variable inspection matters. The
-override must come before the recipe name; release recipes ignore it.
-
-`just sweep` (keeps 7 days, `just sweep 14` for two weeks) is the other half:
-the profile shrinks each build generation, sweeping bounds how many pile up,
-since cargo never collects the artifacts it has stopped using.
 
 ## Configuration
 

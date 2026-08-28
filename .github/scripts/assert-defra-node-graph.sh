@@ -83,18 +83,18 @@ assert_no_libp2p defra-node
 assert_absent db libp2p --no-default-features --features native
 
 # Lean local-ACP + native host. No SourceHub, no Wasmtime, no libp2p.
-assert_absent defra-node sourcehub --no-default-features --features lark,redb,native
-assert_absent defra-node acp-light-client --no-default-features --features lark,redb,native
-assert_absent defra-node commonware-cryptography --no-default-features --features lark,redb,native
-assert_absent defra-node aws-lc-rs --no-default-features --features lark,redb,native
-assert_absent defra-node cosmrs --no-default-features --features lark,redb,native
-assert_absent defra-node wasmtime --no-default-features --features lark,redb,native
-assert_absent defra-node cranelift-codegen --no-default-features --features lark,redb,native
+assert_absent defra-node sourcehub --no-default-features --features regolith,redb,native
+assert_absent defra-node acp-light-client --no-default-features --features regolith,redb,native
+assert_absent defra-node commonware-cryptography --no-default-features --features regolith,redb,native
+assert_absent defra-node aws-lc-rs --no-default-features --features regolith,redb,native
+assert_absent defra-node cosmrs --no-default-features --features regolith,redb,native
+assert_absent defra-node wasmtime --no-default-features --features regolith,redb,native
+assert_absent defra-node cranelift-codegen --no-default-features --features regolith,redb,native
 
 # Lean Iroh P2P: Iroh present, no libp2p / libp2p-*, p2p crate not enabling
 # libp2p-transport. `p2p` implies native, so listing native is redundant but
 # matches the advertised combo.
-LEAN_IROH=(--no-default-features --features lark,redb,native,p2p)
+LEAN_IROH=(--no-default-features --features regolith,redb,native,p2p)
 assert_no_libp2p defra-node "${LEAN_IROH[@]}"
 assert_present defra-node iroh "${LEAN_IROH[@]}"
 
@@ -130,5 +130,5 @@ assert_p2p_crate_iroh_only
 
 # Unique crate names. Log only — not a gate and not binary size. Main may move.
 echo "defra-node default unique crate names: $(unique_crate_names)"
-echo "defra-node --no-default-features --features lark,redb,native unique crate names: $(unique_crate_names --no-default-features --features lark,redb,native)"
-echo "defra-node --no-default-features --features lark,redb,native,p2p unique crate names: $(unique_crate_names --no-default-features --features lark,redb,native,p2p)"
+echo "defra-node --no-default-features --features regolith,redb,native unique crate names: $(unique_crate_names --no-default-features --features regolith,redb,native)"
+echo "defra-node --no-default-features --features regolith,redb,native,p2p unique crate names: $(unique_crate_names --no-default-features --features regolith,redb,native,p2p)"

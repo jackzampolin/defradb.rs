@@ -95,8 +95,8 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
 mod tests {
     use super::*;
 
-    fn test_db() -> Arc<db::DB<storage::MemoryStore>> {
-        let store = storage::MemoryStore::new();
+    fn test_db() -> Arc<db::DB<storage::RegolithStore>> {
+        let store = storage::RegolithStore::in_memory().unwrap();
         Arc::new(db::DB::new(store).unwrap())
     }
 

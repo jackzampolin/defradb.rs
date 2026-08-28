@@ -14,7 +14,7 @@ use db::index::IndexManager;
 use document::Document;
 use document::NormalValue;
 use schema::IndexedFieldDescription;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 /// Directions spread around a circle, so nearest-neighbour order is
 /// unambiguous for any query.
@@ -44,7 +44,7 @@ fn exhaustive(corpus: &[(u64, Document, Vec<f64>)], query: &[f64], k: usize) -> 
 /// Builds the index, backfills it, and returns the fetcher's answer for a
 /// query alongside the exhaustive one.
 async fn routed_and_exact(documents: usize, query: &[f64], k: usize) -> (Vec<u64>, Vec<u64>) {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let schema = docs_schema();
     let corpus = corpus(documents);
     let mut manager = IndexManager::new(COLLECTION_SHORT_ID);

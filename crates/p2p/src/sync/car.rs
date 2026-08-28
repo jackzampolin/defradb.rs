@@ -413,7 +413,7 @@ mod tests {
     use multihash_codetable::{Code, MultihashDigest};
     use serde_ipld_dagcbor::codec::DagCborCodec;
     use std::sync::Arc;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);
@@ -543,7 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_exact_blocks_does_not_walk_descendants() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let grandchild_data = encode_ipld(ipld!({ "kind": "grandchild" }));
@@ -575,7 +575,7 @@ mod tests {
     async fn collect_exact_blocks_serves_field_and_composite_history_subsets() {
         use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
         let mut previous_field = None;
         let mut previous_composite = None;
@@ -632,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_dag_blocks_handles_deep_chains_iteratively() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let mut next: Option<Cid> = None;
@@ -661,7 +661,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_frontier_dags_dedupes_shared_descendants() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let shared_data = encode_ipld(ipld!({ "kind": "shared" }));
@@ -692,7 +692,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_dag_cids_walks_all_reachable_and_caps() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = DefraBlockstore::new(store, true);
 
         let grandchild_data = encode_ipld(ipld!({ "kind": "grandchild" }));

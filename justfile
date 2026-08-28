@@ -645,15 +645,15 @@ fmt-check:
 lint:
     cargo clippy --all -- -D warnings
     cargo clippy -p cli --no-default-features --features release-full --all-targets -- -D warnings
-    cargo clippy -p cli --no-default-features --features rocksdb,lark --all-targets -- -D warnings
-    cargo clippy -p cli --no-default-features --features lark --all-targets -- -D warnings
+    cargo clippy -p cli --no-default-features --features rocksdb,regolith --all-targets -- -D warnings
+    cargo clippy -p cli --no-default-features --features regolith --all-targets -- -D warnings
     cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
     cargo clippy -p cli --features otel --all-targets -- -D warnings
     cargo clippy -p defra-node --features otel --all-targets -- -D warnings
     cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
     cargo clippy -p db --features p2p --all-targets -- -D warnings
-    cargo clippy -p defra-node --no-default-features --features lark,redb,native --all-targets -- -D warnings
-    cargo clippy -p defra-node --no-default-features --features lark,redb,native,p2p --all-targets -- -D warnings
+    cargo clippy -p defra-node --no-default-features --features regolith,redb,native --all-targets -- -D warnings
+    cargo clippy -p defra-node --no-default-features --features regolith,redb,native,p2p --all-targets -- -D warnings
     cargo check -p p2p --no-default-features --features iroh-transport
     cargo check -p db --no-default-features --features native
     just check-node-graph
@@ -663,7 +663,7 @@ lint:
 check-node-graph:
     bash .github/scripts/assert-defra-node-graph.sh
 
-# Lean combo check. Examples: lark,redb,native  |  lark,redb,native,p2p
+# Lean combo check. Examples: regolith,redb,native  |  regolith,redb,native,p2p
 [group('check')]
 check-node-lean *features:
     cargo check -p defra-node --no-default-features --features {{ features }}
@@ -706,7 +706,7 @@ ci: fmt-check lint lint-wasm test test-features build-wasm integration proofs co
 start *args:
     cargo run -p cli -- start {{ args }}
 
-# Start against a chosen backend: lark (default), redb, fjall, rocksdb, memory.
+# Start against a chosen backend: regolith (default), redb, fjall, rocksdb, memory.
 [group('run')]
 start-backend backend *args:
     cargo run -p cli -- start --store {{ backend }} {{ args }}

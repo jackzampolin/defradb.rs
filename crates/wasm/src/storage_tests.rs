@@ -22,7 +22,7 @@ mod tests {
 
         let txn = store.new_txn(true).await.unwrap();
         let val = txn.get(b"key1").await.unwrap();
-        assert_eq!(val, Some(b"value1".to_vec()));
+        assert_eq!(val, Some(Bytes::from_static(b"value1")));
     }
 
     #[wasm_bindgen_test]
@@ -74,7 +74,7 @@ mod tests {
 
         let txn = store.new_txn(true).await.unwrap();
         let val = txn.get(b"key").await.unwrap();
-        assert_eq!(val, Some(b"second".to_vec()));
+        assert_eq!(val, Some(Bytes::from_static(b"second")));
     }
 
     // ── Deletes ─────────────────────────────────────────────────────
@@ -146,7 +146,7 @@ mod tests {
         txn.set(b"rw_key", b"rw_val").await.unwrap();
         // Should see our own pending write before commit
         let val = txn.get(b"rw_key").await.unwrap();
-        assert_eq!(val, Some(b"rw_val".to_vec()));
+        assert_eq!(val, Some(Bytes::from_static(b"rw_val")));
     }
 
     #[wasm_bindgen_test]
@@ -168,12 +168,12 @@ mod tests {
 
         // Read txn should still see original (snapshot isolation)
         let val = read_txn.get(b"iso_key").await.unwrap();
-        assert_eq!(val, Some(b"original".to_vec()));
+        assert_eq!(val, Some(Bytes::from_static(b"original")));
 
         // New read txn sees updated value
         let fresh_txn = store.new_txn(true).await.unwrap();
         let val = fresh_txn.get(b"iso_key").await.unwrap();
-        assert_eq!(val, Some(b"updated".to_vec()));
+        assert_eq!(val, Some(Bytes::from_static(b"updated")));
     }
 
     // ── Multiple keys ───────────────────────────────────────────────
@@ -341,7 +341,7 @@ mod tests {
 
         let txn = store.new_txn(true).await.unwrap();
         let val = txn.get(b"empty_val").await.unwrap();
-        assert_eq!(val, Some(vec![]));
+        assert_eq!(val, Some(Bytes::new()));
         assert!(txn.has(b"empty_val").await.unwrap());
     }
 
@@ -384,7 +384,7 @@ mod tests {
             let val = txn.get(b"persist_key").await.unwrap();
             assert_eq!(
                 val,
-                Some(b"persist_value".to_vec()),
+                Some(Bytes::from_static(b"persist_value")),
                 "Data should survive persist + reopen"
             );
         }
@@ -446,7 +446,10 @@ mod tests {
         {
             let store = LevelDbStore::open_with_opfs(db_name).await.unwrap();
             let txn = store.new_txn(true).await.unwrap();
-            assert_eq!(txn.get(b"keep").await.unwrap(), Some(b"yes".to_vec()));
+            assert_eq!(
+                txn.get(b"keep").await.unwrap(),
+                Some(Bytes::from_static(b"yes"))
+            );
             assert_eq!(txn.get(b"remove").await.unwrap(), None);
         }
     }
@@ -472,7 +475,10 @@ mod tests {
         {
             let store = LevelDbStore::open_with_opfs(db_name).await.unwrap();
             let txn = store.new_txn(true).await.unwrap();
-            assert_eq!(txn.get(b"mutable").await.unwrap(), Some(b"v2".to_vec()));
+            assert_eq!(
+                txn.get(b"mutable").await.unwrap(),
+                Some(Bytes::from_static(b"v2"))
+            );
         }
     }
 

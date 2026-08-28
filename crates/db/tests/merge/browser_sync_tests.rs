@@ -20,7 +20,7 @@ use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn users_schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -70,7 +70,7 @@ fn replace_wire_block(document: &mut BrowserSyncDocument, old_cid: &str, block: 
 
 #[test]
 fn validation_distinguishes_empty_and_over_limit_counts() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let sync = BrowserSyncEngine::new(database);
     let block = BrowserSyncBlock {
         cid: "cid".into(),
@@ -110,8 +110,8 @@ fn validation_distinguishes_empty_and_over_limit_counts() {
 
 #[tokio::test]
 async fn document_round_trip_uses_crdt_blocks() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema()).await.unwrap();
     target.create_collection(users_schema()).await.unwrap();
 
@@ -156,7 +156,7 @@ async fn document_round_trip_uses_crdt_blocks() {
 
 #[tokio::test]
 async fn rejects_forged_document_id_before_merge() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
@@ -179,7 +179,7 @@ async fn rejects_forged_document_id_before_merge() {
 
 #[tokio::test]
 async fn alias_lookup_uses_canonical_document_id() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
@@ -213,7 +213,7 @@ async fn alias_lookup_uses_canonical_document_id() {
 
 #[tokio::test]
 async fn rejects_field_block_from_another_collection() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     database.create_collection(admins_schema()).await.unwrap();
     let mut document = Document::new();
@@ -253,7 +253,7 @@ async fn rejects_field_block_from_another_collection() {
 
 #[tokio::test]
 async fn rejects_field_link_name_mismatch() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
@@ -284,7 +284,7 @@ async fn rejects_field_link_name_mismatch() {
 
 #[tokio::test]
 async fn validation_accepts_reachable_signature_blocks() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
@@ -342,7 +342,7 @@ async fn validation_accepts_reachable_signature_blocks() {
 
 #[tokio::test]
 async fn validation_rejects_forged_genesis_signature() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database.create_collection(users_schema()).await.unwrap();
     let mut document = Document::new();
     document.set("name", "Alice");
