@@ -113,6 +113,14 @@ impl RegolithStore {
         );
 
         let mut options = RegolithStoreOptions::wasm();
+        // OPFS reports no durable sync, and the engine refuses `Immediate`
+        // against an environment that cannot honour it rather than letting a
+        // caller believe a synced write survived. That refusal is right: on
+        // this target durability comes from `persist`, which writes the
+        // database back to OPFS, not from an fsync that does nothing.
+        if !env.as_env().capabilities().durable_sync {
+            options.engine.durability = regolith::DurabilityMode::Eventual;
+        }
         options.engine.env = env.as_env();
         let store = Self::open_with_options(db_name, options)?;
         // Safe to reach in: nothing else holds this store yet.
