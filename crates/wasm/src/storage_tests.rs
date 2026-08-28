@@ -196,7 +196,12 @@ mod tests {
             let key = format!("batch_{:04}", i);
             let val = format!("value_{}", i);
             let got = txn.get(key.as_bytes()).await.unwrap();
-            assert_eq!(got, Some(Bytes::from(val.into_bytes())), "mismatch at key {}", key);
+            assert_eq!(
+                got,
+                Some(Bytes::from(val.into_bytes())),
+                "mismatch at key {}",
+                key
+            );
         }
     }
 
