@@ -249,9 +249,10 @@ impl Node {
                     "Using regolith datastore at {}",
                     config.data_path().display()
                 );
-                let opts = storage::RegolithStoreOptions::default()
-                    .with_durability(config.datastore.durability);
-                let backend = storage::RegolithStore::open_with_options(config.data_path(), opts)?;
+                let backend = storage::RegolithStore::open_with_options(
+                    config.data_path(),
+                    regolith_options(&config),
+                )?;
                 let store = Self::wrap_store(&config, backend)?;
                 Self::init_persistent_store_and_server(
                     Arc::new(store),
