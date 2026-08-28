@@ -251,7 +251,7 @@ fn default_max_merge_depth() -> usize {
 impl Default for DatastoreConfig {
     fn default() -> Self {
         Self {
-            store: DatastoreType::Lark,
+            store: DatastoreType::Regolith,
             path: "data".to_string(),
             max_txn_retries: 5,
             valuelogfilesize: None,

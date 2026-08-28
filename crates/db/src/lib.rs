@@ -119,7 +119,7 @@ pub use write::doc::DbDocMutator;
 pub use write::queue::DocWriteQueue;
 
 // NAC exports
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub use nac::create_persistent_nac_manager;
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
 

@@ -9,9 +9,9 @@
 //! (`is_merged(cid)` / `get_unmerged()`) on every ingest path. Matches Go's
 //! counter Merge which also ignores the delta nonce.
 
-use bytes::Bytes;
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
+use bytes::Bytes;
 use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;

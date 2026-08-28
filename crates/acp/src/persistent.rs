@@ -11,10 +11,8 @@ use std::sync::Arc;
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
 
-#[cfg(feature = "redb")]
 use std::path::Path;
-#[cfg(feature = "redb")]
-use storage::RedbStore;
+use storage::RegolithStore;
 
 use crate::error::{Error, Result};
 use crate::relation::RelationTuple;
@@ -36,10 +34,10 @@ use crate::store::AcpStore;
 ///
 /// ```ignore
 /// use acp::PersistentAcpStore;
-/// use storage::RedbStore;
+/// use storage::RegolithStore;
 /// use std::sync::Arc;
 ///
-/// let main_store = Arc::new(RedbStore::open("/data")?);
+/// let main_store = Arc::new(RegolithStore::open("/data")?);
 /// let acp_store = PersistentAcpStore::from_store(main_store);
 /// ```
 ///
@@ -74,11 +72,10 @@ impl<S: Store> PersistentAcpStore<S> {
     }
 }
 
-#[cfg(feature = "redb")]
-impl PersistentAcpStore<RedbStore> {
+impl PersistentAcpStore<RegolithStore> {
     /// Open a persistent ACP store at the given directory path.
     ///
-    /// Creates the directory and database file (`acp.redb`) if they don't exist.
+    /// Creates the directory and database file (`acp.regolith`) if they don't exist.
     /// The path should be a directory (e.g., `<root>/local_document_acp/`).
     ///
     /// This method provides backward compatibility for standalone ACP stores.
@@ -116,7 +113,7 @@ impl PersistentAcpStore<RedbStore> {
             })?;
         }
 
-        let db_path = dir_path.join("acp.redb");
+        let db_path = dir_path.join("acp.regolith");
         if db_path.exists() {
             let metadata = std::fs::metadata(&db_path).map_err(|e| {
                 Error::Storage(format!(
@@ -134,7 +131,7 @@ impl PersistentAcpStore<RedbStore> {
             }
         }
 
-        let store = RedbStore::open(&db_path).map_err(|e| {
+        let store = RegolithStore::open(&db_path).map_err(|e| {
             Error::Storage(format!(
                 "failed to open ACP database '{}': {}",
                 db_path.display(),

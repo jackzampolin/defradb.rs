@@ -17,6 +17,7 @@ document = { path = "../document" }
 schema = { path = "../schema" }
 crypto = { path = "../crypto" }
 zeroize = "1.8"
+regolith.workspace = true
 bytes.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -47,40 +48,19 @@ hex = "0.4"
 parking_lot = "0.12"
 
 [features]
-# rocksdb is opt-in so wasm builds don't unify librocksdb-sys/bzip2-sys into
-# the graph. Native consumers (cli, defra-node, embedded, ffi) enable it.
+# regolith is the only backend, on every target, so there is nothing here to
+# select between. `wasm` still exists because it turns off the tokio-dependent
+# parts of this crate, not because it picks a different store.
 default = []
-redb = ["dep:redb"]
-fjall = ["dep:fjall"]
-rocksdb = ["dep:rocksdb"]
-lark = ["dep:lark-kv"]
-# LevelDB backend - pure Rust LSM-tree implementation (WASM only due to !Send)
-# Includes OPFS support for browser persistence
-leveldb = ["dep:rusty-leveldb", "dep:wasm-bindgen-futures", "dep:wasm-bindgen", "dep:js-sys"]
-# WASM support - disables tokio-dependent features
 wasm = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.0", features = ["v4", "js"] }
 
-# rusty-leveldb v4 has optional fs feature - we disable it for WASM
-rusty-leveldb = { version = "4", optional = true, default-features = false }
-
-# WASM interop dependencies (optional, pulled in by leveldb feature)
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
-
 # Tokio is only available on non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
-
-# Native storage backends
-redb = { workspace = true, optional = true }
-fjall = { workspace = true, optional = true }
-rocksdb = { workspace = true, optional = true }
-lark-kv = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 futures.workspace = true

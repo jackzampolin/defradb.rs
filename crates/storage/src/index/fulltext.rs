@@ -8,9 +8,9 @@
 //!   Legacy stats: /[col_id]/[idx_id]/_stats             -> [total_docs, total_field_len]
 //!   Stats shard:  /[col_id]/[idx_id]/0xff/s/[shard]     -> [doc_delta, field_len_delta]
 
-use bytes::Bytes;
 use async_trait::async_trait;
 use bm25::{DefaultTokenizer, Language, Tokenizer};
+use bytes::Bytes;
 use document::NormalValue;
 use schema::{FullTextIndexDescription, IndexDescription};
 use std::collections::HashMap;

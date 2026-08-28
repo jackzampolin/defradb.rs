@@ -449,8 +449,6 @@ async fn test_get_size_through_namespace() {
 // REDB MULTISTORE INTEGRATION TESTS
 // These tests verify the redb backend works correctly through the multistore
 // =========================================================================
-
-#[cfg(feature = "redb")]
 mod redb_multistore_tests {
     use storage::corekv::{IterOptions, Store};
     use storage::stores::multistore::RedbMultistore;

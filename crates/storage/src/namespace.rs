@@ -1,3 +1,5 @@
+use crate::corekv::{Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn, Writer};
+use async_trait::async_trait;
 /// Namespace isolation for multi-store architectures
 ///
 /// This module provides byte-prefix namespacing to logically separate
@@ -13,8 +15,6 @@
 /// The NamespacedStore wraps any Store implementation and automatically
 /// prepends the prefix to all keys, ensuring complete isolation between stores.
 use bytes::Bytes;
-use crate::corekv::{Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn, Writer};
-use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Store namespace prefixes

@@ -8,18 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# Passthrough for the storage backends `transaction.rs` gates on. The cfgs in a
-# relocated bench resolve against this package, not against storage.
-#
-# redb is on by default because `transaction` is `required-features = ["redb"]`.
-# Before the fold that resolved against storage's own feature, which a workspace
-# bench run switched on through unification; here nothing would, and the target
-# would drop out of `cargo bench --workspace` unnoticed.
+# regolith is the only backend, so there is no per-backend feature to pass
+# through and no target that has to gate on one.
 [features]
-default = ["redb"]
-redb = ["storage/redb"]
-lark = ["storage/lark"]
-rocksdb = ["storage/rocksdb"]
+default = []
 
 [dev-dependencies]
 criterion.workspace = true
@@ -100,7 +92,6 @@ harness = false
 [[bench]]
 name = "transaction"
 harness = false
-required-features = ["redb"]
 
 [[bench]]
 name = "transport"

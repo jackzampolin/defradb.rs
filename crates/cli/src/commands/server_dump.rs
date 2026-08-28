@@ -15,76 +15,20 @@ impl ServerDumpArgs {
         let lines = match config.datastore.store {
             DatastoreType::Memory => {
                 return Err(Error::InvalidDatastore(
-                    "server-dump is not supported for in-memory datastore".into(),
+                    "server-dump needs a datastore on disk; an in-memory one does not \
+                     outlive the process that wrote it"
+                        .into(),
                 ));
             }
-            #[cfg(feature = "redb")]
-            DatastoreType::Redb => {
-                let opts = storage::backends::RedbStoreOptions::new()
+            DatastoreType::Regolith => {
+                let opts = storage::RegolithStoreOptions::default()
                     .with_durability(config.datastore.durability);
-                let backend = storage::RedbStore::open_with_options(config.data_path(), opts)?;
+                let backend = storage::RegolithStore::open_with_options(config.data_path(), opts)?;
                 let store = Arc::new(Node::wrap_store(config, backend)?);
                 let database = db::DB::open_from_arc(store)
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;
                 database.print_dump().await.map_err(Error::Server)?
-            }
-            #[cfg(not(feature = "redb"))]
-            DatastoreType::Redb => {
-                return Err(Error::InvalidDatastore(
-                    "redb backend not enabled. Rebuild with --features redb".into(),
-                ));
-            }
-            #[cfg(feature = "fjall")]
-            DatastoreType::Fjall => {
-                let opts = storage::backends::FjallStoreOptions::new()
-                    .with_durability(config.datastore.durability);
-                let backend = storage::FjallStore::open_with_options(config.data_path(), opts)?;
-                let store = Arc::new(Node::wrap_store(config, backend)?);
-                let database = db::DB::open_from_arc(store)
-                    .await
-                    .map_err(|e| Error::Server(e.to_string()))?;
-                database.print_dump().await.map_err(Error::Server)?
-            }
-            #[cfg(not(feature = "fjall"))]
-            DatastoreType::Fjall => {
-                return Err(Error::InvalidDatastore(
-                    "fjall backend not enabled. Rebuild with --features fjall".into(),
-                ));
-            }
-            #[cfg(feature = "rocksdb")]
-            DatastoreType::RocksDb => {
-                let opts = storage::backends::RocksDbStoreOptions::new()
-                    .with_durability(config.datastore.durability);
-                let backend = storage::RocksDbStore::open_with_options(config.data_path(), opts)?;
-                let store = Arc::new(Node::wrap_store(config, backend)?);
-                let database = db::DB::open_from_arc(store)
-                    .await
-                    .map_err(|e| Error::Server(e.to_string()))?;
-                database.print_dump().await.map_err(Error::Server)?
-            }
-            #[cfg(not(feature = "rocksdb"))]
-            DatastoreType::RocksDb => {
-                return Err(Error::InvalidDatastore(
-                    "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
-                ));
-            }
-            #[cfg(feature = "lark")]
-            DatastoreType::Lark => {
-                let opts = storage::backends::LarkStoreOptions::new()
-                    .with_durability(config.datastore.durability);
-                let backend = storage::LarkStore::open_with_options(config.data_path(), opts)?;
-                let store = Arc::new(Node::wrap_store(config, backend)?);
-                let database = db::DB::open_from_arc(store)
-                    .await
-                    .map_err(|e| Error::Server(e.to_string()))?;
-                database.print_dump().await.map_err(Error::Server)?
-            }
-            #[cfg(not(feature = "lark"))]
-            DatastoreType::Lark => {
-                return Err(Error::InvalidDatastore(
-                    "lark backend not enabled. Rebuild with --features lark".into(),
-                ));
             }
         };
 

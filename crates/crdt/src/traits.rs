@@ -1,7 +1,7 @@
 //! Core traits for CRDT operations
 
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use defra_core::{types::DocId, Result};
 use std::any::Any;
 use storage::corekv::MaybeSendSync;

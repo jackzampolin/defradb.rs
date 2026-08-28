@@ -4,10 +4,10 @@
 //! When two concurrent writes occur, the one with higher priority wins.
 //! On tie, lexicographic comparison of values provides deterministic resolution.
 
-use bytes::Bytes;
 use crate::priority::{decode_priority, encode_priority};
 use crate::traits::{Context, Delta, MergeResult, PriorityReader, ReplicatedData, ValueReader};
 use async_trait::async_trait;
+use bytes::Bytes;
 use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;

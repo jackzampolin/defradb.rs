@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use super::*;
+use bytes::Bytes;
 
 use crate::block::builder::BlockResult;
 use crate::collection::Collection;

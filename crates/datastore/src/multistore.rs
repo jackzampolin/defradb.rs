@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use async_lock::RwLock;
 /// Transaction-aware Multistore for the datastore layer.
 ///
@@ -6,6 +5,7 @@ use async_lock::RwLock;
 /// this provides namespaced access to a single underlying transaction.
 /// This matches Go DefraDB's internal/datastore/multi.go pattern.
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::Arc;
 use storage::corekv::{Error, IterOptions, Iterator, Reader, Result, Txn, Writer};
 use storage::namespace::Namespace;

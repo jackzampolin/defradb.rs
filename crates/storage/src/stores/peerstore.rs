@@ -1,8 +1,3 @@
-/// Peerstore - Peer and replication metadata
-///
-/// The Peerstore handles storage of replicator configuration, replication
-/// retry tracking, and search engine retry tracking for P2P operations.
-use bytes::Bytes;
 use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
 use crate::keys::peerstore::{
     ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
@@ -10,6 +5,11 @@ use crate::keys::peerstore::{
 use crate::namespace::{Namespace, NamespacedStore};
 use async_lock::{RwLock, RwLockWriteGuardArc};
 use async_trait::async_trait;
+/// Peerstore - Peer and replication metadata
+///
+/// The Peerstore handles storage of replicator configuration, replication
+/// retry tracking, and search engine retry tracking for P2P operations.
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, Weak};

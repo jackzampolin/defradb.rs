@@ -564,7 +564,8 @@ async fn migrate_local_acp(
             migrated.storage_key().into_bytes(),
             (serde_json::to_vec(&migrated).map_err(|error| {
                 Error::Serialization(format!("encode migrated ACP tuple: {error}"))
-            })?).into(),
+            })?)
+            .into(),
         ));
     }
     iter.close().await.map_err(Error::Storage)?;
@@ -629,7 +630,8 @@ async fn migrate_zanzibar_acp(
             new_key,
             (serde_json::to_vec(&relationship).map_err(|error| {
                 Error::Serialization(format!("encode migrated Zanzibar relationship: {error}"))
-            })?).into(),
+            })?)
+            .into(),
         ));
     }
     iter.close().await.map_err(Error::Storage)?;

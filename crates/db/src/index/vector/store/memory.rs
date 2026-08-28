@@ -75,7 +75,8 @@ impl VectorNodeStore for MemoryNodeStore {
     }
 
     async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()> {
-        self.aux.insert((kind, key.to_vec()), Bytes::copy_from_slice(value));
+        self.aux
+            .insert((kind, key.to_vec()), Bytes::copy_from_slice(value));
         Ok(())
     }
 

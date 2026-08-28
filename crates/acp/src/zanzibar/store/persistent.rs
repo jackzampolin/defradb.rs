@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
-#[cfg(feature = "redb")]
-use storage::RedbStore;
+use storage::RegolithStore;
 
 use identity::Did;
 use zanzibar::error::{Error, Result};
@@ -29,11 +28,10 @@ impl<S: Store> PersistentZanzibarStore<S> {
     }
 }
 
-#[cfg(feature = "redb")]
-impl PersistentZanzibarStore<RedbStore> {
+impl PersistentZanzibarStore<RegolithStore> {
     /// Open a persistent store at the given path.
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let store = RedbStore::open(path).map_err(|e| Error::Serialization(e.to_string()))?;
+        let store = RegolithStore::open(path).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(Self::from_store(Arc::new(store)))
     }
 }

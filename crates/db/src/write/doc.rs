@@ -1,8 +1,8 @@
 //! Document mutator for transaction-scoped mutations.
 
-use bytes::Bytes;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};

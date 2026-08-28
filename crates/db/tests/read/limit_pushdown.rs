@@ -98,8 +98,6 @@ async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'sta
 async fn limit_query_reads_keys_proportional_to_the_limit() {
     assert_limit_query_reads_keys_proportional_to_the_limit(MemoryStore::new()).await;
 }
-
-#[cfg(feature = "redb")]
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit_redb() {
     let dir = tempfile::tempdir().unwrap();
@@ -108,8 +106,6 @@ async fn limit_query_reads_keys_proportional_to_the_limit_redb() {
     )
     .await;
 }
-
-#[cfg(feature = "rocksdb")]
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit_rocksdb() {
     let dir = tempfile::tempdir().unwrap();
@@ -118,8 +114,6 @@ async fn limit_query_reads_keys_proportional_to_the_limit_rocksdb() {
     )
     .await;
 }
-
-#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit_fjall() {
     let dir = tempfile::tempdir().unwrap();
@@ -177,8 +171,6 @@ async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 
 async fn explain_execute_reads_keys_proportional_to_the_limit() {
     assert_explain_execute_reads_keys_proportional_to_the_limit(MemoryStore::new()).await;
 }
-
-#[cfg(feature = "redb")]
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit_redb() {
     let dir = tempfile::tempdir().unwrap();
@@ -187,8 +179,6 @@ async fn explain_execute_reads_keys_proportional_to_the_limit_redb() {
     )
     .await;
 }
-
-#[cfg(feature = "rocksdb")]
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit_rocksdb() {
     let dir = tempfile::tempdir().unwrap();
@@ -197,8 +187,6 @@ async fn explain_execute_reads_keys_proportional_to_the_limit_rocksdb() {
     )
     .await;
 }
-
-#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit_fjall() {
     let dir = tempfile::tempdir().unwrap();

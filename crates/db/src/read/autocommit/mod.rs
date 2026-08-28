@@ -5,9 +5,9 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics.
 
-use bytes::Bytes;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
+use bytes::Bytes;
 use document::Document;
 use query::doc_stream::DocStream;
 use query::runner::{DocFetcher, FetchByIdsResult};

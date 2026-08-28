@@ -1,7 +1,7 @@
-use bytes::Bytes;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use blockstore::Blockstore;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use p2p::sync::SyncCoordinator;

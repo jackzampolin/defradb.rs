@@ -3,8 +3,8 @@
 //! Kept in `crates/db` (not `crates/kms`) so the KMS crate doesn't depend on
 //! `db`. Shared by both the embedded node and the CLI node.
 
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::{Arc, Weak};
 
 use kms::{

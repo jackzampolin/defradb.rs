@@ -3,8 +3,8 @@
 //! This module provides the `DocMutator` trait which abstracts storage write
 //! operations for mutation execution, following the same pattern as `DocFetcher`.
 
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use identity::Did;
@@ -260,12 +260,7 @@ impl DeleteResult {
     }
 
     /// Create a result with committed block data (for P2P broadcast).
-    pub fn with_commit(
-        doc_id: DocID,
-        existed: bool,
-        commit_cid: Cid,
-        commit_block: Bytes,
-    ) -> Self {
+    pub fn with_commit(doc_id: DocID, existed: bool, commit_cid: Cid, commit_block: Bytes) -> Self {
         Self {
             doc_id,
             existed,

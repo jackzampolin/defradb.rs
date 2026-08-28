@@ -78,8 +78,6 @@ async fn shutdown_concurrent_calls_are_safe() -> Result<()> {
 
     Ok(())
 }
-
-#[cfg(feature = "lark")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;

@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use super::*;
+use bytes::Bytes;
 
 /// Write a collection-level block for branchable collections.
 ///

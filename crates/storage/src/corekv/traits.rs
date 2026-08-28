@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 /// Core KV trait definitions matching the Go corekv package.
 ///
 /// This module defines the complete trait hierarchy for key-value storage:
@@ -16,7 +17,6 @@
 /// single-threaded. The `#[cfg_attr]` pattern is used to conditionally
 /// apply `async_trait(?Send)` for WASM builds.
 use bytes::Bytes;
-use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -196,10 +196,7 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Store: MaybeSendSync + private::Sealed {
-    /// Returns transaction diagnostics for stores that support them.
-    ///
-    /// Unsupported stores return `None`.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Transaction diagnostics for stores that keep them.
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         None
     }

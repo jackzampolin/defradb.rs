@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 /// Iterator trait and types for traversing key-value pairs.
 ///
 /// This module provides the iterator abstraction for scanning through
@@ -8,7 +9,6 @@
 ///
 /// For WASM targets, the `Send` bound is removed since WASM is single-threaded.
 use bytes::Bytes;
-use async_trait::async_trait;
 
 use super::errors::Result;
 use super::traits::MaybeSend;
@@ -31,7 +31,10 @@ pub struct KvPair {
 impl KvPair {
     /// Create a new key-value pair.
     pub fn new(key: Vec<u8>, value: impl Into<Bytes>) -> Self {
-        Self { key, value: value.into() }
+        Self {
+            key,
+            value: value.into(),
+        }
     }
 
     /// Create a key-only pair (empty value).

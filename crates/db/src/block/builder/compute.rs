@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use super::*;
+use bytes::Bytes;
 
 /// Pre-computed blocks ready for batch insertion into storage.
 ///

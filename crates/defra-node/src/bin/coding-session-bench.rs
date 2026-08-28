@@ -32,7 +32,7 @@ mod runner {
     impl Default for BenchOptions {
         fn default() -> Self {
             Self {
-                backend: StorageBackend::Lark,
+                backend: StorageBackend::Regolith,
                 durability: DurabilityMode::Immediate,
                 data_dir: None,
                 keep_data: false,
@@ -350,18 +350,16 @@ mod runner {
 
     fn parse_backend(value: String) -> Result<StorageBackend> {
         match value.as_str() {
-            "lark" => Ok(StorageBackend::Lark),
-            "redb" => Ok(StorageBackend::Redb),
-            "rocksdb" | "rocks" => Ok(StorageBackend::RocksDb),
-            other => bail!("unknown backend: {other} (expected lark, redb, or rocksdb)"),
+            // The old backend names still parse and all mean regolith, so
+            // an existing bench invocation keeps running.
+            "regolith" | "lark" | "redb" | "rocksdb" | "rocks" => Ok(StorageBackend::Regolith),
+            other => bail!("unknown backend: {other} (expected regolith)"),
         }
     }
 
     fn backend_name(backend: StorageBackend) -> &'static str {
         match backend {
-            StorageBackend::Lark => "lark",
-            StorageBackend::Redb => "redb",
-            StorageBackend::RocksDb => "rocksdb",
+            StorageBackend::Regolith => "regolith",
             _ => "unknown",
         }
     }

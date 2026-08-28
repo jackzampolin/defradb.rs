@@ -1,8 +1,8 @@
 //! Document fetcher for transaction-scoped queries.
 
-use bytes::Bytes;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
+use bytes::Bytes;
 use document::Document;
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::{IndexScanParams, IndexScanType};

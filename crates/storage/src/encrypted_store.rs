@@ -29,8 +29,8 @@
 //! reading encrypted data without the matching key (or vice versa) produces a
 //! decrypt error, never a silent wrong result.
 
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use zeroize::Zeroizing;
 
 use crate::corekv::errors::{Error, Result};

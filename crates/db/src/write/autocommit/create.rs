@@ -1,9 +1,9 @@
-use bytes::Bytes;
 use super::helpers::{
     ensure_collection_is_active, register_created_doc, write_branchable_collection_block,
     write_local_create,
 };
 use super::*;
+use bytes::Bytes;
 
 use crate::block::builder::DocStorageIdentity;
 

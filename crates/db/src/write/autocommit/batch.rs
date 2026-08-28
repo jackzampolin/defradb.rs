@@ -1,6 +1,6 @@
-use bytes::Bytes;
 use async_lock::{Mutex as TokioMutex, MutexGuardArc};
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use parking_lot::Mutex as PlMutex;

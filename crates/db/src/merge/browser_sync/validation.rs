@@ -297,7 +297,9 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
                 Some(sig_cid) => {
                     let sig_data = blocks
                         .iter()
-                        .find_map(|(cid, data): &(Cid, Bytes)| (*cid == sig_cid).then_some(data.as_ref()))
+                        .find_map(|(cid, data): &(Cid, Bytes)| {
+                            (*cid == sig_cid).then_some(data.as_ref())
+                        })
                         .ok_or_else(|| {
                             BrowserSyncError::Invalid(format!(
                                 "genesis signature block {sig_cid} is missing"

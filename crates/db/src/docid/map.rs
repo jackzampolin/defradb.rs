@@ -5,8 +5,8 @@
 //! holds the bidirectional mapping between short IDs and the public
 //! genesis-CID-derived DocIDs, plus a block-CID -> DocID ownership index.
 
-use bytes::Bytes;
 use async_lock::Mutex;
+use bytes::Bytes;
 use datastore::NamespaceView;
 use std::sync::Arc;
 use storage::corekv::{Key, Store};

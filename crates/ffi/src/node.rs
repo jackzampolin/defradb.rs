@@ -74,7 +74,11 @@ fn resolve_store(
 
     if options.in_memory != 0 || backend_name == "memory" || options.db_path.is_null() {
         return Ok((
-            Arc::new(FfiStore::Memory(storage::MemoryStore::new())),
+            Arc::new(FfiStore::Regolith(
+                storage::RegolithStore::in_memory().map_err(|error| {
+                    format!("failed to open in-memory regolith store: {}", error)
+                })?,
+            )),
             embedded::Persistence::Memory,
             None,
         ));
@@ -82,57 +86,23 @@ fn resolve_store(
 
     let path = unsafe { c_str_to_string(options.db_path) }
         .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
-    let effective_backend = if backend_name.is_empty() {
-        "lark"
-    } else {
-        &backend_name
-    };
-
-    let store = match effective_backend {
-        "redb" => Arc::new(FfiStore::Redb(storage::RedbStore::open(&path).map_err(
-            |error| format!("failed to open redb store at '{}': {}", path, error),
-        )?)),
-        #[cfg(feature = "fjall")]
-        "fjall" => Arc::new(FfiStore::Fjall(storage::FjallStore::open(&path).map_err(
-            |error| format!("failed to open fjall store at '{}': {}", path, error),
-        )?)),
-        #[cfg(not(feature = "fjall"))]
-        "fjall" => {
-            return Err("fjall backend not enabled. Rebuild with --features fjall".to_string());
-        }
-        #[cfg(feature = "rocksdb")]
-        "rocksdb" => {
-            let opts = storage::RocksDbStoreOptions::from_env();
-            Arc::new(FfiStore::RocksDb(
-                storage::RocksDbStore::open_with_options(&path, opts).map_err(|error| {
-                    format!("failed to open rocksdb store at '{}': {}", path, error)
-                })?,
-            ))
-        }
-        #[cfg(not(feature = "rocksdb"))]
-        "rocksdb" => {
-            return Err("rocksdb backend not enabled. Rebuild with --features rocksdb".to_string());
-        }
-        #[cfg(feature = "lark")]
-        "lark" => {
-            let opts = storage::LarkStoreOptions::from_env();
-            Arc::new(FfiStore::Lark(
-                storage::LarkStore::open_with_options(&path, opts).map_err(|error| {
-                    format!("failed to open lark store at '{}': {}", path, error)
-                })?,
-            ))
-        }
-        #[cfg(not(feature = "lark"))]
-        "lark" => {
-            return Err("lark backend not enabled. Rebuild with --features lark".to_string());
-        }
+    // The old backend names are accepted and all resolve to regolith, so an
+    // embedder that still passes one keeps working rather than failing at
+    // startup on a name that no longer selects anything.
+    match backend_name.as_str() {
+        "" | "regolith" | "lark" | "redb" | "fjall" | "rocksdb" => {}
         other => {
             return Err(format!(
-                "unknown datastore backend '{}'. Supported: lark, redb, fjall, rocksdb, memory",
+                "unknown datastore backend '{}'. Supported: regolith, memory",
                 other
             ));
         }
-    };
+    }
+
+    let store = Arc::new(FfiStore::Regolith(
+        storage::RegolithStore::open(&path)
+            .map_err(|error| format!("failed to open regolith store at '{}': {}", path, error))?,
+    ));
 
     Ok((store, embedded::Persistence::Persistent, Some(path)))
 }
@@ -392,8 +362,6 @@ mod tests {
         );
         assert_eq!(node_close(result.node_ptr).status, 0);
     }
-
-    #[cfg(feature = "lark")]
     #[test]
     fn test_persistent_node_can_reopen_after_close() {
         assert!(crate::runtime::init_runtime());
@@ -416,8 +384,6 @@ mod tests {
         assert_eq!(second.status, 0);
         assert_eq!(node_close(second.node_ptr).status, 0);
     }
-
-    #[cfg(feature = "lark")]
     #[test]
     fn test_persistent_p2p_nodes_reopen_after_pending_broadcasts() {
         assert!(crate::runtime::init_runtime());

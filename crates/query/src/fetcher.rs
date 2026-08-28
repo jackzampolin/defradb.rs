@@ -3,8 +3,8 @@
 //! This module provides the `DocFetcher` trait which abstracts storage access
 //! for query execution, along with result types for handling partial fetches.
 
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use document::Document;
 use identity::Did;
 use storage::corekv::MaybeSendSync;

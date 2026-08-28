@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use super::*;
+use bytes::Bytes;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Counter delta from a block (standalone, with its own transaction).

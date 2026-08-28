@@ -4,8 +4,8 @@
 //! use this to register a callback at mutation time. The underlying tx machinery
 //! fires success callbacks only on commit; discards skip them.
 
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use events::{Bus, Message, Update};
 use std::sync::Arc;

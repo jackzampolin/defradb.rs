@@ -1,12 +1,12 @@
+use crate::corekv::{Error, IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
+use crate::namespace::{Namespace, NamespacedStore};
+use async_trait::async_trait;
 /// Datastore - Document and collection data storage
 ///
 /// The Datastore handles storage of document field values, primary keys,
 /// secondary indexes, search engine artifacts, and view caching. It includes
 /// automatic chunking for values larger than 1MB.
 use bytes::Bytes;
-use crate::corekv::{Error, IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
-use crate::namespace::{Namespace, NamespacedStore};
-use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Chunk size for large values (1MB)
