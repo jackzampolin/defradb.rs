@@ -246,10 +246,12 @@ git log origin/develop --oneline --since="1 week ago"
 
 The Go repo has two remotes:
 - `origin` → `sourcenetwork/defradb` (upstream)
-- `fork` → `jackzampolin/defradb` (our fork, `jack/ffi-rust-compat` branch)
+- `fork` → `edjroz/defradb` (our fork; the rustffi client branches
+  `edjroz/ffi-rust-compat` and `jack/ffi-rust-compat` both live on `origin`)
 
-`DEFRADB_GO_REPO` covers the shell commands above only. Integration tests that
-consume Go build artifacts resolve them at compile time under
+`DEFRADB_GO_REPO` covers the shell commands above and `ffi-test`, which also
+accepts `--go-path <PATH>` to override it. Integration tests that consume Go
+build artifacts resolve them at compile time under
 `$HOME/go/src/github.com/sourcenetwork/defradb` — see `COPY_WASM_PATH` in
 `tools/integration-test/tests/p2p_iroh/sync/version.rs`. A checkout elsewhere
 needs a symlink at that path, or the `p2p_iroh` lens tests fail on a missing

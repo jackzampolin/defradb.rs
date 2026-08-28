@@ -1,6 +1,6 @@
 # ffi-test
 
-CLI tool for running Go integration tests against the Rust FFI implementation of DefraDB. Validates behavioral compatibility by building the Rust FFI library, copying it into the Go test harness, and running Go's integration test packages.
+CLI tool for running Go integration tests against the Rust FFI implementation of DefraDB. Validates behavioral compatibility by building the Rust FFI library into a Go checkout that already carries the Go-side test client, then running Go's integration test packages.
 
 ## Install
 
@@ -11,20 +11,48 @@ cargo install --path tools/ffi-test
 ## Architecture
 
 ```
-defradb.rs (Rust)                    defradb (Go)
-├── crates/ffi/                      ├── tests/integration/
-│   └── (FFI library)                │   └── (Go test packages)
-├── tools/ffi-test/                  └── tests/clients/rustffi/
-│   └── (this CLI tool)                  ├── libdefra_ffi.dylib
-                                         └── defra.h
+defradb.rs (Rust)                     defradb (Go) @ the client branch
+├── crates/ffi/                       ├── tests/integration/
+│   └── (FFI library)                 │   └── (Go test packages)
+└── tools/ffi-test/                   └── tests/clients/rustffi/
+    └── (this CLI tool)      ──────▶      ├── (the Go client, on the branch)
+                                          ├── defra.h        (generated)
+                                          └── libdefra_ffi.* (generated)
 ```
 
-FFI test requires **paired worktrees** — a Rust worktree and a corresponding Go worktree side by side:
+The Go tree is a checkout of `sourcenetwork/defradb` on the branch that carries
+the rustffi client — `edjroz/ffi-rust-compat`, or a branch based on it. That
+branch is a maintained chore branch, not something upstream intends to merge;
+it holds the client plus the harness seams the client needs.
 
-```
+The checkout must sit on the pinned client commit, `GO_FFI_CLIENT_COMMIT` in
+`crates/defra-version`, and `ffi-test run` fails fast when it does not. The pin
+keeps pass rates comparable: an unpinned checkout silently changes what the
+test corpus measures.
+
+`ffi-test` writes exactly two things into that checkout, both regenerated from
+`crates/ffi` on every run and neither ever committed:
+
+- **`defra.h`** — cbindgen output.
+- **the shared library** — `cargo build --release -p ffi`, copied in as
+  `libdefra_ffi.*`.
+
+Everything else in the Go tree belongs to the Go side. Changes to the client
+itself are commits on that branch, not edits here.
+
+## Resolving the Go checkout
+
+In order of precedence:
+
+1. `--go-path <PATH>`
+2. `DEFRADB_GO_REPO`
+3. **worktree pairing** — a Rust worktree and a Go worktree side by side,
+   sharing a suffix:
+
+```text
 sourcenetwork/
 ├── defradb.rs      ←→  defradb       (main)
-├── defradb.rs-foo  ←→  defradb-foo   (ffi/foo branch)
+├── defradb.rs-foo  ←→  defradb-foo   (feature branch)
 ```
 
 ## Commands

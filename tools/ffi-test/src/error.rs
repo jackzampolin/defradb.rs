@@ -7,9 +7,11 @@ pub enum FfiTestError {
     WorktreeDetection(String),
 
     #[error(
-        "Go worktree not found at {path}. Create it with: git worktree add {path} -b {branch}"
+        "Go checkout not found at {path}. It must be a checkout of \
+         sourcenetwork/defradb carrying the rustffi client: the \
+         `edjroz/ffi-rust-compat` branch, or one based on it"
     )]
-    GoWorktreeNotFound { path: String, branch: String },
+    GoWorktreeNotFound { path: String },
 
     #[error("FFI build failed: {0}")]
     FfiBuild(String),
@@ -34,6 +36,13 @@ pub enum FfiTestError {
 
     #[error("cbindgen not found. Install with: cargo install cbindgen")]
     CbindgenNotFound,
+
+    #[error(
+        "Go checkout at {path} is on {found}, not the pinned client commit {}. \
+         Check it out at the pin, or update GO_FFI_CLIENT_COMMIT if the client moved",
+        defra_version::GO_FFI_CLIENT_COMMIT
+    )]
+    GoPinMismatch { path: String, found: String },
 
     #[error("Not in a defradb.rs worktree")]
     NotInWorktree,

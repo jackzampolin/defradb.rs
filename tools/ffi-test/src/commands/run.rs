@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use colored::Colorize;
 
 use crate::builder::build_ffi;
@@ -5,7 +7,7 @@ use crate::embedding_fixture::EmbeddingFixture;
 use crate::error::Result;
 use crate::report::Report;
 use crate::runner::{discover_subpackages, run_tests, RunResult, TestStatus, TestSummary};
-use crate::worktree::WorktreeContext;
+use crate::worktree::{verify_go_pin, WorktreeContext};
 
 /// Run FFI tests for a package
 pub async fn execute(
@@ -13,9 +15,10 @@ pub async fn execute(
     test_filter: Option<&str>,
     verbose: bool,
     skip_build: bool,
+    go_path: Option<PathBuf>,
 ) -> Result<()> {
     // Detect worktree context
-    let ctx = WorktreeContext::detect().await?;
+    let ctx = WorktreeContext::detect_with(go_path).await?;
 
     println!(
         "{} {} @ {}{}",
@@ -30,6 +33,8 @@ pub async fn execute(
     );
     println!("  Rust: {}", ctx.rust_path.display());
     println!("  Go:   {}", ctx.go_path.display());
+
+    verify_go_pin(&ctx.go_path).await?;
     println!();
 
     // Discover all subpackages under this package

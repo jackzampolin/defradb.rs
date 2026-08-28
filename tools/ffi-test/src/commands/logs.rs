@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::error::{FfiTestError, Result};
 use crate::report::load_for_diff;
 use crate::runner::TestStatus;
@@ -9,8 +11,9 @@ pub async fn execute(
     test_filter: Option<&str>,
     failed_only: bool,
     all_output: bool,
+    go_path: Option<PathBuf>,
 ) -> Result<()> {
-    let ctx = WorktreeContext::detect().await?;
+    let ctx = WorktreeContext::detect_with(go_path).await?;
 
     // Load the most recent report for this package
     let reports = load_for_diff(&ctx.branch, package, 1).await?;
