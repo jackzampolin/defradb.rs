@@ -67,6 +67,7 @@ tempfile = "3.17"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 zeroize = "1"
 zstd = "0.13"
+tar = "0.4"
 
 [lints]
 workspace = true
