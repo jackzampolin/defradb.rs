@@ -10,7 +10,8 @@ use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};
 
-pub(crate) async fn write_branchable_collection_block(
+pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store + 'static>(
+    db: &crate::database::DB<S>,
     collection_name: &str,
     collection: &Collection,
     blockstore: &NamespaceView,
@@ -22,7 +23,7 @@ pub(crate) async fn write_branchable_collection_block(
         return Ok(None);
     }
 
-    write_collection_block(
+    let written = write_collection_block(
         blockstore,
         headstore,
         collection.resolved_root_id(),
@@ -37,7 +38,21 @@ pub(crate) async fn write_branchable_collection_block(
             "failed to write collection block for branchable mutation on collection {}: {}",
             collection_name, error
         ))
-    })
+    })?;
+
+    // The append just superseded the heads it was built on, and the keys it
+    // superseded are reclaimed by a transaction of their own. Every branchable
+    // mutation in the crate funnels through here, so this is the one place
+    // that has to remember.
+    //
+    // The reclaiming transaction is opened while the caller's is still open,
+    // which is sound: transactions are optimistic so neither blocks the other,
+    // and the keys it removes were superseded before the caller began, so it
+    // cannot touch anything the caller wrote.
+    db.maybe_prune_collection_heads(collection.resolved_root_id())
+        .await;
+
+    Ok(written)
 }
 
 /// Persist a local UPDATE: apply CRDT field deltas to the authoritative store

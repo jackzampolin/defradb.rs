@@ -147,6 +147,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -427,6 +428,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,

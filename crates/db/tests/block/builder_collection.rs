@@ -2,12 +2,11 @@ use cid::Cid;
 use datastore::NamespaceView;
 use datastore::SharedTxn;
 use db::block::builder::collection::*;
+use db::block::heads::live_collection_heads;
 use defra_core::block::generate_cid_from_bytes;
 use defra_core::Block;
 use std::sync::Arc;
-use storage::corekv::IterOptions;
 use storage::corekv::Store;
-use storage::keys::headstore::HeadstoreColKey;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
@@ -35,22 +34,10 @@ async fn commit(shared: Arc<SharedTxn>) {
 async fn collection_heads(store: &RegolithStore, collection_id: u32) -> Vec<Cid> {
     let shared = SharedTxn::new(store.new_txn(true).await.unwrap());
     let (_, headstore) = views(&shared);
-    let mut iterator = headstore
-        .iterator(IterOptions::new().with_prefix(HeadstoreColKey::collection_prefix(collection_id)))
+    let mut heads = live_collection_heads(&headstore, collection_id)
         .await
-        .unwrap();
-    let mut heads = Vec::new();
-    while let Some(pair) = iterator.next().await.unwrap() {
-        let cid = String::from_utf8(pair.key)
-            .unwrap()
-            .rsplit('/')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        heads.push(cid);
-    }
-    iterator.close().await.unwrap();
+        .unwrap()
+        .live;
     heads.sort_by_cached_key(Cid::to_string);
     heads
 }

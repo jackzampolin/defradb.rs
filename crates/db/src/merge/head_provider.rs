@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use cid::Cid;
 use defra_core::{Block, CrdtDelta};
 use storage::corekv::{IterOptions, Store};
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
+use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
 use p2p::sync::DocumentHeadProvider;
 
@@ -236,34 +236,12 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
             .map_err(|e| {
                 p2p::error::Error::HeadProvider(format!("failed to load short id: {}", e))
             })?;
-        let prefix = HeadstoreColKey::collection_prefix(short_id);
-        let opts = IterOptions::new().with_prefix(prefix);
+        let found = crate::block::heads::live_collection_heads(&headstore, short_id)
+            .await
+            .map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("failed to read collection heads: {}", e))
+            })?;
 
-        let mut iter = headstore.iterator(opts).await.map_err(|e| {
-            p2p::error::Error::HeadProvider(format!("failed to iterate headstore: {}", e))
-        })?;
-
-        let mut cids = Vec::new();
-
-        while let Some(pair) = iter.next().await.map_err(|e| {
-            p2p::error::Error::HeadProvider(format!("headstore iteration error: {}", e))
-        })? {
-            // Parse CID from key: /c/{short_id}/{cid}
-            let key_str = String::from_utf8_lossy(&pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            if parts.len() < 4 {
-                continue;
-            }
-
-            if let Ok(cid) = Cid::from_str(parts[3]) {
-                cids.push(cid);
-            }
-        }
-
-        iter.close().await.map_err(|e| {
-            p2p::error::Error::HeadProvider(format!("headstore close error: {}", e))
-        })?;
-
-        Ok(cids)
+        Ok(found.live)
     }
 }

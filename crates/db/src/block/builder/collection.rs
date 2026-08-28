@@ -16,44 +16,12 @@ pub async fn write_collection_block(
     doc_composite_cid: Cid,
     signing_config: Option<&SigningConfig>,
 ) -> Result<(Cid, Bytes), String> {
-    use storage::corekv::IterOptions;
-
-    // Get existing collection head (if any)
-    let col_prefix = HeadstoreColKey::collection_prefix(collection_short_id);
-    let opts = IterOptions::new()
-        .with_prefix(col_prefix)
-        .with_commutative_set();
-
-    let mut iter = headstore
-        .iterator(opts)
+    let found = crate::block::heads::live_collection_heads(headstore, collection_short_id)
         .await
-        .map_err(|e| format!("Failed to create collection headstore iterator: {}", e))?;
+        .map_err(|e| format!("Failed to read collection heads: {}", e))?;
+    let mut col_heads = found.live;
 
-    let mut col_heads: Vec<Cid> = Vec::new();
-    let mut max_priority: u64 = 0;
-    let mut old_head_keys: Vec<Vec<u8>> = Vec::new();
-
-    while let Some(kv_pair) = iter
-        .next()
-        .await
-        .map_err(|e| format!("Failed to iterate collection headstore: {}", e))?
-    {
-        let priority = decode_priority_varint(&kv_pair.value);
-        if priority > max_priority {
-            max_priority = priority;
-        }
-        // Parse CID from key: /c/{collection_id}/{cid}
-        let key_str = String::from_utf8_lossy(&kv_pair.key);
-        let parts: Vec<&str> = key_str.split('/').collect();
-        if let Some(cid_str) = parts.last() {
-            if let Ok(cid) = cid_str.parse::<Cid>() {
-                col_heads.push(cid);
-            }
-        }
-        old_head_keys.push(kv_pair.key.clone());
-    }
-
-    let priority: u64 = max_priority + 1;
+    let priority: u64 = found.max_priority + 1;
 
     // Sort heads by CID string representation to match Go's Block.New() sorting.
     col_heads.sort_by_cached_key(|a| a.to_string());
@@ -67,6 +35,11 @@ pub async fn write_collection_block(
     // The collection block links to the document composite block
     // Go uses empty string for link name here, fieldName comes from linked block's delta
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
+
+    // Kept because `Block::new` takes the heads by value and the markers below
+    // need to name each one. A collection's head set is one entry in the common
+    // case and a handful after a merge, so this is not the copy to worry about.
+    let superseded_parents = col_heads.clone();
 
     // Create the collection block
     let mut collection_block =
@@ -92,13 +65,25 @@ pub async fn write_collection_block(
         .await
         .map_err(|e| format!("Failed to store collection block: {}", e))?;
 
-    // Delete old collection head entries
-    for old_key in old_head_keys {
-        headstore
-            .delete(&old_key)
-            .await
-            .map_err(|e| format!("Failed to delete old collection head: {}", e))?;
-    }
+    // Record that this block superseded each head it was built on, rather than
+    // deleting those heads.
+    //
+    // Every key written here ends in `collection_cid`, this writer's own block,
+    // so two writers appending concurrently never write the same key and the
+    // engine has nothing to reject. Deleting the parents instead makes both
+    // writers write the parent's key, which is a write-write conflict that
+    // regolith refuses at every isolation level. See `proofs/tla/HeadSet.tla`
+    // (`MC_HeadSet_Red_EagerDelete.cfg` is that defect) and
+    // `HeadSet.applyDerived_parents_not_head` for why this reaches the same
+    // head set without the shared write.
+    crate::block::heads::record_supersedes(
+        headstore,
+        collection_short_id,
+        &superseded_parents,
+        collection_cid,
+    )
+    .await
+    .map_err(|e| format!("Failed to record superseded collection head: {}", e))?;
 
     // Write new collection head: /c/{collection_id}/{cid} → priority
     let col_head_key = HeadstoreColKey::new(collection_short_id, collection_cid);

@@ -160,6 +160,15 @@ impl DbOptions {
 /// The main DefraDB database struct.
 ///
 /// This matches Go's DB struct in internal/db/db.go.
+/// Branchable appends between head-key reclamation passes. Sixteen holds the
+/// backlog to a handful of keys per collection while keeping the extra
+/// transaction off fifteen appends out of sixteen.
+const HEAD_PRUNE_INTERVAL: u64 = 16;
+
+/// Keys one reclamation pass may delete. Bounds the pass by what it holds,
+/// and a pass that stops here leaves the rest for the next one.
+const HEAD_PRUNE_MAX_KEYS: usize = 512;
+
 pub struct DB<S: Store> {
     /// The underlying store.
     store: Arc<S>,
@@ -167,6 +176,14 @@ pub struct DB<S: Store> {
     options: DbOptions,
     /// Counter for generating unique transaction IDs.
     txn_id_counter: AtomicU64,
+    /// Branchable appends since a collection's head keys were last reclaimed.
+    ///
+    /// A superseded head key is reclaimed by a transaction of its own (see
+    /// [`crate::block::heads`]), so doing it on every append would double the
+    /// transaction count on that path. Amortizing it over
+    /// [`HEAD_PRUNE_INTERVAL`] appends holds the backlog at a small constant
+    /// per collection for one atomic per mutation.
+    head_prune_tick: AtomicU64,
     /// Generation of the committed migration graph.
     ///
     /// Lensed fetchers include this in their history-cache validity checks so
@@ -249,6 +266,7 @@ impl<S: Store> DB<S> {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
+            head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: RwLock::new(HashMap::new()),
@@ -311,6 +329,7 @@ impl<S: Store> DB<S> {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
+            head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: RwLock::new(HashMap::new()),
@@ -485,6 +504,54 @@ impl<S: Store> DB<S> {
             .await
             .map_err(Error::Storage)?;
         Ok(DbTxn::new(basic_txn))
+    }
+
+    /// Reclaim superseded collection head keys, if enough have built up.
+    ///
+    /// Called after a branchable append commits. One in
+    /// [`HEAD_PRUNE_INTERVAL`] calls does the work; the rest are an atomic
+    /// increment.
+    pub(crate) async fn maybe_prune_collection_heads(&self, collection_short_id: u32) {
+        if !self.head_prune_tick.fetch_add(1, Ordering::Relaxed).is_multiple_of(HEAD_PRUNE_INTERVAL) {
+            return;
+        }
+        if let Err(error) = self.prune_collection_heads(collection_short_id).await {
+            // Reclamation is the one path here that can lose a write race, and
+            // losing costs nothing: the head set is a function of the markers,
+            // so the next pass repeats the work.
+            tracing::debug!(
+                collection_short_id,
+                %error,
+                "collection head reclamation did not complete"
+            );
+        }
+    }
+
+    /// Delete collection head keys that a marker supersedes, with their
+    /// markers, in a transaction of its own.
+    ///
+    /// Separate on purpose: two of these write the same keys, whereas two
+    /// appends never do. Folding it into an append would put the write-write
+    /// conflict back on the path that must not have one.
+    pub async fn prune_collection_heads(
+        &self,
+        collection_short_id: u32,
+    ) -> Result<crate::block::heads::PruneOutcome> {
+        let txn = self.new_txn(false).await?;
+        let headstore = txn.headstore()?;
+        let outcome = crate::block::heads::prune_superseded_heads(
+            &headstore,
+            collection_short_id,
+            HEAD_PRUNE_MAX_KEYS,
+        )
+        .await
+        .map_err(Error::Storage)?;
+        if outcome == crate::block::heads::PruneOutcome::default() {
+            txn.discard()?;
+            return Ok(outcome);
+        }
+        txn.commit().await?;
+        Ok(outcome)
     }
 
     /// Execute a function within a transaction.

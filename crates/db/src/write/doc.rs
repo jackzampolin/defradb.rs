@@ -260,6 +260,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc.set_id(doc_id.clone());
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -488,6 +489,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -598,6 +600,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,

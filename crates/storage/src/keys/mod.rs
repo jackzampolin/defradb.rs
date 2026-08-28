@@ -63,8 +63,9 @@ pub use doc_id_index::{
 pub use document::{deleted_doc_key, doc_key, DELETED_KEY_PREFIX, DOC_KEY_PREFIX};
 pub use encstore::EncstoreKey;
 pub use headstore::{
-    HeadstoreColKey, HeadstoreCollectionDefinition, HeadstoreCollectionSetDefinition,
-    HeadstoreDocKey, HeadstoreFieldDefinition, HeadstorePriorityKey,
+    HeadstoreColKey, HeadstoreColSuperseded, HeadstoreCollectionDefinition,
+    HeadstoreCollectionSetDefinition, HeadstoreDocKey, HeadstoreFieldDefinition,
+    HeadstorePriorityKey,
 };
 pub use peerstore::{
     PeerstoreSERetry, ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
