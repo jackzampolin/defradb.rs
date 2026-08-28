@@ -512,7 +512,11 @@ impl<S: Store> DB<S> {
     /// [`HEAD_PRUNE_INTERVAL`] calls does the work; the rest are an atomic
     /// increment.
     pub(crate) async fn maybe_prune_collection_heads(&self, collection_short_id: u32) {
-        if !self.head_prune_tick.fetch_add(1, Ordering::Relaxed).is_multiple_of(HEAD_PRUNE_INTERVAL) {
+        if !self
+            .head_prune_tick
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(HEAD_PRUNE_INTERVAL)
+        {
             return;
         }
         if let Err(error) = self.prune_collection_heads(collection_short_id).await {
