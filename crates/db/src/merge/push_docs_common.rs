@@ -4,7 +4,6 @@ use std::str::FromStr;
 
 use cid::Cid;
 use storage::corekv::{IterOptions, Reader};
-#[cfg(not(target_arch = "wasm32"))]
 use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
 pub async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>(
