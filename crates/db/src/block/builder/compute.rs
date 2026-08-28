@@ -120,7 +120,7 @@ pub fn compute_document_blocks(
 
         if let Some(signer) = signing_config {
             if let Some((sig_cid, sig_cbor)) = compute_signature(&field_block, signer)? {
-                blockstore_entries.push((sig_cid.to_bytes(), sig_cbor.into()));
+                blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
                 field_block.signature = Some(sig_cid);
             }
         }
@@ -185,7 +185,7 @@ pub fn compute_document_blocks(
 
     if let Some(signer) = signing_config {
         if let Some((sig_cid, sig_cbor)) = compute_signature(&composite_block, signer)? {
-            blockstore_entries.push((sig_cid.to_bytes(), sig_cbor.into()));
+            blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
             composite_block.signature = Some(sig_cid);
         }
     }

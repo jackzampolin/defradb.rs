@@ -18,7 +18,6 @@ use crate::QueryId;
 use crate::ReplicatorInfo;
 use async_trait::async_trait;
 use blockstore::{Blockstore, DefraBlockstore};
-use bytes::Bytes;
 use cid::Cid;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};

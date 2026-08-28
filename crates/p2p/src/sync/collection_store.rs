@@ -5,7 +5,6 @@
 
 use crate::error::{Error, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Reader, Store};
 use storage::keys::systemstore::P2PCollectionKey;
@@ -166,6 +165,7 @@ impl P2PCollectionStorage for NoOpCollectionStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_p2p_collection_key() {

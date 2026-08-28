@@ -340,7 +340,7 @@ async fn build_merge_block(
 
     MergeBlock {
         cid: result.cid,
-        block_data: bytes::Bytes::from(result.block),
+        block_data: result.block,
         doc_id: result.doc_id,
         collection_id: "col-users".to_string(),
         creator: "did:key:z6MkrBatchMergeTest".to_string(),
@@ -2019,7 +2019,7 @@ async fn batch_merge_rejects_immutable_change_without_partial_write() {
     let sibling_id = sibling_result.doc_id.clone();
     let sibling_merge = MergeBlock {
         cid: sibling_result.cid,
-        block_data: bytes::Bytes::from(sibling_result.block),
+        block_data: sibling_result.block,
         doc_id: sibling_result.doc_id,
         collection_id: "col-agentdocs".to_string(),
         creator: "did:key:z6MkrSib".to_string(),
@@ -3119,7 +3119,7 @@ async fn build_session_merge_block(
     let doc_id = DocID::from_string(&result.doc_id).unwrap();
     let merge_block = MergeBlock {
         cid: result.cid,
-        block_data: bytes::Bytes::from(result.block),
+        block_data: result.block,
         doc_id: result.doc_id,
         collection_id: "col-sessions".to_string(),
         creator: format!("did:key:z6MkrSession{name}"),

@@ -191,7 +191,7 @@ impl FullTextIndex {
             if kv.key.len() != prefix.len() + 1 {
                 continue;
             }
-            let (shard_docs, shard_field_len) = Self::decode_stats_delta(Some(kv.value.into()));
+            let (shard_docs, shard_field_len) = Self::decode_stats_delta(Some(kv.value));
             total_docs = total_docs.checked_add(shard_docs).ok_or_else(|| {
                 crate::corekv::Error::Other("full-text stats overflow".to_string())
             })?;

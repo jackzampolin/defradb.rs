@@ -1,11 +1,6 @@
 use crate::corekv::{Result, Store, Txn};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
-/// Headstore - Merkle tree heads and definitions
-///
-/// The Headstore handles storage of document heads, collection heads,
-/// field definitions, collection definitions, and collection set definitions.
-use bytes::Bytes;
 use std::sync::Arc;
 
 /// Headstore provides storage for merkle tree heads and schema definitions
@@ -47,6 +42,7 @@ mod tests {
     use crate::backends::RegolithStore;
     use crate::corekv::Key;
     use crate::keys::headstore::HeadstoreDocKey;
+    use bytes::Bytes;
     use cid::Cid;
     use std::str::FromStr;
 

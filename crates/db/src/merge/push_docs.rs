@@ -405,7 +405,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                     Bytes::from(block_cid.to_bytes()),
                     collection.collection_id().to_string(),
                     creator.clone(),
-                    Bytes::from(block_data),
+                    block_data,
                 );
                 if let Err(e) = p2p::signing::sign_with_transport(transport, &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
@@ -805,7 +805,7 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
                 Bytes::from(block_cid.to_bytes()),
                 collection_id.to_string(),
                 creator.clone(),
-                Bytes::from(block_data),
+                block_data,
             );
 
             if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
@@ -891,7 +891,7 @@ pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
             Bytes::from(cid.to_bytes()),
             collection_id.to_string(),
             creator.clone(),
-            Bytes::from(block_data),
+            block_data,
         );
         if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
             return Err(format!("failed to sign current collection head {cid}"));

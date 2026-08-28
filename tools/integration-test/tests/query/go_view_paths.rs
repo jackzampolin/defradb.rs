@@ -27,7 +27,7 @@ async fn go_view_paths_test(cluster: TestCluster) {
 
     // Go's AddView: JSON body keyed exactly as its client marshals it.
     let (status, body) = post(
-        &api_url,
+        api_url,
         "/api/v1/view",
         Some(serde_json::json!({
             "Query": "Reading { name value }",
@@ -46,7 +46,7 @@ async fn go_view_paths_test(cluster: TestCluster) {
     // the failure mode this asserts against, because the caller cannot see it.
     const TRANSFORM_CID: &str = "bafkreieqfyxcnvxnbxvpqnbdbslr5qbvrhbhgnrmsdrbfhqhbhmnhqhqhq";
     let (status, body) = post(
-        &api_url,
+        api_url,
         "/api/v1/view",
         Some(serde_json::json!({
             "Query": "Reading { name value }",
@@ -73,7 +73,7 @@ async fn go_view_paths_test(cluster: TestCluster) {
         "/api/v1/view/refresh?name=ReadingView",
         "/api/v1/view/refresh?get_inactive=true",
     ] {
-        let (status, body) = post(&api_url, path, None).await;
+        let (status, body) = post(api_url, path, None).await;
         assert!(
             (200..300).contains(&status),
             "POST {path}: status={status} body={body}"
@@ -81,7 +81,7 @@ async fn go_view_paths_test(cluster: TestCluster) {
     }
 
     // Go returns 400 from strconv.ParseBool for a non-boolean.
-    let (status, body) = post(&api_url, "/api/v1/view/refresh?get_inactive=notabool", None).await;
+    let (status, body) = post(api_url, "/api/v1/view/refresh?get_inactive=notabool", None).await;
     assert_eq!(
         status, 400,
         "a malformed bool must be rejected: body={body}"

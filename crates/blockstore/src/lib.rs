@@ -205,7 +205,7 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
 
         // Populate cache on miss, convert Vec<u8> → Bytes
         if let Some(data) = result {
-            let bytes = Bytes::from(data);
+            let bytes = data;
             self.cache.lock().put(*cid, bytes.clone());
             return Ok(Some(bytes));
         }
