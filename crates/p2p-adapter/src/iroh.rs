@@ -9,12 +9,12 @@ use crate::transport_version_syncer::TransportVersionSyncer;
 use crate::{
     ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
     P2pDocumentInfo, P2pDocumentRequest, ReplicationFilters, ReplicatorInfo, ReplicatorPushOptions,
-    ReplicatorPushOptionsState,
+    ReplicatorPushOptionsState, TransportPeerId,
 };
 
 use p2p::iroh::{
     best_shareable_public_addr, canonical_peer_id, format_public_listen_addrs,
-    parse_public_peer_addr, IrohTransport,
+    parse_canonical_peer_id, parse_public_peer_addr, IrohTransport,
 };
 use p2p::sync::IrohSyncCoordinator;
 use p2p::topics::DefraTopic;
@@ -41,7 +41,7 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
             checker
                 .check_node_access(permission)
                 .await
-                .map_err(|error| P2PError::internal(error.to_string()))?;
+                .map_err(crate::map_nac_error)?;
         }
         Ok(())
     }
@@ -275,6 +275,20 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             result.push(peer_str);
         }
         Ok(result)
+    }
+
+    async fn resolve_peer_identity(
+        &self,
+        peer_id: &TransportPeerId,
+    ) -> P2PResult<Option<identity::Did>> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerActive)
+            .await?;
+        let peer_id = parse_canonical_peer_id(peer_id.as_str())
+            .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        self.transport
+            .get_peer_identity(&peer_id)
+            .await
+            .map_err(|error| P2PError::transport(error.to_string()))
     }
 
     async fn connect_peer(&self, addr: &str) -> P2PResult<()> {

@@ -98,6 +98,9 @@ pub enum P2PError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 
@@ -128,6 +131,53 @@ impl P2PError {
     }
 }
 
+/// Raw transport-specific peer identifier.
+///
+/// This is intentionally distinct from the address strings returned by
+/// [`P2POperations::connected_peers`]. Concrete adapters perform their own
+/// transport-specific parse and canonicalization before issuing a challenge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct TransportPeerId(String);
+
+impl TransportPeerId {
+    /// Constructs a canonical raw transport peer identifier.
+    ///
+    /// Empty values, surrounding whitespace, and address-like values containing
+    /// `/` are rejected as [`P2PError::InvalidInput`]. Concrete transport
+    /// adapters perform their stricter transport-specific parse afterward.
+    pub fn new(value: impl Into<String>) -> P2PResult<Self> {
+        let value = value.into();
+        if value.is_empty() || value.trim() != value || value.contains('/') {
+            return Err(P2PError::InvalidInput(
+                "transport peer ID must be a non-empty canonical raw ID".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated raw transport peer identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TransportPeerId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for TransportPeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Trait for P2P operations that can be accessed via HTTP.
 ///
 /// Abstracts P2P host functionality to decouple HTTP handlers from the
@@ -153,6 +203,26 @@ pub trait P2POperations: Send + Sync {
 
     /// Get connected peers.
     async fn connected_peers(&self) -> P2PResult<Vec<String>>;
+
+    /// Resolve the Defra DID authenticated by a connected transport peer.
+    ///
+    /// Implementations must actively challenge the peer and verify the
+    /// returned identity token against the local transport identity. A cached
+    /// result is acceptable only while its verified token remains fresh and
+    /// the connection remains live. `Ok(None)` means the peer explicitly has
+    /// no configured Defra identity; malformed tokens, wrong audiences,
+    /// protocol failures, and remote internal failures are errors. The input
+    /// is a canonical raw transport peer ID, never an address returned by
+    /// `connected_peers`. Requires `P2pPeerActive`; transports without an
+    /// authenticated identity exchange fail closed.
+    async fn resolve_peer_identity(
+        &self,
+        _peer_id: &TransportPeerId,
+    ) -> P2PResult<Option<identity::Did>> {
+        Err(P2PError::unsupported(
+            "authenticated peer identity resolution is unavailable",
+        ))
+    }
 
     /// Live snapshot of sync resource state (push backlog occupancy,
     /// per-peer backlog, pending DAGs, overload counters) for diagnostics
@@ -1025,4 +1095,34 @@ pub trait ViewOperations: Send + Sync {
 pub trait DumpOperations: Send + Sync {
     /// Dump all database key/value pairs as a list of human-readable strings.
     async fn print_dump(&self) -> Result<Vec<String>, String>;
+}
+
+#[cfg(test)]
+mod transport_peer_id_tests {
+    use super::{P2PError, P2POperations, TransportPeerId};
+
+    #[test]
+    fn transport_peer_id_rejects_addresses_whitespace_and_empty_values() {
+        assert!(TransportPeerId::new("").is_err());
+        assert!(TransportPeerId::new(" peer-id").is_err());
+        assert!(TransportPeerId::new("peer-id ").is_err());
+        assert!(TransportPeerId::new("/ip4/127.0.0.1/p2p/peer-id").is_err());
+        assert_eq!(TransportPeerId::new("peer-id").unwrap().as_str(), "peer-id");
+        assert!(serde_json::from_str::<TransportPeerId>(r#""""#).is_err());
+        assert!(serde_json::from_str::<TransportPeerId>(r#"" peer-id""#).is_err());
+        assert!(
+            serde_json::from_str::<TransportPeerId>(r#""/ip4/127.0.0.1/p2p/peer-id""#).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn default_identity_resolution_fails_closed() {
+        let peer = TransportPeerId::new("peer-id").unwrap();
+        assert!(matches!(
+            crate::mock::MockP2POperations::new()
+                .resolve_peer_identity(&peer)
+                .await,
+            Err(P2PError::Unsupported(_))
+        ));
+    }
 }

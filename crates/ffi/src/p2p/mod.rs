@@ -35,6 +35,7 @@ pub use version_sync::p2p_sync_collection_versions;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FfiP2PErrorCode {
     InvalidInput,
+    Unauthorized,
     NotFound,
     Unsupported,
     Transport,
@@ -65,6 +66,13 @@ impl FfiP2PError {
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: FfiP2PErrorCode::NotFound,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            code: FfiP2PErrorCode::Unauthorized,
             message: message.into(),
         }
     }
@@ -110,6 +118,7 @@ impl From<defra_http::router::P2PError> for FfiP2PError {
         match error {
             defra_http::router::P2PError::InvalidInput(message) => Self::invalid_input(message),
             defra_http::router::P2PError::NotFound(message) => Self::not_found(message),
+            defra_http::router::P2PError::Unauthorized(message) => Self::unauthorized(message),
             defra_http::router::P2PError::Unsupported(message) => Self::unsupported(message),
             defra_http::router::P2PError::Transport(message) => Self::transport(message),
             defra_http::router::P2PError::Internal(message) => Self::internal(message),
@@ -193,6 +202,12 @@ mod tests {
         ));
         assert_eq!(error.code, FfiP2PErrorCode::Transport);
         assert_eq!(error.message, "dial failed");
+
+        let error = FfiP2PError::from(defra_http::router::P2PError::Unauthorized(
+            "permission denied".to_string(),
+        ));
+        assert_eq!(error.code, FfiP2PErrorCode::Unauthorized);
+        assert_eq!(error.message, "permission denied");
     }
 
     #[test]
