@@ -203,11 +203,19 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             }
         }
 
-        // Populate cache on miss, convert Vec<u8> → Bytes
         if let Some(data) = result {
-            let bytes = data;
-            self.cache.lock().put(*cid, bytes.clone());
-            return Ok(Some(bytes));
+            // The cache gets its own copy, not the engine's.
+            //
+            // A read hands back `Bytes` over a regolith `DbSlice`, which is a
+            // refcount on whatever owns those bytes: a 16 KiB SSTable block, or
+            // a memtable arena. Holding one keeps that owner resident even
+            // after the block cache evicts it, so caching the slice itself
+            // would let a million-entry LRU pin an unbounded amount of engine
+            // memory, and a 200-byte value would hold a whole block down.
+            // regolith's own guidance is to copy when the value outlives the
+            // read, which is exactly what a cache does.
+            self.cache.lock().put(*cid, Bytes::from(data.to_vec()));
+            return Ok(Some(data));
         }
 
         Ok(None)
