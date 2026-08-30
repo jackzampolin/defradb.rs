@@ -1,4 +1,4 @@
-use integration_test::{for_each_runtime, TestCluster};
+use integration_test::{extract_doc_id, for_each_runtime, TestCluster};
 use serde_json::Value;
 
 /// Extract indexes array from index_list output.
@@ -360,4 +360,35 @@ async fn filtered_document_delete_http_contract(cluster: TestCluster) {
 for_each_runtime!(
     filtered_document_delete_http_contract,
     filtered_document_delete_http_contract
+);
+
+async fn create_on_deleted_document_errors(cluster: TestCluster) {
+    let client = cluster.client(0);
+    client
+        .schema_add("type DeletedDocUser { name: String }")
+        .expect("failed to add schema");
+
+    let created = client
+        .query(r#"mutation { add_DeletedDocUser(input: {name: "John"}) { _docID } }"#)
+        .expect("create document");
+    let doc_id = extract_doc_id(&created, "add_DeletedDocUser");
+
+    client
+        .query(&format!(
+            r#"mutation {{ delete_DeletedDocUser(docID: "{doc_id}") {{ _docID }} }}"#
+        ))
+        .expect("delete document");
+
+    let err = client
+        .query_expect_error(r#"mutation { add_DeletedDocUser(input: {name: "John"}) { _docID } }"#)
+        .expect("expected create on deleted doc to fail");
+    assert!(
+        err.contains("a document with the given ID has been deleted"),
+        "expected Go-parity deleted-document error, got: {err}"
+    );
+}
+
+for_each_runtime!(
+    create_on_deleted_document_errors,
+    create_on_deleted_document_errors
 );

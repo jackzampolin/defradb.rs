@@ -143,8 +143,7 @@ pub(crate) async fn register_created_doc(
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
         if is_deleted {
             return Err(query::error::QueryError::execution(format!(
-                "Document with ID {} has been deleted",
-                doc_id_str
+                "a document with the given ID has been deleted. DocID: {doc_id_str}"
             )));
         }
         return Err(query::error::QueryError::execution(format!(
