@@ -514,6 +514,27 @@ impl EmbeddedNode {
         self.acp_ops.add_dac_policy(identity, policy).await
     }
 
+    /// Register a DAC policy under an explicit id-salt counter (local ACP only).
+    ///
+    /// Local ACP policy ids are `sha256(policy fields || counter)` with a
+    /// per-process counter, so two nodes that register the same policy after
+    /// different histories derive different ids. A collection bound to a
+    /// policy embeds the id in its SDL, and the SDL text determines the
+    /// collection id — so every peer joining a policy-bound collection must
+    /// reproduce the creator's exact policy id. Passing the creator's counter
+    /// (typically 1, its first policy) makes the id reproducible, and storing
+    /// an existing id overwrites it, so re-registration is idempotent.
+    pub async fn add_dac_policy_with_counter(
+        &self,
+        identity: &str,
+        policy: &str,
+        counter: u64,
+    ) -> anyhow::Result<String> {
+        self.acp_ops
+            .add_dac_policy_with_counter(identity, policy, counter)
+            .await
+    }
+
     /// Grant `target` the `relation` on a document (Go: client.Store::AddDACActorRelationship).
     ///
     /// `identity` is the requesting actor's DID; it must own the document or

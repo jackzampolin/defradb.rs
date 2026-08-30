@@ -9,6 +9,12 @@ use identity::Did;
 #[async_trait::async_trait]
 pub(crate) trait AcpOps: Send + Sync {
     async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String>;
+    async fn add_dac_policy_with_counter(
+        &self,
+        identity: &str,
+        policy: &str,
+        counter: u64,
+    ) -> anyhow::Result<String>;
     async fn add_dac_actor_relationship(
         &self,
         identity: &str,
@@ -199,9 +205,13 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
     }
 }
 
-#[async_trait::async_trait]
-impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
-    async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
+impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
+    async fn add_dac_policy_inner(
+        &self,
+        identity: &str,
+        policy: &str,
+        counter_override: Option<u64>,
+    ) -> anyhow::Result<String> {
         // Go gates on node access before rejecting an empty creator
         // (`internal/db/db_dac.go:64-67`), so a NAC denial wins. An empty
         // identity is Go's `immutable.None`, not a DID to parse.
@@ -231,6 +241,9 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
 
         #[cfg(feature = "sourcehub")]
         if let Some(sourcehub_acp) = &self.policy_lookup.sourcehub {
+            if counter_override.is_some() {
+                bail!("explicit policy counters apply to local ACP only");
+            }
             return sourcehub_acp
                 .add_policy(identity, policy)
                 .await
@@ -240,7 +253,10 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
         let Some(store) = &self.policy_lookup.local else {
             bail!("operation requires ACP, but ACP not available");
         };
-        let counter = self.policy_counter.fetch_add(1, Ordering::SeqCst);
+        let counter = match counter_override {
+            Some(counter) => counter,
+            None => self.policy_counter.fetch_add(1, Ordering::SeqCst),
+        };
         let built = acp::policy_yaml::build_policy(&parsed, counter)
             .map_err(|error| anyhow!("invalid policy: {error}"))?;
         let options = acp::StorePolicyOptions::new()
@@ -252,6 +268,23 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
             .map_err(|error| anyhow!("failed to store policy: {error}"))?;
 
         Ok(built.id)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
+    async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
+        self.add_dac_policy_inner(identity, policy, None).await
+    }
+
+    async fn add_dac_policy_with_counter(
+        &self,
+        identity: &str,
+        policy: &str,
+        counter: u64,
+    ) -> anyhow::Result<String> {
+        self.add_dac_policy_inner(identity, policy, Some(counter))
+            .await
     }
 
     async fn add_dac_actor_relationship(

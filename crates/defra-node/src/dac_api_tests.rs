@@ -315,3 +315,43 @@ async fn add_dac_policy_is_gated_by_node_access_control() {
     node.shutdown().await;
     defra_core::signing::clear_identity_store();
 }
+
+/// Local ACP policy ids are salted with a per-process counter, so a peer
+/// whose node has already registered other policies cannot reproduce a
+/// creator's policy id through add_dac_policy — and a policy-bound SDL
+/// (which embeds the id) would then derive a different collection id. The
+/// explicit-counter variant makes the id reproducible and idempotent.
+#[tokio::test]
+async fn policy_id_reproducible_with_explicit_counter() {
+    let creator = EmbeddedNode::builder().build().await.unwrap();
+    let follower = EmbeddedNode::builder().build().await.unwrap();
+    let id = creator.add_dac_policy(DID_A, POLICY_YAML).await.unwrap();
+
+    let unrelated = "name: unrelated\nresources:\n  - name: users\n    relations:\n      - name: reader\n    permissions:\n      - name: read\n        expr: reader\n";
+    follower.add_dac_policy(DID_A, unrelated).await.unwrap();
+    let diverged = follower.add_dac_policy(DID_A, POLICY_YAML).await.unwrap();
+    assert_ne!(
+        diverged, id,
+        "plain re-registration diverges after unrelated history"
+    );
+
+    let reproduced = follower
+        .add_dac_policy_with_counter(DID_A, POLICY_YAML, 1)
+        .await
+        .unwrap();
+    assert_eq!(reproduced, id);
+    let again = follower
+        .add_dac_policy_with_counter(DID_A, POLICY_YAML, 1)
+        .await
+        .unwrap();
+    assert_eq!(again, id);
+
+    follower
+        .add_schema(&format!(
+            "type Users @policy(id: \"{reproduced}\", resource: \"users\") {{ name: String }}"
+        ))
+        .await
+        .unwrap();
+    creator.shutdown().await;
+    follower.shutdown().await;
+}
