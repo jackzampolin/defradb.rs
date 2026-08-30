@@ -3206,6 +3206,11 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
     let broadcaster = Broadcaster::new(transport.clone());
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
+    // A gossip origin is only a recovery provider while the transport has a
+    // route to it; this test is about conflict retries, so make it routable.
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
             sync_config: SyncConfig::default(),
@@ -3220,7 +3225,6 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
             rate_limiter: Arc::new(PeerRateLimiter::default()),
         });
 
-    let peer = random_peer_id();
     coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
         .await
