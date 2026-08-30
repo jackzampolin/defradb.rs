@@ -370,6 +370,40 @@ mod tests {
 
     // ── OPFS persistence ────────────────────────────────────────────
 
+    /// Closing is enough on its own: a caller should not have to know that
+    /// this target keeps the database in linear memory and needs an explicit
+    /// write-back. `close` persists first, so shutting down cleanly does not
+    /// silently discard everything written since the last `persist`.
+    #[wasm_bindgen_test]
+    async fn test_opfs_close_persists_without_an_explicit_call() {
+        let db_name = "test_opfs_close_persists";
+
+        {
+            let store = RegolithStore::open_opfs(db_name).await.unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"closed_key", b"closed_value").await.unwrap();
+            txn.commit().await.unwrap();
+            // Deliberately no `store.persist()` here.
+            store.close().await.unwrap();
+        }
+
+        {
+            let store = RegolithStore::open_opfs(db_name).await.unwrap();
+            let found = {
+                let txn = store.new_txn(true).await.unwrap();
+                txn.get(b"closed_key").await.unwrap()
+                // The read transaction is dropped here: `close` refuses while
+                // one is still in flight, which is the behaviour it should have.
+            };
+            assert_eq!(
+                found,
+                Some(Bytes::from_static(b"closed_value")),
+                "close must write the database back before shutting it down"
+            );
+            store.close().await.unwrap();
+        }
+    }
+
     #[wasm_bindgen_test]
     async fn test_opfs_write_persist_reopen() {
         let db_name = "test_opfs_persist_rw";
