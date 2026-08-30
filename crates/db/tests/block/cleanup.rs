@@ -6,12 +6,12 @@ use defra_core::CompositeDeltaPayload;
 use defra_core::CrdtDelta;
 use defra_core::DAGLink;
 use defra_core::LwwDeltaPayload;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::namespace::Namespace;
+use storage::RegolithStore;
 
 async fn stores() -> (NamespaceView, NamespaceView) {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = SharedTxn::new(store.new_txn(false).await.unwrap());
     (
         NamespaceView::new(txn.clone(), Namespace::Blockstore),

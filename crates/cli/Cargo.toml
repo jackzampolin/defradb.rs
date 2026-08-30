@@ -115,17 +115,13 @@ version = "0.9"
 optional = true
 
 [features]
-default = ["lark", "rocksdb", "redb"]
-release-full = ["lark", "rocksdb", "redb", "postgres", "sourcehub", "orbis"]
-lark = ["storage/lark"]
+default = []
+release-full = ["postgres", "sourcehub", "orbis"]
 postgres = ["dep:pg-compat"]
 # SourceHub/hub.rs on-chain document ACP (`--document-acp-type source-hub|hub-rs`).
 sourcehub = ["dep:sourcehub"]
 # Orbis ring threshold signing (`--signer-type orbis`).
 orbis = ["dep:orbis"]
-redb = ["storage/redb"]
-fjall = ["storage/fjall"]
-rocksdb = ["storage/rocksdb"]
 iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh", "dep:iroh-net", "dep:rand"]
 profiling = ["dep:tracing-chrome"]
 # OpenTelemetry OTLP exporter. Mirrors Go's `//go:build telemetry`: compile-time
@@ -134,6 +130,7 @@ profiling = ["dep:tracing-chrome"]
 otel = ["telemetry/otlp"]
 
 [dev-dependencies]
+toml = "0.9"
 tempfile = "3.17"
 portpicker = "0.1"
 

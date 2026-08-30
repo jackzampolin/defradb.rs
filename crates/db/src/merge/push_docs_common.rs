@@ -1,18 +1,17 @@
+use bytes::Bytes;
 use std::collections::HashSet;
 use std::str::FromStr;
 
 use cid::Cid;
 use storage::corekv::{IterOptions, Reader};
-#[cfg(not(target_arch = "wasm32"))]
-use storage::keys::headstore::HeadstoreColKey;
 use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
 pub async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>(
     block_reader: &R,
     enc_reader: &E,
     root_cid: Cid,
-    root_data: Vec<u8>,
-) -> Vec<(Cid, Vec<u8>)> {
+    root_data: Bytes,
+) -> Vec<(Cid, Bytes)> {
     let mut ordered = Vec::new();
     let mut visited = HashSet::new();
     let mut stack = vec![(root_cid, root_data, false)];
@@ -158,24 +157,10 @@ pub(crate) async fn load_collection_head_cids<R: Reader + ?Sized>(
     head_reader: &R,
     collection_short_id: u32,
 ) -> Result<Vec<Cid>, String> {
-    let prefix = HeadstoreColKey::collection_prefix(collection_short_id);
-    let prefix_len = prefix.len();
-    let mut iter = head_reader
-        .iterator(IterOptions::new().with_prefix(prefix))
+    let found = crate::block::heads::live_collection_heads(head_reader, collection_short_id)
         .await
-        .map_err(|error| format!("failed to iterate collection heads: {error}"))?;
-    let mut heads = Vec::new();
-    while let Some(pair) = iter
-        .next()
-        .await
-        .map_err(|error| format!("failed to read collection head: {error}"))?
-    {
-        let cid_text = String::from_utf8_lossy(&pair.key[prefix_len..]);
-        if let Ok(cid) = Cid::from_str(&cid_text) {
-            heads.push(cid);
-        }
-    }
-    Ok(heads)
+        .map_err(|error| format!("failed to read collection heads: {error}"))?;
+    Ok(found.live)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

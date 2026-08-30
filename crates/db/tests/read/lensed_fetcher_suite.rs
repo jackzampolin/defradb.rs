@@ -11,7 +11,7 @@ fn test_doc_to_lens_doc_conversion() {
     doc.set("name", Value::String("Alice".to_string()));
     doc.set("age", Value::Number(30.into()));
 
-    let lens_doc = LensedDocFetcher::<storage::MemoryStore>::doc_to_lens_doc(&doc).unwrap();
+    let lens_doc = LensedDocFetcher::<storage::RegolithStore>::doc_to_lens_doc(&doc).unwrap();
 
     assert_eq!(
         lens_doc.get("name").unwrap(),
@@ -22,7 +22,7 @@ fn test_doc_to_lens_doc_conversion() {
 
 #[tokio::test]
 async fn unknown_document_version_passes_through() {
-    let db = Arc::new(db::DB::new(storage::MemoryStore::new()).unwrap());
+    let db = Arc::new(db::DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap());
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
     let fetcher =

@@ -48,6 +48,33 @@ use Tier::{Behavioral, Boundary, Contract};
 
 pub const PROPERTIES: &[Property] = &[
     Property {
+        // Two writers appending to one collection without seeing each other must
+        // both land, leaving two tips for a later merge: that is what makes the
+        // head set a CRDT rather than a last-writer-wins cell. The eager-delete
+        // strategy makes them write the same key, which regolith refuses at
+        // every isolation level, so the RED configuration is the defect and the
+        // GREEN one is the derived-head fix.
+        family: "Concurrent collection-head transitions",
+        name: "INV_NoWriteConflict — concurrent appends to one collection both commit and form siblings",
+        axis: Tla,
+        anchor: "crates/db/src/block/builder/collection.rs write_collection_block; crates/storage/src/backends/regolith/transaction.rs",
+        model_ref: "MC_HeadSet_Green.cfg (GREEN) / MC_HeadSet_Red_EagerDelete.cfg (RED)",
+        tiers: &[Behavioral],
+    },
+    Property {
+        // The algebra the temporal model rests on: every key a writer writes
+        // names that writer, so two writers cannot collide (disjointness), and
+        // the eager strategy demonstrably does collide (non-vacuity). Appending
+        // a block makes it a head and un-heads the parents it named, which is
+        // what the delete used to achieve.
+        family: "Concurrent collection-head transitions",
+        name: "derived_writeSets_disjoint / eager_writeSets_overlap / applyDerived_parents_not_head",
+        axis: Lean,
+        anchor: "crates/db/src/block/heads.rs live_collection_heads; crates/db/src/block/builder/collection.rs write_collection_block",
+        model_ref: "HeadSet.Core (lake build)",
+        tiers: &[Contract],
+    },
+    Property {
         family: "B3 filtered replication",
         name: "INV_DagComplete — filtered push still converges per-document",
         axis: Tla,

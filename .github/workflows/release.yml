@@ -10,75 +10,24 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.variant }} (${{ matrix.platform }})
+    name: Build (${{ matrix.platform }})
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # full (all supported release integrations)
-          - variant: full
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features release-full"
-          - variant: full
-            target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features release-full"
-          - variant: full
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features release-full"
-          - variant: full
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features release-full"
-          # rocksdb (lark included: default runtime backend)
-          - variant: rocksdb
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features rocksdb,lark"
-          - variant: rocksdb
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features rocksdb,lark"
-          - variant: rocksdb
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,lark"
-          - variant: rocksdb
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features rocksdb,lark"
-          # lark (minimal: single default-runtime backend)
-          - variant: lark
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features lark"
-          - variant: lark
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features lark"
-          - variant: lark
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features lark"
-          - variant: lark
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features lark"
     steps:
       - uses: actions/checkout@v4
 
@@ -103,10 +52,6 @@ jobs:
           if ! command -v protoc >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
-          if [ "${{ matrix.variant }}" != "lark" ] && ! command -v clang >/dev/null 2>&1; then
-            NEEDS_APT=1
-          fi
-
           if [ "$NEEDS_APT" -eq 0 ]; then
             echo "Linux build dependencies already installed; skipping apt."
             exit 0
@@ -119,9 +64,6 @@ jobs:
 
           bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-          if [ "${{ matrix.variant }}" != "lark" ]; then
-            sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
-          fi
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -138,23 +80,21 @@ jobs:
           fi
 
       - name: Build
-        run: cargo build --release -p cli --target ${{ matrix.target }} ${{ matrix.features }}
+        run: >-
+          cargo build --release -p cli --target ${{ matrix.target }}
+          --no-default-features --features release-full
 
       - name: Package
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if [ "${{ matrix.variant }}" = "full" ]; then
-            ARCHIVE="defra_${TAG}_${{ matrix.platform }}.tar.gz"
-          else
-            ARCHIVE="defra-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
-          fi
+          ARCHIVE="defra_${TAG}_${{ matrix.platform }}.tar.gz"
           tar czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" defra
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-${{ matrix.variant }}-${{ matrix.platform }}
+          name: defra-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
 
       - name: Cleanup
@@ -212,54 +152,28 @@ jobs:
           git clean -fd
 
   build-ffi:
-    name: FFI ${{ matrix.variant }} (${{ matrix.platform }})
+    name: FFI (${{ matrix.platform }})
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # redb (default; lark included: default runtime backend)
-          - variant: redb
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
-          - variant: redb
-            target: aarch64-unknown-linux-gnu
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
+          - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
-          - variant: redb
-            target: x86_64-apple-darwin
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
+          - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
-          - variant: redb
-            target: aarch64-apple-darwin
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
+          - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,iroh"
-          # rocksdb (redb stays: ffi hard-requires it; lark: default runtime backend)
-          - variant: rocksdb
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
-          - variant: rocksdb
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
-          - variant: rocksdb
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
-          - variant: rocksdb
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime,lark,redb,rocksdb,iroh"
+            features: "--no-default-features --features native,wasmtime-runtime,iroh"
     steps:
       - uses: actions/checkout@v4
 
@@ -284,10 +198,6 @@ jobs:
           if ! command -v protoc >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
-          if [ "${{ matrix.variant }}" = "rocksdb" ] && ! command -v clang >/dev/null 2>&1; then
-            NEEDS_APT=1
-          fi
-
           if [ "$NEEDS_APT" -eq 0 ]; then
             echo "Linux build dependencies already installed; skipping apt."
             exit 0
@@ -300,9 +210,6 @@ jobs:
 
           bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-          if [ "${{ matrix.variant }}" = "rocksdb" ]; then
-            sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
-          fi
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -330,7 +237,7 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="defra-ffi-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
+          ARCHIVE="defra-ffi_${TAG}_${{ matrix.platform }}.tar.gz"
           RELEASE_DIR="target/${{ matrix.target }}/release"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             LIB="libdefra_ffi.dylib"
@@ -348,7 +255,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-ffi-${{ matrix.variant }}-${{ matrix.platform }}
+          name: defra-ffi-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
 
       - name: Cleanup
@@ -384,7 +291,7 @@ jobs:
 
       - name: Build Apple FFI
         env:
-          FEATURES: redb,iroh,native
+          FEATURES: iroh,native
           NO_DEFAULT_FEATURES: "1"
           OUT_DIR: ${{ github.workspace }}/target/apple-ffi
         run: |
@@ -431,12 +338,12 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: defra-full-linux_amd64
+          name: defra-linux_amd64
           path: docker-context/linux/amd64
 
       - uses: actions/download-artifact@v4
         with:
-          name: defra-full-linux_arm64
+          name: defra-linux_arm64
           path: docker-context/linux/arm64
 
       - name: Extract binaries
@@ -474,19 +381,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: defra-full-*
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: defra-lark-*
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: defra-rocksdb-*
+          pattern: defra-*
           merge-multiple: true
 
       - uses: actions/download-artifact@v4

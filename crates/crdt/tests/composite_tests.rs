@@ -12,11 +12,11 @@ use crdt::traits::{Context, MergeResult, ReplicatedData};
 use defra_core::types::DocId;
 use std::collections::HashMap;
 use std::f64;
-use storage::{MemoryStore, Store};
+use storage::{RegolithStore, Store};
 
 #[tokio::test]
 async fn test_composite_multiple_fields() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register fields
@@ -60,18 +60,18 @@ async fn test_composite_multiple_fields() {
     let txn = store.new_txn(true).await.unwrap();
     let name_key = b"/data/v1/doc1/name".to_vec();
     let name = txn.get(&name_key).await.unwrap().unwrap();
-    assert_eq!(name, b"Alice");
+    assert_eq!(name, &b"Alice"[..]);
 
     // Verify count field
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
+    let count = i64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
     assert_eq!(count, 5);
 }
 
 #[tokio::test]
 async fn test_composite_empty_delta_is_applied() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
     let ctx = Context {
         doc_id: DocId::new_unchecked("doc1"),
@@ -88,7 +88,7 @@ async fn test_composite_empty_delta_is_applied() {
 
 #[tokio::test]
 async fn test_composite_field_type_mismatch_lww_to_counter() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register field as LWW
@@ -124,7 +124,7 @@ async fn test_composite_field_type_mismatch_lww_to_counter() {
 
 #[tokio::test]
 async fn test_composite_field_type_mismatch_counter_to_lww() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register field as Counter
@@ -159,7 +159,7 @@ async fn test_composite_field_type_mismatch_counter_to_lww() {
 
 #[tokio::test]
 async fn test_composite_unknown_field() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Don't register any fields
@@ -190,7 +190,7 @@ async fn test_composite_unknown_field() {
 
 #[tokio::test]
 async fn test_composite_schema_evolution_type_change() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register field as LWW in schema v1
@@ -243,7 +243,7 @@ async fn test_composite_schema_evolution_type_change() {
 
 #[tokio::test]
 async fn test_composite_doc_id_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     composite.register_lww_field("name".to_string());
@@ -277,7 +277,7 @@ async fn test_composite_doc_id_mismatch() {
 
 #[tokio::test]
 async fn test_composite_float64_counter_overflow_becomes_positive_infinity() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
 
@@ -319,14 +319,14 @@ async fn test_composite_float64_counter_overflow_becomes_positive_infinity() {
     let txn = store.new_txn(true).await.unwrap();
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = f64::from_be_bytes(count_bytes.try_into().unwrap());
+    let count = f64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
     assert!(count.is_infinite());
     assert!(count.is_sign_positive());
 }
 
 #[tokio::test]
 async fn test_composite_float64_counter_nan_increment_propagates_nan() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
 
@@ -355,13 +355,13 @@ async fn test_composite_float64_counter_nan_increment_propagates_nan() {
     let txn = store.new_txn(true).await.unwrap();
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = f64::from_be_bytes(count_bytes.try_into().unwrap());
+    let count = f64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
     assert!(count.is_nan());
 }
 
 #[tokio::test]
 async fn test_composite_float64_counter_negative_zero_normalizes_to_positive_zero() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
 
@@ -390,13 +390,13 @@ async fn test_composite_float64_counter_negative_zero_normalizes_to_positive_zer
     let txn = store.new_txn(true).await.unwrap();
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = f64::from_be_bytes(count_bytes.try_into().unwrap());
+    let count = f64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
     assert_eq!(count.to_bits(), 0.0f64.to_bits());
 }
 
 #[tokio::test]
 async fn test_composite_schema_version_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     composite.register_lww_field("name".to_string());

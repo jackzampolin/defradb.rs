@@ -4,13 +4,13 @@ use lens::LensModule;
 use lens::TransformId;
 use schema::FieldKind;
 use schema::ScalarArrayKind;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::datastore::ViewCacheKey;
 use storage::keys::systemstore::LensConfigKey;
+use storage::RegolithStore;
 
-async fn agent_response_db() -> DB<MemoryStore> {
-    let store = MemoryStore::new();
+async fn agent_response_db() -> DB<RegolithStore> {
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
     let collections = query::parse_sdl(
         r#"
@@ -24,8 +24,8 @@ async fn agent_response_db() -> DB<MemoryStore> {
     db
 }
 
-async fn users_db() -> DB<MemoryStore> {
-    let db = DB::new(MemoryStore::new()).unwrap();
+async fn users_db() -> DB<RegolithStore> {
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let collections = query::parse_sdl("type Users { name: String }").unwrap();
     db.create_collections_atomic(collections).await.unwrap();
     db
@@ -126,7 +126,7 @@ async fn patch_collection_rolls_back_when_migration_is_invalid() {
 
 #[tokio::test]
 async fn patch_collection_preserves_runtime_root_id() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
 
     let collections = query::parse_sdl(
@@ -248,7 +248,7 @@ async fn patch_collection_reports_unknown_numeric_kind_like_go() {
 
 #[tokio::test]
 async fn patch_view_query_creates_new_version() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
 
     let users = query::parse_sdl("type Users { name: String }").unwrap();
@@ -293,7 +293,7 @@ async fn patch_view_query_creates_new_version() {
 
 #[tokio::test]
 async fn patch_dematerialization_requires_an_empty_view() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let users = query::parse_sdl("type Users { name: String }").unwrap();
     db.create_collections_atomic(users).await.unwrap();
 
@@ -424,7 +424,7 @@ async fn patch_collection_rejects_numeric_kind_in_direct_kind_replacement() {
 
 #[tokio::test]
 async fn patch_collection_rejects_mutating_an_existing_policy() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
     let collections = query::parse_sdl(
         r#"
@@ -503,7 +503,7 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
     const AUTHOR_V1: &str = "bafyreibvcavbxqwimz5vdxe5q5href63g3skc6ytg45hm4fqh6wsx57wmq";
     const AUTHOR_V2: &str = "bafyreihv2jdbz3sipc7tqdoycerkcjn6gehr5aleiroqlewvsmjd26unfq";
 
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
 
     let collections = query::parse_sdl(

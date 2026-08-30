@@ -3,14 +3,15 @@
 //! These tests verify block storage, merge tracking for P2P operations,
 //! and data corruption detection.
 
+use bytes::Bytes;
 use cid::Cid;
 use std::str::FromStr;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::{Store, Writer};
 use storage::keys::blockstore::{MERGE_PREFIX, OBJECT_MARKER};
 use storage::namespace::Namespace;
 use storage::stores::blockstore::{Blockstore, BlockstoreTxn};
+use storage::RegolithStore;
 
 fn test_cid() -> Cid {
     Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
@@ -22,7 +23,7 @@ fn test_cid2() -> Cid {
 
 #[tokio::test]
 async fn test_blockstore_put_get() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Blockstore::new(store, false);
 
     let cid = test_cid();
@@ -40,12 +41,12 @@ async fn test_blockstore_put_get() {
     let txn = blockstore.new_txn(true).await.unwrap();
     let txn_bs = txn.as_any().downcast_ref::<BlockstoreTxn>().unwrap();
     let retrieved = txn_bs.get_block(&cid).await.unwrap();
-    assert_eq!(retrieved, Some(data.to_vec()));
+    assert_eq!(retrieved, Some(Bytes::from(data.to_vec())));
 }
 
 #[tokio::test]
 async fn test_blockstore_merge_tracking() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Blockstore::new(store, true); // P2P mode
 
     let cid = test_cid();
@@ -83,7 +84,7 @@ async fn test_blockstore_merge_tracking() {
 
 #[tokio::test]
 async fn test_blockstore_get_unmerged() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Blockstore::new(store, true); // P2P mode
 
     let cid1 = test_cid();
@@ -125,7 +126,7 @@ async fn test_blockstore_get_unmerged() {
 
 #[tokio::test]
 async fn test_blockstore_non_p2p_no_tracking() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Blockstore::new(store, false); // Non-P2P mode
 
     let cid = test_cid();
@@ -150,7 +151,7 @@ async fn test_get_unmerged_cids_detects_corruption() {
     // get_unmerged_cids should return an error if it encounters merge keys
     // that cannot be parsed. This indicates data corruption and the caller
     // should be aware that results are incomplete.
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Blockstore::new(store.clone(), true); // P2P mode
 
     // Add a valid block first
@@ -198,7 +199,7 @@ async fn test_get_unmerged_cids_detects_corruption() {
 async fn test_delete_block_cleans_up_merge_marker() {
     // Verify delete_block removes both the block and its merge marker
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Blockstore::new(store, true); // P2P mode
 
     let cid = test_cid();

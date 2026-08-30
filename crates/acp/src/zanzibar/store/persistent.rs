@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
-#[cfg(feature = "redb")]
-use storage::RedbStore;
+use storage::RegolithStore;
 
 use identity::Did;
 use zanzibar::error::{Error, Result};
@@ -29,11 +28,10 @@ impl<S: Store> PersistentZanzibarStore<S> {
     }
 }
 
-#[cfg(feature = "redb")]
-impl PersistentZanzibarStore<RedbStore> {
+impl PersistentZanzibarStore<RegolithStore> {
     /// Open a persistent store at the given path.
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let store = RedbStore::open(path).map_err(|e| Error::Serialization(e.to_string()))?;
+        let store = RegolithStore::open(path).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(Self::from_store(Arc::new(store)))
     }
 }
@@ -153,7 +151,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
 
             let last_issued = match stored {
                 Some(bytes) => {
-                    let value: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                    let value: [u8; 8] = bytes.as_ref().try_into().map_err(|_| {
                         Error::Serialization(format!(
                             "next_policy_counter: expected 8 bytes, found {}",
                             bytes.len()

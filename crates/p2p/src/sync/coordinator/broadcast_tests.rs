@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

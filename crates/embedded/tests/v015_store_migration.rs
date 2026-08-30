@@ -16,17 +16,24 @@ const LAST_LEGACY_COMPOSITE_HEAD: &str =
     "bafyreidz66r3ozihn5gum475v5s7evufcjy4fewvywv6n24eh3x5vncwae";
 const MIGRATION_MARKER: &[u8] = b"/migration/doc-short-id/v1";
 
+/// Unpack the v0.15 store into a disposable directory.
+///
+/// A regolith store is a directory, so the fixture is a tar rather than the
+/// single file the Redb-era one was.
 fn materialize_fixture(directory: &Path) -> Result<PathBuf> {
-    let encoded: String = include_str!("fixtures/v015_populated.redb.zst.b64")
+    let encoded: String = include_str!("fixtures/v015_populated.regolith.tar.zst.b64")
         .split_whitespace()
         .collect();
     let compressed = BASE64_STANDARD
         .decode(encoded)
         .context("decode v0.15 fixture base64")?;
-    let bytes =
-        zstd::stream::decode_all(compressed.as_slice()).context("decompress v0.15 Redb fixture")?;
-    let path = directory.join("v015.redb");
-    fs::write(&path, bytes).context("write disposable v0.15 Redb fixture")?;
+    let archive =
+        zstd::stream::decode_all(compressed.as_slice()).context("decompress v0.15 fixture")?;
+    let path = directory.join("v015_store");
+    fs::create_dir(&path).context("create disposable v0.15 store directory")?;
+    tar::Archive::new(archive.as_slice())
+        .unpack(&path)
+        .context("unpack disposable v0.15 store")?;
     Ok(path)
 }
 
@@ -159,7 +166,7 @@ async fn malformed_v015_store_rolls_back_the_entire_migration() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = materialize_fixture(directory.path())?;
 
-    let store = Arc::new(storage::RedbStore::open(
+    let store = Arc::new(storage::RegolithStore::open(
         path.to_str().context("fixture path contains non-UTF-8")?,
     )?);
     {

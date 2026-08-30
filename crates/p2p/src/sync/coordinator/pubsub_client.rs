@@ -337,7 +337,7 @@ mod tests {
     use async_trait::async_trait;
     use blockstore::DefraBlockstore;
     use parking_lot::Mutex;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     use super::*;
     use crate::message::{
@@ -593,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_pubsub_services_returns_error_and_stays_unready_on_partial_subscribe() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = RawSubscribeFailTransport::new(2);
         let registered_topics = transport.registered_topics.clone();

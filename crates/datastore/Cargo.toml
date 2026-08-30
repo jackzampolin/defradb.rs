@@ -15,6 +15,7 @@ ignored = ["cid"]
 bench = false
 
 [dependencies]
+bytes.workspace = true
 # Async runtime
 async-trait.workspace = true
 async-lock.workspace = true

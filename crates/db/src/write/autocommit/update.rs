@@ -281,6 +281,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     }
 
                     let col_block_data = write_branchable_collection_block(
+                        &self.db,
                         collection_name,
                         &collection,
                         &blockstore,

@@ -1,13 +1,14 @@
 //! The index's private blob space, over both store implementations.
 
+use bytes::Bytes;
 use db::index::vector::kv_store::KvNodeStore;
 use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::Node;
 use db::index::vector::store::NodeId;
 use db::index::vector::store::VectorNodeStore;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
+use storage::RegolithStore;
 
 const COLLECTION: u32 = 41;
 const INDEX: u32 = 9;
@@ -15,7 +16,7 @@ const CENTROID: u8 = b'c';
 const CODEBOOK: u8 = b'b';
 const LIST: u8 = b'l';
 
-async fn txn(store: &MemoryStore) -> Box<dyn Txn> {
+async fn txn(store: &RegolithStore) -> Box<dyn Txn> {
     store.new_txn(false).await.unwrap()
 }
 
@@ -39,7 +40,7 @@ async fn collect<S: VectorNodeStore>(
 /// faithful stand-in for the persisted one.
 macro_rules! for_both_stores {
     ($body:ident) => {{
-        let backing = MemoryStore::new();
+        let backing = RegolithStore::in_memory().unwrap();
         let mut write = txn(&backing).await;
         let mut kv = KvNodeStore::new(&mut write, COLLECTION, INDEX, 0);
         $body(&mut kv).await;
@@ -55,7 +56,7 @@ async fn an_entry_round_trips() {
         store.put_aux(CENTROID, b"7", b"payload").await.unwrap();
         assert_eq!(
             store.get_aux(CENTROID, b"7").await.unwrap(),
-            Some(b"payload".to_vec())
+            Some(Bytes::from_static(b"payload"))
         );
         assert_eq!(store.get_aux(CENTROID, b"8").await.unwrap(), None);
     }
@@ -69,7 +70,7 @@ async fn a_later_write_replaces_an_earlier_one() {
         store.put_aux(CODEBOOK, b"0", b"second").await.unwrap();
         assert_eq!(
             store.get_aux(CODEBOOK, b"0").await.unwrap(),
-            Some(b"second".to_vec())
+            Some(Bytes::from_static(b"second"))
         );
     }
     for_both_stores!(body);
@@ -170,7 +171,7 @@ async fn the_graph_and_the_aux_space_are_independent() {
 
         assert_eq!(
             store.get_aux(CENTROID, b"1").await.unwrap(),
-            Some(b"not a node".to_vec())
+            Some(Bytes::from_static(b"not a node"))
         );
     }
     for_both_stores!(body);
@@ -180,7 +181,7 @@ async fn the_graph_and_the_aux_space_are_independent() {
 /// each other's entries.
 #[tokio::test]
 async fn epochs_are_isolated() {
-    let backing = MemoryStore::new();
+    let backing = RegolithStore::in_memory().unwrap();
 
     let mut write = txn(&backing).await;
     KvNodeStore::new(&mut write, COLLECTION, INDEX, 0)
@@ -198,7 +199,7 @@ async fn epochs_are_isolated() {
         let store = KvNodeStore::new(&mut read, COLLECTION, INDEX, epoch);
         assert_eq!(
             store.get_aux(CENTROID, b"1").await.unwrap(),
-            Some(expected.as_bytes().to_vec())
+            Some(Bytes::from(expected.as_bytes().to_vec()))
         );
         assert_eq!(collect(&store, CENTROID, b"").await.len(), 1);
     }
@@ -207,7 +208,7 @@ async fn epochs_are_isolated() {
 /// Two indexes on one collection share the keyspace too.
 #[tokio::test]
 async fn indexes_are_isolated() {
-    let backing = MemoryStore::new();
+    let backing = RegolithStore::in_memory().unwrap();
 
     let mut write = txn(&backing).await;
     KvNodeStore::new(&mut write, COLLECTION, 1, 0)
@@ -223,5 +224,8 @@ async fn indexes_are_isolated() {
     let mut read = txn(&backing).await;
     let first = KvNodeStore::new(&mut read, COLLECTION, 1, 0);
     assert_eq!(collect(&first, LIST, b"").await.len(), 1);
-    assert_eq!(first.get_aux(LIST, b"k").await.unwrap().unwrap(), b"one");
+    assert_eq!(
+        first.get_aux(LIST, b"k").await.unwrap().unwrap(),
+        &b"one"[..]
+    );
 }

@@ -678,7 +678,7 @@ mod tests {
     use cid::Cid;
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
     use std::sync::Arc;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     use crate::error::Result as P2PResult;
     use crate::message::{
@@ -965,14 +965,16 @@ mod tests {
     async fn gossip_root_only_relay_cannot_become_durable_recovery_provider() {
         use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
             SyncCoordinator::new(transport, blockstore, SyncConfig::default())
                 .await
                 .expect("coordinator");
-        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+            RegolithStore::in_memory().unwrap(),
+        )));
         coordinator
             .install_pending_dag_store(pending_store.clone())
             .await;
@@ -1001,14 +1003,16 @@ mod tests {
     async fn gossip_routable_authenticated_origin_is_the_durable_recovery_provider() {
         use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
             SyncCoordinator::new(transport, blockstore, SyncConfig::default())
                 .await
                 .expect("coordinator");
-        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+            RegolithStore::in_memory().unwrap(),
+        )));
         coordinator
             .install_pending_dag_store(pending_store.clone())
             .await;
@@ -1067,14 +1071,16 @@ mod tests {
     async fn unsigned_gossip_origin_cannot_become_a_durable_recovery_provider() {
         use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
             SyncCoordinator::new(transport, blockstore, SyncConfig::default())
                 .await
                 .expect("coordinator");
-        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+            RegolithStore::in_memory().unwrap(),
+        )));
         coordinator
             .install_pending_dag_store(pending_store.clone())
             .await;
@@ -1103,7 +1109,7 @@ mod tests {
     /// than once per tick.
     #[tokio::test(start_paused = true)]
     async fn peer_connect_expedites_and_clock_dispatches_once() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
@@ -1216,7 +1222,7 @@ mod tests {
     /// without instrumenting the manager directly.
     #[tokio::test(start_paused = true)]
     async fn sync_status_surfaces_pending_dag_retry_clock() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
@@ -1301,7 +1307,7 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_clock_does_not_claim_behind_the_fetch_task_bound() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let config = SyncConfig {

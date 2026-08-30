@@ -7,7 +7,7 @@ use query::runner::DocFetcher;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 /// The stream must be observationally identical to the eager path.
 #[tokio::test]
@@ -64,7 +64,7 @@ async fn exhaustion_closes_the_inner_stream() {
         .stream_all_with_deleted("Users", false)
         .await
         .unwrap();
-    let mut stream = AutoCommitDocStream::<MemoryStore>::without_txn(Box::new(RecordingStream {
+    let mut stream = AutoCommitDocStream::<RegolithStore>::without_txn(Box::new(RecordingStream {
         inner,
         closed: closed.clone(),
     }));
@@ -87,7 +87,7 @@ async fn explicit_close_closes_the_inner_stream() {
         .stream_all_with_deleted("Users", false)
         .await
         .unwrap();
-    let mut stream = AutoCommitDocStream::<MemoryStore>::without_txn(Box::new(RecordingStream {
+    let mut stream = AutoCommitDocStream::<RegolithStore>::without_txn(Box::new(RecordingStream {
         inner,
         closed: closed.clone(),
     }));

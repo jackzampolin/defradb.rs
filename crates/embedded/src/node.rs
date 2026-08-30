@@ -252,7 +252,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     }
 }
 
-/// Builder for memory/redb embedded nodes.
+/// Builder for memory/regolith embedded nodes.
 #[derive(Default)]
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
@@ -333,51 +333,31 @@ impl NodeBuilder {
                 }
             }
 
-            #[cfg(feature = "redb")]
-            {
-                tracing::info!(
-                    storage_backend = "redb",
-                    data_path = %path.display(),
-                    "embedded node starting"
-                );
+            tracing::info!(
+                storage_backend = "regolith",
+                data_path = %path.display(),
+                "embedded node starting"
+            );
 
-                let redb = storage::RedbStore::open(
-                    path.to_str()
-                        .ok_or_else(|| anyhow!("data path contains non-UTF-8 characters"))?,
-                )
-                .with_context(|| format!("failed to open redb store at '{}'", path.display()))?;
-
-                (EmbeddedStore::Redb(redb), Persistence::Persistent)
-            }
-
-            #[cfg(all(not(feature = "redb"), feature = "lark"))]
-            {
-                tracing::info!(
-                    storage_backend = "lark",
-                    data_path = %path.display(),
-                    "embedded node starting"
-                );
-
-                let lark = storage::LarkStore::open(&path).with_context(|| {
-                    format!("failed to open lark store at '{}'", path.display())
+            // `Options::embedded` sizes the engine for a 1-4 MiB working
+            // set, which is what an embedded node has to live inside.
+            let opts = storage::RegolithStoreOptions::embedded();
+            let store =
+                storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
+                    format!("failed to open regolith store at '{}'", path.display())
                 })?;
 
-                (EmbeddedStore::Lark(lark), Persistence::Persistent)
-            }
-
-            #[cfg(all(not(feature = "redb"), not(feature = "lark")))]
-            {
-                return Err(anyhow!(
-                    "persistent embedded storage requires the redb or lark feature"
-                ));
-            }
+            (EmbeddedStore::Regolith(store), Persistence::Persistent)
         } else {
             tracing::info!(
                 storage_backend = "memory",
                 "embedded node starting (ephemeral, no data_path)"
             );
             (
-                EmbeddedStore::Memory(storage::MemoryStore::new()),
+                EmbeddedStore::Regolith(
+                    storage::RegolithStore::in_memory()
+                        .context("failed to open in-memory regolith store")?,
+                ),
                 Persistence::Memory,
             )
         };

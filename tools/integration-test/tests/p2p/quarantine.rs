@@ -153,7 +153,7 @@ fn indexed_session_lookup(client: &integration_test::DefraClient, value: &str) -
 async fn canonical_pick_converges_and_quarantine_guard_stays_silent() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(3)
-        .with_node_store(HUB, "redb")
+        .with_node_store(HUB, "regolith")
         .with_keyring()
         .with_p2p()
         .build()
@@ -397,7 +397,7 @@ async fn canonical_pick_converges_and_quarantine_guard_stays_silent() {
     // --- Phase 2: restart durability of composed state ---
 
     // Pre-kill snapshot: everything B holds right now must survive the
-    // restart on its redb rootdir. Asserting it contains the known IDs
+    // restart on its regolith rootdir. Asserting it contains the known IDs
     // (rather than trusting an unchecked snapshot) is the fix for the
     // review finding: `doc_ids_present` used to swallow query errors into
     // an empty set, which would let the post-restart retention assertion

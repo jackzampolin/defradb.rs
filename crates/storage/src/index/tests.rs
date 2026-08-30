@@ -1,5 +1,5 @@
 use super::*;
-use crate::backends::MemoryStore;
+use crate::backends::RegolithStore;
 use crate::corekv::{IterOptions, Store};
 use crate::keys::IndexDataStoreKey;
 use document::NormalValue;
@@ -82,12 +82,15 @@ async fn get_entries(txn: &dyn crate::corekv::Reader, prefix: &[u8]) -> Vec<(Vec
     let opts = IterOptions::default().with_prefix(prefix.to_vec());
     let mut iter = txn.iterator(opts).await.unwrap();
     let items = iter.collect_all().await.unwrap();
-    items.into_iter().map(|kv| (kv.key, kv.value)).collect()
+    items
+        .into_iter()
+        .map(|kv| (kv.key, kv.value.to_vec()))
+        .collect()
 }
 
 #[tokio::test]
 async fn test_simple_index_save() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, test_index_description(false));
@@ -105,7 +108,7 @@ async fn test_simple_index_save() {
 
 #[tokio::test]
 async fn test_simple_index_allows_duplicates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, test_index_description(false));
@@ -125,7 +128,7 @@ async fn test_simple_index_allows_duplicates() {
 
 #[tokio::test]
 async fn test_simple_index_update() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, test_index_description(false));
@@ -148,7 +151,7 @@ async fn test_simple_index_update() {
 
 #[tokio::test]
 async fn test_simple_index_delete() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, test_index_description(false));
@@ -167,7 +170,7 @@ async fn test_simple_index_delete() {
 
 #[tokio::test]
 async fn test_simple_index_remove_all() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, test_index_description(false));
@@ -196,7 +199,7 @@ async fn test_simple_index_remove_all() {
 
 #[tokio::test]
 async fn test_unique_index_save() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -218,7 +221,7 @@ async fn test_unique_index_save() {
 
 #[tokio::test]
 async fn test_unique_index_rejects_duplicates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -241,7 +244,7 @@ async fn test_unique_index_rejects_duplicates() {
 
 #[tokio::test]
 async fn test_unique_index_rejects_same_doc_duplicate() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -256,7 +259,7 @@ async fn test_unique_index_rejects_same_doc_duplicate() {
 
 #[tokio::test]
 async fn test_unique_index_null_allows_duplicates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -276,7 +279,7 @@ async fn test_unique_index_null_allows_duplicates() {
 
 #[tokio::test]
 async fn test_unique_index_update() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -303,7 +306,7 @@ async fn test_unique_index_update() {
 
 #[tokio::test]
 async fn test_unique_index_delete() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -322,7 +325,7 @@ async fn test_unique_index_delete() {
 
 #[tokio::test]
 async fn test_composite_index() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, composite_index_description(false));
@@ -342,7 +345,7 @@ async fn test_composite_index() {
 
 #[tokio::test]
 async fn test_index_sort_order() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, test_index_description(false));
@@ -377,7 +380,7 @@ async fn test_index_sort_order() {
 
 #[tokio::test]
 async fn test_unique_index_update_to_existing_value_fails() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, test_index_description(true));
@@ -415,7 +418,7 @@ async fn test_unique_index_update_to_existing_value_fails() {
 
 #[tokio::test]
 async fn test_composite_index_sort_order() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, composite_index_description(false));
@@ -475,7 +478,7 @@ async fn test_composite_index_sort_order() {
 
 #[tokio::test]
 async fn concurrent_fulltext_saves_use_independent_stats_shards() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = test_fulltext_index();
     let mut first = store.new_txn(false).await.unwrap();
     let mut second = store.new_txn(false).await.unwrap();
@@ -502,7 +505,7 @@ async fn concurrent_fulltext_saves_use_independent_stats_shards() {
 
 #[tokio::test]
 async fn fulltext_stats_preserve_legacy_base_and_apply_deltas() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = test_fulltext_index();
     let legacy_key = legacy_fulltext_stats_key();
     let mut legacy_value = Vec::new();
@@ -569,7 +572,7 @@ async fn fulltext_stats_preserve_legacy_base_and_apply_deltas() {
 
 #[tokio::test]
 async fn fulltext_scoring_tracks_updates_and_deletes_with_sharded_stats() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = test_fulltext_index();
     let mut create = store.new_txn(false).await.unwrap();
     index

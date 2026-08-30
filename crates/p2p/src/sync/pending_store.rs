@@ -384,7 +384,7 @@ mod tests {
 
     use super::*;
     use multihash_codetable::{Code, MultihashDigest};
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     fn record(doc: &str) -> PersistedPendingDag {
         PersistedPendingDag {
@@ -472,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_load_remove_roundtrip() {
-        let store = PendingDagStore::new(Arc::new(MemoryStore::new()));
+        let store = PendingDagStore::new(Arc::new(RegolithStore::in_memory().unwrap()));
         let root_a = cid(b"a");
         let root_b = cid(b"b");
 
@@ -496,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_overwrites_existing_record() {
-        let store = PendingDagStore::new(Arc::new(MemoryStore::new()));
+        let store = PendingDagStore::new(Arc::new(RegolithStore::in_memory().unwrap()));
         let root = cid(b"a");
         store.put(&root, &record("doc-old")).await.unwrap();
         store.put(&root, &record("doc-new")).await.unwrap();
@@ -516,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn quarantine_load_remove_roundtrip() {
-        let store = PendingDagStore::new(Arc::new(MemoryStore::new()));
+        let store = PendingDagStore::new(Arc::new(RegolithStore::in_memory().unwrap()));
         let root = cid(b"a");
 
         assert!(!store.is_quarantined(&root).await.unwrap());
@@ -544,7 +544,7 @@ mod tests {
     /// quarantined root, or it would re-drive a merge known to fail every time.
     #[tokio::test]
     async fn quarantined_root_is_absent_from_live_load_all() {
-        let store = PendingDagStore::new(Arc::new(MemoryStore::new()));
+        let store = PendingDagStore::new(Arc::new(RegolithStore::in_memory().unwrap()));
         let live_root = cid(b"live");
         let quarantined_root = cid(b"quarantined");
 

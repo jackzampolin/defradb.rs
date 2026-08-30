@@ -209,7 +209,7 @@ pub struct DatastoreConfig {
     ///
     /// `None` means unset: each backend keeps its own default. Deliberately not
     /// defaulted to Go's 1 GiB -- that is Badger's own default, so passing it
-    /// through is a no-op in Go, whereas lark and rocksdb default their
+    /// through is a no-op in Go, whereas regolith defaults its
     /// compaction output target to 64 MiB and would be moved 16x by it.
     ///
     /// `skip` rather than `default`, because the old `u64` field carried that
@@ -251,7 +251,7 @@ fn default_max_merge_depth() -> usize {
 impl Default for DatastoreConfig {
     fn default() -> Self {
         Self {
-            store: DatastoreType::Lark,
+            store: DatastoreType::Regolith,
             path: "data".to_string(),
             max_txn_retries: 5,
             valuelogfilesize: None,

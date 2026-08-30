@@ -11,6 +11,7 @@ repository.workspace = true
 bench = false
 
 [dependencies]
+bytes.workspace = true
 web-time.workspace = true
 # Internal crates
 cursor = { path = "../cursor" }

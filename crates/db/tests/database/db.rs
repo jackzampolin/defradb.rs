@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use db::database::*;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 struct StubKms;
 
@@ -36,7 +36,7 @@ impl kms::KmsService for StubKms {
 
 #[test]
 fn db_kms_accessor_round_trips() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     assert!(db.kms().is_none());
 
     let first: Arc<dyn kms::KmsService> = Arc::new(StubKms);

@@ -1,4 +1,5 @@
 use super::*;
+use bytes::Bytes;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Counter delta from a block (standalone, with its own transaction).
@@ -475,7 +476,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
     fn decode_counter_value(
         &self,
-        bytes: Vec<u8>,
+        bytes: Bytes,
         numeric_kind: NumericKind,
         field_name: &str,
     ) -> Option<NormalValue> {

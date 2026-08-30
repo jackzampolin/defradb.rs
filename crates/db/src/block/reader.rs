@@ -70,7 +70,7 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
         Document::from_cbor(&doc_bytes).map_err(|e| format!("failed to decode document: {e}"))?;
     document.set_id(canonical_doc_id);
     if let Some(version_bytes) = version_bytes {
-        if let Ok(version) = String::from_utf8(version_bytes) {
+        if let Ok(version) = String::from_utf8(version_bytes.into()) {
             document.set_schema_version_id(version);
         }
     }

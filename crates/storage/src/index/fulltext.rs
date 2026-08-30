@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use bm25::{DefaultTokenizer, Language, Tokenizer};
+use bytes::Bytes;
 use document::NormalValue;
 use schema::{FullTextIndexDescription, IndexDescription};
 use std::collections::HashMap;
@@ -135,7 +136,7 @@ impl FullTextIndex {
         freqs
     }
 
-    fn decode_stats(value: Option<Vec<u8>>) -> (u64, u64) {
+    fn decode_stats(value: Option<Bytes>) -> (u64, u64) {
         match value {
             Some(bytes) if bytes.len() == 16 => {
                 let total_docs = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
@@ -146,7 +147,7 @@ impl FullTextIndex {
         }
     }
 
-    fn decode_stats_delta(value: Option<Vec<u8>>) -> (i128, i128) {
+    fn decode_stats_delta(value: Option<Bytes>) -> (i128, i128) {
         match value {
             Some(bytes) if bytes.len() == 32 => {
                 let docs = i128::from_be_bytes(bytes[0..16].try_into().unwrap());

@@ -11,10 +11,10 @@ use query::mutator::DocMutator;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
-pub fn new_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
-    DbTxn::<MemoryStore>::new(basic_txn)
+pub fn new_txn(basic_txn: BasicTxn) -> DbTxn<RegolithStore> {
+    DbTxn::<RegolithStore>::new(basic_txn)
 }
 
 pub fn next_test_doc_short_id() -> u64 {
@@ -22,8 +22,8 @@ pub fn next_test_doc_short_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-pub async fn fixture_with_docs(n: usize) -> Arc<DB<MemoryStore>> {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+pub async fn fixture_with_docs(n: usize) -> Arc<DB<RegolithStore>> {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     for i in 0..n {
@@ -39,9 +39,9 @@ pub async fn fixture_with_docs(n: usize) -> Arc<DB<MemoryStore>> {
     db
 }
 
-pub async fn make_test_db_with_bus() -> (Arc<DB<MemoryStore>>, Arc<dyn Bus>) {
+pub async fn make_test_db_with_bus() -> (Arc<DB<RegolithStore>>, Arc<dyn Bus>) {
     let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
-    let mut db = DB::new(MemoryStore::new()).expect("create db");
+    let mut db = DB::new(RegolithStore::in_memory().unwrap()).expect("create db");
     db.set_event_bus(Arc::clone(&bus));
     (Arc::new(db), bus)
 }

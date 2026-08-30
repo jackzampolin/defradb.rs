@@ -11,7 +11,7 @@ use std::{future::Future, pin::Pin};
 use blockstore::{Blockstore, DefraBlockstore, Error as BlockstoreError};
 use cid::Cid;
 use multihash_codetable::{Code, MultihashDigest};
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 use tokio::time::timeout;
 
 use crate::bitswap::{
@@ -45,7 +45,7 @@ use super::{
     DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
 };
 
-type TestBlockstore = DefraBlockstore<MemoryStore>;
+type TestBlockstore = DefraBlockstore<RegolithStore>;
 type TwoStreamHandler = Arc<
     dyn Fn(
             PeerId,
@@ -254,7 +254,7 @@ fn create_test_coordinator_full(
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     create_test_coordinator_with_blockstore(TestCoordinatorParams {
         sync_config,
@@ -413,7 +413,7 @@ struct SingleOwnerBlockstore {
 impl SingleOwnerBlockstore {
     fn new() -> Self {
         Self {
-            inner: DefraBlockstore::new(Arc::new(MemoryStore::new()), true),
+            inner: DefraBlockstore::new(Arc::new(RegolithStore::in_memory().unwrap()), true),
             write_calls: AtomicUsize::new(0),
             active_writes: AtomicUsize::new(0),
             max_active_writes: AtomicUsize::new(0),
@@ -503,7 +503,7 @@ impl Blockstore for SingleOwnerBlockstore {
 
 impl ConflictOnceBlockstore {
     fn new() -> Self {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         Self {
             inner: DefraBlockstore::new(store, true),
             remaining_put_conflicts: AtomicUsize::new(1),
@@ -514,7 +514,7 @@ impl ConflictOnceBlockstore {
     }
 
     fn new_put_many() -> Self {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         Self {
             inner: DefraBlockstore::new(store, true),
             remaining_put_conflicts: AtomicUsize::new(0),
@@ -1317,7 +1317,7 @@ async fn doc_sync_filters_heads_outside_replicator_collection() {
     let transport_handle = transport.clone();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let block = Block::new(
@@ -1384,7 +1384,7 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
     let transport_handle = transport.clone();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let block = Block::new(
@@ -1573,7 +1573,7 @@ async fn car_fetch_allows_relayed_receiver_via_authenticated_defra_identity() {
         identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
     let transport = NoopTransport::new();
     let transport_handle = transport.clone();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let field_block = Block::new(
@@ -1647,7 +1647,7 @@ async fn derived_selective_car_authority_is_peer_and_root_scoped() {
     let peer = random_peer_id();
     let transport = NoopTransport::new();
     let transport_handle = transport.clone();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let field_block = Block::new(
@@ -1777,7 +1777,7 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
         .await
         .unwrap();
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let previous_field = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
@@ -1958,7 +1958,7 @@ async fn collection_head_car_authority_is_rederived_from_transport_after_restart
         .await
         .unwrap();
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let child = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
@@ -2040,7 +2040,7 @@ async fn gossip_car_authority_is_rederived_from_acp_without_subscription_event_a
 
     let receiver = random_peer_id();
     let transport = NoopTransport::new();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let child = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
@@ -2157,7 +2157,7 @@ async fn doc_sync_open_mode_allows_any_peer() {
 #[tokio::test]
 async fn doc_sync_rejects_requests_above_configured_doc_id_limit() {
     let transport = NoopTransport::new();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let config = SyncConfig {
         max_doc_sync_request_doc_ids: 2,
@@ -2184,7 +2184,7 @@ async fn doc_sync_rejects_requests_above_configured_doc_id_limit() {
 #[tokio::test]
 async fn doc_sync_accepts_requests_at_exactly_configured_doc_id_limit() {
     let transport = NoopTransport::new();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let config = SyncConfig {
         max_doc_sync_request_doc_ids: 2,
@@ -2211,7 +2211,7 @@ async fn doc_sync_accepts_requests_at_exactly_configured_doc_id_limit() {
 #[tokio::test]
 async fn doc_sync_zero_config_resolves_to_default_limit() {
     let transport = NoopTransport::new();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let config = SyncConfig {
         max_doc_sync_request_doc_ids: 0,
@@ -2347,7 +2347,7 @@ async fn branchable_sync_reply_remerges_locally_complete_unmerged_head() {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let block = Block::new(
@@ -2958,7 +2958,7 @@ async fn gossip_ignores_transport_replicator_state_for_directionality() {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let peer = random_peer_id();
@@ -3007,7 +3007,7 @@ async fn delete_replicator_removes_gossip_access_without_subscription() {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let peer = random_peer_id();
@@ -3050,7 +3050,7 @@ async fn create_replicator_update_keeps_outbound_targets_from_gossip_sources() {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let peer = random_peer_id();
@@ -3836,7 +3836,7 @@ async fn doc_sync_error_reply_is_not_consumed_as_empty_success() {
 async fn doc_sync_reply_starts_independent_dag_roots_concurrently() {
     let transport = NoopTransport::new();
     let transport_handle = transport.clone();
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, SyncConfig::default())
         .await

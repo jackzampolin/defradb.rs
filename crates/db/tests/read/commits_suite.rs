@@ -3,7 +3,7 @@ mod unit_tests {
     use db::*;
     use document::NormalValue;
     use std::sync::Arc;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     fn commit(doc_id: &str, field_name: &str) -> Document {
         let mut commit = Document::new();
@@ -25,7 +25,7 @@ mod unit_tests {
 
     #[test]
     fn sort_commits_preserves_document_discovery_order() {
-        let fetcher = CommitsFetcher::<MemoryStore>::new(Arc::new(TokioMutex::new(None)));
+        let fetcher = CommitsFetcher::<RegolithStore>::new(Arc::new(TokioMutex::new(None)));
         let mut commits = vec![
             commit("z-first", "_C"),
             commit("z-first", "name"),
@@ -61,20 +61,20 @@ mod additional_tests {
     #[test]
     fn test_looks_like_cidv1() {
         use db::read::commits::CommitsFetcher;
-        use storage::backends::memory::MemoryStore;
+        use storage::RegolithStore;
 
-        assert!(CommitsFetcher::<MemoryStore>::looks_like_cidv1(
+        assert!(CommitsFetcher::<RegolithStore>::looks_like_cidv1(
             "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist"
         ));
-        assert!(CommitsFetcher::<MemoryStore>::looks_like_cidv1(
+        assert!(CommitsFetcher::<RegolithStore>::looks_like_cidv1(
             "bafyreiajq6jmyblg2b6vupjdapzkaodbt7kkwqp4fijekdvydnyxvr4y7q"
         ));
 
-        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1(
+        assert!(!CommitsFetcher::<RegolithStore>::looks_like_cidv1(
             "fhbnjfahfhfhanfhga"
         ));
-        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1("short"));
-        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1(
+        assert!(!CommitsFetcher::<RegolithStore>::looks_like_cidv1("short"));
+        assert!(!CommitsFetcher::<RegolithStore>::looks_like_cidv1(
             "randomtext"
         ));
     }
@@ -84,7 +84,7 @@ mod shared_owner_tests {
 
     use std::collections::HashSet;
     use std::sync::Arc;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     use async_lock::Mutex;
     use defra_core::{Block, CrdtDelta, LwwDeltaPayload};
@@ -95,7 +95,7 @@ mod shared_owner_tests {
 
     #[tokio::test]
     async fn shared_field_cid_fans_out_to_every_owner() {
-        let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+        let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
         let mut data = Vec::new();
         ciborium::into_writer(&NormalValue::String("shared".to_string()), &mut data).unwrap();
         let block = Block::new(

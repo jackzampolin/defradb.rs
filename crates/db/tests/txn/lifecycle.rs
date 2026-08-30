@@ -1,6 +1,7 @@
 //! Tests for DbTxn struct.
 
 use crate::common::fixture::new_txn;
+use bytes::Bytes;
 use datastore::BasicTxn;
 use db::collection::ensure_persisted_collection_short_id;
 use db::txn::DbTxn;
@@ -8,18 +9,18 @@ use db::Error;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::CollectionID;
 use storage::keys::systemstore::CollectionIDSequenceKey;
+use storage::RegolithStore;
 
-fn new_explicit_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
+fn new_explicit_txn(basic_txn: BasicTxn) -> DbTxn<RegolithStore> {
     DbTxn::new_explicit(basic_txn)
 }
 
 #[tokio::test]
 async fn test_db_txn_basic() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_txn(basic_txn);
 
@@ -30,7 +31,7 @@ async fn test_db_txn_basic() {
 
 #[tokio::test]
 async fn test_db_txn_explicit() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_explicit_txn(basic_txn);
 
@@ -39,7 +40,7 @@ async fn test_db_txn_explicit() {
 
 #[tokio::test]
 async fn test_db_txn_make_explicit() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let mut txn = new_txn(basic_txn);
 
@@ -50,7 +51,7 @@ async fn test_db_txn_make_explicit() {
 
 #[tokio::test]
 async fn test_db_txn_write_and_commit() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_txn(basic_txn);
 
@@ -68,12 +69,12 @@ async fn test_db_txn_write_and_commit() {
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
     let txn = new_txn(basic_txn);
     let value = txn.datastore().unwrap().get(b"key").await.unwrap();
-    assert_eq!(value, Some(b"value".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
 }
 
 #[tokio::test]
 async fn test_db_txn_write_and_discard() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_txn(basic_txn);
 
@@ -96,7 +97,7 @@ async fn test_db_txn_write_and_discard() {
 
 #[tokio::test]
 async fn test_db_txn_force_commit() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_explicit_txn(basic_txn);
 
@@ -114,14 +115,14 @@ async fn test_db_txn_force_commit() {
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
     let txn = new_txn(basic_txn);
     let value = txn.datastore().unwrap().get(b"key").await.unwrap();
-    assert_eq!(value, Some(b"value".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
 }
 
 // Negative tests for error conditions
 
 #[tokio::test]
 async fn test_db_txn_explicit_commit_returns_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_explicit_txn(basic_txn);
 
@@ -132,7 +133,7 @@ async fn test_db_txn_explicit_commit_returns_error() {
 
 #[tokio::test]
 async fn test_db_txn_explicit_discard_returns_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_explicit_txn(basic_txn);
 
@@ -143,7 +144,7 @@ async fn test_db_txn_explicit_discard_returns_error() {
 
 #[tokio::test]
 async fn test_db_txn_force_discard() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_explicit_txn(basic_txn);
 
@@ -166,7 +167,7 @@ async fn test_db_txn_force_discard() {
 
 #[tokio::test]
 async fn test_db_txn_accessor_returns_all_stores() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_txn(basic_txn);
 
@@ -184,7 +185,7 @@ async fn test_db_txn_accessor_returns_all_stores() {
 
 #[tokio::test]
 async fn test_db_txn_callbacks_executed_on_commit() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let mut txn = new_txn(basic_txn);
 
@@ -201,7 +202,7 @@ async fn test_db_txn_callbacks_executed_on_commit() {
 
 #[tokio::test]
 async fn test_db_txn_callbacks_executed_on_discard() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let mut txn = new_txn(basic_txn);
 
@@ -218,7 +219,7 @@ async fn test_db_txn_callbacks_executed_on_discard() {
 
 #[tokio::test]
 async fn test_db_txn_readonly_cannot_write() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, true).await.unwrap();
     let txn = new_txn(basic_txn);
 
@@ -231,7 +232,7 @@ async fn test_db_txn_readonly_cannot_write() {
 
 #[tokio::test]
 async fn test_db_txn_id_increments() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
     let basic_txn1 = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn1 = new_txn(basic_txn1);
@@ -248,10 +249,10 @@ async fn test_db_txn_id_increments() {
 
 #[tokio::test]
 async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_duplicating() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
-    let txn1 = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 1, false).await.unwrap());
-    let txn2 = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 2, false).await.unwrap());
+    let txn1 = DbTxn::<RegolithStore>::new(BasicTxn::new(&*store, 1, false).await.unwrap());
+    let txn2 = DbTxn::<RegolithStore>::new(BasicTxn::new(&*store, 2, false).await.unwrap());
 
     let short_id_1 = {
         let systemstore1 = txn1.systemstore().unwrap();
@@ -283,7 +284,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
         "expected write-write conflict, got: {err}"
     );
 
-    let retry_txn = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 3, false).await.unwrap());
+    let retry_txn = DbTxn::<RegolithStore>::new(BasicTxn::new(&*store, 3, false).await.unwrap());
     let retried_short_id = {
         let retry_systemstore = retry_txn.systemstore().unwrap();
         ensure_persisted_collection_short_id(&retry_systemstore, "collection-b")
@@ -293,7 +294,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
     assert_eq!(retried_short_id, 2);
     retry_txn.commit().await.unwrap();
 
-    let read_txn = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 4, true).await.unwrap());
+    let read_txn = DbTxn::<RegolithStore>::new(BasicTxn::new(&*store, 4, true).await.unwrap());
     let (collection_a_short_id, collection_b_short_id, sequence_value) = {
         let read_systemstore = read_txn.systemstore().unwrap();
         let sequence_key = CollectionIDSequenceKey;
@@ -309,14 +310,17 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
         (collection_a_short_id, collection_b_short_id, sequence_value)
     };
 
-    assert_eq!(collection_a_short_id, Some(b"1".to_vec()));
-    assert_eq!(collection_b_short_id, Some(b"2".to_vec()));
-    assert_eq!(sequence_value, Some(2u32.to_be_bytes().to_vec()));
+    assert_eq!(collection_a_short_id, Some(Bytes::from_static(b"1")));
+    assert_eq!(collection_b_short_id, Some(Bytes::from_static(b"2")));
+    assert_eq!(
+        sequence_value,
+        Some(Bytes::from(2u32.to_be_bytes().to_vec()))
+    );
 }
 
 #[tokio::test]
 async fn test_db_txn_multiple_writes_single_commit() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
     let txn = new_txn(basic_txn);
 
@@ -344,21 +348,21 @@ async fn test_db_txn_multiple_writes_single_commit() {
     let txn = new_txn(basic_txn);
     assert_eq!(
         txn.datastore().unwrap().get(b"key1").await.unwrap(),
-        Some(b"value1".to_vec())
+        Some(Bytes::from_static(b"value1"))
     );
     assert_eq!(
         txn.datastore().unwrap().get(b"key2").await.unwrap(),
-        Some(b"value2".to_vec())
+        Some(Bytes::from_static(b"value2"))
     );
     assert_eq!(
         txn.datastore().unwrap().get(b"key3").await.unwrap(),
-        Some(b"value3".to_vec())
+        Some(Bytes::from_static(b"value3"))
     );
 }
 
 #[tokio::test]
 async fn test_db_txn_overwrite_value() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
     // Write initial value
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
@@ -385,13 +389,13 @@ async fn test_db_txn_overwrite_value() {
     let txn = new_txn(basic_txn);
     assert_eq!(
         txn.datastore().unwrap().get(b"key").await.unwrap(),
-        Some(b"updated".to_vec())
+        Some(Bytes::from_static(b"updated"))
     );
 }
 
 #[tokio::test]
 async fn test_db_txn_delete_value() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
     // Write initial value
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();

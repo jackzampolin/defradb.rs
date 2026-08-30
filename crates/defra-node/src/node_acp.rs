@@ -89,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_document_acp_enforces_stored_custom_policy() {
-        let store = Arc::new(storage::MemoryStore::new());
+        let store = Arc::new(storage::RegolithStore::in_memory().unwrap());
         let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local)
             .await
             .unwrap();

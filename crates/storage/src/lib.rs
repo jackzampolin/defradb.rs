@@ -29,18 +29,18 @@
 ///     └── Iterator with filtering
 ///     ↓
 /// Backend Implementation
-///     ├── MemoryStore (testing, WASM)
+///     ├── RegolithStore (testing, WASM)
 ///     └── RedbStore (production, native only)
 /// ```
 ///
 /// # Quick Start
 ///
 /// ```ignore
-/// use storage::backends::MemoryStore;
+/// use storage::RegolithStore;
 /// use storage::corekv::{Store, Reader, Writer};
 ///
 /// // Create a store
-/// let store = MemoryStore::new();
+/// let store = RegolithStore::in_memory().unwrap();
 ///
 /// // Create a transaction
 /// let mut txn = store.new_txn(false).await?;
@@ -54,7 +54,7 @@
 /// // Read back
 /// let txn = store.new_txn(true).await?;
 /// let value = txn.get(b"key").await?;
-/// assert_eq!(value, Some(b"value".to_vec()));
+/// assert_eq!(value, Some(Bytes::from_static(b"value")));
 /// ```
 ///
 /// # Feature Status
@@ -96,74 +96,24 @@
 /// - API documentation
 /// - Architecture guides
 pub mod backends;
-/// Shared by backends that read snapshot ranges in bounded windows.
-///
-/// Gated on `not(wasm32)` alone: `memory` has no feature flag and is always
-/// compiled on native targets, so it already covers `redb`, `fjall`, and
-/// `rocksdb`, which are feature-gated but also `not(wasm32)`-only.
-#[cfg(not(target_arch = "wasm32"))]
-mod chunked;
 pub mod corekv;
 pub mod dyn_store;
-/// Iterator over a range that cannot contain any key.
-///
-/// Gated identically to `chunked`, whose readers are its only consumers.
-#[cfg(not(target_arch = "wasm32"))]
-mod empty_iterator;
 pub mod encoding;
 pub mod encrypted_store;
 pub mod field_value;
 pub mod keys;
-/// Merges a `chunked` snapshot read against a transaction's pending writes.
-///
-/// Gated identically to `chunked`, whose readers are its only consumers.
-#[cfg(not(target_arch = "wasm32"))]
-mod merging;
 pub mod namespace;
-/// Computes range-query bounds shared by every backend, guarding against
-/// disjoint start/end bounds.
-///
-/// Gated identically to `chunked`, whose readers are its only consumers.
-#[cfg(not(target_arch = "wasm32"))]
-mod range_bounds;
 
 pub mod index;
 pub mod stores;
 
 // See #19 for transaction wrapper module
 
-// Re-export commonly used types for convenience
-// MemoryStore is only available on native platforms (uses tokio::sync::RwLock)
-#[cfg(not(target_arch = "wasm32"))]
-pub use backends::{
-    ConflictTrackerStats, MemoryStore, TransactionConflictStats, TransactionStatsHandle,
-    TransactionStatsSnapshot,
-};
-
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use backends::{RedbStore, RedbStoreOptions};
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-pub use backends::{FjallStore, FjallStoreOptions};
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub use backends::{
-    RocksDbBlockCacheCounters, RocksDbBlockCacheStats, RocksDbBloomFilterCounters,
-    RocksDbCompactionCounters, RocksDbCumulativeStats, RocksDbFlushCounters, RocksDbHistogramStats,
-    RocksDbIoCounters, RocksDbLsmStats, RocksDbStatsHandle, RocksDbStatsSnapshot, RocksDbStore,
-    RocksDbStoreOptions, RocksDbTransactionStats, RocksDbWriteStallCounters,
-};
-
-#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
-pub use backends::{LarkStore, LarkStoreOptions};
-
-#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
-pub use backends::LevelDbStore;
-
-#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
-pub use backends::OpfsEnv;
-
+// Re-export commonly used types for convenience.
+pub use backends::{RegolithStore, RegolithStoreOptions};
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,
 };
 pub use dyn_store::DynStore;
+
+pub use backends::{TransactionStatsHandle, TransactionStatsSnapshot};
