@@ -2090,6 +2090,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-chrome",
  "tracing-subscriber",
@@ -9720,9 +9721,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "regolith"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f55657ec83ac884b56f6f3744a01891af5ffe682b3ced632435d0ab3e0db433b"
+checksum = "d78ac133f988e47a96a6d9df82e22247b382cd92f785425377ca5b33a47d68b1"
 dependencies = [
  "js-sys",
  "kovan",
