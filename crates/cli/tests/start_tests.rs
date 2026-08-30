@@ -107,16 +107,28 @@ fn test_apply_to_config_rejects_zero_transaction_cleanup_interval_when_enabled()
     );
 }
 
+/// `--store` naming a removed backend is refused rather than quietly resolving
+/// to regolith. Such a flag comes from a setup written against a version whose
+/// on-disk format this binary cannot read, so accepting it and opening the
+/// directory anyway is worse than saying no.
 #[test]
-fn test_apply_to_config_redb_store_succeeds() {
-    let mut config = Config::default();
-    config.datastore.store = DatastoreType::Memory; // Start with non-default
-    let mut args = default_start_args();
-    args.store = Some("redb".to_string());
+fn test_apply_to_config_removed_store_is_refused() {
+    for name in ["redb", "lark", "rocksdb", "badger", "fjall"] {
+        let mut config = Config::default();
+        config.datastore.store = DatastoreType::Memory;
+        let mut args = default_start_args();
+        args.store = Some(name.to_string());
 
-    let result = args.apply_to_config(&mut config);
-    assert!(result.is_ok());
-    assert_eq!(config.datastore.store, DatastoreType::Regolith);
+        assert!(
+            args.apply_to_config(&mut config).is_err(),
+            "--store {name} must be refused"
+        );
+        assert_eq!(
+            config.datastore.store,
+            DatastoreType::Memory,
+            "a refused --store must not have changed the config"
+        );
+    }
 }
 
 #[test]

@@ -143,19 +143,7 @@ impl std::str::FromStr for KeyringBackend {
 #[non_exhaustive]
 pub enum DatastoreType {
     /// A regolith database on disk.
-    ///
-    /// The names of the backends regolith replaced are accepted as
-    /// aliases, so a config file written by an older binary keeps
-    /// loading instead of failing to parse on a value that no longer
-    /// selects anything.
     #[default]
-    #[serde(
-        alias = "regolith",
-        alias = "redb",
-        alias = "badger",
-        alias = "fjall",
-        alias = "rocksdb"
-    )]
     Regolith,
     /// A regolith database kept in memory, which nothing outlives.
     Memory,
@@ -254,11 +242,7 @@ impl std::str::FromStr for DatastoreType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            // The old backend names all resolve to regolith rather than
-            // failing, so an existing config file keeps starting.
-            "regolith" | "lark" | "redb" | "badger" | "fjall" | "rocksdb" => {
-                Ok(DatastoreType::Regolith)
-            }
+            "regolith" => Ok(DatastoreType::Regolith),
             "memory" => Ok(DatastoreType::Memory),
             _ => Err(Error::InvalidDatastore(s.to_string())),
         }

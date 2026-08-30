@@ -1,6 +1,6 @@
 //! Tests for configuration type enums
 
-use cli::config::{DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput};
+use cli::config::{DatastoreConfig, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput};
 use cli::error::Error;
 
 // LogLevel tests
@@ -97,25 +97,33 @@ fn test_log_output_display_roundtrip() {
 #[test]
 fn test_datastore_type_from_str_valid() {
     assert_eq!(
-        "redb".parse::<DatastoreType>().unwrap(),
+        "regolith".parse::<DatastoreType>().unwrap(),
         DatastoreType::Regolith
     );
     assert_eq!(
         "memory".parse::<DatastoreType>().unwrap(),
         DatastoreType::Memory
     );
-    assert_eq!(
-        "rocksdb".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Regolith
-    );
-    assert_eq!(
-        "badger".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Regolith
-    );
-    assert_eq!(
-        "regolith".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Regolith
-    );
+}
+
+/// The removed backends are refused rather than silently resolving to
+/// regolith. A config naming one is a config written against a version that
+/// stored data this binary cannot read, so starting anyway and pointing the
+/// engine at that directory is the wrong kindness: it either fails deeper in
+/// or opens something the operator did not ask for.
+#[test]
+fn removed_backend_names_are_refused() {
+    for name in ["lark", "redb", "badger", "fjall", "rocksdb", "leveldb"] {
+        assert!(
+            name.parse::<DatastoreType>().is_err(),
+            "{name} must not parse as a datastore"
+        );
+        let parsed: Result<DatastoreConfig, _> = toml::from_str(&format!("store = \"{name}\"\n"));
+        assert!(
+            parsed.is_err(),
+            "config file with store = \"{name}\" must not load"
+        );
+    }
 }
 
 #[test]

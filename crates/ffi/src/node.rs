@@ -86,11 +86,8 @@ fn resolve_store(
 
     let path = unsafe { c_str_to_string(options.db_path) }
         .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
-    // The old backend names are accepted and all resolve to regolith, so an
-    // embedder that still passes one keeps working rather than failing at
-    // startup on a name that no longer selects anything.
     match backend_name.as_str() {
-        "" | "regolith" | "lark" | "redb" | "fjall" | "rocksdb" => {}
+        "" | "regolith" => {}
         other => {
             return Err(format!(
                 "unknown datastore backend '{}'. Supported: regolith, memory",

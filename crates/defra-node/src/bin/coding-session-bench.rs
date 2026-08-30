@@ -350,9 +350,7 @@ mod runner {
 
     fn parse_backend(value: String) -> Result<StorageBackend> {
         match value.as_str() {
-            // The old backend names still parse and all mean regolith, so
-            // an existing bench invocation keeps running.
-            "regolith" | "lark" | "redb" | "rocksdb" | "rocks" => Ok(StorageBackend::Regolith),
+            "regolith" => Ok(StorageBackend::Regolith),
             other => bail!("unknown backend: {other} (expected regolith)"),
         }
     }

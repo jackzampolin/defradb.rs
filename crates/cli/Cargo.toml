@@ -130,6 +130,7 @@ profiling = ["dep:tracing-chrome"]
 otel = ["telemetry/otlp"]
 
 [dev-dependencies]
+toml = "0.9"
 tempfile = "3.17"
 portpicker = "0.1"
 
