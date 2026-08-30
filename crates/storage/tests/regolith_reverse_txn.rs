@@ -127,3 +127,59 @@ async fn forward_and_backward_agree_on_the_set() {
     backward.reverse();
     assert_eq!(forward, backward);
 }
+
+/// A seek below the range's start must land on the start, on a writing
+/// transaction as well as a read-only one.
+///
+/// The read-only path clamps through `floor`; the writing path used to pass
+/// the raw seek key into the merged scan, so it returned entries outside its
+/// own bounds. The backend conformance suite missed it because every seek test
+/// there opens a read-only transaction.
+#[tokio::test]
+async fn a_seek_below_start_is_clamped_on_a_writing_transaction() {
+    let store = seeded().await;
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"bb", b"pending").await.unwrap();
+
+    let mut iter = txn
+        .iterator(IterOptions::new().with_start(b"c".to_vec()))
+        .await
+        .unwrap();
+    // "a" is below the start bound; the scan must begin at "c" regardless.
+    assert!(iter.seek(b"a").await.unwrap());
+
+    let mut seen = Vec::new();
+    while let Some(pair) = iter.next().await.unwrap() {
+        seen.push(String::from_utf8(pair.key).unwrap());
+    }
+    iter.close().await.unwrap();
+
+    assert_eq!(seen, ["c", "d", "e"], "seek below start escaped the range");
+}
+
+/// The same clamp with a pending write sitting below the start bound, so the
+/// buffered side of the merge is exercised too.
+#[tokio::test]
+async fn a_pending_write_below_start_stays_out_of_a_clamped_seek() {
+    let store = seeded().await;
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"aa", b"pending").await.unwrap();
+
+    let mut iter = txn
+        .iterator(IterOptions::new().with_start(b"c".to_vec()))
+        .await
+        .unwrap();
+    assert!(iter.seek(b"a").await.unwrap());
+
+    let mut seen = Vec::new();
+    while let Some(pair) = iter.next().await.unwrap() {
+        seen.push(String::from_utf8(pair.key).unwrap());
+    }
+    iter.close().await.unwrap();
+
+    assert_eq!(
+        seen,
+        ["c", "d", "e"],
+        "a pending write below start leaked in"
+    );
+}

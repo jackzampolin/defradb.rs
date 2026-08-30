@@ -233,10 +233,10 @@ impl RegolithIterator {
             (Some(end), Some(limit)) if end > *limit => Some(limit.clone()),
             (end, _) => end,
         });
-        let from = match &anchor {
-            Anchor::RangeStart => self.start.as_deref(),
-            Anchor::At(key) | Anchor::After(key) => Some(key.as_slice()),
-        };
+        // Same clamp the read-only arm gets from `floor`. Without it a seek
+        // below `start` on a writing transaction walks from the raw key and
+        // returns entries outside the iterator's own range.
+        let floor = self.floor(&anchor);
 
         // The borrow of the transaction opens and closes inside this
         // call, so the iterator outlives no borrow.
@@ -247,7 +247,7 @@ impl RegolithIterator {
                     end.as_deref(),
                     regolith::ScanDirection::Reverse,
                 )),
-                None => Box::new(txn.scan_stream(from, self.end.as_deref())),
+                None => Box::new(txn.scan_stream(floor.as_deref(), self.end.as_deref())),
             };
         for (key, value) in entries {
             // A resume key was returned by the previous page; a seek key was
