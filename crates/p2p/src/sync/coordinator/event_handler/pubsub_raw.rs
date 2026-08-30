@@ -26,7 +26,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // `encryption/<caller>/_response` sub-topic. Both must reach the KMS
         // transport's dispatcher (not the doc-sync/branchable pubsub_rpc path),
         // so match the base topic and its `_response` sub-topics here.
-        #[cfg(feature = "libp2p-transport")]
+        #[cfg(feature = "kms")]
         {
             let is_kms_base = topic == crate::topics::ENCRYPTION_TOPIC;
             let is_kms_response = topic

@@ -26,7 +26,9 @@
 pub mod correlator;
 pub mod envelope;
 pub mod id;
+#[cfg(feature = "libp2p-transport")]
 pub mod topic;
+#[cfg(feature = "libp2p-transport")]
 pub mod topic_handler;
 
 pub use correlator::{
@@ -34,7 +36,9 @@ pub use correlator::{
 };
 pub use envelope::InternalResponse;
 pub use id::derive_request_id;
+#[cfg(feature = "libp2p-transport")]
 pub use topic::{response_topic, strip_response_topic};
+#[cfg(feature = "libp2p-transport")]
 pub use topic_handler::{
     DeliveryOutcome, FnHandler, MessageHandler, OutgoingResponse, TopicHandler,
 };

@@ -85,13 +85,17 @@ default = []
 test-utils = ["libp2p-transport"]
 libp2p-transport = [
     "dep:iroh-bitswap",
-    "dep:kms",
+    "kms",
     "dep:libp2p",
     "dep:libp2p-stream",
     "dep:multiaddr",
     "dep:rlimit",
     "dep:sysinfo",
 ]
+# The KMS pubsub-RPC layer (crate::kms + crate::pubsub_rpc + the coordinator's
+# KMS transport slot). Transport-generic; implied by libp2p-transport and
+# opt-in for iroh-only builds.
+kms = ["dep:kms"]
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3", "dep:lru"]
 
 [dev-dependencies]

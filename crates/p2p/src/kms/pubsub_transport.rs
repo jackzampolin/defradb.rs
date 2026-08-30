@@ -32,7 +32,9 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::peer_identity::PeerIdentityResolver;
-use crate::pubsub_rpc::{response_topic, Correlator, InternalResponse, PublishOptions};
+#[cfg(feature = "libp2p-transport")]
+use crate::pubsub_rpc::response_topic;
+use crate::pubsub_rpc::{Correlator, InternalResponse, PublishOptions};
 use crate::topics::{DefraTopic, ENCRYPTION_TOPIC};
 use crate::transport::{P2PTransport, PeerId};
 
@@ -87,15 +89,17 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
         identity_resolver: Arc<dyn PeerIdentityResolver>,
     ) -> KmsResult<Arc<Self>> {
         let local_peer_id = transport.local_peer_id().to_string();
+        // Canonicalize through `libp2p::PeerId` when that dep is compiled in
+        // (Go wire-compat guarantee); otherwise -- and for peer ids that do
+        // not parse as libp2p ids, e.g. iroh hex -- join the transport-native
+        // string. For a base58 libp2p id both spellings are identical.
+        #[cfg(feature = "libp2p-transport")]
         let self_response_topic = match local_peer_id.parse::<libp2p::PeerId>() {
             Ok(pid) => response_topic(ENCRYPTION_TOPIC, &pid),
-            Err(_) => {
-                // Non-libp2p peer id (e.g. iroh): fall back to a string-joined
-                // sub-topic. Go interop only applies on libp2p, so this branch
-                // exists purely to keep the type generic over transports.
-                format!("{ENCRYPTION_TOPIC}/{local_peer_id}/_response")
-            }
+            Err(_) => format!("{ENCRYPTION_TOPIC}/{local_peer_id}/_response"),
         };
+        #[cfg(not(feature = "libp2p-transport"))]
+        let self_response_topic = format!("{ENCRYPTION_TOPIC}/{local_peer_id}/_response");
 
         transport
             .subscribe(DefraTopic::Encryption)
@@ -476,7 +480,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "libp2p-transport"))]
 mod tests {
     use super::*;
     use crate::error::{Error, Result};

@@ -64,13 +64,13 @@ pub mod error;
 mod explicit_replay;
 #[cfg(feature = "libp2p-transport")]
 pub mod host;
-#[cfg(feature = "libp2p-transport")]
+#[cfg(feature = "kms")]
 pub mod kms;
 pub mod manage_correlator;
 pub mod message;
 pub mod peer_identity;
 pub mod protocol;
-#[cfg(feature = "libp2p-transport")]
+#[cfg(any(feature = "kms", feature = "libp2p-transport"))]
 pub mod pubsub_rpc;
 pub mod replicator;
 pub mod se_correlator;
