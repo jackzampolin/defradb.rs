@@ -438,7 +438,7 @@ mod runner {
              \n\
              Options:\n\
                --profile NAME            Fixture profile: smoke, default, or large\n\
-               --backend NAME            Backend: regolith, redb, or rocksdb (default: regolith)\n\
+               --backend NAME            Backend: regolith (the only one)\n\
                --store NAME              Alias for --backend\n\
                --durability NAME         Durability: immediate or eventual (default: immediate)\n\
                --data-dir PATH            Persist the store at PATH\n\

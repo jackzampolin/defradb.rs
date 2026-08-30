@@ -252,7 +252,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     }
 }
 
-/// Builder for memory/redb embedded nodes.
+/// Builder for memory/regolith embedded nodes.
 #[derive(Default)]
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,

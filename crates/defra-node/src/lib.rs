@@ -774,8 +774,6 @@ fn timeout_secs(timeout: Duration) -> u64 {
 }
 
 /// Selects which persistent storage backend to use when `data_path` is set.
-///
-/// Defaults to `Redb` for backwards compatibility.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub enum StorageBackend {

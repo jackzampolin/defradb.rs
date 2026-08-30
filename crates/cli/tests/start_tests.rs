@@ -113,7 +113,7 @@ fn test_apply_to_config_rejects_zero_transaction_cleanup_interval_when_enabled()
 /// directory anyway is worse than saying no.
 #[test]
 fn test_apply_to_config_removed_store_is_refused() {
-    for name in ["redb", "lark", "rocksdb", "badger", "fjall"] {
+    for name in ["redb", "lark", "rocksdb", "fjall"] {
         let mut config = Config::default();
         config.datastore.store = DatastoreType::Memory;
         let mut args = default_start_args();

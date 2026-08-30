@@ -454,7 +454,7 @@ async fn test_get_size_through_namespace() {
 
 // =========================================================================
 // REDB MULTISTORE INTEGRATION TESTS
-// These tests verify the redb backend works correctly through the multistore
+// These tests verify the regolith backend works correctly through the multistore
 // =========================================================================
 mod persistent_multistore_tests {
     use bytes::Bytes;

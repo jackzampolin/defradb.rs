@@ -174,7 +174,7 @@ async fn test_unified_store_basic_operations() {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("data");
 
-    // Create main redb store (simulating the main database)
+    // Create main regolith store (simulating the main database)
     let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
 
     // Create ACP store from main database using unified mode
@@ -200,7 +200,7 @@ async fn test_unified_store_namespace_isolation() {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("data");
 
-    // Create main redb store
+    // Create main regolith store
     let redb_store = Arc::new(storage::RegolithStore::open(&db_path).unwrap());
 
     // Create ACP store from main database

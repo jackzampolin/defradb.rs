@@ -113,7 +113,7 @@ fn test_datastore_type_from_str_valid() {
 /// or opens something the operator did not ask for.
 #[test]
 fn removed_backend_names_are_refused() {
-    for name in ["lark", "redb", "badger", "fjall", "rocksdb", "leveldb"] {
+    for name in ["lark", "redb", "fjall", "rocksdb", "leveldb"] {
         assert!(
             name.parse::<DatastoreType>().is_err(),
             "{name} must not parse as a datastore"

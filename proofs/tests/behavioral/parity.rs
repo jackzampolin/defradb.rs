@@ -367,7 +367,7 @@ async fn parity_lww_tie_partition_rust_rust() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()
@@ -512,7 +512,7 @@ async fn parity_samedoc_mixed_live() {
 }
 
 /// Build a mixed Rust(node0)/Go(node1) cluster with per-node native disk stores
-/// (`with_node_store`: Rust=redb, Go=badger) so EACH node persists across a
+/// (`with_node_store`: Rust=regolith, Go=badger) so EACH node persists across a
 /// restart. This is what makes the strongest cross-impl test — mixed + restart —
 /// possible (a cluster-wide store can't satisfy both impls).
 async fn mixed_disk_cluster() -> TestCluster {
@@ -525,7 +525,7 @@ async fn mixed_disk_cluster() -> TestCluster {
         // an ephemeral peer-id, so a restart changes it and a peer's replicator
         // can't re-target the new id — not a product bug, a test-mode artifact.
         .with_keyring()
-        .with_node_store(0, "redb") // node0 = Rust
+        .with_node_store(0, "regolith") // node0 = Rust
         .with_node_store(1, "badger") // node1 = Go
         .with_rust_binary(support::release_binary())
         .build()
@@ -566,14 +566,14 @@ async fn parity_samedoc_mixed_restart_rust() {
     .await;
 }
 
-/// Control: Rust<->Rust (redb) — should reproduce the divergence.
+/// Control: Rust<->Rust (regolith) — should reproduce the divergence.
 #[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
 #[tokio::test]
 async fn parity_samedoc_rust_rust() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_rust_binary(support::release_binary())
         .build()
         .await
@@ -1133,7 +1133,7 @@ async fn parity_mixed_fields_3node_rust_rust() {
     let cluster = TestCluster::builder()
         .rust_nodes(3)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()
@@ -1649,7 +1649,7 @@ async fn parity_unique_twins_rust_rust() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()

@@ -143,7 +143,14 @@ impl std::str::FromStr for KeyringBackend {
 #[non_exhaustive]
 pub enum DatastoreType {
     /// A regolith database on disk.
+    ///
+    /// `badger` names the same thing. Not compatibility with a backend this
+    /// tree ever had, which is gone: it is what Go calls its persistent store,
+    /// and the cross-runtime tests hand one `--store` string to both binaries.
+    /// Accepting it here is cheaper than teaching the harness to pick a name
+    /// per runtime, and it is the only foreign name accepted.
     #[default]
+    #[serde(alias = "badger")]
     Regolith,
     /// A regolith database kept in memory, which nothing outlives.
     Memory,
@@ -242,7 +249,8 @@ impl std::str::FromStr for DatastoreType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "regolith" => Ok(DatastoreType::Regolith),
+            // `badger` is Go's name for the same thing; see the variant.
+            "regolith" | "badger" => Ok(DatastoreType::Regolith),
             "memory" => Ok(DatastoreType::Memory),
             _ => Err(Error::InvalidDatastore(s.to_string())),
         }
