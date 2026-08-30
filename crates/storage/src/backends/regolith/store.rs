@@ -243,6 +243,11 @@ impl Store for RegolithStore {
             return Ok(());
         }
         self.await_quiescence().await?;
+        // On OPFS the database is resident in linear memory and only `persist`
+        // writes it back, so closing without it discards everything since the
+        // last explicit call. A no-op on every other environment.
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        self.persist().await?;
         self.inner
             .db
             .db()
