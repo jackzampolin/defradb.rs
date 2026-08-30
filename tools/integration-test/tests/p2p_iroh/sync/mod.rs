@@ -2,5 +2,6 @@
 
 mod branchable;
 mod doc;
+mod overlay_origin;
 mod sync;
 mod version;

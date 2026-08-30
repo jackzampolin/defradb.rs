@@ -1,11 +1,12 @@
 # Sync Tests
 
-25 passing, 0 ignored.
+26 passing, 0 ignored.
 
 ## Files
 
 - `branchable.rs` — Branchable collection sync: multi-head, branched versions, error cases (all pass)
 - `doc.rs` — Document sync: single/multi-node, version sync, auto-subscribe behavior (all pass)
+- `overlay_origin.rs` — A -> B -> C chain: a head hint the gossip overlay delivers from a peer the transport never dialed must not leave a permanently deferred pending root on C (pass)
 - `sync.rs` — Core iroh sync: document sync, collection version sync, branchable/CID error cases (all pass)
 - `version.rs` — Collection version sync: initial, patch, view with lens transforms (all pass)
 
