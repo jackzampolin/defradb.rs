@@ -129,4 +129,10 @@ pub struct P2PConfig {
     /// links; overflow is nacked back to the pusher. Each source peer may use
     /// at most one quarter of this capacity. Default: 1000.
     pub max_pending_dags: usize,
+    /// Re-announce blocks merged from peers on their gossip topics, so
+    /// subscribers with no transport route to the author still receive them
+    /// through whichever peer merged them. Signatures are verified on merge,
+    /// so a rebroadcasting node never vouches for content it did not verify.
+    /// Default: false.
+    pub rebroadcast_on_merge: bool,
 }

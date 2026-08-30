@@ -196,6 +196,8 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
 
+    let rebroadcast_on_merge = config.rebroadcast_on_merge;
+
     // 7. SyncCoordinator (transport-generic -- same constructor, different type param)
     let sync_config = p2p::sync::SyncConfig {
         max_concurrent_dag_fetches: config.max_concurrent_dag_fetches,
@@ -258,7 +260,10 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
             coord_for_repl,
             sync_events,
             merge_handler_for_loop,
-            p2p::sync::ReplicationConfig::default(),
+            p2p::sync::ReplicationConfig {
+                rebroadcast_on_merge,
+                ..p2p::sync::ReplicationConfig::default()
+            },
             |_| {},
         )
         .await;
