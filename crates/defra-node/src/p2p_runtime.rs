@@ -272,10 +272,12 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     // inbound gossip on that topic routes to it; the KMS itself is built
     // later in lib.rs once document ACP exists and is bound in via
     // `wire_kms` -- the same late-binding dance as `wire_document_acp`.
-    let kms_transport =
-        p2p::kms::PubsubKeyTransport::new(transport.clone(), Arc::new(p2p::AnonymousResolver))
-            .await
-            .map_err(|e| anyhow::anyhow!("KMS transport creation failed: {e}"))?;
+    let kms_transport = p2p::kms::PubsubKeyTransport::new(
+        transport.clone(),
+        Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("KMS transport creation failed: {e}"))?;
     coordinator.install_kms_transport(kms_transport.clone());
     let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
     let merge_handler_for_loop = replication.merge_handler.clone();
