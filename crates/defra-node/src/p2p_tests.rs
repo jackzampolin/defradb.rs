@@ -1596,8 +1596,7 @@ async fn live_replicator_same_session_followup_turn_converges() {
     node1.shutdown().await;
 
     assert_eq!(
-        receiver,
-        expected_receiver,
+        receiver, expected_receiver,
         "same-session followup turn failed to converge without explicit sync nudge; receiver={receiver:?} expected={second_expected:?} sender_diag={sender_diag:?} receiver_diag={receiver_diag:?}",
     );
 }
@@ -1936,9 +1935,7 @@ async fn encrypted_create_replicates_plaintext_to_replicator() {
     );
 
     // The writer itself must read its own encrypted document back.
-    let local = writer
-        .execute(r#"query { SecretNote { name age } }"#)
-        .await;
+    let local = writer.execute(r#"query { SecretNote { name age } }"#).await;
     assert!(
         local.errors.is_empty(),
         "writer readback failed: {:?}",
@@ -1952,7 +1949,10 @@ async fn encrypted_create_replicates_plaintext_to_replicator() {
         .and_then(|a| a.first())
         .cloned()
         .expect("writer sees its own document");
-    assert_eq!(local_doc.get("name").and_then(|v| v.as_str()), Some("classified"));
+    assert_eq!(
+        local_doc.get("name").and_then(|v| v.as_str()),
+        Some("classified")
+    );
     assert_eq!(local_doc.get("age").and_then(|v| v.as_i64()), Some(7));
 
     // The replica must converge to the same plaintext.

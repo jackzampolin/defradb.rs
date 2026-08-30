@@ -24,7 +24,9 @@ p2p = [
     "dep:blockstore",
     "dep:defra-http",
     "dep:defra-p2p-adapter",
+    "dep:kms",
     "p2p/iroh-transport",
+    "p2p/kms",
     "defra-p2p-adapter/iroh",
     "defra-p2p-adapter/native",
 ]
@@ -85,6 +87,7 @@ defra-http = { path = "../http", optional = true }
 
 # Optional — P2P replication (IROH transport)
 p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
+kms = { path = "../kms", optional = true }
 blockstore = { path = "../blockstore", optional = true }
 defra-p2p-adapter = { workspace = true, optional = true, default-features = false, features = ["iroh"] }
 

@@ -3583,6 +3583,7 @@ dependencies = [
  "events",
  "hex",
  "identity",
+ "kms",
  "lens",
  "p2p",
  "query",

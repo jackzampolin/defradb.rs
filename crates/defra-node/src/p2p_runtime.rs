@@ -9,6 +9,7 @@ use p2p::P2PTransport;
 use crate::P2PConfig;
 
 type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>, bool)>;
+type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
 
 /// Owned Iroh/P2P background tasks and handles; shut down via [`P2PLifecycle::shutdown`].
 pub(super) struct P2PLifecycle {
@@ -155,6 +156,16 @@ pub(super) struct P2PSetupResult {
     pub(super) mutator: Arc<dyn query::DocMutator>,
     pub(super) wire_document_acp: Option<WireDocumentAcpCallback>,
     pub(super) txn_broadcaster: Arc<dyn db::event::emission::TxnBroadcaster>,
+    /// Type-erased KMS transport for this node's P2P system. lib.rs adds it
+    /// to the DefraKms transports list and installs the serve handler.
+    pub(super) kms_transport: Arc<dyn kms::KeyTransport>,
+    /// This node's transport-level peer id (stringified). lib.rs binds it
+    /// into the KMS so served ECIES replies carry the correct AAD peer id.
+    pub(super) local_peer_id: String,
+    /// Defers wiring the late-built KMS into the inner merge handler
+    /// (mirrors `wire_document_acp`): document ACP isn't available when the
+    /// P2P system is created, so the KMS is built later in lib.rs.
+    pub(super) wire_kms: Option<WireKmsCallback>,
 }
 
 pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
@@ -254,6 +265,19 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         sync_blockstore.clone(),
         coordinator.clone(),
     );
+
+    // KMS pubsub-RPC transport for cross-peer DEK fetch/serve on the
+    // `encryption` topic (mirrors the CLI iroh runtime and
+    // crates/embedded/src/node_p2p.rs). Installed on the coordinator so
+    // inbound gossip on that topic routes to it; the KMS itself is built
+    // later in lib.rs once document ACP exists and is bound in via
+    // `wire_kms` -- the same late-binding dance as `wire_document_acp`.
+    let kms_transport =
+        p2p::kms::PubsubKeyTransport::new(transport.clone(), Arc::new(p2p::AnonymousResolver))
+            .await
+            .map_err(|e| anyhow::anyhow!("KMS transport creation failed: {e}"))?;
+    coordinator.install_kms_transport(kms_transport.clone());
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
     let merge_handler_for_loop = replication.merge_handler.clone();
     let broadcast_mutator = replication.broadcast_mutator.clone();
     let merge_handler_for_acp = replication.merge_handler.clone();
@@ -370,6 +394,11 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
         txn_broadcaster: replication.txn_broadcaster,
+        kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        local_peer_id: peer_id,
+        wire_kms: Some(Box::new(move |kms| {
+            merge_handler_inner_for_kms.set_kms(kms);
+        })),
     })
 }
 
