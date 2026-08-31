@@ -49,7 +49,7 @@ fn default_start_args() -> StartArgs {
         p2p_rate_limit_rate: None,
         p2p_max_doc_sync_request_doc_ids: None,
         p2p_max_pending_dags: None,
-        p2p_rebroadcast_on_merge: false,
+        p2p_rebroadcast_on_merge: None,
         p2p_push_queue_capacity: None,
         p2p_push_queue_byte_capacity: None,
         p2p_max_active_pushes_per_peer: None,
@@ -179,7 +179,7 @@ fn test_apply_to_config_all_flags() {
         p2p_rate_limit_rate: Some(4.5),
         p2p_max_doc_sync_request_doc_ids: Some(64),
         p2p_max_pending_dags: Some(7),
-        p2p_rebroadcast_on_merge: true,
+        p2p_rebroadcast_on_merge: Some(true),
         p2p_push_queue_capacity: Some(48),
         p2p_push_queue_byte_capacity: Some(4096),
         p2p_max_active_pushes_per_peer: Some(3),
@@ -252,4 +252,22 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.embedding.url, "http://localhost:11434/v1");
     assert_eq!(config.embedding.model, "nomic-embed-text");
     assert_eq!(config.embedding.api_key_env, "CUSTOM_EMBEDDING_KEY");
+}
+
+/// An explicit `false` (flag `=false` or the environment variable) overrides
+/// a `true` from the config file; an absent flag leaves the config alone.
+#[test]
+fn test_rebroadcast_flag_precedence() {
+    let mut config = Config::default();
+    config.net.p2p_rebroadcast_on_merge = true;
+    let mut args = default_start_args();
+    args.p2p_rebroadcast_on_merge = Some(false);
+    args.apply_to_config(&mut config).unwrap();
+    assert!(!config.net.p2p_rebroadcast_on_merge);
+
+    let mut config = Config::default();
+    config.net.p2p_rebroadcast_on_merge = true;
+    let args = default_start_args();
+    args.apply_to_config(&mut config).unwrap();
+    assert!(config.net.p2p_rebroadcast_on_merge);
 }
