@@ -131,3 +131,69 @@ async fn rust_equal_index_keys_in_filter_are_ordered_by_doc_id() {
         &second_id,
     );
 }
+
+const PRODUCT_SCHEMA: &str = r#"
+    type Product @index(fields: ["category", "rank"]) {
+        category: String
+        rank: Int
+        name: String
+    }
+"#;
+
+/// Ranks repeat so one scan covers the order across full keys and the
+/// tie-break within one of them.
+const PRODUCTS: [(&str, i64); 5] = [("p0", 1), ("p1", 1), ("p2", 2), ("p3", 2), ("p4", 3)];
+
+/// A partial `_in` over a composite index prefix-scans, so one `_in` value
+/// spans several distinct full index keys. The public-DocID tie-break must
+/// stay inside one key rather than reorder across the secondary field (#1602).
+#[tokio::test]
+async fn rust_partial_in_over_composite_index_keeps_secondary_field_order() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    let node = cluster.client(0);
+    node.schema_add(PRODUCT_SCHEMA).expect("add schema");
+
+    for (name, rank) in PRODUCTS {
+        node.query(&format!(
+            r#"mutation {{ add_Product(input: {{category: "a", rank: {rank}, name: "{name}"}}) {{ _docID }} }}"#
+        ))
+        .unwrap_or_else(|e| panic!("add {name}: {e}"));
+    }
+
+    let result = node
+        .query(r#"query { Product(filter: {category: {_in: ["a"]}}) { rank _docID } }"#)
+        .expect("partial _in over the composite index");
+    let rows = result["Product"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Product array missing from {result}"));
+    assert_eq!(
+        rows.len(),
+        PRODUCTS.len(),
+        "expected every product, got {result}"
+    );
+
+    let got: Vec<(i64, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["rank"].as_i64().expect("rank"),
+                row["_docID"].as_str().expect("_docID").to_string(),
+            )
+        })
+        .collect();
+
+    let mut index_order = got.clone();
+    index_order.sort();
+    let mut doc_id_order = got.clone();
+    doc_id_order.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_ne!(
+        index_order, doc_id_order,
+        "the seed must distinguish index order from a flat DocID sort, \
+         otherwise this test cannot fail"
+    );
+    assert_eq!(
+        got, index_order,
+        "a partial `_in` must return rank order, with the DocID tie-break \
+         applied only within one rank"
+    );
+}

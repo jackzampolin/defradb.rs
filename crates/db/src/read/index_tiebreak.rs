@@ -2,22 +2,38 @@
 
 use std::collections::HashSet;
 
+use document::NormalValue;
 use query::planner::index_selection::IndexScanType;
+use storage::index::IndexEntry;
 
-/// Append one InScan value's short IDs as a group, skipping IDs already seen.
-pub(crate) fn extend_equal_key_group(
+/// Append one InScan value's entries, skipping short IDs already seen.
+///
+/// A partial key over a composite index prefix-scans, so one InScan value can
+/// span several distinct full index keys. Entries arrive in index-key order,
+/// so a run of identical `values` is one equal-key group.
+pub(crate) fn extend_equal_key_groups(
     all: &mut Vec<u64>,
     group_lens: &mut Vec<usize>,
     seen: &mut HashSet<u64>,
-    short_ids: impl IntoIterator<Item = u64>,
+    entries: impl IntoIterator<Item = IndexEntry>,
 ) {
-    let start = all.len();
-    for id in short_ids {
-        if seen.insert(id) {
-            all.push(id);
+    let mut key: Option<Vec<NormalValue>> = None;
+    let mut start = all.len();
+    for entry in entries {
+        if key.as_ref() != Some(&entry.values) {
+            if key.is_some() {
+                group_lens.push(all.len() - start);
+                start = all.len();
+            }
+            key = Some(entry.values);
+        }
+        if seen.insert(entry.doc_short_id) {
+            all.push(entry.doc_short_id);
         }
     }
-    group_lens.push(all.len() - start);
+    if key.is_some() {
+        group_lens.push(all.len() - start);
+    }
 }
 
 /// Sort one equal-key group by public DocID.
@@ -138,6 +154,48 @@ mod tests {
         let mut ids = vec!["b".into(), "a".into()];
         apply_equal_key_doc_id_tie_break(&range(), &mut ids, 0, Some(1), &[]);
         assert_eq!(ids, ["b", "a"]);
+    }
+
+    fn entry(short_id: u64, values: &[i64]) -> IndexEntry {
+        IndexEntry::new(
+            short_id,
+            values.iter().map(|v| NormalValue::Int(*v)).collect(),
+        )
+    }
+
+    #[test]
+    fn a_prefix_scan_splits_into_one_group_per_full_key() {
+        let mut all = Vec::new();
+        let mut lens = Vec::new();
+        let mut seen = HashSet::new();
+        extend_equal_key_groups(
+            &mut all,
+            &mut lens,
+            &mut seen,
+            vec![
+                entry(1, &[7, 1]),
+                entry(2, &[7, 1]),
+                entry(3, &[7, 2]),
+                entry(4, &[7, 3]),
+            ],
+        );
+        assert_eq!(all, [1, 2, 3, 4]);
+        assert_eq!(lens, [2, 1, 1]);
+    }
+
+    #[test]
+    fn a_deduped_entry_does_not_count_toward_its_group() {
+        let mut all = Vec::new();
+        let mut lens = Vec::new();
+        let mut seen = HashSet::new();
+        extend_equal_key_groups(
+            &mut all,
+            &mut lens,
+            &mut seen,
+            vec![entry(1, &[7, 1]), entry(1, &[7, 1]), entry(2, &[7, 2])],
+        );
+        assert_eq!(all, [1, 2]);
+        assert_eq!(lens, [1, 1]);
     }
 
     #[test]

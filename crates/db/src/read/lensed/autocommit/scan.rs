@@ -180,11 +180,11 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                             })?
                         };
                         raw_count += entries.len() as u64;
-                        crate::read::index_tiebreak::extend_equal_key_group(
+                        crate::read::index_tiebreak::extend_equal_key_groups(
                             &mut all_doc_short_ids,
                             &mut group_lens,
                             &mut seen_short_ids,
-                            entries.into_iter().map(|e| e.doc_short_id),
+                            entries,
                         );
                     }
                     (all_doc_short_ids, raw_count, group_lens)
