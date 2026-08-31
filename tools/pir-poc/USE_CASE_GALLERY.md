@@ -2,10 +2,13 @@
 
 This document turns the selected PIR primitives into small application-shaped
 POCs. It is a catalog, not a claim that nine separate protocols should be
-maintained. Every snapshot case uses the same `PrivateTable` and replicated
-Dense XOR implementation. The served live fixtures use the same immediate
-two-party Compact-DPF implementation; the measured production direction batches
-alerts into packed-presence Dense epochs.
+maintained. Every snapshot fixture exercises the same `PrivateTable` and
+replicated Dense XOR implementation so correctness is comparable, even where
+the production recommendation is 100 visible decoys. The served live fixtures
+use the same immediate two-party Compact-DPF implementation; the measured
+production direction batches alerts into packed-presence Dense epochs. The
+authoritative decision ladder and scale conditions are in
+[`USE_CASES.md`](USE_CASES.md).
 
 The separate [encrypted-search POC](ENCRYPTED_SEARCH.md) evaluates a faster
 one-lookup tier with explicitly weaker search/access-pattern privacy.
@@ -30,12 +33,12 @@ operations and exclude HTTP, OHTTP, queues and artifact building.
 | Product | Use case | Why it is useful | POC shape | Selected protocol |
 |---|---|---|---|---|
 | Mizu / Shieldd | Wallet note recovery | A remote wallet retrieves only encrypted actions matching its proof-bound routing prefix instead of downloading every compact block | Public generation/window + private routing prefix -> four-slot encrypted-action page | Dense XOR, 2+ replicas |
-| Mizu / Shieldd | Nullifier non-membership witness | A wallet obtains the path needed to prove its note remains unspent without identifying the nullifier to a provider | 32-byte nullifier -> fixed 2,008-byte witness | Dense XOR, 2+ replicas |
+| Mizu / Shieldd | Nullifier non-membership witness | A wallet obtains the path needed to prove its note remains unspent without identifying the nullifier to a provider | 32-byte nullifier -> fixed 2,008-byte witness | 100 plausible decoy path/index reads by default; Dense high-privacy tier |
 | Mizu / Shieldd | Routing-tag alert | A wallet learns that an encrypted action for its routing tag appeared without registering the tag in plaintext | Routing-prefix event bucket -> private match/miss hint | Packed-presence Dense per public epoch; immediate Compact DPF fallback |
 | Shinzo | Historical contract logs | A researcher or wallet hides which contract and event signature it is investigating | Public block window + private address/topic0 -> four-slot log page | Dense XOR, 2+ replicas |
-| Shinzo | Private transaction receipt | A wallet retrieves public transaction/receipt/attestation data without disclosing which transaction matters to it | Transaction hash -> fixed receipt and provenance projection | Dense XOR, 2+ replicas |
+| Shinzo | Private transaction receipt | A wallet retrieves public transaction/receipt/attestation data without disclosing which transaction matters to it | Transaction hash -> fixed receipt and provenance projection | 100 same-block decoys; one-block Dense high-privacy tier |
 | Shinzo | Contract event alert | A wallet privately follows an address or topic in the live DefraDB log stream | Canonical address/topic bucket -> private match/miss hint | Packed-presence Dense per block/epoch; immediate Compact DPF fallback |
-| DefraDB | Private document by ID | An application retrieves an authorized projection while hiding a high-entropy document ID | Collection generation + document ID -> fixed encrypted projection | Dense XOR, 2+ replicas |
+| DefraDB | Private document by ID | An application retrieves an authorized projection while hiding a high-entropy document ID | Collection generation + document ID -> fixed encrypted projection | Dense for bounded collection/generation; decoys when no bounded partition exists |
 | DefraDB | Private secondary-index page | Equality queries can return many documents without exposing the indexed value | Collection/field/value/page -> four fixed result slots | Dense XOR, 2+ replicas |
 | DefraDB | Private change feed | An application follows equality-filtered updates without sending the filter value to the provider | Collection/field/value event bucket -> private hint | Packed-presence Dense per public epoch; immediate Compact DPF fallback |
 
@@ -93,15 +96,15 @@ snapshot page only on a hit. At batch 512 on the RTX 2070 SUPER:
 
 | Epoch protocol | Aggregate server/subscriber | One-time registration | Response/epoch | Servers |
 |---|---:|---:|---:|---|
-| Packed-presence Dense | **0.156 us** | 16,384 B | 2 B | 2, 3, or more |
-| GPU DPF over 16-byte rows | 29.096 us | 4,160 B | 32 B | exactly 2 |
-| 100 visible buckets | 0.187 us | 400 B | 1,600 B | 1 visible server |
+| Packed-presence Dense | **0.182 us** | 16,384 B | 2 B | 2, 3, or more |
+| GPU DPF over 16-byte rows | 32.589 us | 4,160 B | 32 B | exactly 2 |
+| 100 visible buckets | 0.206 us | 400 B | 1,600 B | 1 visible server |
 
 The strict and visible elapsed numbers use different processors and do not
 establish an intrinsic speedup, but they remove server latency as the reason to
 prefer decoys for epoch-capable alerts. Packed Dense costs 8 KiB of retained
 selector state/subscriber/server. If selectors do not remain GPU-resident, the
-measured host-to-device transfer adds about 1.99 us/subscriber at batch 512.
+measured host-to-device transfer adds about 4.78 us/subscriber at batch 512.
 
 For genuinely immediate delivery, indexed decoys remain decisively cheaper
 than Compact DPF by revealing all 100 watched buckets, the exact event bucket,

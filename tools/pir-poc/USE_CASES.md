@@ -11,6 +11,92 @@ The primary objective is minimum aggregate server work for a complete useful
 result. Client CPU, upload, download, storage, build/update work, privacy and
 availability remain separate metrics.
 
+## Protocol decision ladder
+
+There is no honest total ordering across different privacy guarantees. For a
+given query, start at the top of the applicable column and stop as soon as its
+conditions are satisfied:
+
+| Situation | First choice | Move down only when |
+|---|---|---|
+| Candidate identities may be visible | 100 indexed decoys | Repeated-set/intersection leakage, low-entropy keys, or result traffic makes this unacceptable |
+| Cold strict snapshot, 2+ independent operators | Exact populated table + Dense XOR | Aggregate `N/8` upload/server is outside the network budget |
+| Cold strict snapshot, one operator | GPU InsPIRe | A single-server computational assumption is unacceptable or no suitable GPU exists |
+| Cold strict snapshot, compact upload | GPU-DPF with a large ready batch | Batch is small or total server work is the priority |
+| Warm repeated reads of one immutable generation | SinglePass | The client cannot first download the generation, keep state, and complete its exactly-two-server update protocol |
+| Live hint with block/epoch delay | Packed-presence Dense | The product genuinely needs an answer for every event; then use immediate Compact DPF and exactly two parties |
+
+For snapshot data layout, use compact exact ordinals/MPHF when the complete
+populated key set can safely be represented, Fuse when it cannot, and avoid the
+dominated cuckoo layout. These layouts reduce table size; they do not change
+the privacy protocol. Finite-differences PIR remains a narrow two-server
+research option: it beat CPU Dense on one 262K-row case, but charged 8x storage,
+5.36 MiB download, and has no validated large/GPU result.
+
+“High entropy” means a key is computationally hard to guess before seeing it,
+for example a random 256-bit transaction hash, document ID, or nullifier. It
+does **not** mean the table has many rows or the key has many matches. High-
+entropy one-shot keys make plausible decoys and blind tokens harder to rank;
+low-bit routing prefixes, enum values, contract addresses and popular tags are
+guessable or frequency-identifiable even when their encoded token looks random.
+
+### Benchmark anchors for the ladder
+
+The final same-card snapshot comparison uses five alternating fresh processes
+on an RTX 2070 SUPER. Every protocol read the same deterministic 120 useful
+bytes/row and every answer was reconstructed:
+
+| Physical table | Batch | Dense XOR, 2 servers | GPU-DPF, 2 servers | InsPIRe GPU, 1 server | 100 visible candidates |
+|---:|---:|---:|---:|---:|---:|
+| 1 GiB / 8.39M rows | 1 | **6.17 ms** | 437.73 ms | 32.21 ms | 0.01138 ms |
+| 1 GiB / 8.39M rows | 32 | **6.14 ms** | 13.74 ms | 18.86 ms | 0.01138 ms |
+| 4 GiB / 33.55M rows | 1 | **23.07 ms** | 1,667.08 ms | capacity-blocked | 0.01251 ms |
+| 4 GiB / 33.55M rows | 128 | **23.48 ms** | 28.84 ms | capacity-blocked | 0.01251 ms |
+
+The three strict columns are same-card GPU measurements. The visible column is
+the separate same-host CPU point-read control: its exact file-backed address
+space was mapped, but only the scheduled random pages were made resident. It
+is a warm indexed-read baseline, not a cold-storage or same-kernel result.
+
+Dense's batch-1 client generated 2 MiB of shares in 2.68 ms; GPU-DPF generated
+4,160 B in 0.084 ms; InsPIRe generated 379,904 B in 47.48 ms. Thus Dense is
+the measured server-work winner, not automatically the mobile-network winner.
+The visible path is about 542x less server time at 1 GiB and 1,844x less at
+4 GiB because it reads 100 rows rather than privately traversing the table. It
+does not provide the same privacy.
+
+On the same Ryzen CPU and 1 GiB corpus, two-replica Dense versus pinned Poulpy
+InsPIRe2 server wall time was 115.90 versus 415.10 ms at batch 1, 49.11 versus
+396.22 ms at batch 8, and 67.59 versus 224.38 ms at batch 32. CPU InsPIRe also
+used 5.71--6.87 GiB peak RSS and 30.5--36.1 s offline preprocessing. It is not
+the recommended edge-server lane.
+
+### Production recommendation for each implemented use case
+
+The table states the default, not every protocol that could technically answer
+the query. A public partition reveals only the declared collection,
+generation, block range, or epoch; the lookup key remains private.
+
+| Use case | Recommendation and exact condition | Scale evidence and stop condition | Origin/traffic layer |
+|---|---|---|---|
+| Mizu wallet note recovery | Dense XOR over one committed block for hit follow-up and up to a **32-block** public catch-up window. Use a full/padded routing-prefix domain when publishing populated low-bit prefixes would enable a dictionary attack. | At 5K TPS and two-second blocks, 1/32/256 blocks contain at most 10K/320K/2.56M events. Keep each fixed projection artifact at or below the measured 1 GiB class. A tag with 256 continuation pages costs 256 private page retrievals: about **1.58 s aggregate server work** at 6.17 ms/page on a 1 GiB table, so 256 pages is a rejection signal to shorten the window or redesign the page, not a hidden constant. | OHTTP through independent paths by default; fixed-size page classes and cadence. Tor is an optional stronger-origin mode for recovery where ~0.88 s warm latency is acceptable. |
+| Mizu active nullifier witness | Use **100 decoy path/index reads** as the production default when the future leaf index is known and requests are one-shot; retain strict Dense as the high-privacy policy tier. Every decoy coordinate must be structurally plausible and absent/present in the same public class. | The executed 1.05M-leaf strict path used 34.45 ms server and 116.7 KB down; 100 decoys used 0.141 ms and 200.8 KB. A 32B-entry active tree cannot be made cheap by one global Dense scan. Querying fixed Merkle coordinates in the one active generation keeps work proportional to path depth; repeated decoy sets must be refreshed. | OHTTP is important because a high-entropy target can still identify a wallet when paired with its IP. Tor is appropriate for high-risk proof preparation. |
+| Mizu routing-tag alert | Packed-presence Dense once per public **two-second block/epoch**. One wallet normally registers one routing bucket; total work scales with wallets/subscribers, not with “subscriptions per user.” | At batch 512 the final run used 0.182 us aggregate server/subscriber/epoch versus 0.206 us for 100 visible buckets and 32.589 us for GPU-DPF. At the 5K TPS maximum, 10K events are ORed into one bitmap before one answer/subscriber; at lower TPS only bitmap ingestion falls, not the one answer. | Poll every epoch through padded OHTTP. Tor may be opt-in; fixed cadence is more important for preventing query/spend timing linkage. |
+| Shinzo historical contract logs | Dense XOR over a public **32-block** default window, with one-block and 256-block classes and fixed continuation pages. Keep `(address, topic0)` private. | At the 5K TPS/two-second maximum those classes bound 10K/320K/2.56M events. Admit a class only if its padded artifact stays within the measured 1 GiB/6.17 ms-per-page budget. Without a public block window the history grows past 1B records and 100 decoys are the realistic server-work choice; low-entropy/popular contracts make their leakage explicit. | OHTTP default; Tor for investigations where destination/timing protection justifies latency. Pad empty and hit pages identically. |
+| Shinzo transaction receipt | **100 decoys** sampled from the same public block/receipt class. A transaction hash is high entropy and normally queried once, so the provider has less basis to rank the real member. | A global receipt table naturally grows beyond 1B rows; strict traversal grows with it while 100 point reads stay constant. If the inclusion block is already public and strict target privacy is required, a one-block Dense table is a separate high-privacy mode, not the default. | OHTTP default; do not reuse the same 99 decoys. Tor protects especially sensitive transaction interest. |
+| Shinzo contract event alert | Packed-presence Dense once per committed block. | Same 0.182 us/subscriber/epoch batch-512 evidence as Mizu. A hit triggers the bounded historical-log fetch; it does not return variable-size logs. Immediate Compact DPF is reserved for a documented sub-block SLA because work otherwise scales as events x subscribers. | Fixed-cadence padded OHTTP; optional Tor. Independent replica operators remain necessary. |
+| DefraDB document by ID | Dense XOR for an authorization-equivalent collection/generation partition at or below roughly **8.39M x 120 B (1 GiB)**. If no collection/tenant/time partition can keep it bounded, use 100 decoys for high-entropy IDs. | The strict 1 GiB anchor is 6.17 ms server and 2 MiB upload; 4 GiB is 23.07 ms and 8 MiB upload. At 1B rows neither is an edge-friendly global table. An independent encrypted sidecar may instead use blind exact search, but only when the query provider never receives plaintext/key mappings. | OHTTP default. Build separate artifacts per ACP-equivalent reader class; PIR must not become an authorization bypass. |
+| DefraDB secondary-index page | Dense XOR with exact-MPHF/Fuse pages inside a public collection plus time/generation partition. Inline the fixed encrypted projection and batch continuation pages with shared-row traversal. | At 1B documents and 0.01% fanout, the executed logical strict model used 10.40 s server and 38.9 MB down; 100 decoys used 106.79 ms but 1.943 GB down. Neither is a good unpartitioned product default. Require a partition small enough for the 1 GiB class; if that is impossible, choose decoys only when candidate leakage and 100x result amplification are acceptable. | OHTTP and fixed fanout/page classes. Tor is optional. Encryption protects projection contents/at-rest storage but does not reduce the PIR scan. |
+| DefraDB private change feed | Packed-presence Dense at a declared **one-second or one-commit epoch**, followed by a bounded private snapshot page on a hit. | Same live batch evidence. Capacity is 8 KiB selector state/subscriber/server: one million subscribers need about 8.2 GB/server. Immediate DPF is only for a real sub-epoch requirement. | Fixed-cadence padded OHTTP is the default; Tor optional. Durable cursors and replay must not introduce target-dependent response sizes. |
+
+Blind encrypted search is separate from PIR when it is used to reduce work: it
+does one keyed-token lookup but leaks equality, repeats, access, volume and
+update correlations. It is useful for high-entropy one-shot nullifier,
+transaction-hash, or document-ID lookups only when an independent trusted
+exporter holds the search/data keys and the query server never sees plaintext
+mapping. Putting encrypted rows inside Dense is still useful at rest, but it
+does not reduce Dense's scan.
+
 ## POC exit decision
 
 The protocol exploration can stop here. The POC has established that DefraDB
@@ -179,12 +265,23 @@ excluded. The mapped address spaces are exact, but only scheduled pages are
 resident, so this is not a cold-storage benchmark.
 
 The same-host CUDA control does not change a snapshot choice. On the 1 GiB
-physical table, two-server Dense used 5.54 ms aggregate/query at both batch 1
-and 128; the pinned GPU-DPF path fell from 394.83 ms at batch 1 to 6.30 ms at
-batch 128 but never overtook Dense. On the largest fitting 4 GiB table and
-batch 128, Dense was 22.02 ms versus GPU-DPF 25.64 ms. DPF saves upload
+physical table, two-server Dense used 5.79 ms aggregate/query at batch 1 and
+5.64 ms at batch 128; the pinned GPU-DPF path fell from 408.24 ms to 6.46 ms
+but never overtook Dense. On the largest fitting 4 GiB table and batch 128,
+Dense was 23.48 ms versus GPU-DPF 28.84 ms. DPF saves upload
 (4,160 B/query instead of 2--8 MiB here), not total server work. See
 `COMPARISON.md` for the full correctness, energy and batch matrix.
+
+The final five-process same-card run strengthens that conclusion without
+making it universal. At 1 GiB and batches 1/8/32, InsPIRe used
+32.21/20.03/18.86 ms server/query; Dense used 6.17/6.18/6.14 ms. InsPIRe has
+one server, computational privacy, a 379,904-byte upload and no client database
+hint; Dense has two information-theoretic replicas and a 2 MiB aggregate
+upload. Thus Dense remains the server-work choice, while InsPIRe can be the
+better cold-client/network or single-server choice. First-online p50 was 8.10
+ms Dense, 179.01 ms InsPIRe and 446.93 ms GPU-DPF. InsPIRe's 58.27--308.05 ms
+first-online range and its 9.03/5.56/3.91-second materialize/preprocess/context
+phases remain explicit cold-start costs.
 
 ### Go versus Rust Dense XOR kernel
 
@@ -365,13 +462,13 @@ subscription at a server but does not reveal its uniformly hidden bucket. The
 cost is 8 KiB of retained selector state per subscriber per server and epoch
 latency rather than immediate notification.
 
-On the RTX 2070 SUPER, a batch of 512 ready subscriptions cost 0.156 us
+On the RTX 2070 SUPER, a batch of 512 ready subscriptions cost 0.182 us
 aggregate strict kernel time/subscriber/epoch, returned 2 B across two replicas,
 and was slightly below the matched one-server 100-visible-bucket control's
-0.187 us. The visible path is still weaker privacy and returns 1,600 B. One
+0.206 us. The visible path is still weaker privacy and returns 1,600 B. One
 million strict subscriptions require about 8.2 GB selector storage/server and
-about 0.16 seconds aggregate kernel work/epoch if selector batches stay on the
-GPU. Copying them from host memory every epoch adds about 1.99 us/subscriber at
+about 0.18 seconds aggregate kernel work/epoch if selector batches stay on the
+GPU. Copying them from host memory every epoch adds about 4.78 us/subscriber at
 batch 512 and must not be omitted from capacity planning.
 
 Compact DPF remains the fallback when the application truly requires an answer
@@ -490,10 +587,10 @@ the log by itself.
 
 At 512 ready subscriptions on the local RTX 2070 SUPER:
 
-- packed-presence Dense: 0.000156 ms aggregate server kernel/subscriber/epoch,
-  about 0.000078 ms parallel latency, and 2 B response across two replicas;
-- GPU DPF over an overprovisioned 16-byte histogram: 0.029096 ms aggregate;
-- 100 visible buckets: 0.000187 ms on one CPU server and 1,600 B response;
+- packed-presence Dense: 0.000182 ms aggregate server kernel/subscriber/epoch,
+  about 0.000093 ms parallel latency, and 2 B response across two replicas;
+- GPU DPF over an overprovisioned 16-byte histogram: 0.032589 ms aggregate;
+- 100 visible buckets: 0.000206 ms on one CPU server and 1,600 B response;
 - one-time registration: 16,384 B Dense, 4,160 B GPU DPF, or 400 B visible.
 
 The strict result being slightly faster in elapsed time than visible candidates
@@ -508,7 +605,7 @@ Shinzo needs sub-block notification. Its verified baseline is 0.00080 ms
 aggregate server work/subscription/event with a 640 B two-party registration,
 but total work and fixed delivery grow with every event and subscription. At
 the 5,000 TPS maximum, a two-second epoch contains 10,000 events: for 10,000
-subscribers, the measured models are about 1.56 ms aggregate packed GPU kernel
+subscribers, the measured models are about 1.82 ms aggregate packed GPU kernel
 per epoch versus about 78 seconds aggregate immediate CPU DPF work. At lower
 TPS the exact saving falls linearly, while packed presence remains one fixed
 retrieval per epoch.

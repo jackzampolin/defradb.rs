@@ -12,6 +12,7 @@ result_dir=${DEFRA_PIR_RESULT_DIR:-"$repo_root/target/pir-research-results/gpu-d
 cuda_home=${DEFRA_CUDA_HOME:-/opt/cuda-12.4}
 cuda_arch=${DEFRA_CUDA_ARCH:-75}
 profile=${1:-quick}
+protocol_order=${DEFRA_GPU_PROTOCOL_ORDER:-dense-first}
 
 case "$profile" in
   quick|full) ;;
@@ -20,8 +21,15 @@ case "$profile" in
     exit 2
     ;;
 esac
+case "$protocol_order" in
+  dense-first|dpf-first) ;;
+  *)
+    echo "DEFRA_GPU_PROTOCOL_ORDER must be dense-first or dpf-first" >&2
+    exit 2
+    ;;
+esac
 
-for command in git g++-13 jq nvidia-smi; do
+for command in git g++-13 jq lscpu nvidia-smi; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "$command is required" >&2
     exit 1
@@ -32,6 +40,7 @@ if [[ ! -x "$cuda_home/bin/nvcc" ]]; then
   echo "Set DEFRA_CUDA_HOME to an installed toolkit." >&2
   exit 1
 fi
+total_memory_mib=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
 
 cuda_math_header="$cuda_home/targets/x86_64-linux/include/crt/math_functions.h"
 if [[ -f "$cuda_math_header" ]] &&
@@ -85,7 +94,11 @@ snapshot_cases=(
   "1048576 8"
   "1048576 32"
   "8388608 1"
+  "8388608 2"
+  "8388608 4"
   "8388608 8"
+  "8388608 16"
+  "8388608 32"
 )
 live_batches=(1 32 128 512)
 if [[ $profile == full ]]; then
@@ -93,13 +106,20 @@ if [[ $profile == full ]]; then
   minimum_ms=75
   snapshot_cases+=(
     "1048576 128"
-    "8388608 32"
     "8388608 128"
     "33554432 1"
     "33554432 8"
     "33554432 32"
     "33554432 128"
   )
+  if (( total_memory_mib >= 30000 )); then
+    snapshot_cases+=(
+      "134217728 1"
+      "134217728 8"
+      "134217728 32"
+      "134217728 128"
+    )
+  fi
   live_batches+=(1024 2048)
 fi
 
@@ -114,7 +134,8 @@ for case_spec in "${snapshot_cases[@]}"; do
     --entries "$entries" \
     --batch "$batch" \
     --samples "$samples" \
-    --min-sample-ms "$minimum_ms" | tee -a "$snapshot_jsonl"
+    --min-sample-ms "$minimum_ms" \
+    --protocol-order "$protocol_order" | tee -a "$snapshot_jsonl"
 done
 
 for batch in "${live_batches[@]}"; do
@@ -126,23 +147,47 @@ for batch in "${live_batches[@]}"; do
     --live | tee -a "$live_jsonl"
 done
 
+gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+compute_capability=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
+driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+cpu=$(lscpu | awk -F: '/^Model name:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}')
 jq -s \
   --arg profile "$profile" \
   --arg upstream_url "$upstream_url" \
   --arg upstream_commit "$upstream_commit" \
   --arg cuda "$($cuda_home/bin/nvcc --version | tail -1)" \
-  '{schema:"defradb-gpu-pir-suite-v1",profile:$profile,
+  --arg gpu "$gpu" \
+  --arg compute_capability "$compute_capability" \
+  --arg driver "$driver" \
+  --arg cpu "$cpu" \
+  --argjson total_memory_mib "$total_memory_mib" \
+  '{schema:"defradb-gpu-pir-suite-v2",profile:$profile,
     upstream:{url:$upstream_url,commit:$upstream_commit},cuda:$cuda,
+    hardware:{gpu:$gpu,compute_capability:$compute_capability,
+      driver:$driver,cpu:$cpu},
+    capacity:{device_memory_mib:$total_memory_mib,
+      completed_entries:(map(.entries)|unique),
+      capacity_blocked:(if (map(.entries)|index(134217728)) then [] else
+        [{entries:134217728,useful_row_bytes:120,
+          physical_table_bytes_per_replica:17179869184,
+          reason:"16 GiB table plus selectors/workspaces requires a 30 GiB-class GPU"}]
+        end)},
     snapshot:.}' "$snapshot_jsonl" > "$result_dir/snapshot-$profile.json"
 jq -s \
   --arg profile "$profile" \
   --arg upstream_url "$upstream_url" \
   --arg upstream_commit "$upstream_commit" \
-  '{schema:"defradb-gpu-live-suite-v1",profile:$profile,
+  --arg gpu "$gpu" \
+  --arg compute_capability "$compute_capability" \
+  --arg driver "$driver" \
+  --arg cpu "$cpu" \
+  '{schema:"defradb-gpu-live-suite-v2",profile:$profile,
     upstream:{url:$upstream_url,commit:$upstream_commit},
+    hardware:{gpu:$gpu,compute_capability:$compute_capability,
+      driver:$driver,cpu:$cpu},
     live_epoch_histogram:.}' "$live_jsonl" > "$result_dir/live-$profile.json"
 
 printf 'gpu=%s\nupstream_commit=%s\nprofile=%s\nsnapshot=%s\nlive=%s\n' \
-  "$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)" \
+  "$gpu" \
   "$upstream_commit" "$profile" \
   "$result_dir/snapshot-$profile.json" "$result_dir/live-$profile.json"

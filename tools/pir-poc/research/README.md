@@ -17,6 +17,7 @@ Available research benchmark names:
 - `active-nullifier`
 - `billion-tag`
 - `cold`
+- `cpu-snapshot` (same-host two-replica Dense and 100-candidate control at `2^23 x 120 B`)
 - `defra-events` (executable DefraDB `EventName::Update` adapter demonstration)
 - `dense-batch`
 - `end-to-end`
@@ -53,6 +54,48 @@ bash tools/pir-poc/research/run-gpu-pir-defra.sh full
 
 See [`gpu_dpf_adapter/README.md`](gpu_dpf_adapter/README.md) for its exact scope,
 hardware/toolchain requirements and interpretation limits.
+
+The Ethereum-oriented InsPIRe CUDA server now has a separate pinned same-GPU
+runner with cold-client, first-online, preprocessing and small-batch phase
+boundaries:
+
+```bash
+bash tools/pir-poc/research/run-inspire-gpu-defra.sh quick
+bash tools/pir-poc/research/run-inspire-gpu-defra.sh full
+```
+
+See [`FULL_COMPARISON.md`](FULL_COMPARISON.md) for the apples-to-apples CPU/GPU
+matrix and [`inspire_gpu_adapter/README.md`](inspire_gpu_adapter/README.md) for
+the capacity and security qualifications.
+
+The combined runner executes both pinned CUDA suites and joins only matching
+hardware/table/batch rows:
+
+```bash
+bash tools/pir-poc/research/run-full-gpu-comparison.sh quick
+bash tools/pir-poc/research/run-full-gpu-comparison.sh full
+```
+
+The final small-batch publication runner starts five fresh processes,
+alternates both suite order and Dense/DPF internal order, and aggregates
+p50/min/max without deleting prior evidence:
+
+```bash
+bash tools/pir-poc/research/run-repeated-gpu-comparison.sh
+```
+
+The same-host CPU lane compares the Rust control with pinned Poulpy InsPIRe2
+on AVX2/FMA:
+
+```bash
+cargo run -p pir-poc --release --features research -- \
+  research cpu-snapshot full
+bash tools/pir-poc/research/run-poulpy-cpu-defra.sh full
+```
+
+Poulpy's batch list defaults to `1 8 32` and can be changed with
+`DEFRA_POULPY_BATCHES`. The generated JSON distinguishes server wall from the
+sum of its measured parallel phases.
 
 `research defra-events` listens to updates from an embedded DefraDB node,
 evaluates a Compact-DPF subscription, seals a snapshot, and privately retrieves

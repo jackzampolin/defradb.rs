@@ -306,6 +306,31 @@ impl Snapshot {
         })
     }
 
+    #[cfg(feature = "research")]
+    pub(crate) fn research_benchmark_from_rows(
+        rows: Vec<u8>,
+        row_size: usize,
+        source_cutoff: &str,
+    ) -> Result<Self> {
+        if row_size <= SLOT_HEADER_SIZE + 1 || rows.len() % row_size != 0 {
+            bail!("research benchmark rows must have one fixed valid row width");
+        }
+        let bucket_count = rows.len() / row_size;
+        if !bucket_count.is_power_of_two() {
+            bail!("research benchmark row count must be a power of two");
+        }
+        let config = SnapshotConfig {
+            bucket_count,
+            bucket_capacity: 1,
+            values_per_page: 1,
+            max_key_bytes: 1,
+            max_value_bytes: row_size - SLOT_HEADER_SIZE - 1,
+            source: "research-common-corpus".into(),
+            source_cutoff: source_cutoff.into(),
+        };
+        Self::from_parts(rows, config, bucket_count, 0)
+    }
+
     fn from_parts(
         rows: Vec<u8>,
         config: SnapshotConfig,

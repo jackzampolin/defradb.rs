@@ -24,6 +24,8 @@ mod cold;
 #[cfg(feature = "research")]
 mod config;
 #[cfg(feature = "research")]
+mod cpu_snapshot;
+#[cfg(feature = "research")]
 mod dense_batch;
 #[cfg(feature = "research")]
 mod end_to_end;
@@ -60,6 +62,8 @@ mod warm_stateful;
 
 #[cfg(feature = "research")]
 pub use cold::run as run_cold;
+#[cfg(feature = "research")]
+pub use cpu_snapshot::run as run_cpu_snapshot;
 #[cfg(feature = "research")]
 pub use dense_batch::run as run_dense_batch;
 #[cfg(feature = "research")]

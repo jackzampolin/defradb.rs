@@ -23,6 +23,8 @@ their source is not vendored into DefraDB.
 | ChalametPIR | `448698f7c314fd4eb36e889f6a6ec7fba64db03d` | Common Fuse/matrix suite passes 34/34 after the dependency-resolution qualification below. Client/common crates compile for `wasm32-wasip1`. |
 | MPC4J Practical Keyword PIR | `178da1b07e8aa011bce9ffbd921e8a1d24477f0b` (`v1.1.3-beta`, Zenodo 14722434) | Exact tag builds. PGM index tests pass 4/4; requested `SIMPLE_NAIVE`, `SIMPLE_BIN`, `PGM_INDEX`, and `CHALAMET` correctness cases pass individual and batch paths. The upstream parameter class is deliberately ignored. Common-corpus performance is not yet admitted. |
 | InsPIRe | Zenodo `17361471`, `artifact-final.zip` MD5 `bfa9edb2d8403f0dc20830fb40608b78` | The official archive (not the third-party `inspire-rs` crate) requires AVX-512. Its checked corpus adapter is ready, but correctness/performance is blocked on this AVX2 host. |
+| Poulpy InsPIRe2 CPU | `533081a74301c8ba6ddd5e1dfc0c9daa6e3e75ef` | The AVX2/FMA backend reconstructs the common `2^23 x 120 B` corpus at batches 1/8/32. It is slower than same-host Dense wall time, uses 5.71--6.87 GiB peak RSS, and spends 30.5--36.1 s offline. |
+| InsPIRe GPU | `c14d1d84a425cdaa9f86ed09465b09c9c9802f13` | The Ethereum-oriented CUDA server and CPU client build on the RTX 2070 SUPER, pass 9/9 upstream tests, and complete five alternating 1 GiB repetitions. The 4 GiB state is capacity-blocked on the 8 GiB card. This is distinct from the official CPU artifact. |
 | GPU-DPF | `ce23a06af884ee54300b5bc5fd5350e445f10b0b` | Pinned ChaCha12 DPF expansion/fused reduction compiles with CUDA 12.4 and passes every 120-byte snapshot and packed live reconstruction through the 4 GiB local table limit. Archived upstream POC; not production-vetted. |
 
 The current exporter records both BLAKE3 and SHA-256, and each external runner
@@ -71,6 +73,26 @@ bash tools/pir-poc/research/run-inspire-defra.sh
 
 On this runner it verifies the permanent archive and checked input patch, then
 writes `BLOCKED.txt` and exits before building because AVX-512F is absent.
+
+InsPIRe same-GPU server comparison:
+
+```bash
+bash tools/pir-poc/research/run-inspire-gpu-defra.sh full
+```
+
+This runner targets the local CUDA compute capability, preserves the upstream
+cryptographic implementation, checks the upstream tests, and reports client
+cold start, first online answer, preprocessing and batches 1 through 32.
+
+Poulpy InsPIRe2 same-CPU comparison:
+
+```bash
+bash tools/pir-poc/research/run-poulpy-cpu-defra.sh full
+```
+
+The runner pins Rust nightly `2026-05-14`, verifies AVX2/FMA, patches only a
+new upstream example, uses 128 physical bytes with the last eight bytes zero,
+and emits one JSON file for each requested batch.
 
 GPU-DPF plus same-GPU Dense and packed-presence controls:
 

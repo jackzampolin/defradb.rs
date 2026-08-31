@@ -307,6 +307,7 @@ async fn research(args: &[String]) -> Result<()> {
         Some("active-nullifier") => print_json(&pir_poc::benchmark::run_active_nullifier(profile)?),
         Some("billion-tag") => print_json(&pir_poc::benchmark::run_billion_tag(profile)?),
         Some("cold") => print_json(&pir_poc::benchmark::run_cold(profile)?),
+        Some("cpu-snapshot") => print_json(&pir_poc::benchmark::run_cpu_snapshot(profile)?),
         Some("dense-batch") => print_json(&pir_poc::benchmark::run_dense_batch(profile)?),
         Some("defra-events") => print_json(&pir_poc::subscription::demo().await?),
         Some("end-to-end") => print_json(&pir_poc::benchmark::run_end_to_end(profile)?),

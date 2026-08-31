@@ -47,9 +47,17 @@ GPU kernel time, device-to-host response copy, wire bytes, and approximate NVML
 power. HTTP, TLS, queueing, persistent-table loading, network transfer and
 keyword-to-ordinal mapping are excluded.
 
+Schema v3 also records protocol-context construction and the first H2D,
+unwarmed answer and D2H phases before calibration. Dense/DPF first-online
+results are measured; the live packed-presence control currently labels that
+optional object `measured: false`. GPU table materialization uses the synthetic
+deterministic initialization kernel and is not a cold-storage/file-load time.
+
 The full snapshot matrix runs `2^20`, `2^23`, and `2^25` rows at batches 1, 8,
 32, and 128. `2^25 x 128` is the largest case that fits this POC's 8 GB GPU once
-the 4 GiB table, selectors, DPF state and answers coexist.
+the 4 GiB table, selectors, DPF state and answers coexist. On a device with at
+least 30 GiB, the runner also schedules the `2^27`/16 GiB tier; otherwise the
+suite emits an explicit `capacity_blocked` record.
 
 ## Live epoch-histogram scope
 

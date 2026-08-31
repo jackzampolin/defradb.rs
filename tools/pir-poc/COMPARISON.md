@@ -293,18 +293,18 @@ server reading the same warm bitmap.
 
 | Ready subscribers | Packed Dense strict | 16-byte-row Dense control | GPU DPF | 100 visible buckets | Strict parallel wall/batch |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 35.380 us | 36.708 us | 1,959.239 us | 0.054 us | 0.018 ms |
-| 32 | 1.096 us | 2.606 us | 61.704 us | 0.068 us | 0.018 ms |
-| 128 | 0.371 us | 2.310 us | 37.472 us | 0.082 us | 0.027 ms |
-| 512 | **0.156 us** | 2.537 us | 29.096 us | 0.187 us | 0.040 ms |
-| 1,024 | **0.151 us** | 2.542 us | 28.875 us | 0.249 us | 0.077 ms |
-| 2,048 | **0.229 us** | 2.512 us | 28.535 us | 0.325 us | 0.243 ms |
+| 1 | 56.947 us | 65.102 us | 2,199.250 us | 0.075 us | 0.029 ms |
+| 32 | 2.010 us | 3.844 us | 71.403 us | 0.229 us | 0.034 ms |
+| 128 | 0.527 us | 2.497 us | 42.583 us | 0.361 us | 0.035 ms |
+| 512 | **0.182 us** | 2.733 us | 32.589 us | 0.206 us | 0.048 ms |
+| 1,024 | **0.212 us** | 2.700 us | 31.614 us | 0.242 us | 0.113 ms |
+| 2,048 | 0.187 us | 2.729 us | 31.046 us | **0.090 us** | 0.196 ms |
 
 The bold elapsed results are not a claim that strict PIR is intrinsically
 cheaper than decoys: the packed kernel ran on the GPU while the visible control
 ran on the CPU, and energy was not measured for the CPU control. They do show
 that once 512+ subscribers are ready, strict packed presence no longer carries
-a meaningful server-latency penalty on this host. At batch 128 it is 101x less
+a meaningful server-latency penalty on this host. At batch 128 it is 81x less
 aggregate kernel time than the pinned GPU-DPF path. The older 16-byte histogram
 was unnecessary for a hit alert and is retained only as a control.
 
@@ -317,11 +317,11 @@ was unnecessary for a hit alert and is retained only as a control.
 
 Selectors/keys may be retained on the GPU. If packed selectors are copied from
 host memory every epoch, the measured aggregate H2D cost at batch 512 is an
-additional 1.986 us/subscriber, far above its 0.156-us kernel. Production must
+additional 4.778 us/subscriber, far above its 0.182-us kernel. Production must
 therefore budget GPU-resident registrations, stage long-lived pinned batches,
 or explicitly include PCIe work. One million Dense subscriptions occupy about
-8.2 GB on each server and need roughly 0.16 seconds aggregate kernel time per
-epoch by the batch-512 result (about 0.08 seconds with two replicas in parallel),
+8.2 GB on each server and need roughly 0.18 seconds aggregate kernel time per
+epoch by the batch-512 result (about 0.09 seconds with two replicas in parallel),
 before scheduling and network. The DPF state is four times smaller but its
 measured server work is much larger.
 
@@ -331,7 +331,7 @@ packed PIR `O(65,536 * subscriptions)` once per epoch. Against the measured
 0.78-us immediate Compact-DPF baseline, batch-512 packed presence breaks even
 at one event/epoch and wins increasingly as event count rises. At the 5,000 TPS
 maximum and a two-second epoch, 10,000 events and 10,000 subscribers imply
-about 1.56 ms of aggregate packed GPU kernel work versus about 78 seconds of
+about 1.82 ms of aggregate packed GPU kernel work versus about 78 seconds of
 aggregate per-event CPU DPF work. This cross-hardware estimate is a capacity
 direction, not an identical-hardware speedup.
 
@@ -356,22 +356,22 @@ time per query.
 
 | Rows / physical table per replica | Ready queries | Dense XOR | GPU DPF | Dense upload/query | DPF upload/query |
 |---:|---:|---:|---:|---:|---:|
-| `2^20` / 128 MiB | 1 | 0.752 ms | 50.376 ms | 256 KiB | 4,160 B |
-|  | 8 | 0.709 ms | 6.114 ms | 256 KiB | 4,160 B |
-|  | 32 | 0.696 ms | 1.557 ms | 256 KiB | 4,160 B |
-|  | 128 | **0.703 ms** | 0.778 ms | 256 KiB | 4,160 B |
-| `2^23` / 1 GiB | 1 | 5.543 ms | 394.835 ms | 2 MiB | 4,160 B |
-|  | 8 | 5.572 ms | 48.787 ms | 2 MiB | 4,160 B |
-|  | 32 | 5.575 ms | 12.393 ms | 2 MiB | 4,160 B |
-|  | 128 | **5.547 ms** | 6.302 ms | 2 MiB | 4,160 B |
-| `2^25` / 4 GiB | 1 | 22.176 ms | 1,603.580 ms | 8 MiB | 4,160 B |
-|  | 8 | 22.669 ms | 196.652 ms | 8 MiB | 4,160 B |
-|  | 32 | 22.384 ms | 48.664 ms | 8 MiB | 4,160 B |
-|  | 128 | **22.019 ms** | 25.641 ms | 8 MiB | 4,160 B |
+| `2^20` / 128 MiB | 1 | 0.769 ms | 51.044 ms | 256 KiB | 4,160 B |
+|  | 8 | 0.734 ms | 6.275 ms | 256 KiB | 4,160 B |
+|  | 32 | 0.726 ms | 1.602 ms | 256 KiB | 4,160 B |
+|  | 128 | **0.709 ms** | 0.788 ms | 256 KiB | 4,160 B |
+| `2^23` / 1 GiB | 1 | 5.786 ms | 408.237 ms | 2 MiB | 4,160 B |
+|  | 8 | 5.733 ms | 50.545 ms | 2 MiB | 4,160 B |
+|  | 32 | 5.625 ms | 12.626 ms | 2 MiB | 4,160 B |
+|  | 128 | **5.636 ms** | 6.461 ms | 2 MiB | 4,160 B |
+| `2^25` / 4 GiB | 1 | 23.073 ms | 1,667.076 ms | 8 MiB | 4,160 B |
+|  | 8 | 23.195 ms | 203.977 ms | 8 MiB | 4,160 B |
+|  | 32 | 23.255 ms | 52.561 ms | 8 MiB | 4,160 B |
+|  | 128 | **23.481 ms** | 28.836 ms | 8 MiB | 4,160 B |
 
 DPF amortizes unused GPU occupancy, but it does not overtake Dense by batch 128
 at any locally executable size. At `2^25`, batch 128, Dense also used about
-3.62 J/query versus DPF's 4.74 J/query by coarse 10-ms NVML sampling. DPF's
+3.99 J/query versus DPF's 4.51 J/query by coarse 10-ms NVML sampling. DPF's
 real advantage is 63x--2,017x smaller upload as `N` grows, not lower total
 server work. This archived implementation is useful evidence, not the last word
 on modern DPF kernels; production evaluation should repeat on the intended GPU
@@ -387,6 +387,70 @@ Reproduce both the snapshot and live matrices with:
 ```bash
 bash tools/pir-poc/research/run-gpu-pir-defra.sh full
 ```
+
+### Same-GPU Dense, DPF and InsPIRe result
+
+The Ethereum-oriented
+[`inspire-gpu`](https://github.com/keewoolee/inspire-gpu) server now also runs
+locally at pinned commit `c14d1d84a425cdaa9f86ed09465b09c9c9802f13`.
+The checked adapter encodes the same deterministic 120-byte records into
+InsPIRe's 64 15-bit slots. It changes no cryptographic kernel or parameter.
+All three results below therefore use the same RTX 2070 SUPER, `2^23` records,
+one 1 GiB physical table and matching ready-query batch sizes. They are p50s
+over five fresh processes with alternating suite and kernel order:
+
+| Ready queries | Dense aggregate server/query | GPU-DPF aggregate server/query | InsPIRe server/query |
+|---:|---:|---:|---:|
+| 1 | **6.17 ms** | 437.73 ms | 32.21 ms |
+| 2 | **6.15 ms** | 215.55 ms | 22.42 ms |
+| 4 | **6.12 ms** | 108.00 ms | 21.17 ms |
+| 8 | **6.18 ms** | 54.18 ms | 20.03 ms |
+| 16 | **6.14 ms** | 27.17 ms | 18.86 ms |
+| 32 | **6.14 ms** | 13.74 ms | 18.86 ms |
+
+This is aggregate work: Dense and DPF sum two replica evaluations, while
+InsPIRe uses one server. Its service p50, including measured CPU query unpack
+and response compression, was 33.64 ms at batch 1 and 20.37 ms/query at batch
+32. Dense used 5.22x less aggregate server time than the InsPIRe GPU primitive
+at batch 1 and 3.07x less at batch 32 on this card.
+
+The client/network direction differs sharply. At batch 1, Dense generated both
+shares in 2.68 ms and uploads 2 MiB; GPU-DPF generated its keys in 0.084 ms and
+uploads 4,160 B; InsPIRe generated and packed its query in 47.48 ms and uploads
+379,904 B. InsPIRe downloads 12,288 B, while each replicated adapter returns
+240 aggregate bytes before framing. At a hypothetical 10 Mbit/s link, byte
+serialization alone is about 1,678 ms for Dense, 3.52 ms for DPF and 314 ms for
+InsPIRe. These are network projections, not server work or complete latency.
+
+The exact-corpus InsPIRe cold-snapshot p50 spent 9.03 s on host materialization,
+5.56 s on GPU preprocessing and 3.91 s constructing the context. First-online
+p50s were 8.10 ms Dense, 446.93 ms GPU-DPF and 179.01 ms InsPIRe. InsPIRe's
+58.27--308.05 ms range exposes material lazy-runtime variation rather than
+hiding it in a warm mean. Dense's GPU table setup remains a deterministic
+initializer rather than a common storage read, so cold-storage totals are not
+directly comparable. Reproduce and inspect the complete schema in
+[`research/FULL_COMPARISON.md`](research/FULL_COMPARISON.md).
+
+### Same-CPU Dense versus Poulpy InsPIRe2
+
+The pinned `poulpy-pir` adapter consumes the same deterministic 120 useful
+bytes (128 physical) at `2^23` entries on the AVX2 Ryzen 7 3700X. Dense uses
+eight worker threads per replica; Poulpy uses its AVX2/FMA backend:
+
+| Batch | Dense two-replica aggregate wall/query | Poulpy wall/query | Poulpy summed phase work/query |
+|---:|---:|---:|---:|
+| 1 | **115.90 ms** | 415.10 ms | 414.41 ms |
+| 8 | **49.11 ms** | 396.22 ms | 1,450.53 ms |
+| 32 | **67.59 ms** | 224.38 ms | 1,178.94 ms |
+
+Poulpy had the smaller query (428,117 B versus 2 MiB) but downloaded 196,889 B,
+used 5.71--6.87 GiB peak RSS and required 30.5--36.1 seconds of offline work.
+The Dense rows use the exact common 120 useful/128 physical-byte encoding; the
+last eight bytes are zero in both adapters. The Dense adapter does not yet
+report thread CPU-seconds, so its parallel wall
+column is not relabeled energy or exact CPU work. The deployment conclusion is
+narrow but sufficient: on this edge-class AVX2 host, CPU InsPIRe did not beat
+Dense server wall time. The GPU lane is the relevant InsPIRe deployment.
 
 ### Ethereum GPU reference versus 100 visible candidates
 

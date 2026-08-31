@@ -47,10 +47,19 @@ struct Options {
   int samples = 7;
   int min_sample_ms = 50;
   bool live = false;
+  bool dpf_first = false;
 };
 
 struct Timings {
   double client_ms = 0.0;
+  bool first_online_measured = false;
+  double server_context_ms = 0.0;
+  double first_h2d_aggregate_ms = 0.0;
+  double first_server0_ms = 0.0;
+  double first_server1_ms = 0.0;
+  double first_aggregate_server_ms = 0.0;
+  double first_parallel_server_ms = 0.0;
+  double first_d2h_aggregate_ms = 0.0;
   double h2d_p50_ms = 0.0;
   double server0_p50_ms = 0.0;
   double server1_p50_ms = 0.0;
@@ -197,6 +206,16 @@ Options parse_options(int argc, char** argv) {
       options.min_sample_ms = std::stoi(value("--min-sample-ms"));
     } else if (arg == "--live") {
       options.live = true;
+    } else if (arg == "--protocol-order") {
+      const std::string order = value("--protocol-order");
+      if (order == "dense-first") {
+        options.dpf_first = false;
+      } else if (order == "dpf-first") {
+        options.dpf_first = true;
+      } else {
+        throw std::runtime_error(
+            "--protocol-order must be dense-first or dpf-first");
+      }
     } else {
       throw std::runtime_error("unknown argument: " + arg);
     }
@@ -617,6 +636,7 @@ Timings benchmark_dense(const Options& options, const std::vector<int>& targets,
   const size_t selector_bytes = selector0.size() * sizeof(uint32_t);
   const int blocks_per_query = std::max(1, multiprocessors * 4);
 
+  const auto context_started = std::chrono::steady_clock::now();
   uint32_t* device_selector = nullptr;
   uint4* partial = nullptr;
   uint4* output = nullptr;
@@ -625,6 +645,9 @@ Timings benchmark_dense(const Options& options, const std::vector<int>& targets,
                                       blocks_per_query * DEFRA_LIMBS * sizeof(uint4)));
   DEFRA_CUDA(cudaMalloc(&output, static_cast<size_t>(options.batch) *
                                      DEFRA_LIMBS * sizeof(uint4)));
+  DEFRA_CUDA(cudaDeviceSynchronize());
+  const double context_ms = milliseconds(
+      std::chrono::steady_clock::now() - context_started);
 
   auto launch = [&]() {
     dense_partial_kernel<<<options.batch * blocks_per_query, kThreads>>>(
@@ -634,14 +657,42 @@ Timings benchmark_dense(const Options& options, const std::vector<int>& targets,
         partial, output, blocks_per_query, options.batch);
   };
 
-  DEFRA_CUDA(cudaMemcpy(device_selector, selector0.data(), selector_bytes,
-                        cudaMemcpyHostToDevice));
-  launch();
-  DEFRA_CUDA(cudaDeviceSynchronize());
   cudaEvent_t start;
   cudaEvent_t stop;
   DEFRA_CUDA(cudaEventCreate(&start));
   DEFRA_CUDA(cudaEventCreate(&stop));
+
+  std::vector<uint4> host0(static_cast<size_t>(options.batch) * DEFRA_LIMBS);
+  std::vector<uint4> host1(host0.size());
+  auto first_server = [&](const std::vector<uint32_t>& selector,
+                          std::vector<uint4>& host,
+                          double* h2d_ms, double* server_ms,
+                          double* d2h_ms) {
+    auto started = std::chrono::steady_clock::now();
+    DEFRA_CUDA(cudaMemcpy(device_selector, selector.data(), selector_bytes,
+                          cudaMemcpyHostToDevice));
+    *h2d_ms = milliseconds(std::chrono::steady_clock::now() - started);
+    started = std::chrono::steady_clock::now();
+    launch();
+    DEFRA_CUDA(cudaDeviceSynchronize());
+    *server_ms = milliseconds(std::chrono::steady_clock::now() - started);
+    started = std::chrono::steady_clock::now();
+    DEFRA_CUDA(cudaMemcpy(host.data(), output, host.size() * sizeof(uint4),
+                          cudaMemcpyDeviceToHost));
+    *d2h_ms = milliseconds(std::chrono::steady_clock::now() - started);
+  };
+  double first_h2d0_ms = 0.0;
+  double first_h2d1_ms = 0.0;
+  double first_server0_ms = 0.0;
+  double first_server1_ms = 0.0;
+  double first_d2h0_ms = 0.0;
+  double first_d2h1_ms = 0.0;
+  first_server(selector0, host0, &first_h2d0_ms, &first_server0_ms,
+               &first_d2h0_ms);
+  first_server(selector1, host1, &first_h2d1_ms, &first_server1_ms,
+               &first_d2h1_ms);
+  verify_dense(options, targets, host0, host1);
+
   DEFRA_CUDA(cudaEventRecord(start));
   launch();
   DEFRA_CUDA(cudaEventRecord(stop));
@@ -653,8 +704,6 @@ Timings benchmark_dense(const Options& options, const std::vector<int>& targets,
   std::vector<double> server0_ms;
   std::vector<double> server1_ms;
   std::vector<double> d2h;
-  std::vector<uint4> host0(static_cast<size_t>(options.batch) * DEFRA_LIMBS);
-  std::vector<uint4> host1(host0.size());
   PowerSampler power;
   power.start();
   for (int sample = 0; sample < options.samples; ++sample) {
@@ -694,6 +743,15 @@ Timings benchmark_dense(const Options& options, const std::vector<int>& targets,
 
   Timings result;
   result.client_ms = client_ms;
+  result.first_online_measured = true;
+  result.server_context_ms = context_ms;
+  result.first_h2d_aggregate_ms = first_h2d0_ms + first_h2d1_ms;
+  result.first_server0_ms = first_server0_ms;
+  result.first_server1_ms = first_server1_ms;
+  result.first_aggregate_server_ms = first_server0_ms + first_server1_ms;
+  result.first_parallel_server_ms =
+      std::max(first_server0_ms, first_server1_ms);
+  result.first_d2h_aggregate_ms = first_d2h0_ms + first_d2h1_ms;
   result.h2d_p50_ms = median(h2d) * 2.0;
   result.server0_p50_ms = median(server0_ms);
   result.server1_p50_ms = median(server1_ms);
@@ -852,26 +910,58 @@ Timings benchmark_dpf(const Options& options, const std::vector<int>& targets,
   const std::vector<SeedsCodewordsFlatGPU>& keys1 = keys.server1;
   const size_t key_bytes = keys0.size() * sizeof(SeedsCodewordsFlatGPU);
 
+  const auto context_started = std::chrono::steady_clock::now();
   SeedsCodewordsFlatGPU* device_keys = nullptr;
   uint4* output = nullptr;
   DEFRA_CUDA(cudaMalloc(&device_keys, key_bytes));
   DEFRA_CUDA(cudaMalloc(&output, static_cast<size_t>(options.batch) *
                                      DEFRA_LIMBS * sizeof(uint4)));
   dpf_hybrid_initialize(options.batch, options.entries);
+  DEFRA_CUDA(cudaDeviceSynchronize());
+  const double context_ms = milliseconds(
+      std::chrono::steady_clock::now() - context_started);
   auto launch = [&]() {
     dpf_hybrid<CHACHA20>(device_keys, output,
                          const_cast<uint4*>(table), options.batch,
                          options.entries, nullptr);
   };
 
-  DEFRA_CUDA(cudaMemcpy(device_keys, keys0.data(), key_bytes,
-                        cudaMemcpyHostToDevice));
-  launch();
-  DEFRA_CUDA(cudaDeviceSynchronize());
   cudaEvent_t start;
   cudaEvent_t stop;
   DEFRA_CUDA(cudaEventCreate(&start));
   DEFRA_CUDA(cudaEventCreate(&stop));
+
+  std::vector<uint4> host0(static_cast<size_t>(options.batch) * DEFRA_LIMBS);
+  std::vector<uint4> host1(host0.size());
+  auto first_server = [&](const std::vector<SeedsCodewordsFlatGPU>& keys,
+                          std::vector<uint4>& host,
+                          double* h2d_ms, double* server_ms,
+                          double* d2h_ms) {
+    auto started = std::chrono::steady_clock::now();
+    DEFRA_CUDA(cudaMemcpy(device_keys, keys.data(), key_bytes,
+                          cudaMemcpyHostToDevice));
+    *h2d_ms = milliseconds(std::chrono::steady_clock::now() - started);
+    started = std::chrono::steady_clock::now();
+    launch();
+    DEFRA_CUDA(cudaDeviceSynchronize());
+    *server_ms = milliseconds(std::chrono::steady_clock::now() - started);
+    started = std::chrono::steady_clock::now();
+    DEFRA_CUDA(cudaMemcpy(host.data(), output, host.size() * sizeof(uint4),
+                          cudaMemcpyDeviceToHost));
+    *d2h_ms = milliseconds(std::chrono::steady_clock::now() - started);
+  };
+  double first_h2d0_ms = 0.0;
+  double first_h2d1_ms = 0.0;
+  double first_server0_ms = 0.0;
+  double first_server1_ms = 0.0;
+  double first_d2h0_ms = 0.0;
+  double first_d2h1_ms = 0.0;
+  first_server(keys0, host0, &first_h2d0_ms, &first_server0_ms,
+               &first_d2h0_ms);
+  first_server(keys1, host1, &first_h2d1_ms, &first_server1_ms,
+               &first_d2h1_ms);
+  verify_dpf(options, targets, host0, host1);
+
   DEFRA_CUDA(cudaEventRecord(start));
   launch();
   DEFRA_CUDA(cudaEventRecord(stop));
@@ -883,8 +973,6 @@ Timings benchmark_dpf(const Options& options, const std::vector<int>& targets,
   std::vector<double> server0_ms;
   std::vector<double> server1_ms;
   std::vector<double> d2h;
-  std::vector<uint4> host0(static_cast<size_t>(options.batch) * DEFRA_LIMBS);
-  std::vector<uint4> host1(host0.size());
   PowerSampler power;
   power.start();
   for (int sample = 0; sample < options.samples; ++sample) {
@@ -924,6 +1012,15 @@ Timings benchmark_dpf(const Options& options, const std::vector<int>& targets,
 
   Timings result;
   result.client_ms = client_ms;
+  result.first_online_measured = true;
+  result.server_context_ms = context_ms;
+  result.first_h2d_aggregate_ms = first_h2d0_ms + first_h2d1_ms;
+  result.first_server0_ms = first_server0_ms;
+  result.first_server1_ms = first_server1_ms;
+  result.first_aggregate_server_ms = first_server0_ms + first_server1_ms;
+  result.first_parallel_server_ms =
+      std::max(first_server0_ms, first_server1_ms);
+  result.first_d2h_aggregate_ms = first_d2h0_ms + first_d2h1_ms;
   result.h2d_p50_ms = median(h2d) * 2.0;
   result.server0_p50_ms = median(server0_ms);
   result.server1_p50_ms = median(server1_ms);
@@ -1020,7 +1117,11 @@ VisibleTimings benchmark_visible100(const Options& options,
 void print_timing(const char* name, const Timings& timing, size_t upload_bytes,
                   size_t response_bytes, int batch) {
   std::printf(
-      "\"%s\":{\"client_batch_ms\":%.6f,\"gpu_h2d_p50_ms\":%.6f,"
+      "\"%s\":{\"client_batch_ms\":%.6f,\"server_context_ms\":%.6f,"
+      "\"first_online\":{\"measured\":%s,\"gpu_h2d_aggregate_ms\":%.6f,"
+      "\"server0_ms\":%.6f,\"server1_ms\":%.6f,"
+      "\"aggregate_server_ms\":%.6f,\"parallel_server_ms\":%.6f,"
+      "\"gpu_d2h_aggregate_ms\":%.6f},\"gpu_h2d_p50_ms\":%.6f,"
       "\"server0_p50_ms\":%.6f,\"server1_p50_ms\":%.6f,"
       "\"aggregate_server_p50_ms\":%.6f,\"parallel_wall_p50_ms\":%.6f,"
       "\"aggregate_server_ms_per_query\":%.6f,"
@@ -1029,7 +1130,12 @@ void print_timing(const char* name, const Timings& timing, size_t upload_bytes,
       "\"approximate_gpu_joules_per_query\":%.6f,\"power_samples\":%zu,"
       "\"aggregate_upload_bytes\":%zu,\"aggregate_response_bytes\":%zu,"
       "\"calibrated_repetitions\":%d}",
-      name, timing.client_ms, timing.h2d_p50_ms, timing.server0_p50_ms,
+      name, timing.client_ms, timing.server_context_ms,
+      timing.first_online_measured ? "true" : "false",
+      timing.first_h2d_aggregate_ms, timing.first_server0_ms,
+      timing.first_server1_ms, timing.first_aggregate_server_ms,
+      timing.first_parallel_server_ms, timing.first_d2h_aggregate_ms,
+      timing.h2d_p50_ms, timing.server0_p50_ms,
       timing.server1_p50_ms, timing.aggregate_p50_ms, timing.wall_p50_ms,
       timing.aggregate_p50_ms / batch,
       batch * 1000.0 / timing.wall_p50_ms, timing.d2h_p50_ms,
@@ -1049,17 +1155,28 @@ int main(int argc, char** argv) {
     DEFRA_CUDA(cudaGetDeviceProperties(&properties, device));
     const size_t table_bytes = static_cast<size_t>(options.entries) *
                                DEFRA_LIMBS * sizeof(uint4);
+    const auto table_started = std::chrono::steady_clock::now();
     uint4* table = nullptr;
     DEFRA_CUDA(cudaMalloc(&table, table_bytes));
     const int depth = log2_entries(options.entries);
     initialize_table_kernel<<<(options.entries + 255) / 256, 256>>>(
         table, options.entries, depth, options.live);
     DEFRA_CUDA(cudaDeviceSynchronize());
+    const double table_materialize_ms = milliseconds(
+        std::chrono::steady_clock::now() - table_started);
 
     const std::vector<int> targets = target_ordinals(options);
-    const Timings dense =
-        benchmark_dense(options, targets, table, properties.multiProcessorCount);
-    const Timings dpf = benchmark_dpf(options, targets, table);
+    Timings dense;
+    Timings dpf;
+    if (options.dpf_first) {
+      dpf = benchmark_dpf(options, targets, table);
+      dense = benchmark_dense(options, targets, table,
+                              properties.multiProcessorCount);
+    } else {
+      dense = benchmark_dense(options, targets, table,
+                              properties.multiProcessorCount);
+      dpf = benchmark_dpf(options, targets, table);
+    }
     const Timings packed_presence = options.live
         ? benchmark_packed_presence(options, targets,
                                     properties.multiProcessorCount)
@@ -1077,18 +1194,21 @@ int main(int argc, char** argv) {
 
     std::printf("{");
     std::printf(
-        "\"schema\":\"defradb-gpu-pir-comparison-v2\","
+        "\"schema\":\"defradb-gpu-pir-comparison-v3\","
         "\"upstream_commit\":\"%s\",\"gpu\":\"%s\","
         "\"compute_capability\":\"%d.%d\",\"mode\":\"%s\","
         "\"entries\":%d,\"batch\":%d,\"samples\":%d,"
+        "\"protocol_order\":\"%s\","
         "\"useful_row_bytes\":%d,\"physical_row_bytes\":%zu,"
         "\"table_bytes_per_replica\":%zu,"
+        "\"gpu_table_materialize_ms_per_replica\":%.6f,"
         "\"packed_presence_table_bytes_per_replica\":%zu,"
         "\"dpf_key_bytes_per_server\":%zu,",
         kUpstreamCommit, properties.name, properties.major, properties.minor,
         options.live ? "live_epoch_histogram" : "snapshot", options.entries,
-        options.batch, options.samples, useful_bytes,
-        DEFRA_LIMBS * sizeof(uint4), table_bytes,
+        options.batch, options.samples,
+        options.dpf_first ? "dpf-first" : "dense-first", useful_bytes,
+        DEFRA_LIMBS * sizeof(uint4), table_bytes, table_materialize_ms,
         options.live ? static_cast<size_t>(options.entries) / 8 : 0,
         sizeof(SeedsCodewordsFlatGPU));
     print_timing("dense_xor", dense, dense_upload, response, options.batch);
@@ -1121,7 +1241,7 @@ int main(int argc, char** argv) {
         ",\"correctness\":{\"dense\":true,\"dpf\":true,"
         "\"packed_presence_dense\":%s,"
         "\"visible_100\":%s},"
-        "\"scope\":\"warm server kernels; strict replicas execute sequentially on one GPU, while visible_100 uses one host-CPU server; aggregate is the strict replica sum and parallel wall is their max; HTTP, network, queueing, persistence, and keyword-to-ordinal lookup excluded\"}\n",
+        "\"scope\":\"first_online is the first H2D/answer/D2H after table and protocol-context construction; warm server kernels follow calibration; strict replicas execute sequentially on one GPU, while visible_100 uses one host-CPU server; aggregate is the strict replica sum and parallel wall is their max; HTTP, network, queueing, persistence, and keyword-to-ordinal lookup excluded\"}\n",
         options.live ? "true" : "null",
         options.live ? "true" : "null");
     cudaFree(table);
