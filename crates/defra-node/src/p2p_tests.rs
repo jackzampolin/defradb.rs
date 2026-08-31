@@ -1801,15 +1801,13 @@ async fn p2p_shutdown_releases_store_for_immediate_reopen() {
 /// An embedded node must serve its branchable-collection heads to
 /// `sync_branchable_collection`, the same way a CLI node does.
 ///
-/// The write side is healthy: SDL keeps `@branchable`, every mutation path
-/// records the collection head under the persisted short-id prefix (see
-/// `crates/defra-node/tests/branchable_sdl.rs` and
-/// `crates/db/tests/merge/collection_heads.rs`). What breaks is serving:
-/// the embedded runtime builds its coordinator through
-/// `with_access_control_and_serve_gate`, which silently installs a
-/// `NoOpHeadProvider`, so every BranchableSync response (and DocSync head
-/// lookup) carries zero heads and a late-joining peer can never pull the
-/// collection.
+/// The write side is fenced elsewhere: SDL keeps `@branchable`, and every
+/// mutation path records the collection head under the persisted short-id
+/// prefix (`crates/defra-node/tests/branchable_sdl.rs`,
+/// `crates/db/tests/merge/collection_heads.rs`). This test pins the serving
+/// side: a coordinator wired with a `NoOpHeadProvider` answers every
+/// BranchableSync response (and DocSync head lookup) with zero heads, and a
+/// late-joining peer can never pull the collection.
 #[tokio::test]
 async fn branchable_sync_pulls_collection_from_embedded_peer() {
     init_tracing();
