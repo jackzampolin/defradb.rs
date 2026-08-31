@@ -27,14 +27,17 @@ use kms::{
     EncodedFetchRequest, FetchEncryptionKeyReply, FetchEncryptionKeyRequest, IncomingHandler,
     KeyTransport, Result as KmsResult, TransportReplyStream,
 };
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
+
+use cid::Cid;
+use kovan_map::HopscotchMap;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::peer_identity::PeerIdentityResolver;
 #[cfg(feature = "libp2p-transport")]
 use crate::pubsub_rpc::response_topic;
-use crate::pubsub_rpc::{Correlator, InternalResponse, PublishOptions};
+use crate::pubsub_rpc::{derive_request_id, Correlator, InternalResponse, PublishOptions};
 use crate::topics::{DefraTopic, ENCRYPTION_TOPIC};
 use crate::transport::{P2PTransport, PeerId};
 
@@ -79,12 +82,13 @@ pub struct PubsubKeyTransport<T: P2PTransport> {
     /// Pre-formatted `encryption/<self>/_response` topic this node subscribes
     /// to in order to receive replies addressed to it.
     self_response_topic: String,
-    /// Requests that arrive before a handler is installed, replayed on
+    /// Requests that arrive before a handler is installed, keyed by request
+    /// id so a requester's periodic republishes coalesce, and replayed on
     /// installation. Runtimes wire this transport into their event loop
     /// before the KMS itself exists, and a requester's retries give up after
     /// a few seconds — dropping that window's requests turns into
     /// `KeyUnavailable` on the requester for no lasting reason.
-    pending_requests: Mutex<Vec<(String, Vec<u8>)>>,
+    pending_requests: HopscotchMap<Cid, (String, Vec<u8>)>,
     /// Back-reference so `install_handler` can replay the buffer through the
     /// normal dispatch path.
     self_ref: OnceLock<Weak<Self>>,
@@ -134,7 +138,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             correlator: Correlator::new(),
             local_peer_id,
             self_response_topic,
-            pending_requests: Mutex::new(Vec::new()),
+            pending_requests: HopscotchMap::new(),
             self_ref: OnceLock::new(),
         });
         let _ = transport.self_ref.set(Arc::downgrade(&transport));
@@ -207,15 +211,12 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
         let handler = self.handler.read().ok().and_then(|g| g.clone());
         let Some(handler) = handler else {
             const PENDING_CAP: usize = 32;
-            let mut pending = match self.pending_requests.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if pending.len() >= PENDING_CAP {
+            if self.pending_requests.len() >= PENDING_CAP {
                 warn!("KMS request buffer full before a handler was installed; dropping");
             } else {
                 debug!("KMS request arrived before a handler was installed; buffered");
-                pending.push((from, payload));
+                self.pending_requests
+                    .insert_if_absent(derive_request_id(&payload), (from, payload));
             }
             return;
         };
@@ -500,13 +501,20 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         if let Ok(mut slot) = self.handler.write() {
             *slot = Some(handler);
         }
-        let buffered: Vec<(String, Vec<u8>)> = {
-            let mut pending = match self.pending_requests.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            pending.drain(..).collect()
-        };
+        // Requests stop entering the buffer once the handler is visible, so
+        // this drain terminates; looping covers inserts racing installation.
+        let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+        loop {
+            let keys: Vec<Cid> = self.pending_requests.keys().collect();
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                if let Some(entry) = self.pending_requests.remove(&key) {
+                    buffered.push(entry);
+                }
+            }
+        }
         if buffered.is_empty() {
             return;
         }
