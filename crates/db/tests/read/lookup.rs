@@ -18,7 +18,7 @@ use schema::IndexedFieldDescription;
 use schema::VectorAlgorithm;
 use schema::VectorIndexDescription;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 const COLLECTION: &str = "docs";
 const DIMENSIONS: u32 = 4;
@@ -62,8 +62,8 @@ fn vector_at(i: usize) -> Vec<f64> {
     vec![angle.sin(), angle.cos(), (angle * 0.5).sin(), 0.25]
 }
 
-async fn populated() -> (Arc<DB<MemoryStore>>, u32) {
-    let db = Arc::new(DB::new(MemoryStore::new()).expect("a database"));
+async fn populated() -> (Arc<DB<RegolithStore>>, u32) {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("a database"));
     db.create_collection(schema())
         .await
         .expect("the collection must register");
@@ -100,7 +100,7 @@ async fn populated() -> (Arc<DB<MemoryStore>>, u32) {
     (db, index_id)
 }
 
-async fn search(db: &Arc<DB<MemoryStore>>, name: &str, index_id: u32, k: usize) -> Vec<u64> {
+async fn search(db: &Arc<DB<RegolithStore>>, name: &str, index_id: u32, k: usize) -> Vec<u64> {
     let txn = db.new_txn(false).await.unwrap();
     let fetcher = DbDocFetcher::new(txn);
     fetcher

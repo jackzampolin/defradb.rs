@@ -95,7 +95,7 @@ fn test_cache_populate() {
 
 #[tokio::test]
 async fn active_collection_versions_exclude_inactive_cache_entries() {
-    let db = db::DB::open(storage::backends::MemoryStore::new())
+    let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
 

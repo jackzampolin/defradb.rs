@@ -64,7 +64,7 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     // Both nodes need stable stores and identities because each is restarted.
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_p2p()
         .build()

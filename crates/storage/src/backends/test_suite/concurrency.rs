@@ -1,4 +1,5 @@
-use crate::corekv::{Error, IterOptions, Store, Txn};
+use crate::corekv::{Error, Store};
+use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -35,58 +36,6 @@ pub async fn test_concurrent_writes_different_keys<S: Store + 'static>(store: Ar
             i
         );
     }
-}
-
-async fn replace_collection_heads(txn: &mut Box<dyn Txn>, child: &[u8]) {
-    let mut iterator = txn
-        .iterator(
-            IterOptions::new()
-                .with_prefix(b"h/c/7/".to_vec())
-                .with_commutative_set(),
-        )
-        .await
-        .unwrap();
-    let mut old_heads = Vec::new();
-    while let Some(pair) = iterator.next().await.unwrap() {
-        old_heads.push(pair.key);
-    }
-    iterator.close().await.unwrap();
-
-    for old_head in old_heads {
-        txn.delete(&old_head).await.unwrap();
-    }
-    txn.set(child, b"2").await.unwrap();
-}
-
-/// Test concurrent observed-remove/add transitions on a shared set prefix.
-pub async fn test_commutative_set_transitions<S: Store + 'static>(store: Arc<S>) {
-    let mut seed = store.new_txn(false).await.unwrap();
-    seed.set(b"h/c/7/root", b"1").await.unwrap();
-    seed.commit().await.unwrap();
-
-    let mut first = store.new_txn(false).await.unwrap();
-    let mut second = store.new_txn(false).await.unwrap();
-    replace_collection_heads(&mut first, b"h/c/7/first").await;
-    replace_collection_heads(&mut second, b"h/c/7/second").await;
-
-    first.commit().await.unwrap();
-    second.commit().await.unwrap();
-
-    let read = store.new_txn(true).await.unwrap();
-    let mut iterator = read
-        .iterator(IterOptions::new().with_prefix(b"h/c/7/".to_vec()))
-        .await
-        .unwrap();
-    let mut heads = Vec::new();
-    while let Some(pair) = iterator.next().await.unwrap() {
-        heads.push(pair.key);
-    }
-    iterator.close().await.unwrap();
-    heads.sort();
-    assert_eq!(
-        heads,
-        vec![b"h/c/7/first".to_vec(), b"h/c/7/second".to_vec()]
-    );
 }
 
 /// Test concurrent writes to the SAME key (last writer wins)
@@ -155,7 +104,7 @@ pub async fn test_last_writer_wins<S: Store + 'static>(store: Arc<S>) {
     let txn = store.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"shared").await.unwrap(),
-        Some(b"from_txn1".to_vec()),
+        Some(Bytes::from_static(b"from_txn1")),
         "First commit should win (second conflicted)"
     );
 }
@@ -180,7 +129,7 @@ pub async fn test_last_writer_wins_reverse<S: Store + 'static>(store: Arc<S>) {
     let txn = store.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"shared").await.unwrap(),
-        Some(b"from_txn2".to_vec()),
+        Some(Bytes::from_static(b"from_txn2")),
         "First commit should win (second conflicted)"
     );
 }
@@ -336,7 +285,7 @@ pub async fn test_snapshot_isolation_long_running_reader<S: Store + 'static>(sto
     // Start a long-running reader
     let reader = store.new_txn(true).await.unwrap();
     let initial_value = reader.get(b"long_read_key").await.unwrap();
-    assert_eq!(initial_value, Some(b"original".to_vec()));
+    assert_eq!(initial_value, Some(Bytes::from_static(b"original")));
 
     // Perform 100 rapid writes
     for i in 0..100 {
@@ -352,7 +301,7 @@ pub async fn test_snapshot_isolation_long_running_reader<S: Store + 'static>(sto
     let final_value = reader.get(b"long_read_key").await.unwrap();
     assert_eq!(
         final_value,
-        Some(b"original".to_vec()),
+        Some(Bytes::from_static(b"original")),
         "Long-running reader should maintain snapshot isolation"
     );
 
@@ -361,7 +310,7 @@ pub async fn test_snapshot_isolation_long_running_reader<S: Store + 'static>(sto
     let new_value = new_reader.get(b"long_read_key").await.unwrap();
     assert_eq!(
         new_value,
-        Some(b"write_99".to_vec()),
+        Some(Bytes::from_static(b"write_99")),
         "New reader should see latest committed value"
     );
 }
@@ -387,7 +336,7 @@ pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
     // Writer2 should NOT see writer1's uncommitted changes
     assert_eq!(
         writer2.get(b"shared_key").await.unwrap(),
-        Some(b"initial".to_vec()),
+        Some(Bytes::from_static(b"initial")),
         "Writer2 should see original value, not writer1's uncommitted change"
     );
     assert_eq!(
@@ -413,7 +362,7 @@ pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
     // Writer2 still shouldn't see writer1's committed changes (snapshot isolation)
     assert_eq!(
         writer2.get(b"shared_key").await.unwrap(),
-        Some(b"from_writer2".to_vec()), // Its own pending write
+        Some(Bytes::from_static(b"from_writer2")), // Its own pending write
         "Writer2 should see its own write, not writer1's commit"
     );
 
@@ -432,12 +381,12 @@ pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
     let reader = store.new_txn(true).await.unwrap();
     assert_eq!(
         reader.get(b"shared_key").await.unwrap(),
-        Some(b"from_writer1".to_vec()),
+        Some(Bytes::from_static(b"from_writer1")),
         "Final value should be from writer1 (writer2 conflicted)"
     );
     assert_eq!(
         reader.get(b"writer1_only").await.unwrap(),
-        Some(b"exclusive".to_vec()),
+        Some(Bytes::from_static(b"exclusive")),
         "writer1_only key should exist"
     );
     assert_eq!(

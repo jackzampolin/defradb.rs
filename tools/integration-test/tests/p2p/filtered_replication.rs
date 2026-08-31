@@ -2989,7 +2989,7 @@ async fn rust_filtered_replication_retry_respects_filter() {
         .rust_nodes(2)
         .with_p2p()
         .with_keyring()
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .unwrap();
@@ -3130,7 +3130,7 @@ async fn rust_forget_replicator_prevents_retry_redial_after_restart() {
         .rust_nodes(2)
         .with_p2p()
         .with_keyring()
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .unwrap();
@@ -3291,13 +3291,13 @@ async fn rust_forget_replicator_prevents_retry_redial_after_restart() {
 /// replicator both still pushes matching docs AND still excludes non-matching ones.
 #[tokio::test]
 async fn rust_filtered_replication_source_restart_preserves_filter() {
-    // Keyring => stable peer identity across restart; redb => persistent
+    // Keyring => stable peer identity across restart; regolith => persistent
     // peerstore/data so the persisted replicator (and its filter) survive.
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_keyring()
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .unwrap();
@@ -3464,13 +3464,13 @@ async fn list_replicators_http(cluster: &TestCluster, node: usize) -> serde_json
 async fn rust_filtered_replication_partial_delete_keeps_remaining() {
     const OTHER_SCHEMA: &str = "type OtherDoc { body: String }";
 
-    // Keyring => stable peer identity across restart; redb => persistent peerstore
+    // Keyring => stable peer identity across restart; regolith => persistent peerstore
     // so the survivor's re-persisted row must actually be reloaded after restart.
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_keyring()
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .unwrap();

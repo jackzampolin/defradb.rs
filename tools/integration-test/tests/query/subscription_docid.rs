@@ -274,7 +274,7 @@ async fn subscription_no_filter_test(cluster: TestCluster) {
         collected.len() >= 2,
         "expected at least 2 events (one per document), got {}: {:?}",
         collected.len(),
-        &*collected
+        *collected
     );
 
     let seen_ids: HashSet<String> = collected
@@ -338,7 +338,7 @@ async fn subscription_delete_event_scoped_by_cid_test(cluster: TestCluster) {
                     == Some(true)
         }),
         "expected delete subscription event with _deleted=true for {doc_id}, got: {:?}",
-        &*collected
+        *collected
     );
 }
 

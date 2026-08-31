@@ -1,11 +1,12 @@
-/// Blockstore - IPLD blocks and merkle tree nodes
-///
-/// The Blockstore handles storage of IPLD blocks with merge tracking for CRDT operations.
-/// It tracks which blocks have been merged into the permanent store vs. pending merge.
 use crate::corekv::{IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
 use crate::keys::blockstore::{BlockstoreKey, ToMergeIndexKey, OBJECT_MARKER};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
+/// Blockstore - IPLD blocks and merkle tree nodes
+///
+/// The Blockstore handles storage of IPLD blocks with merge tracking for CRDT operations.
+/// It tracks which blocks have been merged into the permanent store vs. pending merge.
+use bytes::Bytes;
 use cid::Cid;
 use std::sync::Arc;
 
@@ -79,7 +80,7 @@ impl BlockstoreTxn {
     }
 
     /// Get a block by CID
-    pub async fn get_block(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+    pub async fn get_block(&self, cid: &Cid) -> Result<Option<Bytes>> {
         let block_key = BlockstoreKey::new(*cid);
         self.get(&block_key.bytes()).await
     }
@@ -166,7 +167,7 @@ impl crate::corekv::private::Sealed for BlockstoreTxn {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for BlockstoreTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(key).await
     }
 

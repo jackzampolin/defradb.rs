@@ -800,7 +800,7 @@ async fn holder_public_doc_id(
     let key = storage::keys::DocShortIDToDocIDKey::new(doc_short_id).bytes();
     match systemstore.get(&key).await? {
         Some(bytes) => {
-            Ok(Some(String::from_utf8(bytes).map_err(|e| {
+            Ok(Some(String::from_utf8(bytes.into()).map_err(|e| {
                 storage::corekv::Error::Other(e.to_string())
             })?))
         }

@@ -1,4 +1,5 @@
 use crate::corekv::Store;
+use bytes::Bytes;
 
 /// Test drop_all clears all data
 pub async fn test_drop_all<S: Store + crate::corekv::Dropable>(store: &S) {
@@ -57,7 +58,7 @@ pub async fn test_drop_all_then_write<S: Store + crate::corekv::Dropable>(store:
     );
     assert_eq!(
         txn.get(b"new_key").await.unwrap(),
-        Some(b"new_value".to_vec()),
+        Some(Bytes::from_static(b"new_value")),
         "new_key should exist"
     );
 }
@@ -73,5 +74,8 @@ pub async fn test_drop_all_empty_store<S: Store + crate::corekv::Dropable>(store
     txn.commit().await.unwrap();
 
     let txn = store.new_txn(true).await.unwrap();
-    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value".to_vec()));
+    assert_eq!(
+        txn.get(b"key").await.unwrap(),
+        Some(Bytes::from_static(b"value"))
+    );
 }

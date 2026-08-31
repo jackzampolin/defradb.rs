@@ -109,7 +109,7 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       ;;
     defra-ffi-*ios_xcframework*)
       ;;
-    defra-ffi-*)
+    defra-ffi_*)
       member=$(tar -tzf "$archive" | awk '/^libdefra_ffi\.(so|dylib)$/ { member = $0 } END { print member }')
       [ -n "$member" ] || { echo "No FFI library found in $name" >&2; exit 1; }
       current=$(member_size "$archive" "$member")
@@ -126,7 +126,7 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       report_row "$label" "$current" "$previous_size"
       ffi_count=$((ffi_count + 1))
       ;;
-    defra_*.tar.gz|defra-lark_*.tar.gz|defra-rocksdb_*.tar.gz)
+    defra_*.tar.gz)
       current=$(member_size "$archive" defra)
       previous_size=
       if [ -n "$previous" ]; then

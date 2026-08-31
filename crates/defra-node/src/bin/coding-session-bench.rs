@@ -32,7 +32,7 @@ mod runner {
     impl Default for BenchOptions {
         fn default() -> Self {
             Self {
-                backend: StorageBackend::Lark,
+                backend: StorageBackend::Regolith,
                 durability: DurabilityMode::Immediate,
                 data_dir: None,
                 keep_data: false,
@@ -350,18 +350,14 @@ mod runner {
 
     fn parse_backend(value: String) -> Result<StorageBackend> {
         match value.as_str() {
-            "lark" => Ok(StorageBackend::Lark),
-            "redb" => Ok(StorageBackend::Redb),
-            "rocksdb" | "rocks" => Ok(StorageBackend::RocksDb),
-            other => bail!("unknown backend: {other} (expected lark, redb, or rocksdb)"),
+            "regolith" => Ok(StorageBackend::Regolith),
+            other => bail!("unknown backend: {other} (expected regolith)"),
         }
     }
 
     fn backend_name(backend: StorageBackend) -> &'static str {
         match backend {
-            StorageBackend::Lark => "lark",
-            StorageBackend::Redb => "redb",
-            StorageBackend::RocksDb => "rocksdb",
+            StorageBackend::Regolith => "regolith",
             _ => "unknown",
         }
     }
@@ -442,7 +438,7 @@ mod runner {
              \n\
              Options:\n\
                --profile NAME            Fixture profile: smoke, default, or large\n\
-               --backend NAME            Backend: lark, redb, or rocksdb (default: lark)\n\
+               --backend NAME            Backend: regolith (the only one)\n\
                --store NAME              Alias for --backend\n\
                --durability NAME         Durability: immediate or eventual (default: immediate)\n\
                --data-dir PATH            Persist the store at PATH\n\

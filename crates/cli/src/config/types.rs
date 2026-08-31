@@ -142,13 +142,18 @@ impl std::str::FromStr for KeyringBackend {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum DatastoreType {
+    /// A regolith database on disk.
+    ///
+    /// `badger` names the same thing. Not compatibility with a backend this
+    /// tree ever had, which is gone: it is what Go calls its persistent store,
+    /// and the cross-runtime tests hand one `--store` string to both binaries.
+    /// Accepting it here is cheaper than teaching the harness to pick a name
+    /// per runtime, and it is the only foreign name accepted.
     #[default]
-    Lark,
-    RocksDb,
     #[serde(alias = "badger")]
-    Redb,
+    Regolith,
+    /// A regolith database kept in memory, which nothing outlives.
     Memory,
-    Fjall,
 }
 
 /// P2P transport backend options.
@@ -233,11 +238,8 @@ impl std::str::FromStr for AcpDocumentType {
 impl std::fmt::Display for DatastoreType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DatastoreType::Lark => write!(f, "lark"),
-            DatastoreType::Redb => write!(f, "redb"),
+            DatastoreType::Regolith => write!(f, "regolith"),
             DatastoreType::Memory => write!(f, "memory"),
-            DatastoreType::Fjall => write!(f, "fjall"),
-            DatastoreType::RocksDb => write!(f, "rocksdb"),
         }
     }
 }
@@ -247,11 +249,9 @@ impl std::str::FromStr for DatastoreType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "lark" => Ok(DatastoreType::Lark),
-            "redb" | "badger" => Ok(DatastoreType::Redb),
+            // `badger` is Go's name for the same thing; see the variant.
+            "regolith" | "badger" => Ok(DatastoreType::Regolith),
             "memory" => Ok(DatastoreType::Memory),
-            "fjall" => Ok(DatastoreType::Fjall),
-            "rocksdb" => Ok(DatastoreType::RocksDb),
             _ => Err(Error::InvalidDatastore(s.to_string())),
         }
     }

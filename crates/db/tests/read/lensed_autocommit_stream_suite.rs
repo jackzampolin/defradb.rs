@@ -25,14 +25,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::RwLock;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn wrapped_stream(
-    db: Arc<DB<MemoryStore>>,
+    db: Arc<DB<RegolithStore>>,
     collection: Collection,
     inner: Box<dyn DocStream>,
     closed: Arc<AtomicBool>,
-) -> LensedAutoCommitDocStream<MemoryStore> {
+) -> LensedAutoCommitDocStream<RegolithStore> {
     LensedAutoCommitDocStream::new(
         Box::new(RecordingStream { inner, closed }),
         None,
@@ -150,7 +150,7 @@ impl TransformStore for AlwaysFailingTransformStore {
 #[tokio::test]
 async fn close_joins_inner_close_error_with_persist_error() {
     let transform_store = Arc::new(AlwaysFailingTransformStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
@@ -241,7 +241,7 @@ async fn close_joins_inner_close_error_with_persist_error() {
         migration_generation: stale_generation,
     }];
 
-    let mut stream = LensedAutoCommitDocStream::<MemoryStore>::new(
+    let mut stream = LensedAutoCommitDocStream::<RegolithStore>::new(
         Box::new(FailingCloseStream),
         None,
         LensedAutoCommitFetcher::new(db),

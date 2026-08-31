@@ -17,8 +17,8 @@ use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use schema::IndexedFieldDescription;
-use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
+use storage::RegolithStore;
 
 /// Generate a test schema with common fields.
 fn test_schema() -> CollectionVersion {
@@ -48,7 +48,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
@@ -106,7 +106,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
@@ -182,7 +182,7 @@ proptest! {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
@@ -258,7 +258,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
@@ -321,7 +321,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
@@ -384,7 +384,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
@@ -460,7 +460,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
 
@@ -491,7 +491,7 @@ proptest! {
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let store = MemoryStore::new();
+            let store = RegolithStore::in_memory().unwrap();
             let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
 

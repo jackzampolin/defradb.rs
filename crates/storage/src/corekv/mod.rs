@@ -35,8 +35,8 @@
 /// ```ignore
 /// use storage::corekv::{Store, Reader, Writer, IterOptions};
 ///
-/// // Create a store (memory or redb)
-/// let store = MemoryStore::new();
+/// // Create a store (on disk or in memory)
+/// let store = RegolithStore::in_memory().unwrap();
 ///
 /// // Create a transaction
 /// let mut txn = store.new_txn(false).await?;
@@ -54,7 +54,7 @@
 /// // Read back
 /// let txn = store.new_txn(true).await?;
 /// let value = txn.get(b"key1").await?;
-/// assert_eq!(value, Some(b"value1".to_vec()));
+/// assert_eq!(value, Some(Bytes::from_static(b"value1")));
 ///
 /// // Iterate
 /// let opts = IterOptions::new().with_prefix(b"key".to_vec());

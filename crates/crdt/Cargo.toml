@@ -14,6 +14,7 @@ ignored = ["serde_json", "thiserror"]
 bench = false
 
 [dependencies]
+bytes.workspace = true
 defra-core = { path = "../defra-core" }
 storage = { path = "../storage" }
 

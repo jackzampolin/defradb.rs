@@ -1,114 +1,20 @@
-/// Backend implementations for CoreKV storage.
-///
-/// This module provides concrete implementations of the CoreKV traits for
-/// different storage backends. Each backend has different characteristics
-/// and is suitable for different use cases.
-///
-/// # Available Backends
-///
-/// - **Memory**: Fast in-memory storage using BTreeMap. Suitable for testing,
-///   development, ephemeral caches, and WASM environments. Data is lost when
-///   the process exits.
-///
-/// - **Redb** (default, native only): Pure Rust persistent storage using redb.
-///   ACID transactions with snapshot isolation. **NOT WASM-compatible** due to
-///   memory-mapped file usage. Suitable for native platform production deployments.
-///
-/// # Choosing a Backend
-///
-/// | Feature | Memory | Redb |
-/// |---------|--------|------|
-/// | Persistence | No | Yes |
-/// | WASM Support | Yes | **No** |
-/// | Performance | Very Fast | Fast |
-/// | Memory Usage | High (all in RAM) | Low (MVCC snapshots) |
-/// | Crash Recovery | No | Yes |
-/// | Concurrent Access | Yes | Yes |
-/// | ACID Transactions | Yes | Yes |
-/// | Snapshot Isolation | Yes (MVCC) | Yes |
-/// | Use Case | Testing, Dev, WASM | Production (native) |
-///
-/// # Example
-///
-/// ```ignore
-/// use storage::backends::MemoryStore;
-/// use storage::corekv::Store;
-///
-/// // For testing
-/// let memory_store = MemoryStore::new();
-///
-/// #[cfg(feature = "redb")]
-/// {
-///     use storage::backends::RedbStore;
-///     let redb_store = RedbStore::open("/path/to/db")?;
-/// }
-/// ```
+//! Storage backends.
+//!
+//! There is one: regolith. It is the only store on every target DefraDB
+//! runs on, so there is nothing here to select between and no feature
+//! flag to get wrong.
+
 pub(crate) mod shared;
 
+pub mod regolith;
+
+// Public rather than `cfg(test)`: the suite is the backend contract, and an
+// integration test links the library without its test cfg. Gated off wasm
+// only because it drives concurrent transactions.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod memory;
-
-// Redb is only available on native platforms (not WASM)
-// because it requires memory-mapped files and native filesystem access
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub mod redb;
-
-// Fjall LSM-tree backend - concurrent writes without global lock (native only)
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-pub mod fjall;
-
-// RocksDB backend - tunable LSM-tree with universal compaction (native only)
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub mod rocksdb;
-
-// Lark backend - pure Rust LSM-tree (native only)
-#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
-pub mod lark;
-
-// LevelDB backend - pure Rust, WASM only (rusty-leveldb uses Rc internally, not Send/Sync)
-// On native platforms, use redb instead for full concurrency support.
-#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
-pub mod leveldb;
-
-// OPFS environment for LevelDB browser persistence.
-// Implements rusty-leveldb's synchronous Env trait using an in-memory filesystem
-// that loads from and persists to the browser's Origin Private File System (OPFS).
-#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
-pub mod opfs_env;
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test_suite;
 
-pub use shared::{CallbackCounts, DurabilityMode};
-
-#[cfg(not(target_arch = "wasm32"))]
+pub use regolith::{RegolithStore, RegolithStoreOptions, RegolithTxn};
 pub use shared::{
-    ConflictTrackerStats, TransactionConflictStats, TransactionStatsHandle,
-    TransactionStatsSnapshot,
+    CallbackCounts, DurabilityMode, TransactionStatsHandle, TransactionStatsSnapshot,
 };
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use memory::MemoryStore;
-
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use redb::{IntegrityReport, RedbStore, RedbStoreOptions};
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-pub use fjall::{FjallStore, FjallStoreOptions};
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub use rocksdb::{
-    RocksDbBlockCacheCounters, RocksDbBlockCacheStats, RocksDbBloomFilterCounters,
-    RocksDbCompactionCounters, RocksDbCumulativeStats, RocksDbFlushCounters, RocksDbHistogramStats,
-    RocksDbIoCounters, RocksDbLsmStats, RocksDbStatsHandle, RocksDbStatsSnapshot, RocksDbStore,
-    RocksDbStoreOptions, RocksDbTransactionStats, RocksDbWriteStallCounters,
-};
-
-#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
-pub use lark::{LarkStore, LarkStoreOptions};
-
-#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
-pub use leveldb::LevelDbStore;
-
-#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
-pub use opfs_env::OpfsEnv;

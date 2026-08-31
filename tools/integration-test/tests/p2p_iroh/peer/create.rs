@@ -569,6 +569,6 @@ async fn create_with_collection_and_subscription() {
     assert!(
         has_john,
         "subscription event should contain John, got: {:?}",
-        &*collected
+        *collected
     );
 }

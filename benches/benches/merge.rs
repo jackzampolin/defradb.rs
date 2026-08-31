@@ -11,13 +11,13 @@ use crdt::{
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use defra_core::types::DocId;
 use std::hint::black_box;
-use storage::{MemoryStore, Store, Txn};
+use storage::{RegolithStore, Store, Txn};
 
 mod common;
 
 /// Single-poll executor for futures that never yield.
 ///
-/// Every `MemoryStore` operation resolves without suspending, so one `poll`
+/// Every `RegolithStore` operation resolves without suspending, so one `poll`
 /// always completes. Using this instead of `tokio::runtime::Runtime::block_on`
 /// keeps the runtime's park/unpark and task bookkeeping out of the timed body,
 /// so the "clean" benches below measure CRDT merge work rather than executor work.
@@ -40,7 +40,13 @@ fn make_context() -> Context {
 }
 
 fn new_txn() -> Box<dyn Txn> {
-    block_on(async { MemoryStore::new().new_txn(false).await.unwrap() })
+    block_on(async {
+        RegolithStore::in_memory()
+            .unwrap()
+            .new_txn(false)
+            .await
+            .unwrap()
+    })
 }
 
 fn lww_delta(priority: u64, data: &[u8]) -> LwwDelta {
@@ -59,7 +65,7 @@ fn make_merge_setup(
     incoming: LwwDelta,
 ) -> (Box<dyn Txn>, Lww, Context, LwwDelta) {
     common::shared_runtime().block_on(async move {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
         let ctx = make_context();
         let mut txn = store.new_txn(false).await.unwrap();
@@ -74,7 +80,11 @@ fn make_clean_lww_setup(initial: LwwDelta) -> (Box<dyn Txn>, Lww, Context) {
     block_on(async move {
         let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
         let ctx = make_context();
-        let mut txn = MemoryStore::new().new_txn(false).await.unwrap();
+        let mut txn = RegolithStore::in_memory()
+            .unwrap()
+            .new_txn(false)
+            .await
+            .unwrap();
         lww.merge(&mut *txn, &ctx, &initial).await.unwrap();
         (txn, lww, ctx)
     })
@@ -88,7 +98,11 @@ fn make_counter_setup(
         let counter =
             Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, kind).unwrap();
         let ctx = make_context();
-        let mut txn = MemoryStore::new().new_txn(false).await.unwrap();
+        let mut txn = RegolithStore::in_memory()
+            .unwrap()
+            .new_txn(false)
+            .await
+            .unwrap();
         counter.merge(&mut *txn, &ctx, initial).await.unwrap();
         (txn, counter, ctx)
     })
@@ -122,7 +136,11 @@ fn make_composite_setup(field_count: usize, initial: &CompositeDelta) -> (Box<dy
     block_on(async move {
         let dag = composite_dag(field_count);
         let ctx = make_context();
-        let mut txn = MemoryStore::new().new_txn(false).await.unwrap();
+        let mut txn = RegolithStore::in_memory()
+            .unwrap()
+            .new_txn(false)
+            .await
+            .unwrap();
         dag.merge(&mut *txn, &ctx, initial).await.unwrap();
         (txn, ctx)
     })
@@ -131,7 +149,7 @@ fn make_composite_setup(field_count: usize, initial: &CompositeDelta) -> (Box<dy
 const FIELD_COUNTS: [usize; 3] = [1, 4, 16];
 
 /// The original merge benches. Their timed body includes
-/// `Runtime::block_on`, a `MemoryStore` transaction get/set, a value read and
+/// `Runtime::block_on`, a `RegolithStore` transaction get/set, a value read and
 /// `txn.discard()`, so they measure the whole stack rather than the merge
 /// algorithm. Retained as-is: the gap against the `*_clean` variants, which
 /// merge the same deltas from the same fixtures, is what quantifies that
@@ -396,7 +414,7 @@ fn bench_composite_merge(c: &mut Criterion) {
 /// the transaction lifecycle and a transaction get/set.
 ///
 /// These are independent measurements, not terms to subtract from
-/// `crdt/lww_merge_*`. `txn_new_and_discard` covers `MemoryStore::new()` and
+/// `crdt/lww_merge_*`. `txn_new_and_discard` covers `RegolithStore::in_memory().unwrap()` and
 /// transaction creation, which `bench_merge_contaminated` performs in its
 /// untimed setup, and the contaminated body also times a `lww.value()` read
 /// that has no baseline here. They size each component individually; they do

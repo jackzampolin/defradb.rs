@@ -149,7 +149,7 @@ async fn convergence_partition_both_directions_merge() {
         .with_p2p()
         // Disk store so each node's state survives the restart that creates the
         // partition.
-        .with_store("redb")
+        .with_store("regolith")
         .with_rust_binary(support::release_binary())
         .build()
         .await
@@ -286,7 +286,7 @@ async fn convergence_concurrent_same_doc_writes_merge() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_rust_binary(support::release_binary())
         .build()
         .await
@@ -423,7 +423,7 @@ async fn rust_storm_cluster(nodes: usize) -> TestCluster {
     TestCluster::builder()
         .rust_nodes(nodes)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()
@@ -629,7 +629,7 @@ async fn convergence_concurrent_counter_increments_sum() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_rust_binary(support::release_binary())
         .build()
         .await
@@ -722,7 +722,7 @@ async fn convergence_concurrent_counter_3node_full_mesh_sum() {
     let cluster = TestCluster::builder()
         .rust_nodes(3)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         // Stable peer-ids so a peer-id churn can't confound the cross-peer fetch.
         .with_keyring()
         .with_rust_binary(support::release_binary())
@@ -851,7 +851,7 @@ async fn convergence_encrypted_lww_restart_merge() {
         .rust_nodes(2)
         .with_p2p()
         .with_encryption()
-        .with_store("redb")
+        .with_store("regolith")
         // Stable peer-id across the restart (so a peer-id change can't confound).
         .with_keyring()
         .with_rust_binary(support::release_binary())
@@ -984,7 +984,7 @@ async fn run_pncounter_signed_deltas(restart: bool) {
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_rust_binary(support::release_binary())
         .build()
         .await
@@ -1073,7 +1073,7 @@ async fn run_mixed_lww_counter_merge(restart_node: Option<usize>) {
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()
@@ -1175,7 +1175,7 @@ async fn convergence_delete_update_race_preserves_tombstone() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()

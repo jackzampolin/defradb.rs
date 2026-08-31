@@ -1,7 +1,8 @@
+use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use super::*;
-use crate::backends::MemoryStore;
+use crate::backends::RegolithStore;
 use crate::corekv::Key;
 use crate::keys::peerstore::ReplicatorKey;
 
@@ -42,7 +43,7 @@ async fn push_transaction_conflicts_stop_at_bound() {
 
 #[tokio::test]
 async fn transient_marker_io_failure_recovers_durable_scopes() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -103,7 +104,7 @@ async fn marker_io_failures_stop_at_bound() {
 
 #[tokio::test]
 async fn test_peerstore_basic() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
 
     let key = ReplicatorKey::new("replicator_1");
@@ -116,12 +117,12 @@ async fn test_peerstore_basic() {
     // Read
     let txn = peerstore.new_txn(true).await.unwrap();
     let value = txn.get(&key.bytes()).await.unwrap();
-    assert_eq!(value, Some(b"replicator_config".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"replicator_config")));
 }
 
 #[tokio::test]
 async fn test_set_get_replicator() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
 
     let peer_id = "QmTestPeer123";
@@ -132,7 +133,7 @@ async fn test_set_get_replicator() {
 
     // Get
     let result = peerstore.get_replicator(peer_id).await.unwrap();
-    assert_eq!(result, Some(data.to_vec()));
+    assert_eq!(result, Some(Bytes::from(data.to_vec())));
 
     // Has
     assert!(peerstore.has_replicator(peer_id).await.unwrap());
@@ -141,7 +142,7 @@ async fn test_set_get_replicator() {
 
 #[tokio::test]
 async fn test_delete_replicator() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
 
     let peer_id = "QmTestPeer123";
@@ -178,7 +179,7 @@ async fn test_delete_replicator() {
 
 #[tokio::test]
 async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     let peer_id = "coordinated-peer";
     peerstore
@@ -218,7 +219,7 @@ async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
 
 #[tokio::test]
 async fn same_peer_retry_transitions_have_one_storage_owner() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     peerstore
         .create_replicator("peer", b"replicator")
@@ -256,7 +257,7 @@ async fn same_peer_retry_transitions_have_one_storage_owner() {
 
 #[tokio::test]
 async fn reconnect_activation_uses_the_same_peer_retry_writer() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     let peer_id = "peer";
     peerstore
@@ -296,7 +297,7 @@ async fn reconnect_activation_uses_the_same_peer_retry_writer() {
 
 #[tokio::test]
 async fn delete_replicator_clears_orphaned_retry_state() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -316,7 +317,7 @@ async fn delete_replicator_clears_orphaned_retry_state() {
 
 #[tokio::test]
 async fn retry_sweep_peers_require_persisted_replicators() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -338,7 +339,7 @@ async fn retry_sweep_peers_require_persisted_replicators() {
 
 #[tokio::test]
 async fn test_list_replicators() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
 
     // Add multiple replicators
@@ -368,7 +369,7 @@ async fn test_list_replicators() {
 
 #[tokio::test]
 async fn test_list_replicators_empty() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
 
     let all = peerstore.list_replicators().await.unwrap();
@@ -377,7 +378,7 @@ async fn test_list_replicators_empty() {
 
 #[tokio::test]
 async fn test_update_replicator() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
 
     let peer_id = "QmTestPeer123";
@@ -388,7 +389,7 @@ async fn test_update_replicator() {
         .await
         .unwrap();
     let result = peerstore.get_replicator(peer_id).await.unwrap();
-    assert_eq!(result, Some(b"config_v1".to_vec()));
+    assert_eq!(result, Some(Bytes::from_static(b"config_v1")));
 
     // Update
     peerstore
@@ -396,7 +397,7 @@ async fn test_update_replicator() {
         .await
         .unwrap();
     let result = peerstore.get_replicator(peer_id).await.unwrap();
-    assert_eq!(result, Some(b"config_v2".to_vec()));
+    assert_eq!(result, Some(Bytes::from_static(b"config_v2")));
 
     // Still only one replicator
     let all = peerstore.list_replicators().await.unwrap();
@@ -405,7 +406,7 @@ async fn test_update_replicator() {
 
 #[tokio::test]
 async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -427,13 +428,13 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
         txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
             .await
             .unwrap(),
-        Some(Vec::new())
+        Some(Bytes::new())
     );
     assert_eq!(
         txn.get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
             .await
             .unwrap(),
-        Some(Vec::new())
+        Some(Bytes::new())
     );
     drop(txn);
 
@@ -447,7 +448,7 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
 
 #[tokio::test]
 async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -486,7 +487,7 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
 
 #[tokio::test]
 async fn collection_updates_coalesce_to_one_rederivable_scope() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -507,7 +508,7 @@ async fn collection_updates_coalesce_to_one_rederivable_scope() {
 
 #[tokio::test]
 async fn retry_marker_stats_report_scope_counts_and_oldest_peer_clock() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -534,7 +535,7 @@ async fn retry_marker_stats_report_scope_counts_and_oldest_peer_clock() {
 /// An empty scope has nothing to replay and must not create state.
 #[tokio::test]
 async fn versionless_empty_document_failure_creates_no_retry_state() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -554,7 +555,7 @@ async fn versionless_empty_document_failure_creates_no_retry_state() {
 
 #[tokio::test]
 async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     txn.set(
@@ -575,7 +576,7 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
         txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
             .await
             .unwrap(),
-        Some(Vec::new())
+        Some(Bytes::new())
     );
     let schedule = txn
         .get(&ReplicatorRetryIDKey::new("peer").bytes())
@@ -589,7 +590,7 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
 
 #[tokio::test]
 async fn peer_retry_cursor_rotates_bounded_marker_prefix_after_failure() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     peerstore
         .create_replicator("peer", b"replicator")
@@ -618,7 +619,7 @@ async fn peer_retry_cursor_rotates_bounded_marker_prefix_after_failure() {
 
 #[tokio::test]
 async fn capacity_reschedule_rotates_without_advancing_failure_ladder() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     peerstore
         .create_replicator("peer", b"replicator")
@@ -654,7 +655,7 @@ async fn capacity_reschedule_rotates_without_advancing_failure_ladder() {
 
 #[tokio::test]
 async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     for cid in ["commit-a", "commit-b"] {
@@ -685,13 +686,13 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
         txn.get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
             .await
             .unwrap(),
-        Some(Vec::new())
+        Some(Bytes::new())
     );
 }
 
 #[tokio::test]
 async fn sweep_clear_removes_preexisting_empty_document_retry() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     txn.set(
@@ -721,7 +722,7 @@ async fn sweep_clear_removes_preexisting_empty_document_retry() {
 
 #[tokio::test]
 async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let clear_store = Peerstore::new(Arc::clone(&store));
     let register_store = Peerstore::new(Arc::clone(&store));
     let peerstore = Peerstore::new(store);
@@ -750,7 +751,7 @@ async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
 
 #[tokio::test]
 async fn peer_reconnect_activates_schedule_without_resetting_ladder() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let mut retry = super::super::RetryInfo::new_initial();
     retry.bump();

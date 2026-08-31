@@ -768,7 +768,7 @@ mod tests {
     use defra_core::{
         Block, CollectionDeltaPayload, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
     };
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
     use tokio::sync::Notify;
 
     use crate::sync::pending_store::{
@@ -777,13 +777,13 @@ mod tests {
     use crate::sync::{PeerStateTracker, SyncConfig};
 
     struct BlockingPendingDagStore {
-        inner: PendingDagStore<MemoryStore>,
+        inner: PendingDagStore<RegolithStore>,
         replace_entered: Notify,
         replace_release: Notify,
     }
 
     impl BlockingPendingDagStore {
-        fn new(store: Arc<MemoryStore>) -> Self {
+        fn new(store: Arc<RegolithStore>) -> Self {
             Self {
                 inner: PendingDagStore::new(store),
                 replace_entered: Notify::new(),
@@ -902,7 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_pushlog_tracks_nested_missing_links_before_merge() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let (manager, mut events) =
@@ -946,7 +946,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_dependency_pushlog_is_stored_without_becoming_a_head() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let (manager, mut events) =
@@ -1013,7 +1013,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_registration_does_not_emit_after_receiver_clock_claims_fetch() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let (manager, mut events) =
@@ -1059,7 +1059,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_registration_does_not_depend_on_fetch_event_receiver() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let (manager, events) =
@@ -1099,7 +1099,7 @@ mod tests {
     async fn conformance_same_cid_concurrent_announcements_are_idempotent() {
         const ANNOUNCEMENT_COUNT: usize = 8;
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let config = SyncConfig {
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_replay_nacks_in_flight_then_succeeds_after_owner_completes() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let config = SyncConfig {
@@ -1254,7 +1254,7 @@ mod tests {
 
     #[tokio::test]
     async fn merged_head_exits_before_block_verification_or_registration() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let (manager, mut events) =
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_capacity_sheds_unrelated_blocks_but_accepts_missing_dependency() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
         let config = SyncConfig {

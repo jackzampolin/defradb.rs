@@ -165,6 +165,7 @@ impl P2PCollectionStorage for NoOpCollectionStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_p2p_collection_key() {
@@ -184,9 +185,9 @@ mod tests {
 
     #[tokio::test]
     async fn stores_collection_state_in_systemstore_namespace() {
-        use storage::backends::MemoryStore;
+        use storage::RegolithStore;
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let p2p_store = P2PCollectionStore::new(store.clone());
 
         p2p_store.add_collection("users").await.unwrap();
@@ -198,7 +199,7 @@ mod tests {
                 .get(&P2PCollectionKey::new("users").bytes())
                 .await
                 .unwrap(),
-            Some(vec![COLLECTION_MARKER])
+            Some(Bytes::from(vec![COLLECTION_MARKER]))
         );
 
         let root_txn = store.new_txn(true).await.unwrap();
@@ -214,9 +215,9 @@ mod tests {
 
     #[tokio::test]
     async fn loads_collection_state_written_like_go_systemstore() {
-        use storage::backends::MemoryStore;
+        use storage::RegolithStore;
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let systemstore = Systemstore::new(store.clone());
         let mut system_txn = systemstore.new_txn(false).await.unwrap();
         system_txn

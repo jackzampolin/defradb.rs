@@ -6,9 +6,9 @@ use defra_core::block::Block;
 use document::Document;
 use document::NormalValue;
 use std::collections::HashSet;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::namespace::Namespace;
+use storage::RegolithStore;
 
 async fn block(blockstore: &NamespaceView, cid: &Cid) -> Block {
     let bytes = blockstore
@@ -21,7 +21,7 @@ async fn block(blockstore: &NamespaceView, cid: &Cid) -> Block {
 
 #[tokio::test]
 async fn field_priority_is_independent_of_sibling_updates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let shared = SharedTxn::new(txn);
     let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);

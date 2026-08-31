@@ -8,7 +8,7 @@
 //! orphaned their entries, and unique indexes stopped rejecting duplicates.
 
 use db::definition::migration::format::CURRENT_INDEX_FORMAT;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 /// The marker byte every encoded time key starts with, per `encoding::mod`.
 const TIME_MARKER: u8 = 8;
@@ -39,7 +39,7 @@ fn the_old_and_new_encodings_differ() {
 /// second open finds the store current instead of rebuilding again.
 #[tokio::test]
 async fn an_unstamped_store_is_stamped_on_open() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
 
     let db = db::DB::open(store.clone()).await.expect("first open");
     assert_eq!(
@@ -61,7 +61,9 @@ async fn an_unstamped_store_is_stamped_on_open() {
 /// stamp still lands.
 #[tokio::test]
 async fn a_fresh_store_opens_clean() {
-    let db = db::DB::open(MemoryStore::new()).await.expect("open");
+    let db = db::DB::open(RegolithStore::in_memory().unwrap())
+        .await
+        .expect("open");
     assert_eq!(
         db.stored_index_format().await.unwrap(),
         Some(CURRENT_INDEX_FORMAT)

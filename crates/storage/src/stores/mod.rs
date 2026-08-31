@@ -34,5 +34,5 @@ pub use systemstore::Systemstore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use multistore::MemoryMultistore;
 
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use multistore::RedbMultistore;
+#[cfg(not(target_arch = "wasm32"))]
+pub use multistore::PersistentMultistore;
