@@ -8,8 +8,8 @@
 //! origin; C's transport does know B, so that hint registers a fetchable root
 //! and C converges without ever talking to A.
 //!
-//! `DEFRA_P2P_REBROADCAST_ON_MERGE` is process-global and inherited by the
-//! spawned nodes, so the test is `#[serial]` and clears the variable on exit.
+//! Rebroadcast is enabled per node with `--p2p-rebroadcast-on-merge`, so
+//! nothing about this test leaks into the test-process environment.
 //!
 //! Run with:
 //!   cargo test --test p2p_iroh -- sync::overlay_rebroadcast::
@@ -22,16 +22,6 @@ use serial_test::serial;
 const SCHEMA: &str = "type Note { title: String }";
 const P2P_TIMEOUT: Duration = Duration::from_secs(15);
 const DOC_COUNT: usize = 6;
-const REBROADCAST_ENV: &str = "DEFRA_P2P_REBROADCAST_ON_MERGE";
-
-struct EnvGuard(&'static str);
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        std::env::remove_var(self.0);
-    }
-}
-
 async fn sync_status(cluster: &TestCluster, node: usize) -> serde_json::Value {
     reqwest::get(format!("{}/api/v0/p2p/sync/status", cluster.api_url(node)))
         .await
@@ -52,12 +42,10 @@ fn note_count(client: &integration_test::DefraClient) -> usize {
 #[tokio::test]
 #[serial]
 async fn third_hop_converges_through_rebroadcasting_relay() {
-    std::env::set_var(REBROADCAST_ENV, "true");
-    let _guard = EnvGuard(REBROADCAST_ENV);
-
     let cluster = TestCluster::builder()
         .rust_nodes(3)
         .with_iroh_transport()
+        .with_extra_rust_args(["--p2p-rebroadcast-on-merge"])
         .build()
         .await
         .expect("cluster start");

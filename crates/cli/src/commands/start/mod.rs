@@ -229,9 +229,18 @@ pub struct StartArgs {
 
     /// Re-announce blocks merged from peers on their gossip topics, so
     /// subscribers with no transport route to the author still receive them
-    /// through whichever peer merged them (multi-hop propagation). Default: off.
-    #[arg(long, env = "DEFRA_P2P_REBROADCAST_ON_MERGE")]
-    pub p2p_rebroadcast_on_merge: bool,
+    /// through whichever peer merged them (multi-hop propagation). Bare
+    /// `--p2p-rebroadcast-on-merge` enables; `=false` (or the environment
+    /// variable set to `false`) disables, overriding the config file.
+    /// Default: off.
+    #[arg(
+        long,
+        env = "DEFRA_P2P_REBROADCAST_ON_MERGE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true"
+    )]
+    pub p2p_rebroadcast_on_merge: Option<bool>,
 
     /// Max queued outbound push jobs; overflow defers to the persisted retry
     /// ladder. Default: 1024.
@@ -478,8 +487,8 @@ impl StartArgs {
         if let Some(max) = self.p2p_max_pending_dags {
             config.net.p2p_max_pending_dags = max;
         }
-        if self.p2p_rebroadcast_on_merge {
-            config.net.p2p_rebroadcast_on_merge = true;
+        if let Some(rebroadcast) = self.p2p_rebroadcast_on_merge {
+            config.net.p2p_rebroadcast_on_merge = rebroadcast;
         }
         if let Some(capacity) = self.p2p_push_queue_capacity {
             config.net.p2p_push_queue_capacity = capacity;
