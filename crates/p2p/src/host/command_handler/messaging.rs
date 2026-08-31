@@ -354,11 +354,6 @@ impl<S: Store> P2PHost<S> {
         peer_id: PeerId,
         response: tokio::sync::oneshot::Sender<Result<Option<identity::Did>>>,
     ) {
-        if let Some(identity) = self.peer_identities.get(&peer_id).cloned() {
-            let _ = response.send(Ok(Some(identity)));
-            return;
-        }
-
         let local_peer_id = self.swarm.local_peer_id().to_string();
         let keypair = self.keypair.clone();
         let handler = self.two_stream_handler.clone();
@@ -376,6 +371,9 @@ impl<S: Store> P2PHost<S> {
 
             let result = result.and_then(|reply| {
                 if let Some(error) = reply.err_message.clone() {
+                    if error == crate::message::IDENTITY_UNCONFIGURED_ERROR {
+                        return Ok(None);
+                    }
                     return Err(crate::error::Error::Transport(error));
                 }
                 let token_identity = identity::from_token(&reply.identity_token)

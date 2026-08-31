@@ -39,7 +39,7 @@ pub use version_syncer::DbVersionSyncer;
 
 pub use defra_http::router::{
     ExplicitReplayCapabilityInput, P2PError, P2POperations, P2PResult, P2pDocumentInfo,
-    P2pDocumentRequest, ReplicationFilter, ReplicationFilters, ReplicatorInfo,
+    P2pDocumentRequest, ReplicationFilter, ReplicationFilters, ReplicatorInfo, TransportPeerId,
 };
 
 /// Resolve replicator-delete collection arguments from names to CIDs.
@@ -466,6 +466,7 @@ impl ReplicatorPushOptionsState {
 pub(crate) trait P2PErrorExt {
     fn invalid_input(message: impl Into<String>) -> Self;
     fn not_found(message: impl Into<String>) -> Self;
+    fn unauthorized(message: impl Into<String>) -> Self;
     fn transport(message: impl Into<String>) -> Self;
     fn persistence(message: impl Into<String>) -> Self;
     fn internal(message: impl Into<String>) -> Self;
@@ -478,6 +479,10 @@ impl P2PErrorExt for P2PError {
 
     fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound(message.into())
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self::Unauthorized(message.into())
     }
 
     fn transport(message: impl Into<String>) -> Self {
@@ -493,9 +498,16 @@ impl P2PErrorExt for P2PError {
     }
 }
 
+fn map_nac_error(error: db::Error) -> P2PError {
+    match error {
+        db::Error::NotAuthorized { .. } => P2PError::unauthorized(error.to_string()),
+        other => P2PError::internal(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ReplicatorPushOptions, ReplicatorPushOptionsState};
+    use super::{map_nac_error, P2PError, ReplicatorPushOptions, ReplicatorPushOptionsState};
     use zeroize::Zeroizing;
 
     #[test]
@@ -516,5 +528,19 @@ mod tests {
                 se_identity_pubkey: Some(b"did:key:zTest".to_vec()),
             }
         );
+    }
+
+    #[test]
+    fn nac_denial_is_distinct_from_checker_failure() {
+        assert!(matches!(
+            map_nac_error(db::Error::NotAuthorized {
+                permission: "P2pPeerActive".to_string()
+            }),
+            P2PError::Unauthorized(_)
+        ));
+        assert!(matches!(
+            map_nac_error(db::Error::Acp("policy backend unavailable".to_string())),
+            P2PError::Internal(_)
+        ));
     }
 }

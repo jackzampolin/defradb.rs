@@ -118,8 +118,13 @@ impl IrohTransport {
             })
             .await?;
         if let Some(error) = response.err_message.as_deref() {
-            tracing::debug!(peer_id = %peer_id, error, "Iroh peer has no resolvable Defra identity");
-            return Ok(None);
+            if error == crate::message::IDENTITY_UNCONFIGURED_ERROR {
+                tracing::debug!(peer_id = %peer_id, "Iroh peer has no configured Defra identity");
+                return Ok(None);
+            }
+            return Err(Error::Transport(format!(
+                "peer identity challenge failed: {error}"
+            )));
         }
         let token_identity = identity::from_token(&response.identity_token)
             .map_err(|error| Error::Transport(format!("invalid peer identity token: {error}")))?;
@@ -647,6 +652,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved, Some(expected_did));
+
+        requester.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+        requester_task.await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_without_node_identity_is_distinct_from_challenge_failure() {
+        let requester_key = SecretKey::generate();
+        let server_key = SecretKey::generate();
+        let (requester_tx, _requester_events, _requester_replicators, requester_task) =
+            spawn_endpoint(test_config(requester_key.clone()))
+                .await
+                .unwrap();
+        let (server_tx, _server_events, _server_replicators, server_task) =
+            spawn_endpoint(test_config(server_key.clone()))
+                .await
+                .unwrap();
+        let requester = IrohTransport::new(requester_tx, requester_key);
+        let server = IrohTransport::new(server_tx, server_key);
+
+        requester
+            .dial(
+                server.local_peer_id(),
+                server.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        requester
+            .poll_until_connected(server.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            requester
+                .get_peer_identity(server.local_peer_id())
+                .await
+                .unwrap(),
+            None
+        );
 
         requester.shutdown().await.unwrap();
         server.shutdown().await.unwrap();

@@ -118,7 +118,7 @@ pub use router::{
     DocumentAcpOperations, IndexFieldInfo, IndexInfo, IndexOperations, ManageRequester, NacStatus,
     NacStatusInfo, NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult,
     PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,
-    ReplicatorInfo, TransactionOperations, ViewOperations, MANAGE_UNAUTHORIZED,
+    ReplicatorInfo, TransactionOperations, TransportPeerId, ViewOperations, MANAGE_UNAUTHORIZED,
 };
 pub use server::{Server, ServerConfig, DEFAULT_MAX_BACKUP_SIZE};
 
