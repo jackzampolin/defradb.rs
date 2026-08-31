@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use super::cbor::{nullable_bytes, optional_bytes};
 use super::traits::Message;
 
+/// Protocol sentinel indicating that the remote node has no DID identity configured.
+pub const IDENTITY_UNCONFIGURED_ERROR: &str = "node identity is not configured";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityRequest {
     #[serde(rename = "Version")]
@@ -132,6 +135,14 @@ impl IdentityResponse {
             err_message: None,
             identity_token,
         }
+    }
+
+    /// Returns the protocol sentinel response for a node without a configured DID.
+    ///
+    /// Transport adapters map only this response to `None`; other remote errors
+    /// remain failures.
+    pub fn identity_unconfigured(request_message_id: &str) -> Self {
+        Self::error(request_message_id, IDENTITY_UNCONFIGURED_ERROR)
     }
 
     pub fn error(request_message_id: &str, err: &str) -> Self {

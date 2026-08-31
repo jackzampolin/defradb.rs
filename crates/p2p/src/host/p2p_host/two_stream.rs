@@ -9,6 +9,43 @@ use crate::two_stream::TwoStreamEvent;
 use super::P2PHost;
 use crate::host::event::HostEvent;
 
+fn identity_request_targets_peer(
+    request: &crate::message::IdentityRequest,
+    authenticated_peer: &libp2p::PeerId,
+) -> bool {
+    request.peer_id == authenticated_peer.to_string()
+}
+
+fn identity_response_for_request(
+    request: &crate::message::IdentityRequest,
+    authenticated_peer: &libp2p::PeerId,
+    node_identity: Option<&identity::RawIdentity>,
+) -> crate::message::IdentityResponse {
+    if !identity_request_targets_peer(request, authenticated_peer) {
+        return crate::message::IdentityResponse::error(
+            &request.message_id,
+            "identity request peer did not match authenticated transport peer",
+        );
+    }
+
+    let Some(node_identity) = node_identity else {
+        return crate::message::IdentityResponse::identity_unconfigured(&request.message_id);
+    };
+
+    match identity::new_token(
+        node_identity,
+        std::time::Duration::from_secs(60 * 60 * 24),
+        Some(authenticated_peer.to_string()),
+        None,
+    ) {
+        Ok(token) => crate::message::IdentityResponse::success(&request.message_id, token),
+        Err(error) => crate::message::IdentityResponse::error(
+            &request.message_id,
+            &format!("failed to generate identity token: {error}"),
+        ),
+    }
+}
+
 impl<S: Store> P2PHost<S> {
     /// Handle two-stream protocol events.
     pub(super) async fn handle_two_stream_event(&mut self, event: TwoStreamEvent) {
@@ -142,26 +179,11 @@ impl<S: Store> P2PHost<S> {
                 }
             }
             TwoStreamEvent::IdentityRequest { peer_id, request } => {
-                let mut reply = match self.node_identity.as_ref() {
-                    Some(node_identity) => match identity::new_token(
-                        node_identity.as_ref(),
-                        std::time::Duration::from_secs(60 * 60 * 24),
-                        Some(request.peer_id.clone()),
-                        None,
-                    ) {
-                        Ok(token) => {
-                            crate::message::IdentityResponse::success(&request.message_id, token)
-                        }
-                        Err(error) => crate::message::IdentityResponse::error(
-                            &request.message_id,
-                            &format!("failed to generate identity token: {error}"),
-                        ),
-                    },
-                    None => crate::message::IdentityResponse::error(
-                        &request.message_id,
-                        "node identity is not configured",
-                    ),
-                };
+                let mut reply = identity_response_for_request(
+                    &request,
+                    &peer_id,
+                    self.node_identity.as_deref(),
+                );
 
                 match crate::signing::sign_message(self.keypair(), &mut reply) {
                     Ok(()) => {
@@ -191,9 +213,7 @@ impl<S: Store> P2PHost<S> {
                     )?;
                     identity::Identity::did(&identity)
                 }) {
-                    Ok(did) => {
-                        self.peer_identities.insert(peer_id, did);
-                    }
+                    Ok(_did) => {}
                     Err(error) => {
                         warn!(peer_id = %peer_id, error = %error, "Failed to verify peer identity token");
                     }
@@ -349,5 +369,49 @@ impl<S: Store> P2PHost<S> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{identity_request_targets_peer, identity_response_for_request};
+    use identity::Identity as _;
+
+    #[test]
+    fn identity_request_cannot_forward_audience_for_another_transport_peer() {
+        let authenticated = libp2p::PeerId::random();
+        let victim = libp2p::PeerId::random();
+
+        let forwarded = crate::message::IdentityRequest::new(victim.to_string());
+        assert!(!identity_request_targets_peer(&forwarded, &authenticated));
+        let node_identity =
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap();
+        let rejected =
+            identity_response_for_request(&forwarded, &authenticated, Some(&node_identity));
+        assert!(rejected.err_message.is_some());
+        assert!(rejected.identity_token.is_empty());
+
+        let bound = crate::message::IdentityRequest::new(authenticated.to_string());
+        assert!(identity_request_targets_peer(&bound, &authenticated));
+        let accepted = identity_response_for_request(&bound, &authenticated, Some(&node_identity));
+        assert!(accepted.err_message.is_none());
+        let token_identity = identity::from_token(&accepted.identity_token).unwrap();
+        identity::verify_auth_token(&token_identity, &authenticated.to_string()).unwrap();
+        assert_eq!(
+            identity::Identity::did(&token_identity).unwrap(),
+            node_identity.did().unwrap()
+        );
+    }
+
+    #[test]
+    fn identity_request_without_node_identity_returns_explicit_none_sentinel() {
+        let authenticated = libp2p::PeerId::random();
+        let request = crate::message::IdentityRequest::new(authenticated.to_string());
+        let response = identity_response_for_request(&request, &authenticated, None);
+        assert_eq!(
+            response.err_message.as_deref(),
+            Some(crate::message::IDENTITY_UNCONFIGURED_ERROR)
+        );
+        assert!(response.identity_token.is_empty());
     }
 }

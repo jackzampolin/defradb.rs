@@ -86,6 +86,14 @@ pub fn canonical_peer_id(peer_id: &PeerId) -> PeerId {
     }
 }
 
+/// Parse one raw iroh endpoint ID and return its canonical spelling.
+/// Address and ticket forms are deliberately rejected at this identity seam.
+pub fn parse_canonical_peer_id(value: &str) -> Result<PeerId> {
+    let id = EndpointId::from_str(value)
+        .map_err(|error| Error::InvalidPeerId(format!("invalid iroh peer ID: {error}")))?;
+    Ok(PeerId::new(id.to_string()))
+}
+
 /// Render raw iroh endpoint listen addresses into stable, connectable public strings.
 ///
 /// The returned list keeps direct addresses first for compatibility with
@@ -373,5 +381,14 @@ mod tests {
         let selected = best_shareable_public_addr(&peer_id, &[PeerAddr::new(addrless_ticket)]);
 
         assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn strict_peer_id_parser_rejects_addresses_and_canonicalizes_ids() {
+        let endpoint = endpoint_id();
+        let parsed = parse_canonical_peer_id(&endpoint.to_string()).unwrap();
+        assert_eq!(parsed.as_str(), endpoint.to_string());
+        assert!(parse_canonical_peer_id("").is_err());
+        assert!(parse_canonical_peer_id(&format!("127.0.0.1:7777/p2p/{endpoint}")).is_err());
     }
 }

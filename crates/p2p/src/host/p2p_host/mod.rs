@@ -263,8 +263,6 @@ pub struct P2PHost<S: Store> {
     pub(super) peer_addrs: HashMap<PeerId, Multiaddr>,
     /// Optional local DEFRA identity used for Go-compatible identity exchange.
     pub(super) node_identity: Option<Arc<identity::RawIdentity>>,
-    /// Verified peer DEFRA DIDs keyed by peer ID.
-    pub(super) peer_identities: HashMap<PeerId, identity::Did>,
     /// Tracks established connections and actively prunes them after the
     /// Go-compatible low/high watermarks are exceeded.
     connection_manager: ActiveConnectionManager,
@@ -594,7 +592,6 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             bitswap_queries: HashMap::new(),
             peer_addrs: HashMap::new(),
             node_identity,
-            peer_identities: HashMap::new(),
             connection_manager: ActiveConnectionManager::new(
                 config.connection_manager_low_water,
                 config.connection_manager_high_water,

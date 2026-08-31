@@ -42,7 +42,7 @@ mod traits;
 pub use branchable::{BranchableSyncReply, BranchableSyncRequest};
 pub use car::CarFetchRequest;
 pub use docsync::{DocSyncItem, DocSyncReply, DocSyncRequest, MAX_DOC_IDS};
-pub use identity::{IdentityRequest, IdentityResponse};
+pub use identity::{IdentityRequest, IdentityResponse, IDENTITY_UNCONFIGURED_ERROR};
 pub use manage::{
     ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryRequest,
     ManageQueryResult, ManageReply, ManageRequest,

@@ -215,10 +215,7 @@ async fn dispatch_stream(
                     ),
                 }
             } else {
-                crate::message::IdentityResponse::error(
-                    &request.message_id,
-                    "node identity is not configured",
-                )
+                crate::message::IdentityResponse::identity_unconfigured(&request.message_id)
             };
             protocols::write_message(&mut send, &response).await?;
             send.finish()
