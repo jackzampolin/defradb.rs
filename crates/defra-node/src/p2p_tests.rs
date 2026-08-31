@@ -1596,8 +1596,7 @@ async fn live_replicator_same_session_followup_turn_converges() {
     node1.shutdown().await;
 
     assert_eq!(
-        receiver,
-        expected_receiver,
+        receiver, expected_receiver,
         "same-session followup turn failed to converge without explicit sync nudge; receiver={receiver:?} expected={second_expected:?} sender_diag={sender_diag:?} receiver_diag={receiver_diag:?}",
     );
 }
@@ -1887,4 +1886,104 @@ async fn branchable_sync_pulls_collection_from_embedded_peer() {
 
     source.shutdown().await;
     joiner.shutdown().await;
+}
+
+/// An encrypted create on one embedded node must replicate to a peer as
+/// readable plaintext: the receiver merges the encrypted blocks and fetches
+/// the DEK from the writer over the KMS pubsub-RPC protocol (`encryption`
+/// topic), gated by NAC/DAC policy.
+///
+/// A runtime with no KMS wired never gets that far: the merge falls back to
+/// the legacy path (reading the raw `Encryption` block from the local
+/// store), does not hold it, and the document never becomes visible on the
+/// replica. The CLI and `embedded` runtimes wire the KMS
+/// (crates/cli/src/commands/start/server.rs, crates/embedded/src/node.rs);
+/// this pins defra-node serving and fetching the same way.
+#[tokio::test]
+async fn encrypted_create_replicates_plaintext_to_replicator() {
+    init_tracing();
+
+    let writer = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build writer");
+    let replica = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build replica");
+
+    const SCHEMA: &str = "type SecretNote { name: String age: Int }";
+    writer.add_schema(SCHEMA).await.expect("schema on writer");
+    replica.add_schema(SCHEMA).await.expect("schema on replica");
+
+    install_one_way_replicator(&writer, &replica, &["SecretNote"]).await;
+
+    let response = writer
+        .execute(
+            r#"mutation { create_SecretNote(encrypt: true, input: {name: "classified", age: 7}) { _docID } }"#,
+        )
+        .await;
+    assert!(
+        response.errors.is_empty(),
+        "encrypted create failed: {:?}",
+        response.errors
+    );
+
+    // The writer itself must read its own encrypted document back.
+    let local = writer.execute(r#"query { SecretNote { name age } }"#).await;
+    assert!(
+        local.errors.is_empty(),
+        "writer readback failed: {:?}",
+        local.errors
+    );
+    let local_doc = local
+        .data
+        .as_ref()
+        .and_then(|d| d.get("SecretNote"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .cloned()
+        .expect("writer sees its own document");
+    assert_eq!(
+        local_doc.get("name").and_then(|v| v.as_str()),
+        Some("classified")
+    );
+    assert_eq!(local_doc.get("age").and_then(|v| v.as_i64()), Some(7));
+
+    // The replica must converge to the same plaintext.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let response = replica
+            .execute(r#"query { SecretNote { name age } }"#)
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "replica query failed: {:?}",
+            response.errors
+        );
+        let doc = response
+            .data
+            .as_ref()
+            .and_then(|d| d.get("SecretNote"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .cloned();
+        if let Some(doc) = &doc {
+            if doc.get("name").and_then(|v| v.as_str()) == Some("classified")
+                && doc.get("age").and_then(|v| v.as_i64()) == Some(7)
+            {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replica never saw the decrypted document; last: {doc:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    writer.shutdown().await;
+    replica.shutdown().await;
 }

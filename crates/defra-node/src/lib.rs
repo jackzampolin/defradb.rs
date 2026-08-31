@@ -1408,6 +1408,83 @@ impl NodeBuilder {
             wire_document_acp(document_acp.clone(), _strict_replicated_doc_access);
         }
 
+        // Build the KMS once document ACP exists (same ordering as the CLI
+        // runtime and crates/embedded/src/node.rs): blockstore-backed key
+        // store, NAC/DAC release policy, and the pubsub transport created in
+        // setup_p2p. Without this, encrypted blocks replicate but no peer can
+        // ever fetch the DEK, so encrypted documents never become readable on
+        // replicas.
+        #[cfg(feature = "p2p")]
+        if let Some(p2p) = p2p_result.as_mut() {
+            // Blockstore-backed KeyStore: the KMS serves DEKs for ANY
+            // encrypted write by reading the node's durable
+            // encstore->blockstore, not a RAM-only map. The DB owns the
+            // blockstore Arc (set_kms_blockstore) so the adapter can hold a
+            // Weak and avoid the lock-pinning cycle (#976).
+            let kms_blockstore = database.set_kms_blockstore(Arc::new(
+                blockstore::DefraBlockstore::new(store.clone(), true),
+            ));
+            let enc_block_store: Arc<dyn kms::EncBlockStore> =
+                Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
+            let key_store: Arc<dyn kms::KeyStore> =
+                Arc::new(kms::BlockstoreKeyStore::new(enc_block_store));
+            let doc_lookup: Arc<dyn kms::DocCollectionLookup> =
+                Arc::new(db::DbDocCollectionLookup::new(database.clone()));
+            let policy = Arc::new(kms::NacDacPolicy::new(document_acp.clone(), doc_lookup));
+            if let Some(nac) = database.nac_manager() {
+                policy.set_node_acp(Arc::new(db::DbNodeAcpRead::new(nac)));
+            }
+
+            // Node identity used for cross-peer DEK requests. Anonymous
+            // nodes use a stable placeholder DID.
+            let kms_node_did = database.node_did().unwrap_or_else(|| {
+                identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+                    .expect("static anonymous DID parses")
+            });
+
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+                key_store,
+                vec![p2p.kms_transport.clone()],
+                policy as Arc<dyn kms::AccessPolicy>,
+                Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
+                kms_node_did,
+            ));
+
+            // Bind this node's transport peer id into the KMS so served
+            // ECIES replies carry the correct AAD peer id.
+            kms_service.set_local_peer_id(p2p.local_peer_id.clone());
+
+            // Serve handler with a Weak to break the transport<->kms Arc
+            // cycle (transport holds handler -> kms -> transports ->
+            // transport).
+            struct KmsServeHandler {
+                kms: std::sync::Weak<dyn kms::KmsService>,
+            }
+            #[async_trait::async_trait]
+            impl kms::IncomingHandler for KmsServeHandler {
+                async fn handle(
+                    &self,
+                    from: kms::PeerIdentity,
+                    req: kms::FetchEncryptionKeyRequest,
+                ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+                    match self.kms.upgrade() {
+                        Some(kms) => kms.serve_request(from, req).await,
+                        None => Err(kms::Error::Internal("kms dropped".into())),
+                    }
+                }
+            }
+            p2p.kms_transport.install_handler(Arc::new(KmsServeHandler {
+                kms: Arc::downgrade(&kms_service),
+            }));
+
+            if let Some(wire_kms) = p2p.wire_kms.take() {
+                wire_kms(kms_service.clone());
+            }
+
+            // Wire the KMS into the DB-held read/write path.
+            database.set_kms(kms_service);
+        }
+
         // Assemble query runner
         let query_runner =
             query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry.clone())

@@ -27,12 +27,17 @@ use kms::{
     EncodedFetchRequest, FetchEncryptionKeyReply, FetchEncryptionKeyRequest, IncomingHandler,
     KeyTransport, Result as KmsResult, TransportReplyStream,
 };
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
+
+use cid::Cid;
+use kovan_map::HopscotchMap;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::peer_identity::PeerIdentityResolver;
-use crate::pubsub_rpc::{response_topic, Correlator, InternalResponse, PublishOptions};
+#[cfg(feature = "libp2p-transport")]
+use crate::pubsub_rpc::response_topic;
+use crate::pubsub_rpc::{derive_request_id, Correlator, InternalResponse, PublishOptions};
 use crate::topics::{DefraTopic, ENCRYPTION_TOPIC};
 use crate::transport::{P2PTransport, PeerId};
 
@@ -61,6 +66,10 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// fresh message id, so no duplicate suppression) re-solicits the reply.
 const REPUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Upper bound on requests buffered before a handler is installed. Also the
+/// replay parallelism bound: each buffered request replays as its own task.
+const PENDING_CAP: usize = 32;
+
 /// Gossip-backed `KeyTransport`, generic over the underlying P2P transport.
 ///
 /// Outgoing fetches are correlated by request-CID via [`Correlator`]; replies
@@ -77,6 +86,16 @@ pub struct PubsubKeyTransport<T: P2PTransport> {
     /// Pre-formatted `encryption/<self>/_response` topic this node subscribes
     /// to in order to receive replies addressed to it.
     self_response_topic: String,
+    /// Requests that arrive before a handler is installed, keyed by request
+    /// id so a requester's periodic republishes coalesce, and replayed on
+    /// installation. Runtimes wire this transport into their event loop
+    /// before the KMS itself exists, and a requester's retries give up after
+    /// a few seconds — dropping that window's requests turns into
+    /// `KeyUnavailable` on the requester for no lasting reason.
+    pending_requests: HopscotchMap<Cid, (String, Vec<u8>)>,
+    /// Back-reference so `install_handler` can replay the buffer through the
+    /// normal dispatch path.
+    self_ref: OnceLock<Weak<Self>>,
 }
 
 impl<T: P2PTransport> PubsubKeyTransport<T> {
@@ -87,15 +106,17 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
         identity_resolver: Arc<dyn PeerIdentityResolver>,
     ) -> KmsResult<Arc<Self>> {
         let local_peer_id = transport.local_peer_id().to_string();
+        // Canonicalize through `libp2p::PeerId` when that dep is compiled in
+        // (Go wire-compat guarantee); otherwise -- and for peer ids that do
+        // not parse as libp2p ids, e.g. iroh hex -- join the transport-native
+        // string. For a base58 libp2p id both spellings are identical.
+        #[cfg(feature = "libp2p-transport")]
         let self_response_topic = match local_peer_id.parse::<libp2p::PeerId>() {
             Ok(pid) => response_topic(ENCRYPTION_TOPIC, &pid),
-            Err(_) => {
-                // Non-libp2p peer id (e.g. iroh): fall back to a string-joined
-                // sub-topic. Go interop only applies on libp2p, so this branch
-                // exists purely to keep the type generic over transports.
-                format!("{ENCRYPTION_TOPIC}/{local_peer_id}/_response")
-            }
+            Err(_) => format!("{ENCRYPTION_TOPIC}/{local_peer_id}/_response"),
         };
+        #[cfg(not(feature = "libp2p-transport"))]
+        let self_response_topic = format!("{ENCRYPTION_TOPIC}/{local_peer_id}/_response");
 
         transport
             .subscribe(DefraTopic::Encryption)
@@ -114,14 +135,18 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             .await
             .map_err(|e| kms::Error::Internal(format!("register _response routing: {e}")))?;
 
-        Ok(Arc::new(Self {
+        let transport = Arc::new(Self {
             transport,
             identity_resolver,
             handler: RwLock::new(None),
             correlator: Correlator::new(),
             local_peer_id,
             self_response_topic,
-        }))
+            pending_requests: HopscotchMap::new(),
+            self_ref: OnceLock::new(),
+        });
+        let _ = transport.self_ref.set(Arc::downgrade(&transport));
+        Ok(transport)
     }
 
     /// The `encryption/<self>/_response` sub-topic this transport owns. The
@@ -189,7 +214,13 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
         }
         let handler = self.handler.read().ok().and_then(|g| g.clone());
         let Some(handler) = handler else {
-            warn!("KMS request arrived but no handler installed; dropping");
+            if self.pending_requests.len() >= PENDING_CAP {
+                warn!("KMS request buffer full before a handler was installed; dropping");
+            } else {
+                debug!("KMS request arrived before a handler was installed; buffered");
+                self.pending_requests
+                    .insert_if_absent(derive_request_id(&payload), (from, payload));
+            }
             return;
         };
         let req: FetchEncryptionKeyRequest = match defra_core::cbor::from_slice(&payload) {
@@ -473,10 +504,47 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         if let Ok(mut slot) = self.handler.write() {
             *slot = Some(handler);
         }
+        // Requests stop entering the buffer once the handler is visible, so
+        // this drain terminates; looping covers inserts racing installation.
+        let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+        loop {
+            let keys: Vec<Cid> = self.pending_requests.keys().collect();
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                if let Some(entry) = self.pending_requests.remove(&key) {
+                    buffered.push(entry);
+                }
+            }
+        }
+        if buffered.is_empty() {
+            return;
+        }
+        let Some(me) = self.self_ref.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                // One task per request, bounded by PENDING_CAP: a reply that
+                // blocks on publishing cannot head-of-line-block the other
+                // buffered callers past their response timeout.
+                for (from, payload) in buffered {
+                    let me = Arc::clone(&me);
+                    rt.spawn(async move {
+                        me.handle_request(from, payload).await;
+                    });
+                }
+            }
+            Err(_) => warn!(
+                count = buffered.len(),
+                "no async runtime to replay buffered KMS requests; dropping"
+            ),
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "libp2p-transport"))]
 mod tests {
     use super::*;
     use crate::error::{Error, Result};
@@ -1133,5 +1201,80 @@ mod tests {
         assert_eq!(authorization.source_peer_id, source_peer_id);
         assert_eq!(authorization.target_peer_id, caller.to_string());
         assert_eq!(authorization.collection_id, "collection-a");
+    }
+
+    /// A request that lands before `install_handler` is buffered and served
+    /// once the handler exists, instead of being dropped into the
+    /// startup-wiring window.
+    #[tokio::test]
+    async fn request_before_handler_is_served_after_install() {
+        struct FixedIdentityResolver(identity::Did);
+        #[async_trait]
+        impl PeerIdentityResolver for FixedIdentityResolver {
+            async fn resolve(&self, _peer_id: &PeerId) -> Option<identity::Did> {
+                Some(self.0.clone())
+            }
+        }
+
+        struct EchoHandler {
+            seen: Arc<Mutex<Option<kms::PeerIdentity>>>,
+        }
+        #[async_trait]
+        impl IncomingHandler for EchoHandler {
+            async fn handle(
+                &self,
+                from: kms::PeerIdentity,
+                _req: FetchEncryptionKeyRequest,
+            ) -> KmsResult<FetchEncryptionKeyReply> {
+                *self.seen.lock() = Some(from);
+                Ok(FetchEncryptionKeyReply {
+                    links: vec![vec![9]],
+                    blocks: vec![vec![8]],
+                    ephemeral_public_key: vec![1; 32],
+                })
+            }
+        }
+
+        let transport = RacyTransport::new(0);
+        let published = transport.published.clone();
+        let caller = a_libp2p_peer();
+        let resolved_did: identity::Did = "did:key:zalice".parse().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(FixedIdentityResolver(resolved_did.clone())),
+        )
+        .await
+        .unwrap();
+
+        let req = FetchEncryptionKeyRequest {
+            identity: b"did:key:zalice".to_vec(),
+            links: vec![vec![1]],
+            ephemeral_public_key: vec![2; 32],
+            explicit_replay_capability: None,
+        };
+        let req_bytes = defra_core::cbor::to_vec(&req).unwrap();
+        kt.dispatch_incoming(caller.to_string(), ENCRYPTION_TOPIC.to_string(), req_bytes)
+            .await;
+
+        kt.install_handler(Arc::new(EchoHandler { seen: seen.clone() }));
+
+        let expected_topic = response_topic(ENCRYPTION_TOPIC, &caller);
+        let mut served = false;
+        for _ in 0..100 {
+            if published.lock().iter().any(|(t, _)| *t == expected_topic) {
+                served = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            served,
+            "buffered request must be served after install_handler"
+        );
+        assert_eq!(
+            seen.lock().clone().map(|f: kms::PeerIdentity| f.peer_id),
+            Some(caller.to_string())
+        );
     }
 }
