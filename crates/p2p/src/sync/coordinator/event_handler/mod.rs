@@ -1009,14 +1009,16 @@ mod tests {
     async fn gossip_origin_unknown_to_transport_does_not_create_durable_obligation() {
         use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
 
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
             SyncCoordinator::new(transport, blockstore, SyncConfig::default())
                 .await
                 .expect("coordinator");
-        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+            RegolithStore::in_memory().unwrap(),
+        )));
         coordinator
             .install_pending_dag_store(pending_store.clone())
             .await;
