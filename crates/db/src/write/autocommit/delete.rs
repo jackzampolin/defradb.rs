@@ -20,14 +20,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
-        // Create a write transaction
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_mutation_txn().await?;
 
         // Acquire store views up front (dropped before commit); the mutation
         // itself runs in an async block so errors fall through to the discard.
-        // Some(short_id) means the doc existed and was deleted.
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!(
                 "failed to get datastore for collection '{}': {}",
@@ -37,8 +33,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let systemstore = txn.systemstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
+        let blockstore = txn.blockstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+        })?;
+        let headstore = txn.headstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+        })?;
 
-        let result: query::error::Result<Option<(u64, DocID)>> = async {
+        let result: query::error::Result<Option<(DocID, CommitArtifacts)>> = async {
             let Some((doc_short_id, canonical_doc_id)) = collection
                 .resolve_doc_identity(&systemstore, doc_id)
                 .await
@@ -66,136 +68,91 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .delete_with_indexes(&datastore, &canonical_doc_id, doc_short_id, &index_manager)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
-            Ok(existed.then_some((doc_short_id, canonical_doc_id)))
+            if !existed {
+                return Ok(None);
+            }
+
+            let schema_version_id = collection.version_id();
+            let doc_id_str = canonical_doc_id.to_string();
+            // Get signing config from thread-local (set by FFI exec_request)
+            let sign_config = get_signing_config();
+
+            let block_result = write_delete_block(
+                &blockstore,
+                &headstore,
+                &doc_id_str,
+                doc_short_id,
+                schema_version_id,
+                sign_config.as_ref(),
+            )
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write delete block for collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
+            let composite_cid = block_result.cid;
+
+            crate::docid::map::set_block_doc_id_mapping(
+                &systemstore,
+                &composite_cid.to_string(),
+                &doc_id_str,
+            )
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+            let col_block_data = write_branchable_collection_block(
+                &self.db,
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                composite_cid,
+                sign_config.as_ref(),
+            )
+            .await?;
+
+            Ok(Some((
+                canonical_doc_id,
+                (composite_cid, block_result.block, col_block_data),
+            )))
         }
         .await;
 
         drop(datastore);
         drop(systemstore);
+        drop(blockstore);
+        drop(headstore);
 
-        match result {
-            Ok(deleted) => {
-                // DeleteNode treats existed==false as a no-op; don't write a
-                // tombstone block or emit an event for a missing doc.
-                // Propagate any commit error so callers see the same failure
-                // surface they get on the normal commit path (Go returns the
-                // commit error on a no-op delete too).
-                let Some((deleted_short_id, canonical_doc_id)) = deleted else {
-                    if let Err(e) = txn.commit().await {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to commit transaction after no-op delete"
-                        );
-                        return Err(crate::error::commit_query_error(e));
-                    }
-                    return Ok(DeleteResult::new(doc_id.clone(), false));
-                };
-                let existed = true;
+        let operation = if matches!(&result, Ok(None)) {
+            "no-op delete"
+        } else {
+            "delete"
+        };
+        let deleted = self
+            .finish_mutation(txn, result, collection_name, operation)
+            .await?;
 
-                // Build delete block (composite with status=2) in a scoped block
-                let commit_result: CommitArtifacts = {
-                    let blockstore = txn.blockstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get blockstore: {}",
-                            e
-                        ))
-                    })?;
-                    let headstore = txn.headstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get headstore: {}",
-                            e
-                        ))
-                    })?;
+        let Some((canonical_doc_id, commit_result)) = deleted else {
+            return Ok(DeleteResult::new(doc_id.clone(), false));
+        };
 
-                    let schema_version_id = collection.version_id();
-                    let doc_id_str = canonical_doc_id.to_string();
-                    // Get signing config from thread-local (set by FFI exec_request)
-                    let sign_config = get_signing_config();
+        let (cid, block, col_data) = commit_result;
+        self.emit_update_events(
+            &collection,
+            &canonical_doc_id.to_string(),
+            cid,
+            block.clone(),
+            col_data.clone(),
+        );
 
-                    let block_result = write_delete_block(
-                        &blockstore,
-                        &headstore,
-                        &doc_id_str,
-                        deleted_short_id,
-                        schema_version_id,
-                        sign_config.as_ref(),
-                    )
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to write delete block for collection {}: {}",
-                            collection_name, e
-                        ))
-                    })?;
-                    let composite_cid = block_result.cid;
-
-                    let systemstore = txn.systemstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get systemstore: {}",
-                            e
-                        ))
-                    })?;
-                    crate::docid::map::set_block_doc_id_mapping(
-                        &systemstore,
-                        &composite_cid.to_string(),
-                        &doc_id_str,
-                    )
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-                    let col_block_data = write_branchable_collection_block(
-                        &self.db,
-                        collection_name,
-                        &collection,
-                        &blockstore,
-                        &headstore,
-                        composite_cid,
-                        sign_config.as_ref(),
-                    )
-                    .await?;
-
-                    (composite_cid, block_result.block, col_block_data)
-                }; // blockstore and headstore dropped here
-
-                // Commit the transaction (datastore reference is now dropped)
-                if let Err(e) = txn.commit().await {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to commit transaction after delete"
-                    );
-                    return Err(crate::error::commit_query_error(e));
-                }
-
-                let (cid, block, col_data) = commit_result;
-                self.emit_update_events(
-                    &collection,
-                    &canonical_doc_id.to_string(),
-                    cid,
-                    block.clone(),
-                    col_data.clone(),
-                );
-
-                let mut result = DeleteResult::with_commit(canonical_doc_id, existed, cid, block);
-                if let Some((col_cid, col_bytes)) = col_data {
-                    result.broadcast_cid = Some(col_cid);
-                    result.broadcast_block = Some(col_bytes);
-                }
-                Ok(result)
-            }
-            Err(e) => {
-                // Discard the transaction on error
-                if let Err(discard_err) = txn.discard() {
-                    warn!(
-                        collection = %collection_name,
-                        error = %discard_err,
-                        "Failed to discard transaction after delete error"
-                    );
-                }
-                Err(e)
-            }
+        let mut result = DeleteResult::with_commit(canonical_doc_id, true, cid, block);
+        if let Some((col_cid, col_bytes)) = col_data {
+            result.broadcast_cid = Some(col_cid);
+            result.broadcast_block = Some(col_bytes);
         }
+        Ok(result)
     }
 
     /// Delete multiple documents in a single transaction.
@@ -241,9 +198,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
         // Single transaction for all deletes
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_mutation_txn().await?;
 
         let mut results: Vec<(DocID, bool, Option<CommitArtifacts>)> =
             Vec::with_capacity(doc_ids.len());

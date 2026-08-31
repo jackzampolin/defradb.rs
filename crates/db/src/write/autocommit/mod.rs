@@ -27,6 +27,7 @@ use crate::collection::Collection;
 use crate::database::DB;
 use crate::index::IndexManager;
 use crate::read::lensed::fetcher::LensedDocFetcher;
+use crate::txn::DbTxn;
 
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).
@@ -64,6 +65,46 @@ impl<S: Store> AutoCommitMutator<S> {
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         let _ = self.document_acp.set(acp);
+    }
+
+    async fn new_mutation_txn(&self) -> query::error::Result<DbTxn<S>> {
+        self.db.new_txn(false).await.map_err(|error| {
+            query::error::QueryError::execution(format!("failed to create txn: {error}"))
+        })
+    }
+
+    async fn finish_mutation<T>(
+        &self,
+        txn: DbTxn<S>,
+        result: query::error::Result<T>,
+        collection_name: &str,
+        operation: &str,
+    ) -> query::error::Result<T> {
+        match result {
+            Ok(value) => {
+                if let Err(error) = txn.commit().await {
+                    warn!(
+                        collection = %collection_name,
+                        error = %error,
+                        "Failed to commit transaction after {}",
+                        operation
+                    );
+                    return Err(crate::error::commit_query_error(error));
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(discard_error) = txn.discard() {
+                    warn!(
+                        collection = %collection_name,
+                        error = %discard_error,
+                        "Failed to discard transaction after {} error",
+                        operation
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn register_created_doc_with_acp(
@@ -108,9 +149,7 @@ impl<S: Store> AutoCommitMutator<S> {
     pub async fn new_batch_components(
         &self,
     ) -> query::error::Result<(Arc<BatchMutator<S>>, Arc<LensedDocFetcher<S>>)> {
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_mutation_txn().await?;
         let fetcher = Arc::new(LensedDocFetcher::new(
             self.db.clone(),
             txn,
