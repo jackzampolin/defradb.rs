@@ -66,6 +66,10 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// fresh message id, so no duplicate suppression) re-solicits the reply.
 const REPUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Upper bound on requests buffered before a handler is installed. Also the
+/// replay parallelism bound: each buffered request replays as its own task.
+const PENDING_CAP: usize = 32;
+
 /// Gossip-backed `KeyTransport`, generic over the underlying P2P transport.
 ///
 /// Outgoing fetches are correlated by request-CID via [`Correlator`]; replies
@@ -210,7 +214,6 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
         }
         let handler = self.handler.read().ok().and_then(|g| g.clone());
         let Some(handler) = handler else {
-            const PENDING_CAP: usize = 32;
             if self.pending_requests.len() >= PENDING_CAP {
                 warn!("KMS request buffer full before a handler was installed; dropping");
             } else {
@@ -523,11 +526,15 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         };
         match tokio::runtime::Handle::try_current() {
             Ok(rt) => {
-                rt.spawn(async move {
-                    for (from, payload) in buffered {
+                // One task per request, bounded by PENDING_CAP: a reply that
+                // blocks on publishing cannot head-of-line-block the other
+                // buffered callers past their response timeout.
+                for (from, payload) in buffered {
+                    let me = Arc::clone(&me);
+                    rt.spawn(async move {
                         me.handle_request(from, payload).await;
-                    }
-                });
+                    });
+                }
             }
             Err(_) => warn!(
                 count = buffered.len(),
