@@ -351,156 +351,176 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         // iterated including those filtered out by value_filter (for indexFetches
         // metrics). OrScan branches recurse and return already-resolved DocIDs.
         let vf = params.value_filter.as_ref();
-        let (raw_doc_short_ids, raw_fetches): (Vec<u64>, u64) = match &params.scan_type {
-            IndexScanType::ExactMatch { values } => {
-                // Cursor seek is intentionally not applied: ExactMatch fetches a single
-                // value; pagination over a single value is meaningless.
-                let mut iter = index.get(&datastore, values).await.map_err(|e| {
-                    query::error::QueryError::execution(format!("index error: {}", e))
-                })?;
-                collect_with_limit(&mut iter, limit, offset, vf).await?
-            }
-            IndexScanType::InScan {
-                values,
-                suffix_values,
-            } => {
-                // Cursor seek is intentionally not applied: InScan fetches a fixed set
-                // of values; pagination over an unordered set is meaningless.
-                // For IN operator, we need to collect results for each value.
-                // For composite indexes with suffix_values (subsequent Eq conditions),
-                // use exact match (get) with combined values for efficiency.
-                // For composite indexes without suffix_values, use scan_prefix.
-                let is_composite = index.description().fields.len() > 1;
-                let has_full_key = !suffix_values.is_empty()
-                    && suffix_values.len() == index.description().fields.len() - 1;
-                let mut all_doc_short_ids = Vec::new();
-                for value in values {
-                    if has_full_key {
-                        // All index fields covered: In value + suffix Eq values = exact match
-                        let mut key_values = vec![value.clone()];
-                        key_values.extend(suffix_values.iter().cloned());
-                        let mut iter = index.get(&datastore, &key_values).await.map_err(|e| {
+        let (raw_doc_short_ids, raw_fetches, group_lens): (Vec<u64>, u64, Vec<usize>) =
+            match &params.scan_type {
+                IndexScanType::ExactMatch { values } => {
+                    // Cursor seek is intentionally not applied: ExactMatch fetches a single
+                    // value; pagination over a single value is meaningless.
+                    let mut iter = index.get(&datastore, values).await.map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
+                    // Full equal-key set: public-DocID tie-break sorts before offset/limit (#1602).
+                    let (ids, n) = collect_with_limit(&mut iter, None, 0, vf).await?;
+                    (ids, n, Vec::new())
+                }
+                IndexScanType::InScan {
+                    values,
+                    suffix_values,
+                } => {
+                    // Cursor seek is intentionally not applied: InScan fetches a fixed set
+                    // of values; pagination over an unordered set is meaningless.
+                    // For IN operator, we need to collect results for each value.
+                    // For composite indexes with suffix_values (subsequent Eq conditions),
+                    // use exact match (get) with combined values for efficiency.
+                    // For composite indexes without suffix_values, use scan_prefix.
+                    let is_composite = index.description().fields.len() > 1;
+                    let has_full_key = !suffix_values.is_empty()
+                        && suffix_values.len() == index.description().fields.len() - 1;
+                    let mut all_doc_short_ids = Vec::new();
+                    let mut group_lens = Vec::new();
+                    let mut seen_short_ids = HashSet::new();
+                    let mut raw_count = 0u64;
+                    for value in values {
+                        let entries = if has_full_key {
+                            let mut key_values = vec![value.clone()];
+                            key_values.extend(suffix_values.iter().cloned());
+                            let mut iter =
+                                index.get(&datastore, &key_values).await.map_err(|e| {
+                                    query::error::QueryError::execution(format!(
+                                        "index error: {}",
+                                        e
+                                    ))
+                                })?;
+                            iter.collect_all().await.map_err(|e| {
+                                query::error::QueryError::execution(format!(
+                                    "index iteration error: {}",
+                                    e
+                                ))
+                            })?
+                        } else if is_composite {
+                            let mut iter = index
+                                .scan_prefix(&datastore, std::slice::from_ref(value), false)
+                                .await
+                                .map_err(|e| {
+                                    query::error::QueryError::execution(format!(
+                                        "index error: {}",
+                                        e
+                                    ))
+                                })?;
+                            iter.collect_all().await.map_err(|e| {
+                                query::error::QueryError::execution(format!(
+                                    "index iteration error: {}",
+                                    e
+                                ))
+                            })?
+                        } else {
+                            let mut iter = index
+                                .get(&datastore, std::slice::from_ref(value))
+                                .await
+                                .map_err(|e| {
+                                    query::error::QueryError::execution(format!(
+                                        "index error: {}",
+                                        e
+                                    ))
+                                })?;
+                            iter.collect_all().await.map_err(|e| {
+                                query::error::QueryError::execution(format!(
+                                    "index iteration error: {}",
+                                    e
+                                ))
+                            })?
+                        };
+                        raw_count += entries.len() as u64;
+                        crate::read::index_tiebreak::extend_equal_key_groups(
+                            &mut all_doc_short_ids,
+                            &mut group_lens,
+                            &mut seen_short_ids,
+                            entries,
+                        );
+                    }
+                    (all_doc_short_ids, raw_count, group_lens)
+                }
+                IndexScanType::PrefixScan {
+                    prefix_values,
+                    reverse,
+                } => {
+                    let mut iter = index
+                        .scan_prefix(&datastore, prefix_values, *reverse)
+                        .await
+                        .map_err(|e| {
                             query::error::QueryError::execution(format!("index error: {}", e))
                         })?;
-                        let entries = iter.collect_all().await.map_err(|e| {
-                            query::error::QueryError::execution(format!(
-                                "index iteration error: {}",
-                                e
-                            ))
-                        })?;
-                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
-                    } else if is_composite {
-                        let mut iter = index
-                            .scan_prefix(&datastore, std::slice::from_ref(value), false)
-                            .await
-                            .map_err(|e| {
-                                query::error::QueryError::execution(format!("index error: {}", e))
-                            })?;
-                        let entries = iter.collect_all().await.map_err(|e| {
-                            query::error::QueryError::execution(format!(
-                                "index iteration error: {}",
-                                e
-                            ))
-                        })?;
-                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
-                    } else {
-                        let mut iter = index
-                            .get(&datastore, std::slice::from_ref(value))
-                            .await
-                            .map_err(|e| {
-                                query::error::QueryError::execution(format!("index error: {}", e))
-                            })?;
-                        let entries = iter.collect_all().await.map_err(|e| {
-                            query::error::QueryError::execution(format!(
-                                "index iteration error: {}",
-                                e
-                            ))
-                        })?;
-                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
-                    }
-                }
-                let count = all_doc_short_ids.len() as u64;
-                (all_doc_short_ids, count)
-            }
-            IndexScanType::PrefixScan {
-                prefix_values,
-                reverse,
-            } => {
-                let mut iter = index
-                    .scan_prefix(&datastore, prefix_values, *reverse)
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!("index error: {}", e))
-                    })?;
-                apply_cursor_seek_to_iterator(
-                    &mut iter,
-                    &params.cursor_seek,
-                    &systemstore,
-                    collection.resolved_root_id(),
-                )
-                .await?;
-                collect_with_limit(&mut iter, limit, offset, vf).await?
-            }
-            IndexScanType::RangeScan {
-                prefix_values,
-                lower,
-                upper,
-                reverse,
-            } => {
-                let mut iter = index
-                    .scan_range(
-                        &datastore,
-                        prefix_values,
-                        lower.clone(),
-                        upper.clone(),
-                        *reverse,
+                    apply_cursor_seek_to_iterator(
+                        &mut iter,
+                        &params.cursor_seek,
+                        &systemstore,
+                        collection.resolved_root_id(),
                     )
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!("index error: {}", e))
-                    })?;
-                apply_cursor_seek_to_iterator(
-                    &mut iter,
-                    &params.cursor_seek,
-                    &systemstore,
-                    collection.resolved_root_id(),
-                )
-                .await?;
-                collect_with_limit(&mut iter, limit, offset, vf).await?
-            }
-            IndexScanType::OrScan { branches } => {
-                // Cursor seek is intentionally not applied: each branch gets cursor_seek: None
-                // because OrScan merges independent sets; applying a cursor to individual
-                // branches would arbitrarily exclude results from other branches.
-                let mut all_doc_ids = Vec::new();
-                let mut total_raw_fetches = 0u64;
-                for branch in branches {
-                    let branch_params = IndexScanParams {
-                        index_name: params.index_name.clone(),
-                        scan_type: branch.clone(),
-                        limit: None,
-                        offset: 0,
-                        value_filter: None,
-                        cursor_seek: None,
-                    };
-                    let branch_result = self
-                        .get_by_index_scan(collection_name, &branch_params)
-                        .await?;
-                    total_raw_fetches += branch_result.raw_fetches();
-                    all_doc_ids.extend(branch_result.doc_ids().iter().cloned());
+                    .await?;
+                    let (ids, n) = collect_with_limit(&mut iter, limit, offset, vf).await?;
+                    (ids, n, Vec::new())
                 }
-                let mut seen = HashSet::new();
-                let doc_ids: Vec<String> = all_doc_ids
-                    .into_iter()
-                    .filter(|id| seen.insert(id.clone()))
-                    .collect();
-                return Ok(query::fetcher::IndexScanResult::with_raw_count(
-                    doc_ids,
-                    total_raw_fetches,
-                ));
-            }
-            _ => (Vec::new(), 0),
-        };
+                IndexScanType::RangeScan {
+                    prefix_values,
+                    lower,
+                    upper,
+                    reverse,
+                } => {
+                    let mut iter = index
+                        .scan_range(
+                            &datastore,
+                            prefix_values,
+                            lower.clone(),
+                            upper.clone(),
+                            *reverse,
+                        )
+                        .await
+                        .map_err(|e| {
+                            query::error::QueryError::execution(format!("index error: {}", e))
+                        })?;
+                    apply_cursor_seek_to_iterator(
+                        &mut iter,
+                        &params.cursor_seek,
+                        &systemstore,
+                        collection.resolved_root_id(),
+                    )
+                    .await?;
+                    let (ids, n) = collect_with_limit(&mut iter, limit, offset, vf).await?;
+                    (ids, n, Vec::new())
+                }
+                IndexScanType::OrScan { branches } => {
+                    // Cursor seek is intentionally not applied: each branch gets cursor_seek: None
+                    // because OrScan merges independent sets; applying a cursor to individual
+                    // branches would arbitrarily exclude results from other branches.
+                    let mut all_doc_ids = Vec::new();
+                    let mut total_raw_fetches = 0u64;
+                    for branch in branches {
+                        let branch_params = IndexScanParams {
+                            index_name: params.index_name.clone(),
+                            scan_type: branch.clone(),
+                            limit: None,
+                            offset: 0,
+                            value_filter: None,
+                            cursor_seek: None,
+                        };
+                        let branch_result = self
+                            .get_by_index_scan(collection_name, &branch_params)
+                            .await?;
+                        total_raw_fetches += branch_result.raw_fetches();
+                        all_doc_ids.extend(branch_result.doc_ids().iter().cloned());
+                    }
+                    let mut seen = HashSet::new();
+                    let doc_ids: Vec<String> = all_doc_ids
+                        .into_iter()
+                        .filter(|id| seen.insert(id.clone()))
+                        .collect();
+                    return Ok(query::fetcher::IndexScanResult::with_raw_count(
+                        doc_ids,
+                        total_raw_fetches,
+                    ));
+                }
+                _ => (Vec::new(), 0, Vec::new()),
+            };
 
         // Deduplicate doc short IDs while preserving order.
         // Array indexes can return the same document multiple times (once per array
@@ -511,11 +531,18 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .filter(|id| seen.insert(*id))
             .collect();
 
-        let doc_ids = crate::docid::map::resolve_doc_ids(&systemstore, &doc_short_ids)
+        let mut doc_ids = crate::docid::map::resolve_doc_ids(&systemstore, &doc_short_ids)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
             })?;
+        crate::read::index_tiebreak::apply_equal_key_doc_id_tie_break(
+            &params.scan_type,
+            &mut doc_ids,
+            offset,
+            limit,
+            &group_lens,
+        );
 
         Ok(query::fetcher::IndexScanResult::with_raw_count(
             doc_ids,
