@@ -1893,13 +1893,12 @@ async fn branchable_sync_pulls_collection_from_embedded_peer() {
 /// the DEK from the writer over the KMS pubsub-RPC protocol (`encryption`
 /// topic), gated by NAC/DAC policy.
 ///
-/// defra-node builds no KMS at all — `database.set_kms` is never called and
-/// no `PubsubKeyTransport` is installed on the coordinator — so the receiver
-/// falls back to the legacy path (read the raw `Encryption` block from the
-/// local store), does not have it, and the merge fails: the document never
-/// becomes visible on the replica. The CLI and `embedded` runtimes both wire
-/// the KMS (crates/cli/src/commands/start/server.rs,
-/// crates/embedded/src/node.rs); this pins defra-node doing the same.
+/// A runtime with no KMS wired never gets that far: the merge falls back to
+/// the legacy path (reading the raw `Encryption` block from the local
+/// store), does not hold it, and the document never becomes visible on the
+/// replica. The CLI and `embedded` runtimes wire the KMS
+/// (crates/cli/src/commands/start/server.rs, crates/embedded/src/node.rs);
+/// this pins defra-node serving and fetching the same way.
 #[tokio::test]
 async fn encrypted_create_replicates_plaintext_to_replicator() {
     init_tracing();
