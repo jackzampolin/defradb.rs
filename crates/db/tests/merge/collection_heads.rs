@@ -31,7 +31,7 @@ fn branchable_schema() -> CollectionVersion {
 
 /// Every raw store key that textually contains a collection-head segment, so
 /// a failure shows where heads actually landed (or that none were written).
-async fn raw_collection_head_keys(store: &Arc<MemoryStore>) -> Vec<String> {
+async fn raw_collection_head_keys(store: &Arc<RegolithStore>) -> Vec<String> {
     let txn = store.new_txn(true).await.unwrap();
     let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
     let mut keys = Vec::new();
