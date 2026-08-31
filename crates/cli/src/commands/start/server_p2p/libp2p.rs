@@ -79,7 +79,6 @@ impl Node {
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let handle_for_acp = handle.clone();
-        let database_for_acp = database.clone();
 
         // Build the KMS pubsub transport and install it on the coordinator so
         // raw gossip on the encryption topic is routed to it (mirrors
@@ -456,10 +455,7 @@ impl Node {
             wire_merge_acp: Some(Box::new(move |acp| {
                 serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
                     resolver: Arc::new(p2p::HandlePeerIdentityResolver::new(handle_for_acp)),
-                    gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
-                        acp.clone(),
-                        database_for_acp.node_did(),
-                    ),
+                    gate: defra_p2p_adapter::DbBlockReadGate::new_arc(acp.clone()),
                 });
                 coordinator_for_acp.set_document_acp(acp.clone());
                 // Wire the document ACP into the broadcast mutator so newly

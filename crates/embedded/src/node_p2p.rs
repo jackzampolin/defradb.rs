@@ -275,7 +275,6 @@ where
     let coordinator_for_acp = coordinator.clone();
     let serve_acp_for_acp = serve_acp.clone();
     let handle_for_acp = handle.clone();
-    let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     // Lazy SE-key handle: teed by the callback below (runtime provisioning),
@@ -357,10 +356,7 @@ where
         wire_document_acp: Some(Box::new(move |acp| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
                 resolver: Arc::new(p2p::HandlePeerIdentityResolver::new(handle_for_acp)),
-                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
-                    acp.clone(),
-                    database_for_acp.node_did(),
-                ),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(acp.clone()),
             });
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
@@ -568,7 +564,6 @@ where
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let serve_acp_for_acp = serve_acp.clone();
-    let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     let se_key_handle = db::merge::empty_se_key_handle();
@@ -648,10 +643,7 @@ where
         wire_document_acp: Some(Box::new(move |acp| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
                 resolver: Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
-                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
-                    acp.clone(),
-                    database_for_acp.node_did(),
-                ),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(acp.clone()),
             });
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());

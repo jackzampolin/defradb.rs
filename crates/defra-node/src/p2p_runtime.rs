@@ -284,7 +284,6 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     let broadcast_mutator = replication.broadcast_mutator.clone();
     let merge_handler_for_acp = replication.merge_handler.clone();
     let serve_acp_for_acp = serve_acp.clone();
-    let database_for_acp = database.clone();
 
     // 9. Replication loop (transport-generic)
     let coord_for_repl = coordinator.clone();
@@ -385,10 +384,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         wire_document_acp: Some(Box::new(move |acp, strict| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
                 resolver: Arc::new(peer_identity_resolver),
-                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
-                    acp.clone(),
-                    database_for_acp.node_did(),
-                ),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(acp.clone()),
             });
             merge_handler_for_acp.set_document_acp(acp.clone());
             merge_handler_for_acp.set_strict_replicated_doc_access(strict);
