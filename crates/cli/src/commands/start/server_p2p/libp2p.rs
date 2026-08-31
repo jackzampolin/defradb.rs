@@ -149,6 +149,7 @@ impl Node {
         }
 
         let coordinator_for_replication = coordinator.clone();
+        let rebroadcast_on_merge = config.net.p2p_rebroadcast_on_merge;
         let replication_task = tokio::spawn(async move {
             info!("Starting replication loop for P2P sync");
             p2p::sync::ReplicationLoop::run(
@@ -157,7 +158,7 @@ impl Node {
                 merge_handler_for_loop,
                 p2p::sync::ReplicationConfig {
                     continue_on_error: true,
-                    rebroadcast_on_merge: false,
+                    rebroadcast_on_merge,
                     batch_size: 50,
                 },
                 |_| {},

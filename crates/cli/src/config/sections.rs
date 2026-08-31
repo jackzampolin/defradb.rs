@@ -346,6 +346,13 @@ pub struct NetConfig {
     /// at most one quarter of this capacity. Default: 1000.
     #[serde(default = "default_max_pending_dags")]
     pub p2p_max_pending_dags: usize,
+    /// Re-announce blocks merged from peers on their gossip topics, so
+    /// subscribers with no transport route to the author still receive them
+    /// through whichever peer merged them. Signatures are verified on merge,
+    /// so a rebroadcasting node never vouches for content it did not verify.
+    /// Default: false.
+    #[serde(default)]
+    pub p2p_rebroadcast_on_merge: bool,
     /// Max queued outbound push jobs; overflow defers to the persisted retry
     /// ladder. Default: 1024.
     #[serde(default = "default_push_queue_capacity")]
@@ -437,6 +444,7 @@ impl Default for NetConfig {
             p2p_rate_limit_rate: default_rate_limit_rate(),
             p2p_max_doc_sync_request_doc_ids: default_max_doc_sync_request_doc_ids(),
             p2p_max_pending_dags: default_max_pending_dags(),
+            p2p_rebroadcast_on_merge: false,
             p2p_push_queue_capacity: default_push_queue_capacity(),
             p2p_push_queue_byte_capacity: default_push_queue_byte_capacity(),
             p2p_max_active_pushes_per_peer: default_max_active_pushes_per_peer(),

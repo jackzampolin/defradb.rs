@@ -999,6 +999,58 @@ mod tests {
         assert!(pending_store.load_all().await.unwrap().is_empty());
     }
 
+    /// iroh-gossip keeps its own overlay and can deliver a hint straight from
+    /// its signed origin even though the transport never dialed that peer. The
+    /// propagation hop then *is* the origin, but it is not a peer the fetcher
+    /// can use: `transport.connected_peers()` does not list it, so a durable
+    /// obligation bound to it defers "until the provider reconnects" forever.
+    /// Such a hint must stay advisory.
+    #[tokio::test]
+    async fn gossip_origin_unknown_to_transport_does_not_create_durable_obligation() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};
+
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+            RegolithStore::in_memory().unwrap(),
+        )));
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        // Deliberately no `peer_connected("origin-peer")`: the transport has
+        // no route to the peer that is handing us the hint.
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let mut message = make_broadcast("doc123", root_cid, root_block, "collection1");
+        message.source_peer_id = Some("origin-peer".to_string());
+        message.authenticate_origin_peer("origin-peer".to_string());
+        message.authenticate_source_peer("origin-peer".to_string());
+
+        let result = coordinator
+            .handle_gossip_message(
+                PeerId::new("origin-peer".to_string()),
+                message,
+                "collection1".to_string(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(crate::error::Error::Unauthorized(_))),
+            "an origin the transport cannot reach must not become a recovery provider, got {result:?}"
+        );
+        assert!(events.try_recv().is_err());
+        assert!(
+            pending_store.load_all().await.unwrap().is_empty(),
+            "no durable fetch obligation may be bound to an unreachable origin"
+        );
+    }
+
     #[tokio::test]
     async fn gossip_routable_authenticated_origin_is_the_durable_recovery_provider() {
         use crate::sync::pending_store::{PendingDagStorage, PendingDagStore};

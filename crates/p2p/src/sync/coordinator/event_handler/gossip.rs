@@ -107,8 +107,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "head hint has no authenticated content origin".to_string(),
                 )
             })?;
-        let origin_is_routable = authenticated_origin == propagation_source.as_str()
-            || self.access.peer_state.is_connected(authenticated_origin);
+        // Being the propagation hop is not routability evidence. iroh-gossip
+        // keeps its own overlay and can hand us a hint straight from its
+        // origin over a connection the transport never made, and a durable
+        // obligation bound to an unreachable origin defers until it
+        // "reconnects" — which never happens. Only a peer the transport
+        // reports as connected can serve a rooted fetch.
+        let origin_is_routable = self.access.peer_state.is_connected(authenticated_origin);
         if !origin_is_routable {
             tracing::warn!(
                 peer_id = %propagation_source,
