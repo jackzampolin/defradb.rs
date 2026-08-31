@@ -4,10 +4,10 @@
 //! Three nodes chained A -> B -> C: B dials A, C dials B, all subscribed to
 //! the same collection. iroh-gossip keeps its own overlay and meshes C
 //! straight to A, so A's head hints reach C carrying A as both propagation
-//! hop and signed origin while C's transport only knows B. The coordinator
-//! used to accept that as routable and bind a durable fetch obligation to A,
-//! which the fetcher then deferred on every clock tick ("until a qualified
-//! provider reconnects") — a pending root that could never resolve.
+//! hop and signed origin while C's transport only knows B. A hint accepted
+//! as routable from such an origin would bind a durable fetch obligation to
+//! A that the fetcher defers on every clock tick ("until a qualified
+//! provider reconnects") — a pending root that can never resolve.
 //!
 //! The fence: once A's documents have provably reached B (so the gossip path
 //! ran), C must hold no pending roots and must never have deferred a fetch
