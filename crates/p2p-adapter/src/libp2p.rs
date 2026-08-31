@@ -8,7 +8,7 @@ use crate::transport_doc_pusher::TransportDocPusher;
 use crate::{
     ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
     P2pDocumentInfo, P2pDocumentRequest, ReplicationFilters, ReplicatorInfo, ReplicatorPushOptions,
-    ReplicatorPushOptionsState,
+    ReplicatorPushOptionsState, TransportPeerId,
 };
 
 use p2p::sync::Libp2pSyncCoordinator;
@@ -98,7 +98,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             checker
                 .check_node_access(permission)
                 .await
-                .map_err(|error| P2PError::internal(error.to_string()))?;
+                .map_err(crate::map_nac_error)?;
         }
         Ok(())
     }
@@ -282,6 +282,24 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .resolve_peer_addresses(&connected, |peer_id| {
                 self.peer_addresses.read().ok()?.get(peer_id).cloned()
             })
+            .await
+            .map_err(|error| P2PError::transport(error.to_string()))
+    }
+
+    async fn resolve_peer_identity(
+        &self,
+        peer_id: &TransportPeerId,
+    ) -> P2PResult<Option<identity::Did>> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerActive)
+            .await?;
+        let peer_id = peer_id
+            .as_str()
+            .parse::<libp2p::PeerId>()
+            .map_err(|error| {
+                P2PError::invalid_input(format!("invalid peer ID '{peer_id}': {error}"))
+            })?;
+        self.handle
+            .get_peer_identity(peer_id)
             .await
             .map_err(|error| P2PError::transport(error.to_string()))
     }
@@ -1107,6 +1125,25 @@ mod tests {
     use p2p::BitswapStoreAdapter;
     use storage::RegolithStore;
 
+    enum NacOutcome {
+        Denied,
+        Failed,
+    }
+
+    struct FixedNac(NacOutcome);
+
+    #[async_trait]
+    impl db::NodeAccessChecker for FixedNac {
+        async fn check_node_access(&self, permission: acp::nac::NodePermission) -> db::Result<()> {
+            match self.0 {
+                NacOutcome::Denied => Err(db::Error::NotAuthorized {
+                    permission: format!("{permission:?}"),
+                }),
+                NacOutcome::Failed => Err(db::Error::Acp("policy backend unavailable".into())),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn merged_doc_sync_heads_are_not_pending() {
         let blockstore = DefraBlockstore::new(Arc::new(RegolithStore::in_memory().unwrap()), true);
@@ -1219,6 +1256,25 @@ mod tests {
         }
     }
 
+    async fn wait_until_disconnected(handle: &P2PHostHandle, peer_id: libp2p::PeerId) {
+        let start = std::time::Instant::now();
+        loop {
+            if !handle
+                .connected_peers()
+                .await
+                .unwrap_or_default()
+                .contains(&peer_id)
+            {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "timed out waiting for disconnection from {peer_id}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Dials `handle_a` to `handle_b` and waits until each side observes the
     /// other as connected. Mirrors `assert_hosts_connect_over` in
     /// `crates/p2p/tests/host_tests.rs`.
@@ -1234,6 +1290,132 @@ mod tests {
         handle_a.dial(peer_b, vec![addr_b]).await.unwrap();
         wait_until_connected(handle_a, peer_b).await;
         wait_until_connected(handle_b, peer_a).await;
+    }
+
+    fn identity_test_adapter(handle: P2PHostHandle) -> P2PAdapter<NoopBlockstore> {
+        P2PAdapter {
+            handle,
+            sync_coordinator: None,
+            doc_pusher: None,
+            event_bus: None,
+            version_syncer: None,
+            replicator_push_options: ReplicatorPushOptionsState::default(),
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            nac_checker: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_lookup_checks_nac_before_parsing_or_network_io() {
+        let (_host, handle, _events, _replicators) =
+            p2p::host::P2PHost::new(BitswapStoreAdapter::new(Arc::new(NoopBlockstore)))
+                .await
+                .unwrap();
+        let invalid_but_wrapped = TransportPeerId::new("not-a-libp2p-peer-id").unwrap();
+
+        let mut denied = identity_test_adapter(handle.clone());
+        denied.nac_checker = Some(Arc::new(FixedNac(NacOutcome::Denied)));
+        assert!(matches!(
+            denied.resolve_peer_identity(&invalid_but_wrapped).await,
+            Err(P2PError::Unauthorized(_))
+        ));
+
+        let mut failed = identity_test_adapter(handle);
+        failed.nac_checker = Some(Arc::new(FixedNac(NacOutcome::Failed)));
+        assert!(matches!(
+            failed.resolve_peer_identity(&invalid_but_wrapped).await,
+            Err(P2PError::Internal(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn authenticated_identity_lookup_is_fresh_and_unconfigured_is_none() {
+        let first_responder_identity = Arc::new(
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap(),
+        );
+        let first_did = identity::Identity::did(first_responder_identity.as_ref()).unwrap();
+        let responder_transport_key = libp2p::identity::Keypair::generate_ed25519();
+        let (host_a, handle_a, _events_a, _replicators_a) =
+            p2p::host::P2PHost::with_keypair_and_config_and_identity(
+                libp2p::identity::Keypair::generate_ed25519(),
+                BitswapStoreAdapter::new(Arc::new(NoopBlockstore)),
+                p2p::host::P2PHostConfig::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let (host_b, handle_b, _events_b, _replicators_b) =
+            p2p::host::P2PHost::with_keypair_and_config_and_identity(
+                responder_transport_key.clone(),
+                BitswapStoreAdapter::new(Arc::new(NoopBlockstore)),
+                p2p::host::P2PHostConfig::default(),
+                Some(first_responder_identity),
+            )
+            .await
+            .unwrap();
+
+        let task_a = tokio::spawn(host_a.run());
+        let task_b = tokio::spawn(host_b.run());
+        connect_hosts(&handle_a, &handle_b).await;
+
+        let adapter = identity_test_adapter(handle_a.clone());
+        let peer = TransportPeerId::new(handle_b.local_peer_id_cached().to_string()).unwrap();
+        assert_eq!(
+            adapter.resolve_peer_identity(&peer).await.unwrap(),
+            Some(first_did)
+        );
+
+        let responder_peer = handle_b.local_peer_id_cached();
+        handle_b.shutdown().await.unwrap();
+        task_b.await.unwrap();
+        wait_until_disconnected(&handle_a, responder_peer).await;
+
+        let second_responder_identity = Arc::new(
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap(),
+        );
+        let second_did = identity::Identity::did(second_responder_identity.as_ref()).unwrap();
+        let (replacement_host, replacement_handle, _events, _replicators) =
+            p2p::host::P2PHost::with_keypair_and_config_and_identity(
+                responder_transport_key,
+                BitswapStoreAdapter::new(Arc::new(NoopBlockstore)),
+                p2p::host::P2PHostConfig::default(),
+                Some(second_responder_identity),
+            )
+            .await
+            .unwrap();
+        let replacement_task = tokio::spawn(replacement_host.run());
+        assert_eq!(replacement_handle.local_peer_id_cached(), responder_peer);
+        connect_hosts(&handle_a, &replacement_handle).await;
+
+        assert_eq!(
+            adapter.resolve_peer_identity(&peer).await.unwrap(),
+            Some(second_did)
+        );
+
+        handle_a.shutdown().await.unwrap();
+        replacement_handle.shutdown().await.unwrap();
+        task_a.await.unwrap();
+        replacement_task.await.unwrap();
+
+        let (host_c, handle_c, _events_c, _replicators_c) =
+            p2p::host::P2PHost::new(BitswapStoreAdapter::new(Arc::new(NoopBlockstore)))
+                .await
+                .unwrap();
+        let (host_d, handle_d, _events_d, _replicators_d) =
+            p2p::host::P2PHost::new(BitswapStoreAdapter::new(Arc::new(NoopBlockstore)))
+                .await
+                .unwrap();
+        let task_c = tokio::spawn(host_c.run());
+        let task_d = tokio::spawn(host_d.run());
+        connect_hosts(&handle_c, &handle_d).await;
+        let adapter = identity_test_adapter(handle_c.clone());
+        let peer = TransportPeerId::new(handle_d.local_peer_id_cached().to_string()).unwrap();
+        assert_eq!(adapter.resolve_peer_identity(&peer).await.unwrap(), None);
+        handle_c.shutdown().await.unwrap();
+        handle_d.shutdown().await.unwrap();
+        task_c.await.unwrap();
+        task_d.await.unwrap();
     }
 
     /// Characterization, libp2p counterpart of the iroh test: a peer that
