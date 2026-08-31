@@ -13,7 +13,7 @@ use p2p::sync::DocumentHeadProvider;
 use query::mutator::DocMutator;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 use storage::corekv::{IterOptions, Store};
 
 fn branchable_schema() -> CollectionVersion {
@@ -46,7 +46,7 @@ async fn raw_collection_head_keys(store: &Arc<MemoryStore>) -> Vec<String> {
 
 #[tokio::test]
 async fn branchable_collection_writes_expose_collection_heads() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
     db.create_collection(branchable_schema()).await.unwrap();
 
