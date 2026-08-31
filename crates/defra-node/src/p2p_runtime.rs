@@ -219,10 +219,10 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
         max_pending_dags: config.max_pending_dags,
         ..Default::default()
     };
-    // The head provider serves DocSync and BranchableSync requests from this
-    // node's headstore. The access-control constructor installs a
-    // NoOpHeadProvider, which silently answers every head lookup with an
-    // empty list — wire the real one, as the CLI runtime does.
+    // The head provider answers DocSync and BranchableSync requests from
+    // this node's headstore. The access-control constructor would install a
+    // NoOpHeadProvider that silently answers every head lookup with an
+    // empty list, leaving peers unable to pull history from this node.
     let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
         Arc::new(db::merge::create_head_provider(database.clone()));
     let (mut coordinator, sync_events) =
