@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chunked Field Values</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+  :root {
+    --ground: #F3F6F7;
+    --surface: #FFFFFF;
+    --surface-2: #E9EFF1;
+    --ink: #121B22;
+    --muted: #566672;
+    --accent: #0C6A74;
+    --accent-soft: #DCECEE;
+    --warn: #99451A;
+    --warn-soft: #F6E6DA;
+    --line: #D9E2E6;
+    --line-strong: #BFCCD3;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0D1418; --surface: #151E24; --surface-2: #1B262D;
+      --ink: #E3EAEE; --muted: #8DA0AC; --accent: #54C6D1; --accent-soft: #0F3138;
+      --warn: #E28B57; --warn-soft: #31200F; --line: #222E37; --line-strong: #34444F;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0D1418; --surface: #151E24; --surface-2: #1B262D;
+    --ink: #E3EAEE; --muted: #8DA0AC; --accent: #54C6D1; --accent-soft: #0F3138;
+    --warn: #E28B57; --warn-soft: #31200F; --line: #222E37; --line-strong: #34444F;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 1rem;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    max-width: 50rem;
+    margin: 0 auto;
+    padding: 0 clamp(1rem, 4vw, 2rem) 4rem;
+  }
+
+  header.mast {
+    border-bottom: 2px solid var(--ink);
+    padding: 2.5rem 0 1.1rem;
+    margin-bottom: 2rem;
+  }
+
+  .eyebrow {
+    font-family: var(--display);
+    font-size: 0.66rem; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 0.75rem;
+  }
+
+  h1 {
+    font-family: var(--display); font-weight: 700;
+    font-size: clamp(1.9rem, 5vw, 2.7rem);
+    line-height: 1.03; letter-spacing: -0.022em;
+    text-wrap: balance; margin: 0 0 0.7rem;
+  }
+
+  .standfirst { color: var(--muted); margin: 0 0 1.2rem; font-size: 1.05rem; }
+
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 0.35rem 1.75rem;
+    font-family: var(--display); font-size: 0.74rem; color: var(--muted);
+  }
+  .meta b {
+    font-weight: 600; font-size: 0.63rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink); margin-right: 0.4rem;
+  }
+
+  section { margin-bottom: 2.6rem; }
+
+  h2 {
+    font-family: var(--display); font-weight: 700;
+    font-size: 1.28rem; letter-spacing: -0.01em; line-height: 1.15;
+    text-wrap: balance; margin: 0 0 0.85rem;
+    padding-top: 0.9rem; border-top: 1px solid var(--line-strong);
+    display: grid; grid-template-columns: 2.2rem 1fr;
+  }
+  h2 .n {
+    font-size: 0.78rem; font-weight: 600; color: var(--accent);
+    font-variant-numeric: tabular-nums; padding-top: 0.28rem;
+  }
+
+  h3 {
+    font-family: var(--display); font-weight: 600; font-size: 0.94rem;
+    margin: 1.4rem 0 0.45rem;
+  }
+
+  p { margin: 0 0 0.8rem; }
+  ul, ol { margin: 0 0 0.9rem; padding-left: 1.15rem; }
+  li { margin-bottom: 0.3rem; }
+
+  a { color: var(--accent); text-underline-offset: 0.15em; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  strong { font-weight: 600; }
+
+  code {
+    font-family: var(--mono); font-size: 0.85em;
+    background: var(--surface-2); padding: 0.08em 0.3em; border-radius: 2px;
+  }
+
+  pre {
+    font-family: var(--mono); font-size: 0.755rem; line-height: 1.5;
+    background: var(--surface); border: 1px solid var(--line);
+    border-left: 2px solid var(--accent);
+    padding: 0.85rem 1rem; overflow-x: auto; margin: 0 0 1rem;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .tw { overflow-x: auto; margin: 0 0 1.05rem; border: 1px solid var(--line); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-family: var(--display); font-size: 0.78rem; line-height: 1.35; }
+  th, td { text-align: left; padding: 0.44rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-weight: 600; font-size: 0.63rem; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); background: var(--surface-2); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.mono { font-family: var(--mono); font-size: 0.72rem; }
+
+  .callout {
+    background: var(--accent-soft); border-left: 2px solid var(--accent);
+    padding: 0.75rem 0.95rem; margin: 0 0 1.05rem; font-size: 0.95rem;
+  }
+  .callout.risk { background: var(--warn-soft); border-left-color: var(--warn); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .label {
+    display: block; font-family: var(--display); font-size: 0.62rem; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 0.3rem;
+  }
+  .callout.risk .label { color: var(--warn); }
+
+  .cols { display: grid; gap: 1rem; }
+  @media (min-width: 46rem) { .cols { grid-template-columns: 1fr 1fr; } }
+  .cols h3 { margin-top: 0; }
+
+  footer {
+    margin-top: 1.5rem; padding-top: 1rem; border-top: 2px solid var(--ink);
+    font-family: var(--display); font-size: 0.74rem; color: var(--muted);
+  }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+<header class="mast">
+  <p class="eyebrow">DefraDB &middot; Draft specification</p>
+  <h1>Chunked Field Values</h1>
+  <p class="standfirst">Distributing byte arrays larger than any single node can hold in memory, over the Iroh transport, using a chunk list plus streaming continuation.</p>
+  <div class="meta">
+    <span><b>Status</b>Draft for review</span>
+    <span><b>Runtimes</b>Go and Rust</span>
+    <span><b>Scope</b>Distribution and memory bounds</span>
+  </div>
+</header>
+
+<section>
+  <h2><span class="n">01</span><span>Problem</span></h2>
+
+  <p>A field value is carried inline in the CRDT delta block. Nothing splits it, and every transfer path frames it as one message, so peak memory on both sender and receiver scales with the value rather than with a bounded unit. Above a few tens of megabytes there is no path at all, and well below that there is no path a constrained node can walk.</p>
+
+  <p>The Iroh lane makes this concrete. Its CAR transfer reads a length prefix and then allocates the whole payload:</p>
+
+<pre><code>let mut payload = vec![0u8; len];
+recv.read_exact(&amp;mut payload).await?;</code></pre>
+
+  <p>capped by <code>MAX_CAR_SIZE = 64 MiB</code>, with the sender serialising the entire response through <code>cbor::to_vec</code> before writing. QUIC underneath is already a stream; the framing on top of it is not. A browser node over OPFS or an embedded node cannot take a 64 MiB allocation per in-flight transfer, and no allocation cap makes a 1 GB value fit.</p>
+
+  <h3>Requirements</h3>
+  <ul>
+    <li><b>R1</b> Peak memory per transfer is bounded by a fixed chunk, independent of value size, on both sides.</li>
+    <li><b>R2</b> A value of any size transfers to completion.</li>
+    <li><b>R3</b> An interrupted transfer resumes without refetching what arrived.</li>
+    <li><b>R4</b> Every unit is verified on arrival, before it is persisted.</li>
+    <li><b>R5</b> A node may hold a document without holding the value.</li>
+    <li><b>R6</b> Values below the threshold are byte-identical to today: same CIDs, same DocIDs.</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="n">02</span><span>Three layers</span></h2>
+
+  <p>Three mechanisms keep getting conflated. Only the middle one is a wire format.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Layer</th><th>Does</th><th>Defines CIDs?</th><th>Configurable?</th></tr></thead>
+    <tbody>
+      <tr><td><b>A</b> Value at rest</td><td>Splits a stored value across key-value entries so the backend limit stops binding. This is <code>corekv/chunk</code>.</td><td>No</td><td>Yes, per node</td></tr>
+      <tr><td><b>B</b> Content structure</td><td>Splits a value into a DAG of content-addressed blocks. This is what <code>lens/host-go/store/block.go</code> does for WASM.</td><td><b>Yes</b></td><td><b>No</b></td></tr>
+      <tr><td><b>C</b> Transport</td><td>Moves those blocks within a bounded memory budget, resumably.</td><td>No</td><td>Per transport</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Layer B is the chunk list. Once it exists, Layer A largely stops mattering, because every block is small enough for any backend. Layer C is where the constrained-environment requirement actually lives, and it is free to differ per transport.</p>
+
+  <p>On Iroh: content identity is Layer B and must be identical across transports, so the transport cannot define it. But Iroh is the better Layer C, because a QUIC stream is already a continuation. The Rust tree depended on <code>iroh-blobs</code>, dropped it, and nothing replaced its function; <code>blake3</code> survives on that lane only for topic hashing.</p>
+</section>
+
+<section>
+  <h2><span class="n">03</span><span>Chunk list</span></h2>
+
+  <p>A value is encoded exactly as today. At or below <code>INLINE_THRESHOLD</code> the delta carries it inline and nothing changes. Above it, the bytes move into a chunk DAG and the delta carries a descriptor plus a link. The decision is on encoded length alone, never on field kind, so it covers blobs, oversized strings, arrays, JSON, and vectors through one mechanism.</p>
+
+<pre><code>FieldBlock (dag-cbor)                    inline form, unchanged
+  delta: Lww { fieldName, priority, collectionVersionID,
+               data: &lt;encoded value&gt; }
+
+FieldBlock (dag-cbor)                    chunked form
+  delta: Lww { fieldName, priority, collectionVersionID,
+               data: &lt;descriptor CBOR&gt; }
+  links: [ DAGLink { name: "value", cid: &lt;ChunkRoot&gt; } ]
+
+ChunkRoot (dag-cbor)   { v, len, alg, chunks: [Cid, ...] }
+ChunkLeaf (raw, 0x55)  &lt;CHUNK_SIZE bytes; final leaf short&gt;</code></pre>
+
+  <p>This mirrors the shape already shipping for Lens WASM, where <code>LensBlock</code> is either inline <code>WasmBytes</code> or a <code>Chunks</code> link list, selected by size.</p>
+
+  <div class="callout">
+    <span class="label">The link must be a real link</span>
+    <p>Link extraction runs over the whole dag-cbor structure and finds any CID encoded as a CBOR link. The delta's <code>data</code> is an opaque byte string, so a CID inside it is invisible to the DAG walker, to block collection, to missing-link discovery, and to access-grant computation. A CID buried in <code>data</code> yields a value whose chunks silently never replicate.</p>
+  </div>
+
+  <p>Two consequences fall out rather than needing work. The materialised datastore entry is written from the delta's <code>data</code> field verbatim, so once <code>data</code> is a descriptor the second copy is a descriptor too, and the value stops being stored twice. For the same reason the equal-priority LWW tie-break, which today loads the entire current value to compare lexicographically, compares descriptors instead. That is a real semantic change: tie-break ordering moves from content order to descriptor order, so both runtimes must adopt it together.</p>
+
+  <p>Version 1 uses one level: a root holding a flat leaf list, capping a value in the tens of gigabytes. The root's <code>v</code> reserves a balanced-tree encoding beyond that.</p>
+</section>
+
+<section>
+  <h2><span class="n">04</span><span>Invariants</span></h2>
+
+  <p><b>I1. Chunking parameters are protocol constants.</b> <code>CHUNK_SIZE</code> and <code>INLINE_THRESHOLD</code> are compiled into both runtimes and versioned through the descriptor, never node options. Two nodes chunking the same bytes differently produce different leaf CIDs, a different root, and a different field-block CID. For a CRDT register that is two distinct values for one logical write.</p>
+
+  <div class="callout risk">
+    <span class="label">This already exists in lens, where it costs less</span>
+    <p>Lens exposes chunk size as an option: Go defaults to 3 MiB, the Rust path uses 256 KB, and both runtimes create lens blocks. Any WASM between those sizes gets a different CID per runtime, and definitions reference the transform by CID. Only constants have been compared, so this needs a test rather than a bug report, but it is the concrete argument for I1.</p>
+  </div>
+
+  <p><b>I2. Below the threshold, bytes are identical to today.</b> Same delta bytes, same block CID, same DocID. Enforced by a fixture round-trip generated before the change, in both runtimes.</p>
+
+  <p><b>I3. One chunk resident.</b> No path materialises a whole value: not ingest, not hashing, not the merge path, not transfer, not read. This is the requirement constrained nodes impose on everything else in this document.</p>
+</section>
+
+<section>
+  <h2><span class="n">05</span><span>Type and interface definitions</span></h2>
+
+  <p>Normative: the CBOR encodings of the descriptor, chunk root, and stream frame, plus the constants. Both runtimes must produce identical bytes. Non-normative: the API shapes, which follow each language's idiom and need not mirror each other.</p>
+
+  <h3>Shared constants and encodings</h3>
+
+<pre><code>CHUNK_SIZE        = 1 MiB          leaf payload, exact except final leaf
+INLINE_THRESHOLD  = 1 MiB          encoded length at or below stays inline
+DESCRIPTOR_V1     = 1
+HASH_ALG_SHA2_256 = 1
+
+descriptor := { "v": uint, "len": uint, "alg": uint, "root": Cid }
+chunk root := { "v": uint, "len": uint, "alg": uint, "chunks": [Cid] }
+frame      := { "cid": Cid, "idx": uint, "bytes": bytes }</code></pre>
+
+  <p>Canonical CBOR key ordering already used for blocks applies unchanged.</p>
+
+  <div class="cols">
+    <div>
+      <h3>Rust</h3>
+<pre><code>pub struct ValueDescriptor {
+    pub version: u8,
+    pub len: u64,
+    pub alg: HashAlg,
+    pub root: Cid,
+}
+
+pub enum FieldPayload {
+    Inline(Bytes),
+    Chunked(ValueDescriptor),
+}
+
+pub enum Residency {
+    Resident,
+    Partial { have: u64, total: u64 },
+    Absent,
+}
+
+#[async_trait]
+pub trait PayloadStore: Send + Sync {
+    async fn put_leaf(&amp;self, cid: &amp;Cid, data: &amp;[u8])
+        -&gt; Result&lt;()&gt;;
+    async fn get_leaf(&amp;self, cid: &amp;Cid)
+        -&gt; Result&lt;Option&lt;Bytes&gt;&gt;;
+    async fn residency(&amp;self, d: &amp;ValueDescriptor)
+        -&gt; Result&lt;Residency&gt;;
+    /// Leaf indices still missing, for resume.
+    async fn missing(&amp;self, d: &amp;ValueDescriptor)
+        -&gt; Result&lt;Vec&lt;u64&gt;&gt;;
+}
+
+#[async_trait]
+pub trait ValueChunker: Send + Sync {
+    /// One chunk at a time; never the whole value.
+    async fn write(
+        &amp;self,
+        src: Pin&lt;Box&lt;dyn AsyncRead + Send&gt;&gt;,
+    ) -&gt; Result&lt;ValueDescriptor&gt;;
+
+    /// Yields leaves in order, verifying each.
+    fn open(
+        &amp;self,
+        d: &amp;ValueDescriptor,
+        range: ByteRange,
+    ) -&gt; Pin&lt;Box&lt;dyn Stream&lt;Item = Result&lt;Bytes&gt;&gt;
+             + Send&gt;&gt;;
+
+    async fn verify(&amp;self, d: &amp;ValueDescriptor)
+        -&gt; Result&lt;bool&gt;;
+}
+
+/// Layer C. One call moves a whole value;
+/// memory stays at one chunk.
+#[async_trait]
+pub trait ValueTransport: Send + Sync {
+    /// Serve leaves, skipping what the peer holds.
+    async fn serve(
+        &amp;self,
+        d: &amp;ValueDescriptor,
+        skip: &amp;[u64],
+        sink: Pin&lt;Box&lt;dyn AsyncWrite + Send&gt;&gt;,
+    ) -&gt; Result&lt;()&gt;;
+
+    /// Fetch leaves, verifying each as it lands.
+    /// Resumes from missing(); returns bytes moved.
+    async fn fetch(
+        &amp;self,
+        d: &amp;ValueDescriptor,
+        from: &amp;PeerId,
+    ) -&gt; Result&lt;u64&gt;;
+}</code></pre>
+    </div>
+    <div>
+      <h3>Go</h3>
+<pre><code>type ValueDescriptor struct {
+    Version uint8
+    Len     uint64
+    Alg     HashAlg
+    Root    cid.Cid
+}
+
+type FieldPayload struct {
+    Inline     []byte           // nil if chunked
+    Descriptor *ValueDescriptor // nil if inline
+}
+
+type Residency struct {
+    State ResidencyState
+    Have  uint64
+    Total uint64
+}
+
+type PayloadStore interface {
+    PutLeaf(ctx context.Context, c cid.Cid,
+        data []byte) error
+    GetLeaf(ctx context.Context, c cid.Cid)
+        ([]byte, error)
+    Residency(ctx context.Context,
+        d ValueDescriptor) (Residency, error)
+    // Leaf indices still missing, for resume.
+    Missing(ctx context.Context,
+        d ValueDescriptor) ([]uint64, error)
+}
+
+type ValueChunker interface {
+    // One chunk at a time; never the whole value.
+    Write(ctx context.Context, src io.Reader)
+        (ValueDescriptor, error)
+
+    // Verifies each leaf as it is read.
+    Open(ctx context.Context, d ValueDescriptor,
+        r ByteRange) (io.ReadCloser, error)
+
+    Verify(ctx context.Context,
+        d ValueDescriptor) (bool, error)
+}
+
+// Layer C. One call moves a whole value;
+// memory stays at one chunk.
+type ValueTransport interface {
+    // Serve leaves, skipping what the peer holds.
+    Serve(ctx context.Context,
+        d ValueDescriptor, skip []uint64,
+        w io.Writer) error
+
+    // Fetch leaves, verifying each as it lands.
+    // Resumes from Missing(); returns bytes moved.
+    Fetch(ctx context.Context,
+        d ValueDescriptor,
+        from PeerID) (uint64, error)
+}</code></pre>
+    </div>
+  </div>
+
+  <h3>Contract notes</h3>
+  <ul>
+    <li><code>write</code> must not buffer beyond one chunk and must be safe to abort: partial leaves are unreferenced blocks, collected by the same GC that handles orphans.</li>
+    <li><code>open</code> and <code>fetch</code> verify each leaf against its CID before it is emitted or persisted. A mismatch is an error, never a short read.</li>
+    <li><code>serve</code> writes frames onto an already-open stream and must not build a response in memory.</li>
+    <li><code>fetch</code> is idempotent: calling it on a partially transferred value moves only what is missing.</li>
+    <li><code>residency</code> is node-local and never participates in convergence.</li>
+    <li>Access filtering applies per leaf, not once per request.</li>
+  </ul>
+
+  <h3>Conformance</h3>
+  <p>A shared fixture set is the contract, not the signatures: for a fixed input corpus, the expected leaf CIDs, root CID, descriptor bytes, and resulting field-block CID. Both runtimes run it. The I2 fixtures, generated before the change, live in the same set.</p>
+</section>
+
+<section>
+  <h2><span class="n">06</span><span>Streaming continuation</span></h2>
+
+  <p>Once the value is a chunk list, resumability is mostly free: the root names every leaf, so a receiver knows the full CID set up front, can request leaves in any order, and re-requests only what is missing. There is no per-level round trip left for a bulk archive format to amortise.</p>
+
+  <p>What is not free is the memory bound, and that is where the work is.</p>
+
+  <p><b>Iroh lane.</b> The QUIC stream is the continuation. A <code>/defra-iroh/value/0.1</code> ALPN carries the descriptor, then the peer's already-held indices, then a sequence of frames. The sender reads one leaf from the store and writes one frame; the receiver reads one frame, verifies it against its CID, persists it, and drops it. Peak memory is one chunk on both sides, whatever the value size. Resume is reopening the stream with a new skip set. No cursor protocol, no archive format, no allocation proportional to the response.</p>
+
+  <p><b>libp2p lane.</b> Request and response are message-framed, so the same property needs the skip set carried explicitly per request and a bounded number of leaves per response. This is strictly worse and is the reason to prefer Iroh for large values.</p>
+
+  <p>Independently of this design, the existing collector has a bug worth fixing: a block larger than the response budget is skipped and therefore permanently unservable, and reaching the budget abandons the rest of the walk, dropping unrelated siblings.</p>
+</section>
+
+<section>
+  <h2><span class="n">07</span><span>Constrained environments</span></h2>
+
+  <p>Peak memory today is set by the transfer framing, not by the value. On the Iroh lane that is a 64 MiB allocation per in-flight CAR, on the sender and again on the receiver.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th class="num">Concurrent transfers</th><th class="num">Today, 64 MiB frame</th><th class="num">Streaming, 1 MiB chunk</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td class="num">64 MiB</td><td class="num">1 MiB</td></tr>
+      <tr><td class="num">4</td><td class="num">256 MiB</td><td class="num">4 MiB</td></tr>
+      <tr><td class="num">16</td><td class="num">1 GiB</td><td class="num">16 MiB</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>The important column is neither: it is that the streaming figure does not move when the value grows. A browser node over OPFS, a mobile embedded node, and a server node run the same code path with the same ceiling, and differ only in how many transfers they admit at once.</p>
+
+  <p>This is also what makes R5 workable. A constrained node can hold documents, serve queries over their metadata, and fetch a value only when something asks for it, because holding the descriptor costs a few dozen bytes.</p>
+</section>
+
+<section>
+  <h2><span class="n">08</span><span>Distribution cost</span></h2>
+
+  <p>A 1 GB value at 1 MiB chunks is 1024 leaves plus a root. It does not transfer today at all: the Iroh CAR cap is 64 MiB and the libp2p one is 16 MiB. Under this design it is one stream carrying 1025 frames, at one chunk of memory.</p>
+
+  <p>Fan-out is the other half. Per-node egress under naive push to every subscribed peer, at the capture rates under discussion:</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Rate</th><th class="num">N = 3</th><th class="num">N = 10</th><th class="num">N = 50</th></tr></thead>
+    <tbody>
+      <tr><td>200 MB/s, value pushed</td><td class="num">400 MB/s</td><td class="num">1.8 GB/s</td><td class="num">9.8 GB/s</td></tr>
+      <tr><td>20 MB/s, value pushed</td><td class="num">40 MB/s</td><td class="num">180 MB/s</td><td class="num">980 MB/s</td></tr>
+      <tr><td>Descriptor only, 200 MB/s in 3.4 MB segments</td><td class="num">35 KB/s</td><td class="num">159 KB/s</td><td class="num">865 KB/s</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Pushing values closes at no useful N at the high rate. Sending the descriptor with the document and letting peers fetch on demand is bounded by document count rather than by payload size. Since both use the same blocks and the same CIDs, this is a per-node policy, not a wire change: a server peer can prefetch, a phone can wait until something reads.</p>
+</section>
+
+<section>
+  <h2><span class="n">09</span><span>Compatibility and phases</span></h2>
+
+  <p>DocIDs derive from the genesis composite CID, and the composite links field blocks. A chunked field block has different bytes, so a different CID, so a different composite, so a different DocID. I2 bounds this to values that cannot exist today, so no deployed document is affected and no migration runs.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th class="num">#</th><th>Phase</th><th>Wire</th><th>Gate</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Collector bug: oversize block served alone, walk advances instead of terminating</td><td>none</td><td>Oversize block served; siblings kept</td></tr>
+      <tr><td class="num">2</td><td>Bytes for Blob</td><td><b>yes</b></td><td>Cross-runtime identity preserved</td></tr>
+      <tr><td class="num">3</td><td>Chunk list, descriptor, value link, fixed constants, descriptor tie-break</td><td><b>yes</b></td><td>Conformance and I2 fixtures green in both runtimes</td></tr>
+      <tr><td class="num">4</td><td>Iroh value ALPN with frame streaming and skip set</td><td>additive</td><td>1 GB value transfers at one chunk of memory; resumes after interruption</td></tr>
+      <tr><td class="num">5</td><td>Streaming ingest and read; typed embedded surface</td><td>additive</td><td>Write and read a 1 GB value with bounded memory</td></tr>
+      <tr><td class="num">6</td><td>libp2p lane parity</td><td>additive</td><td>Same transfer over libp2p within a bounded per-response leaf count</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Phases 2 and 3 both change the delta block and should land together, renegotiating compatibility once. Phase 1 is independent and can go now.</p>
+</section>
+
+<section>
+  <h2><span class="n">10</span><span>Evidence and open questions</span></h2>
+
+  <div class="tw"><table>
+    <thead><tr><th>Claim</th><th>Confidence</th></tr></thead>
+    <tbody>
+      <tr><td>Iroh CAR allocates the whole payload; <code>MAX_CAR_SIZE</code> is 64 MiB</td><td>Verified in source</td></tr>
+      <tr><td>Sender serialises the whole response before writing</td><td>Verified in source</td></tr>
+      <tr><td>Composite head is what gossips; field values are in linked blocks</td><td>Verified in source</td></tr>
+      <tr><td>Datastore value is the delta's <code>data</code> field verbatim</td><td>Verified in source</td></tr>
+      <tr><td>Equal-priority tie-break loads the whole current value</td><td>Verified in source</td></tr>
+      <tr><td>libp2p CAR budget 16 MiB / 10k blocks; oversize block unservable</td><td>Verified in source</td></tr>
+      <tr><td>Blob is hex text in both runtimes</td><td>Verified in source</td></tr>
+      <tr><td>Lens CID divergence, 3 MiB against 256 KB</td><td>Constants differ and both runtimes build lens blocks; no cross-runtime test run</td></tr>
+      <tr><td>Memory table</td><td>Arithmetic over verified constants</td></tr>
+      <tr><td>Fan-out table</td><td>Arithmetic over quoted rates</td></tr>
+      <tr><td>Sustained throughput at these rates</td><td><b>Not measured.</b> The existing benchmark uses an in-memory store with 16-byte and 1 KB values</td></tr>
+    </tbody>
+  </table></div>
+
+  <ol>
+    <li><b>Constants.</b> Agreement that chunk size and threshold are protocol constants rather than options, and whether lens is retrofitted.</li>
+    <li><b>Chunk size.</b> Proposed 1 MiB, threshold equal to it. Permanent once shipped.</li>
+    <li><b>Tie-break.</b> Confirm descriptor comparison replaces value comparison in both runtimes simultaneously.</li>
+    <li><b>Iroh blob layer.</b> Whether to adopt <code>iroh-blobs</code> verified range streaming for Layer C instead of a hand-written value ALPN. It gives BLAKE3 range proofs and resume, at the cost of a second hash function alongside the CID's.</li>
+    <li><b>Per-leaf access control.</b> Leaves are raw blocks with no field context. Whether they inherit the field block's policy, and how that is enforced on a stream rather than per request.</li>
+    <li><b>Prefetch policy.</b> What decides whether a peer pulls a value eagerly, given it is per-node and not part of convergence.</li>
+  </ol>
+</section>
+
+<footer>
+  Draft for review across the Go and Rust runtimes. Section 10 records what is verified, derived, and unmeasured; no figure here is a measurement unless it says so.
+</footer>
+
+</div>
+</body>
+</html>

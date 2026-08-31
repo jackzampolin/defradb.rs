@@ -8,13 +8,13 @@ use db::AutoCommitMutator;
 use document::Document;
 use query::mutator::DocMutator;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::encrypted_store::EncryptedStore;
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn document_crud_roundtrips_through_encrypted_store() {
     let key = [42u8; 32];
-    let backend = MemoryStore::new();
+    let backend = RegolithStore::in_memory().unwrap();
     let store = Arc::new(EncryptedStore::new(backend, key));
     let db = Arc::new(DB::open_from_arc(store).await.unwrap());
 

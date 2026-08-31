@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 use tokio::sync::mpsc;
 
 type StreamedBlocks = Arc<Mutex<Option<Vec<(Cid, Vec<u8>)>>>>;
@@ -39,7 +39,7 @@ fn diagnostics() -> Arc<SyncDiagnostics> {
 struct TestTransport {
     peer_id: PeerId,
     pubkey: Vec<u8>,
-    blockstore: Arc<DefraBlockstore<MemoryStore>>,
+    blockstore: Arc<DefraBlockstore<RegolithStore>>,
     root_cid: Cid,
     root_data: Vec<u8>,
     car_blocks: Arc<HashMap<Cid, Vec<u8>>>,
@@ -64,7 +64,7 @@ struct TestTransport {
 
 impl TestTransport {
     fn new(
-        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        blockstore: Arc<DefraBlockstore<RegolithStore>>,
         root_cid: Cid,
         root_data: Vec<u8>,
         car_blocks: HashMap<Cid, Vec<u8>>,
@@ -460,7 +460,7 @@ impl P2PTransport for TestTransport {
 
 #[tokio::test]
 async fn poll_fetch_dag_recovers_partial_car_with_batched_selective_fetch() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let child_one_data = encode_ipld(ipld!({ "value": 1 }));
@@ -535,7 +535,7 @@ async fn poll_fetch_dag_recovers_partial_car_with_batched_selective_fetch() {
 
 #[tokio::test]
 async fn poll_fetch_dag_uses_known_missing_frontier_without_recursive_car() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let child_data = encode_ipld(ipld!({ "value": 1 }));
@@ -583,7 +583,7 @@ async fn poll_fetch_dag_uses_known_missing_frontier_without_recursive_car() {
 
 #[tokio::test(start_paused = true)]
 async fn rooted_selective_response_drains_before_query_is_reaped() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let leaf_data = encode_ipld(ipld!({ "value": 1 }));
@@ -644,7 +644,7 @@ async fn rooted_selective_response_drains_before_query_is_reaped() {
 
 #[tokio::test(start_paused = true)]
 async fn exact_selective_batch_does_not_wait_for_a_lost_completion_signal() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let child_data = encode_ipld(ipld!({ "value": 1 }));
@@ -685,7 +685,7 @@ async fn exact_selective_batch_does_not_wait_for_a_lost_completion_signal() {
 
 #[tokio::test(start_paused = true)]
 async fn exact_selective_failure_before_waiter_registration_is_observed_immediately() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let child_data = encode_ipld(ipld!({ "value": 1 }));
@@ -731,7 +731,7 @@ async fn exact_selective_failure_before_waiter_registration_is_observed_immediat
 
 #[tokio::test(start_paused = true)]
 async fn contended_car_ingest_defers_to_root_clock_without_fetch_exhaustion() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
     blockstore.put(&root_cid, &root_data).await.unwrap();
@@ -775,7 +775,7 @@ async fn contended_car_ingest_defers_to_root_clock_without_fetch_exhaustion() {
 
 #[tokio::test]
 async fn poll_fetch_dag_continues_after_partial_selective_batch_progress() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let leaf_one_data = encode_ipld(ipld!({ "value": 1 }));
@@ -848,7 +848,7 @@ async fn poll_fetch_dag_continues_after_partial_selective_batch_progress() {
 /// still making progress.
 #[tokio::test]
 async fn poll_fetch_dag_completes_dag_deeper_than_legacy_iteration_cap() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     const DEPTH: usize = 25;
@@ -926,7 +926,7 @@ fn single_child_dag() -> (Cid, Vec<u8>, Cid, Vec<u8>) {
 /// alternate provider and the fetch completes on the first attempt.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_rotates_to_alternate_provider_on_no_progress() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 
@@ -973,7 +973,7 @@ async fn poll_fetch_dag_rotates_to_alternate_provider_on_no_progress() {
 /// backoff and succeed once the provider starts serving.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_retries_incomplete_fetch_and_succeeds() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 
@@ -1018,7 +1018,7 @@ async fn poll_fetch_dag_retries_incomplete_fetch_and_succeeds() {
 /// after MAX_FETCH_ATTEMPTS without emitting DagReady (terminal failure).
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_exhausted_retries_do_not_emit_dag_ready() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 
@@ -1065,7 +1065,7 @@ async fn poll_fetch_dag_exhausted_retries_do_not_emit_dag_ready() {
 /// the same qualified provider reconnects, a later clock dispatch completes.
 #[tokio::test(start_paused = true)]
 async fn disconnected_provider_defers_until_reconnect_without_exhaustion() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
     blockstore.put(&root_cid, &root_data).await.unwrap();
@@ -1132,7 +1132,7 @@ async fn disconnected_provider_defers_until_reconnect_without_exhaustion() {
 /// not outlive rotation, the limiter permit, or terminal failure.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_cancels_every_issued_query() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 
@@ -1177,7 +1177,7 @@ async fn poll_fetch_dag_cancels_every_issued_query() {
 /// time does not scale with the width of the missing frontier.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_stall_budget_caps_stalled_batches_per_attempt() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let width = SELECTIVE_FETCH_BATCH_SIZE + 1;
@@ -1239,7 +1239,7 @@ async fn poll_fetch_dag_stall_budget_caps_stalled_batches_per_attempt() {
 /// waiting out the transport's full internal timeout chain.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_bounds_hung_car_request() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 
@@ -1289,7 +1289,7 @@ async fn poll_fetch_dag_bounds_hung_car_request() {
 /// source peer.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_completes_from_source_when_peer_listing_fails() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 
@@ -1339,7 +1339,7 @@ async fn poll_fetch_dag_completes_from_source_when_peer_listing_fails() {
 /// between attempts, not after all of its retries complete.
 #[tokio::test(start_paused = true)]
 async fn poll_fetch_dag_releases_limiter_permit_during_backoff() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (root_cid, root_data, child_cid, child_data) = single_child_dag();
 

@@ -13,7 +13,7 @@ mod lww_properties {
     };
     use defra_core::types::DocId;
     use proptest::prelude::*;
-    use storage::{MemoryStore, Store};
+    use storage::{RegolithStore, Store};
 
     proptest! {
         #[test]
@@ -48,7 +48,7 @@ mod lww_properties {
                 ).unwrap();
 
                 // Store 1: merge delta1 then delta2
-                let store1 = MemoryStore::new();
+                let store1 = RegolithStore::in_memory().unwrap();
                 let lww1 = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 lww1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
@@ -57,7 +57,7 @@ mod lww_properties {
                 let pri1 = lww1.priority(&*txn1).await.ok();
 
                 // Store 2: merge delta2 then delta1
-                let store2 = MemoryStore::new();
+                let store2 = RegolithStore::in_memory().unwrap();
                 let lww2 = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 lww2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
@@ -94,7 +94,7 @@ mod lww_properties {
 
                 let mut results = Vec::new();
                 for _ in 0..3 {
-                    let store = MemoryStore::new();
+                    let store = RegolithStore::in_memory().unwrap();
                     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                     let mut txn = store.new_txn(false).await.unwrap();
                     lww.merge(&mut *txn, &ctx, &delta).await.unwrap();
@@ -126,7 +126,7 @@ mod lww_properties {
                     value.clone(),
                 ).unwrap();
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
@@ -167,7 +167,7 @@ mod lww_properties {
                     value.clone(),
                 ).unwrap();
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
                 lww.merge(&mut *txn, &ctx, &delta).await.unwrap();
@@ -196,7 +196,7 @@ mod lww_properties {
                     value.clone(),
                 ).unwrap();
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
                 lww.merge(&mut *txn, &ctx, &delta).await.unwrap();
@@ -220,7 +220,7 @@ mod lww_properties {
                     is_create: false,
                 };
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
@@ -309,7 +309,7 @@ mod lww_properties {
 
                 let mut results = Vec::new();
                 for perm in permutations {
-                    let store = MemoryStore::new();
+                    let store = RegolithStore::in_memory().unwrap();
                     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
                     let mut txn = store.new_txn(false).await.unwrap();
                     for delta in perm {
@@ -333,7 +333,7 @@ mod lww_properties {
             is_create: false,
         };
 
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -355,13 +355,13 @@ mod lww_properties {
         .unwrap();
 
         lww.merge(&mut *txn, &ctx, &low).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"low");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"low"[..]);
 
         lww.merge(&mut *txn, &ctx, &high).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"high");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"high"[..]);
 
         lww.merge(&mut *txn, &ctx, &low).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"high");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"high"[..]);
     }
 
     #[tokio::test]
@@ -372,7 +372,7 @@ mod lww_properties {
             is_create: false,
         };
 
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -394,13 +394,13 @@ mod lww_properties {
         .unwrap();
 
         lww.merge(&mut *txn, &ctx, &alice).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
         lww.merge(&mut *txn, &ctx, &bob).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"Bob"[..]);
 
         lww.merge(&mut *txn, &ctx, &alice).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"Bob"[..]);
     }
 
     #[tokio::test]
@@ -411,7 +411,7 @@ mod lww_properties {
             is_create: false,
         };
 
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -424,7 +424,7 @@ mod lww_properties {
         )
         .unwrap();
         lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
-        assert_eq!(lww.value(&*txn).await.unwrap(), b"value");
+        assert_eq!(lww.value(&*txn).await.unwrap(), &b"value"[..]);
 
         let delete =
             LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 20, "v1".to_string()).unwrap();
@@ -440,7 +440,7 @@ mod counter_properties {
     };
     use defra_core::types::DocId;
     use proptest::prelude::*;
-    use storage::{MemoryStore, Store};
+    use storage::{RegolithStore, Store};
 
     proptest! {
         #[test]
@@ -476,14 +476,14 @@ mod counter_properties {
                     inc2,
                 ).unwrap();
 
-                let store1 = MemoryStore::new();
+                let store1 = RegolithStore::in_memory().unwrap();
                 let counter1 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
                 let val1 = counter1.value(&*txn1).await.ok();
 
-                let store2 = MemoryStore::new();
+                let store2 = RegolithStore::in_memory().unwrap();
                 let counter2 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
@@ -520,15 +520,15 @@ mod counter_properties {
                     increment,
                 ).unwrap();
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val1 = counter.value(&*txn).await.ok().map(|b| i64::from_be_bytes(b.try_into().unwrap()));
+                let val1 = counter.value(&*txn).await.ok().map(|b| i64::from_be_bytes(b.as_ref().try_into().unwrap()));
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val2 = counter.value(&*txn).await.ok().map(|b| i64::from_be_bytes(b.try_into().unwrap()));
+                let val2 = counter.value(&*txn).await.ok().map(|b| i64::from_be_bytes(b.as_ref().try_into().unwrap()));
 
                 assert_eq!(val1, Some(increment.wrapping_mul(1)));
                 assert_eq!(val2, Some(increment.wrapping_mul(2)));
@@ -545,7 +545,7 @@ mod counter_properties {
                     is_create: false,
                 };
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
@@ -571,7 +571,7 @@ mod counter_properties {
 
                 assert!(result.is_ok());
                 let value_bytes = counter.value(&*txn).await.unwrap();
-                let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+                let value = i64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
                 assert_eq!(value, base.wrapping_add(increment));
             });
         }
@@ -586,7 +586,7 @@ mod counter_properties {
                     is_create: false,
                 };
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
@@ -612,7 +612,7 @@ mod counter_properties {
 
                 assert!(result.is_ok());
                 let value_bytes = counter.value(&*txn).await.unwrap();
-                let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+                let value = i64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
                 assert_eq!(value, base.wrapping_add(-decrement));
             });
         }
@@ -672,7 +672,7 @@ mod counter_properties {
 
                 let mut results = Vec::new();
                 for perm in permutations {
-                    let store = MemoryStore::new();
+                    let store = RegolithStore::in_memory().unwrap();
                     let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
                     let mut txn = store.new_txn(false).await.unwrap();
                     for delta in perm {
@@ -720,14 +720,14 @@ mod counter_properties {
                     inc2,
                 ).unwrap();
 
-                let store1 = MemoryStore::new();
+                let store1 = RegolithStore::in_memory().unwrap();
                 let counter1 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
                 let val1 = counter1.value(&*txn1).await.ok();
 
-                let store2 = MemoryStore::new();
+                let store2 = RegolithStore::in_memory().unwrap();
                 let counter2 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
@@ -793,7 +793,7 @@ mod counter_properties {
 
                 let mut results = Vec::new();
                 for perm in permutations {
-                    let store = MemoryStore::new();
+                    let store = RegolithStore::in_memory().unwrap();
                     let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
                     let mut txn = store.new_txn(false).await.unwrap();
                     for delta in perm {
@@ -817,7 +817,7 @@ mod counter_properties {
             is_create: false,
         };
 
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
@@ -842,7 +842,7 @@ mod counter_properties {
         }
 
         let value_bytes = counter.value(&*txn).await.unwrap();
-        let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+        let value = i64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
         assert_eq!(value, 50);
     }
 }
@@ -854,7 +854,7 @@ mod float64_counter_properties {
     };
     use defra_core::types::DocId;
     use proptest::prelude::*;
-    use storage::{MemoryStore, Store};
+    use storage::{RegolithStore, Store};
 
     proptest! {
         #[test]
@@ -892,14 +892,14 @@ mod float64_counter_properties {
                     inc2,
                 ).unwrap();
 
-                let store1 = MemoryStore::new();
+                let store1 = RegolithStore::in_memory().unwrap();
                 let counter1 = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
                 let val1 = counter1.value(&*txn1).await.ok();
 
-                let store2 = MemoryStore::new();
+                let store2 = RegolithStore::in_memory().unwrap();
                 let counter2 = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
@@ -936,15 +936,15 @@ mod float64_counter_properties {
                     increment,
                 ).unwrap();
 
-                let store = MemoryStore::new();
+                let store = RegolithStore::in_memory().unwrap();
                 let counter = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val1 = counter.value(&*txn).await.ok().map(|b| f64::from_be_bytes(b.try_into().unwrap()));
+                let val1 = counter.value(&*txn).await.ok().map(|b| f64::from_be_bytes(b.as_ref().try_into().unwrap()));
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val2 = counter.value(&*txn).await.ok().map(|b| f64::from_be_bytes(b.try_into().unwrap()));
+                let val2 = counter.value(&*txn).await.ok().map(|b| f64::from_be_bytes(b.as_ref().try_into().unwrap()));
 
                 (val1, val2)
             });

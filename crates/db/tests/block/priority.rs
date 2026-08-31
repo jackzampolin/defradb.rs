@@ -8,11 +8,11 @@ use document::Document;
 use document::NormalValue;
 use query::fetcher::CommitsQueryOptions;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::IterOptions;
 use storage::corekv::Key;
 use storage::corekv::Store;
 use storage::keys::HeadstorePriorityKey;
+use storage::RegolithStore;
 
 async fn count_priority_entries<S: Store>(txn: &DbTxn<S>) -> usize {
     let headstore = txn.headstore().unwrap();
@@ -39,7 +39,7 @@ async fn has_priority_index_marker<S: Store>(txn: &DbTxn<S>) -> bool {
 
 #[tokio::test]
 async fn backfill_indexes_a_shared_cid_for_each_document() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let block = Block::new(
         defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
             field_name: "name".to_string(),
@@ -86,7 +86,7 @@ async fn backfill_indexes_a_shared_cid_for_each_document() {
 
 #[tokio::test]
 async fn test_backfill_commit_priority_index_rebuilds_field_and_composite_history() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let seed_db = DB::from_arc(store.clone()).unwrap();
 
     let doc_id = {
@@ -237,7 +237,7 @@ async fn test_backfill_commit_priority_index_rebuilds_field_and_composite_histor
 
 #[tokio::test]
 async fn test_backfill_commit_priority_index_repairs_partial_index_without_marker() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let seed_db = DB::from_arc(store.clone()).unwrap();
 
     let partial_count = {

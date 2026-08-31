@@ -37,7 +37,7 @@ fn test_api_config_defaults() {
 #[test]
 fn test_datastore_config_defaults() {
     let config = DatastoreConfig::default();
-    assert_eq!(config.store, DatastoreType::Lark);
+    assert_eq!(config.store, DatastoreType::Regolith);
     assert_eq!(config.path, "data");
     assert_eq!(config.max_txn_retries, 5);
     assert_eq!(config.valuelogfilesize, None);
@@ -165,12 +165,12 @@ fn test_net_config_validate_skipped_when_p2p_disabled() {
 
 /// Every node started on a pre-`Option<u64>` binary had the old 1 GiB default
 /// serialized into its own `config.yaml` by `create_if_missing`. Reading it
-/// back would apply a 16x compaction-target change to lark and rocksdb for an
+/// back would apply a 16x compaction-target change to regolith for an
 /// operator who never passed the flag, so the key must not deserialize at all.
 #[test]
 fn legacy_valuelogfilesize_in_a_config_file_is_ignored() {
     let yaml = r#"
-store: lark
+store: regolith
 path: data
 max_txn_retries: 5
 valuelogfilesize: 1073741824

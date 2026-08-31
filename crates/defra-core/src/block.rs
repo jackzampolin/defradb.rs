@@ -51,7 +51,7 @@ pub struct Block {
 
     /// Previous block CIDs (sorted lexicographically by string)
     ///
-    /// `None` = nil (omitted in CBOR), `Some(vec![])` would be empty array
+    /// `None` = nil (omitted in CBOR), `Some(Vec::new())` would be empty array
     /// but is normalized to `None` in constructor for space efficiency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heads: Option<Vec<Cid>>,

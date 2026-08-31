@@ -353,6 +353,7 @@ impl<S: Store> crate::database::DB<S> {
 
     /// Delete collection-level metadata: index entries and collection heads.
     async fn truncate_collection_metadata(&self, collection_id: &str, short_id: u32) -> Result<()> {
+        use storage::keys::headstore::HeadstoreColSuperseded;
         use storage::keys::{HeadstoreColKey, IndexDataStoreKey};
 
         let txn = self.new_txn(false).await?;
@@ -382,6 +383,14 @@ impl<S: Store> crate::database::DB<S> {
                 iter.close().await.map_err(Error::Storage)?;
             }
             delete_prefix(&headstore, col_head_prefix).await?;
+            // Supersede markers must go with the heads they name. A marker
+            // left behind would supersede a block that a later write recreates
+            // under the same content-addressed CID.
+            delete_prefix(
+                &headstore,
+                HeadstoreColSuperseded::collection_prefix(short_id),
+            )
+            .await?;
 
             crate::block::cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
                 .await?;

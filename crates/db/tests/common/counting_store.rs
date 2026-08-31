@@ -92,7 +92,7 @@ impl Sealed for CountingTxn {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for CountingTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
         self.counts.point_gets.fetch_add(1, Ordering::SeqCst);
         self.inner.get(key).await
     }

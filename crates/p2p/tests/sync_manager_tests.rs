@@ -8,7 +8,7 @@ use blockstore::{Blockstore, DefraBlockstore};
 use cid::Cid;
 use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 use multihash_codetable::{Code, MultihashDigest};
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 use p2p::error::Error;
 use p2p::message::PushLogBroadcast;
@@ -86,7 +86,7 @@ fn create_composite_block(links: Vec<DAGLink>) -> (Cid, Vec<u8>) {
 
 #[tokio::test]
 async fn test_process_pushlog_stores_block() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -127,7 +127,7 @@ async fn test_process_pushlog_stores_block() {
 
 #[tokio::test]
 async fn test_process_pushlog_already_merged() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -153,7 +153,7 @@ async fn test_process_pushlog_already_merged() {
 
 #[tokio::test]
 async fn test_mark_as_merged() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, _events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -178,7 +178,7 @@ async fn test_mark_as_merged() {
 
 #[tokio::test]
 async fn test_get_unmerged() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, _events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -210,7 +210,7 @@ async fn test_get_unmerged() {
 
 #[tokio::test]
 async fn test_process_pushlog_invalid_cid_returns_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
@@ -236,7 +236,7 @@ async fn test_process_pushlog_invalid_cid_returns_error() {
 
 #[tokio::test]
 async fn test_process_pushlog_cid_mismatch_returns_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
@@ -257,7 +257,7 @@ async fn test_process_pushlog_cid_mismatch_returns_error() {
 
 #[tokio::test]
 async fn test_sequential_unmerged_reannouncement_is_idempotently_registered() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -283,7 +283,7 @@ async fn test_sequential_unmerged_reannouncement_is_idempotently_registered() {
 
 #[tokio::test]
 async fn test_process_pushlog_registration_does_not_depend_on_event_receiver() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -305,7 +305,7 @@ async fn test_process_pushlog_registration_does_not_depend_on_event_receiver() {
 
 #[tokio::test]
 async fn test_already_merged_fast_path_does_not_need_event_receiver() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -328,7 +328,7 @@ async fn test_already_merged_fast_path_does_not_need_event_receiver() {
 
 #[tokio::test]
 async fn test_pending_dag_count_initially_zero() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
@@ -337,7 +337,7 @@ async fn test_pending_dag_count_initially_zero() {
 
 #[tokio::test]
 async fn test_pending_dag_tracking() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -372,7 +372,7 @@ async fn test_pending_dag_tracking() {
 
 #[tokio::test]
 async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -458,7 +458,7 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
 
 #[tokio::test]
 async fn test_diagnostics_counters_track_pending_dag_lifecycle() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -544,7 +544,7 @@ async fn test_diagnostics_counters_track_pending_dag_lifecycle() {
 
 #[tokio::test]
 async fn test_pending_dag_attempts_increment_per_retry() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -585,7 +585,7 @@ async fn test_pending_dag_attempts_increment_per_retry() {
 
 #[tokio::test]
 async fn test_blockstore_accessor() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, _events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
@@ -611,7 +611,7 @@ fn broadcast_for(cid: &Cid, doc_id: &str, block: Vec<u8>) -> PushLogBroadcast {
 
 #[tokio::test]
 async fn test_process_pushlog_pending_capacity_returns_typed_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let config = SyncConfig {
         max_pending_dags: 1,
@@ -668,7 +668,7 @@ async fn test_process_pushlog_pending_capacity_returns_typed_error() {
 async fn test_max_pending_dags_zero_is_normalized_to_one() {
     // A zero cap would reject every missing-link push forever (permanent
     // admission outage); the manager normalizes it to a 1-slot map.
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let config = SyncConfig {
         max_pending_dags: 0,
@@ -705,11 +705,11 @@ mod pending_persistence {
     };
 
     async fn manager_with_store(
-        store: Arc<MemoryStore>,
+        store: Arc<RegolithStore>,
     ) -> (
-        SyncManager<DefraBlockstore<MemoryStore>>,
+        SyncManager<DefraBlockstore<RegolithStore>>,
         tokio::sync::mpsc::Receiver<SyncEvent>,
-        Arc<PendingDagStore<MemoryStore>>,
+        Arc<PendingDagStore<RegolithStore>>,
     ) {
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let (manager, events) =
@@ -759,7 +759,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn current_sender_scope_head_atomically_supersedes_older_durable_root() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut events, pending_store) = manager_with_store(store.clone()).await;
         let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old");
         let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new");
@@ -822,7 +822,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn same_root_reannouncement_retains_durable_recovery_provider() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut events, pending_store) = manager_with_store(store.clone()).await;
         let (root, root_bytes) = composite_with_priority_and_missing_field(1, "field");
         let pushlog = pushlog_for(&root, &root_bytes);
@@ -873,7 +873,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn complete_at_arrival_head_is_durable_before_ack_and_restart() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut events, pending_store) = manager_with_store(store.clone()).await;
         let (root, pushlog) = create_test_head_broadcast();
 
@@ -906,7 +906,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn durable_scope_head_survives_pending_eviction_and_restart() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old");
         let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new");
 
@@ -960,7 +960,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn current_scope_replacement_is_admitted_at_pending_capacity() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let (manager, _events) = SyncManager::new(
             blockstore,
@@ -1004,7 +1004,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn collection_scope_heads_use_the_same_current_obligation_rule() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, _events, pending_store) = manager_with_store(store).await;
         let (old_root, old_bytes) = composite_with_priority_and_missing_field(1, "old-col");
         let (new_root, new_bytes) = composite_with_priority_and_missing_field(2, "new-col");
@@ -1044,7 +1044,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn pending_registration_persists_until_marked_merged() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut events, pending_store) = manager_with_store(store).await;
         let (comp_cid, comp_bytes, _field_cid, field_bytes) = composite_with_missing_field();
 
@@ -1126,7 +1126,7 @@ mod pending_persistence {
     /// already cleared.
     #[tokio::test]
     async fn terminal_merge_clears_a_live_pending_entry_for_the_same_root() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut _events, pending_store) = manager_with_store(store).await;
         let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
 
@@ -1153,7 +1153,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn restore_re_registers_and_re_drives_fetch() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let comp_cid = {
             let (manager, _events, _pending_store) = manager_with_store(store.clone()).await;
             let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
@@ -1190,7 +1190,7 @@ mod pending_persistence {
 
     #[tokio::test]
     async fn restore_skips_and_deletes_merged_roots() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut _events, pending_store) = manager_with_store(store.clone()).await;
         let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
 
@@ -1223,7 +1223,7 @@ mod pending_persistence {
     /// its own prior pushes and provider-exhausted entries, nothing else.
     #[tokio::test]
     async fn redrive_selection_targets_source_peer_and_exhausted_fetches() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut _events, _pending_store) = manager_with_store(store).await;
 
         let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
@@ -1259,7 +1259,7 @@ mod pending_persistence {
     /// successful merge may.
     #[tokio::test]
     async fn clear_keeps_durable_record_until_merge() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut _events, pending_store) = manager_with_store(store).await;
         let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
 
@@ -1299,7 +1299,7 @@ mod pending_persistence {
     /// without a restart.
     #[tokio::test]
     async fn resync_re_registers_cleared_records() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, _events, _pending_store) = manager_with_store(store).await;
         let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
 
@@ -1333,7 +1333,7 @@ mod pending_persistence {
     /// nack instead of being accepted and later dropped.
     #[tokio::test]
     async fn durable_cap_nacks_new_registrations() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let (manager, mut _events) = SyncManager::new(
             blockstore,
@@ -1385,7 +1385,7 @@ mod pending_persistence {
     /// with no peer reconnect or restart.
     #[tokio::test]
     async fn resync_drains_records_skipped_at_capacity_once_slots_free() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let (manager, _events) = SyncManager::new(
             blockstore,
@@ -1433,7 +1433,7 @@ mod pending_persistence {
     /// early-exit would otherwise skip load_all.
     #[tokio::test]
     async fn forced_sweep_rediscovers_orphan_records() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut events, pending_store) = manager_with_store(store).await;
 
         // A live registration keeps the early-exit satisfied.
@@ -1488,7 +1488,7 @@ mod pending_persistence {
     /// durable-cap headroom forever.
     #[tokio::test]
     async fn sweep_prunes_stale_accounting_entries() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut _events, pending_store) = manager_with_store(store).await;
 
         let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
@@ -1522,7 +1522,7 @@ mod pending_persistence {
     /// because that process-local entry has not been cleared yet.
     #[tokio::test]
     async fn sweep_prunes_deleted_record_even_while_pending_entry_is_live() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let (manager, mut _events, pending_store) = manager_with_store(store).await;
         let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
         manager
@@ -1556,7 +1556,7 @@ mod pending_persistence {
     /// instead of waiting for the first (spawned) resync sweep.
     #[tokio::test]
     async fn install_hydrates_durable_accounting_before_first_push() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         {
             let (manager, mut _events, _pending_store) = manager_with_store(store.clone()).await;
             let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
@@ -1626,7 +1626,7 @@ mod pending_persistence {
     /// be nacked (pusher keeps its retry record), not success-acked.
     #[tokio::test]
     async fn persist_failure_nacks_the_push_and_keeps_nothing_registered() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let (manager, _events) =
             SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());

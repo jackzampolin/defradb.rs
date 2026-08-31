@@ -23,9 +23,9 @@ use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::NodeId;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
+use storage::RegolithStore;
 
 const K: usize = 10;
 
@@ -417,7 +417,7 @@ async fn both_kinds_agree_under_a_filter() {
 /// one: nothing about it lives in the store.
 #[tokio::test]
 async fn filtering_works_against_a_persisted_graph() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut corpus = Corpus::new(CORPUS_SEED);
     let vectors = corpus.vectors(300, 8);
     let admit = |id: NodeId| id.0.is_multiple_of(5);

@@ -6,7 +6,7 @@ mod trait_impl;
 
 pub use error::{Error, Result};
 pub use factory::create_memory_nac_manager;
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub use factory::create_persistent_nac_manager;
 
 use std::sync::Arc;

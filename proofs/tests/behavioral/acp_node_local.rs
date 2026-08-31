@@ -73,7 +73,7 @@ async fn build_cluster(backend: Backend) -> TestCluster {
         .with_p2p()
         .with_rust_binary(support::release_binary());
     let b = match backend {
-        Backend::Rust => b.rust_nodes(2).with_store("redb"),
+        Backend::Rust => b.rust_nodes(2).with_store("regolith"),
         Backend::Go => b.go_nodes(2).with_store("badger"),
     };
     b.build().await.expect("build ACP+P2P cluster")

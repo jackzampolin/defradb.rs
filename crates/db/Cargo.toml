@@ -15,9 +15,6 @@ ignored = ["anyhow", "bytes", "libp2p", "multihash", "p2p", "rand", "serde", "se
 default = ["p2p", "native", "wasmtime-runtime"]
 p2p = ["dep:libp2p", "p2p/libp2p-transport"]
 native = ["dep:tokio", "events/channel", "acp/native"]
-redb = ["storage/redb", "acp/redb"]
-rocksdb = ["storage/rocksdb"]
-fjall = ["storage/fjall"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
 
 [lib]

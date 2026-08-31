@@ -36,7 +36,7 @@ async fn concurrent_distinct_branchable_doc_updates_do_not_conflict() {
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .expect("build cluster");

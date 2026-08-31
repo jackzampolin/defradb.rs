@@ -6,14 +6,14 @@ mod collection_delete_4657;
 mod collection_management;
 #[path = "basic/document_lifecycle.rs"]
 mod document_lifecycle;
-#[path = "basic/lark_crash_reopen.rs"]
-mod lark_crash_reopen;
 #[path = "basic/multi_collection.rs"]
 mod multi_collection;
 #[path = "basic/no_signing.rs"]
 mod no_signing;
 #[path = "basic/patch_secondary_relation_4709.rs"]
 mod patch_secondary_relation_4709;
+#[path = "basic/regolith_crash_reopen.rs"]
+mod regolith_crash_reopen;
 #[path = "basic/schema_size_limit.rs"]
 mod schema_size_limit;
 #[path = "basic/self_ref_relations_4712.rs"]

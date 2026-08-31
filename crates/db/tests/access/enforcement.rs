@@ -16,7 +16,7 @@ use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 use tokio::sync::Mutex;
 
 /// Tests that drive the ambient thread-local identity must not run concurrently:
@@ -47,7 +47,7 @@ async fn enabled_manager() -> Arc<NacManager<MemoryZanzibarStore>> {
 
 #[tokio::test]
 async fn unset_manager_allows_everything() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     // No nac_manager installed: every node operation is permitted.
     db.check_node_access(None, NodePermission::DocumentUpdate)
         .await
@@ -56,7 +56,7 @@ async fn unset_manager_allows_everything() {
 
 #[tokio::test]
 async fn owner_allowed_via_explicit_param() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     db.check_node_access(Some(&owner()), NodePermission::DocumentUpdate)
@@ -66,7 +66,7 @@ async fn owner_allowed_via_explicit_param() {
 
 #[tokio::test]
 async fn owner_allowed_via_ambient_identity() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     let guard = defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
@@ -81,7 +81,7 @@ async fn owner_allowed_via_ambient_identity() {
 
 #[tokio::test]
 async fn anonymous_is_denied() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     // No explicit identity and no ambient identity => wildcard, which is
@@ -99,7 +99,7 @@ async fn anonymous_is_denied() {
 
 #[tokio::test]
 async fn non_owner_is_denied() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     let err = db
@@ -138,7 +138,7 @@ fn widget_schema() -> CollectionVersion {
 async fn create_collection_denied_for_non_owner() {
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     let guard =
@@ -163,7 +163,7 @@ async fn create_collection_denied_for_non_owner() {
 async fn create_collection_allowed_for_owner() {
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     let guard = defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
@@ -185,7 +185,7 @@ async fn create_collection_allowed_when_nac_unset() {
     // regardless of ambient identity.
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
 
     let guard =
         defra_core::current_identity::scoped_current_identity(Some(STRANGER_DID.to_string()));
@@ -206,7 +206,7 @@ async fn delete_collection_gated_by_nac() {
     // a non-owner is denied (and the collection survives), the owner succeeds.
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     // Seed: owner creates the collection so there is something to delete.
@@ -273,7 +273,7 @@ const WIDGET_SDL: &str = "type Widget { name: String }";
 async fn add_schema_in_txn_denied_for_non_owner() {
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.set_nac_manager(enabled_manager().await);
     let registry = DbTransactionRegistry::new(db.clone());
 
@@ -301,7 +301,7 @@ async fn add_schema_in_txn_denied_for_non_owner() {
 async fn add_schema_in_txn_allowed_for_owner() {
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.set_nac_manager(enabled_manager().await);
     let registry = DbTransactionRegistry::new(db.clone());
 
@@ -326,7 +326,7 @@ async fn set_active_collection_version_denied_for_non_owner() {
     // The other raw schema-mutation method is also gated.
     let _serial = AMBIENT_GUARD.lock().await;
 
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
     let guard =

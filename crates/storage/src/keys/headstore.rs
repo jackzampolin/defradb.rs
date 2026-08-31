@@ -184,6 +184,62 @@ impl Key for HeadstoreColKey {
     }
 }
 
+/// HeadstoreColSuperseded: records that one collection head superseded another.
+///
+/// Structure: `/cs/[CollectionID]/[ParentCID]/[ChildCID]`
+///
+/// A collection head stops being a head when a later block names it as a
+/// parent. Recording that as a key the *child* owns, rather than deleting the
+/// parent's head key, is what lets two concurrent appends both commit: every
+/// key a writer writes ends in its own CID, so two writers can never write the
+/// same key and the storage engine has nothing to reject.
+///
+/// The head set is then a query rather than a maintained value: a head key is
+/// live exactly when no `/cs/{collection}/{cid}/` entry exists for it. See
+/// `proofs/tla/HeadSet.tla` and `proofs/lean/HeadSet/Core.lean`, where this is
+/// `Key.superseded` and the query is `derivedHeads`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadstoreColSuperseded {
+    /// Collection short id.
+    pub collection_id: u32,
+    /// The head being superseded.
+    pub parent: Cid,
+    /// The block that superseded it, which is also the writer of this key.
+    pub child: Cid,
+}
+
+impl HeadstoreColSuperseded {
+    /// Record that `child` supersedes `parent`.
+    pub fn new(collection_id: u32, parent: Cid, child: Cid) -> Self {
+        Self {
+            collection_id,
+            parent,
+            child,
+        }
+    }
+
+    /// Prefix matching every marker against one head. Non-empty means the head
+    /// has been superseded and is no longer a tip.
+    pub fn parent_prefix(collection_id: u32, parent: Cid) -> Vec<u8> {
+        format!("/cs/{}/{}/", collection_id, parent).into_bytes()
+    }
+
+    /// Prefix matching every marker in a collection, for pruning.
+    pub fn collection_prefix(collection_id: u32) -> Vec<u8> {
+        format!("/cs/{}/", collection_id).into_bytes()
+    }
+}
+
+impl Key for HeadstoreColSuperseded {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/cs/{}/{}/{}", self.collection_id, self.parent, self.child).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/cs/{}/{}/{}", self.collection_id, self.parent, self.child)
+    }
+}
+
 /// HeadstoreFieldDefinition: Maps field definitions to their block head
 ///
 /// Structure: /f/[CollectionName]/[FieldName]/[CID]

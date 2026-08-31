@@ -4,7 +4,7 @@ use storage::corekv::Store;
 
 #[tokio::test]
 async fn counts_keys_pulled_from_the_iterator_not_keys_present() {
-    let store = CountingStore::new(storage::MemoryStore::new());
+    let store = CountingStore::new(storage::RegolithStore::in_memory().unwrap());
 
     let mut txn = store.new_txn(false).await.unwrap();
     for i in 0..100u32 {
@@ -24,7 +24,7 @@ async fn counts_keys_pulled_from_the_iterator_not_keys_present() {
 
 #[tokio::test]
 async fn counts_point_gets_separately() {
-    let store = CountingStore::new(storage::MemoryStore::new());
+    let store = CountingStore::new(storage::RegolithStore::in_memory().unwrap());
 
     let mut txn = store.new_txn(false).await.unwrap();
     txn.set(b"a", b"1").await.unwrap();

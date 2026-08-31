@@ -16,12 +16,8 @@ bench = false
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["native", "wasmtime-runtime", "lark", "redb", "rocksdb"]
-lark = ["embedded/lark", "storage/lark"]
+default = ["native", "wasmtime-runtime"]
 native = ["db/native", "db/p2p", "embedded/native"]
-redb = ["db/redb", "embedded/redb", "storage/redb"]
-fjall = ["storage/fjall"]
-rocksdb = ["storage/rocksdb"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",

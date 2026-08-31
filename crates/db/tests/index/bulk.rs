@@ -18,7 +18,7 @@ use schema::IndexedFieldDescription;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -67,7 +67,7 @@ where
     F: FnOnce(IndexManager, datastore::NamespaceView, CollectionVersion) -> Fut,
     Fut: std::future::Future<Output = db::index::manager::BulkIndexResult>,
 {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
     let mut manager = IndexManager::new(1);
@@ -183,7 +183,7 @@ async fn an_empty_source_indexes_nothing() {
 /// `BackfillSource` over a real collection: the path index creation uses.
 #[tokio::test]
 async fn the_collection_source_streams_every_live_document() {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(schema()).await.unwrap();
 
     let txn = db.new_txn(false).await.unwrap();

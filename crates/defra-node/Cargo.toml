@@ -14,8 +14,7 @@ path = "src/bin/coding-session-bench.rs"
 test = false
 
 [features]
-default = ["lark", "redb", "native", "sourcehub", "wasmtime-runtime"]
-lark = ["storage/lark"]
+default = ["native", "sourcehub", "wasmtime-runtime"]
 http = ["dep:defra-http", "dep:axum"]
 # Iroh/QUIC only. Implies native. Does not enable libp2p.
 p2p = [
@@ -28,8 +27,6 @@ p2p = [
     "defra-p2p-adapter/iroh",
     "defra-p2p-adapter/native",
 ]
-redb = ["storage/redb"]
-rocksdb = ["storage/rocksdb"]
 # Native host (tokio, event channel). Default-on.
 native = ["db/native", ]
 # SourceHub / hub.rs on-chain document ACP. Default-on; omit for local-only ACP.

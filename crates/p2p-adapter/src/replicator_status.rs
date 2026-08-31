@@ -58,13 +58,13 @@ pub async fn load_persisted_replicators<S: storage::corekv::Store>(
 mod tests {
     use std::sync::Arc;
 
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     use super::*;
 
     #[tokio::test]
     async fn status_update_persists_first_transition_only() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let peerstore = storage::stores::Peerstore::new(store);
         let info = p2p::ReplicatorInfo::new("peer-1", vec!["users".to_string()]).unwrap();
         peerstore

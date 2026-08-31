@@ -4,7 +4,7 @@ use std::sync::Arc;
 use blockstore::DefraBlockstore;
 use defra_core::{Block as DefraBlock, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 use multihash_codetable::{Code, MultihashDigest};
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 use crate::sync::manager::DEFAULT_MAX_PENDING_DAGS;
 use crate::sync::{PeerStateTracker, SyncConfig};
@@ -16,15 +16,15 @@ fn test_cid(label: usize) -> Cid {
     )
 }
 
-fn test_manager_with_config(config: SyncConfig) -> SyncManager<DefraBlockstore<MemoryStore>> {
-    let store = Arc::new(MemoryStore::new());
+fn test_manager_with_config(config: SyncConfig) -> SyncManager<DefraBlockstore<RegolithStore>> {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, _events) = SyncManager::new(blockstore, peer_state, config);
     manager
 }
 
-fn test_manager() -> SyncManager<DefraBlockstore<MemoryStore>> {
+fn test_manager() -> SyncManager<DefraBlockstore<RegolithStore>> {
     test_manager_with_config(SyncConfig::default())
 }
 
@@ -77,7 +77,7 @@ fn linked_dag_providers_require_positive_missing_cid_evidence() {
 }
 
 struct BlockingRemoveStore {
-    inner: crate::sync::pending_store::PendingDagStore<MemoryStore>,
+    inner: crate::sync::pending_store::PendingDagStore<RegolithStore>,
     remove_calls: std::sync::atomic::AtomicUsize,
     active_writers: std::sync::atomic::AtomicUsize,
     max_active_writers: std::sync::atomic::AtomicUsize,
@@ -86,7 +86,7 @@ struct BlockingRemoveStore {
 }
 
 impl BlockingRemoveStore {
-    fn new(inner: crate::sync::pending_store::PendingDagStore<MemoryStore>) -> Self {
+    fn new(inner: crate::sync::pending_store::PendingDagStore<RegolithStore>) -> Self {
         Self {
             inner,
             remove_calls: std::sync::atomic::AtomicUsize::new(0),
@@ -189,7 +189,7 @@ async fn terminal_remove_and_quarantine_share_one_durable_metadata_writer() {
     let manager = Arc::new(test_manager());
     let root = test_cid(900);
     let store = Arc::new(BlockingRemoveStore::new(PendingDagStore::new(Arc::new(
-        MemoryStore::new(),
+        RegolithStore::in_memory().unwrap(),
     ))));
     store
         .put(
@@ -261,12 +261,17 @@ async fn already_merged_reconciliation_retires_live_and_durable_obligation() {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
     use blockstore::Blockstore;
 
-    let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(DefraBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, _events) =
         SyncManager::new(Arc::clone(&blockstore), peer_state, SyncConfig::default());
     let root = test_cid(901);
-    let store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    let store = Arc::new(PendingDagStore::new(Arc::new(
+        RegolithStore::in_memory().unwrap(),
+    )));
     store
         .put(
             &root,
@@ -632,7 +637,7 @@ async fn block_arrival_updates_missing_incrementally_without_full_walks() {
     // A dropped event receiver would fail the completing `retry_pending_dag`
     // call with `ChannelSend` before the assertions below run, so keep it
     // alive (unlike `test_manager()`, which discards it).
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
@@ -704,12 +709,17 @@ async fn block_arrival_updates_missing_incrementally_without_full_walks() {
 async fn quarantine_pending_dag_moves_live_record_and_clears_in_memory_entry() {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
 
-    let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(DefraBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
 
     let root = test_cid(1);
-    let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+        RegolithStore::in_memory().unwrap(),
+    )));
     pending_store
         .put(
             &root,
@@ -773,12 +783,17 @@ async fn quarantine_pending_dag_moves_live_record_and_clears_in_memory_entry() {
 async fn quarantine_pending_dag_dedupes_gauge_on_repeat_rejection() {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
 
-    let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(DefraBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
 
     let root = test_cid(1);
-    let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+        RegolithStore::in_memory().unwrap(),
+    )));
     pending_store
         .put(
             &root,
@@ -879,12 +894,17 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
         PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
     };
 
-    let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(DefraBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
 
     let root = test_cid(1);
-    let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+        RegolithStore::in_memory().unwrap(),
+    )));
     let record = PersistedPendingDag {
         doc_id: "doc".to_string(),
         collection_id: "collection".to_string(),
@@ -954,7 +974,10 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
 async fn resync_restore_leaves_root_due_for_receiver_clock() {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
 
-    let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+    let blockstore = Arc::new(DefraBlockstore::new(
+        Arc::new(RegolithStore::in_memory().unwrap()),
+        true,
+    ));
     let peer_state = Arc::new(PeerStateTracker::new());
     let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
 
@@ -962,7 +985,9 @@ async fn resync_restore_leaves_root_due_for_receiver_clock() {
     // sweep falls back to treating the root itself as missing and takes
     // the DagNeedsFetch (non-empty `missing`) path.
     let root = test_cid(1);
-    let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+    let pending_store = Arc::new(PendingDagStore::new(Arc::new(
+        RegolithStore::in_memory().unwrap(),
+    )));
     pending_store
         .put(
             &root,

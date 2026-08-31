@@ -42,7 +42,7 @@ pub(crate) async fn load_collection_from_systemstore(
         );
         query::error::QueryError::execution(format!("storage error: {}", e))
     })? {
-        Some(data) => String::from_utf8(data).map_err(|e| {
+        Some(data) => String::from_utf8(data.into()).map_err(|e| {
             error!(
                 error = ?e,
                 collection_name = %name,

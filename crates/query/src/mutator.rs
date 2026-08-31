@@ -4,6 +4,7 @@
 //! operations for mutation execution, following the same pattern as `DocFetcher`.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use identity::Did;
@@ -76,11 +77,11 @@ pub struct CreateResult {
     /// This is the dag-cbor encoded Block CID, not the document data CID.
     pub commit_cid: Option<Cid>,
     /// The raw bytes of the committed composite block (for P2P broadcast)
-    pub commit_block: Option<Vec<u8>>,
+    pub commit_block: Option<Bytes>,
     /// For branchable collections: the collection block CID to broadcast instead of composite.
     pub broadcast_cid: Option<Cid>,
     /// For branchable collections: the collection block bytes to broadcast.
-    pub broadcast_block: Option<Vec<u8>>,
+    pub broadcast_block: Option<Bytes>,
 }
 
 impl CreateResult {
@@ -102,7 +103,7 @@ impl CreateResult {
         doc_id: DocID,
         document: Document,
         commit_cid: Cid,
-        commit_block: Vec<u8>,
+        commit_block: Bytes,
     ) -> Self {
         Self {
             doc_id,
@@ -137,7 +138,7 @@ impl CreateResult {
         doc_id: DocID,
         document: Document,
         commit_cid: Cid,
-        commit_block: Vec<u8>,
+        commit_block: Bytes,
         broadcast_status: BroadcastStatus,
     ) -> Self {
         Self {
@@ -164,11 +165,11 @@ pub struct UpdateResult {
     /// The CID of the committed composite block (for P2P broadcast)
     pub commit_cid: Option<Cid>,
     /// The raw bytes of the committed composite block (for P2P broadcast)
-    pub commit_block: Option<Vec<u8>>,
+    pub commit_block: Option<Bytes>,
     /// For branchable collections: the collection block CID to broadcast instead of composite.
     pub broadcast_cid: Option<Cid>,
     /// For branchable collections: the collection block bytes to broadcast.
-    pub broadcast_block: Option<Vec<u8>>,
+    pub broadcast_block: Option<Bytes>,
 }
 
 impl UpdateResult {
@@ -190,7 +191,7 @@ impl UpdateResult {
         document: Document,
         fields_modified: usize,
         commit_cid: Cid,
-        commit_block: Vec<u8>,
+        commit_block: Bytes,
     ) -> Self {
         Self {
             document,
@@ -233,7 +234,7 @@ pub struct DeleteResult {
     /// The CID of the committed composite delete block (for P2P broadcast)
     pub commit_cid: Option<Cid>,
     /// The raw bytes of the committed composite delete block (for P2P broadcast)
-    pub commit_block: Option<Vec<u8>>,
+    pub commit_block: Option<Bytes>,
     /// For branchable collections: the CID of the collection-level head block
     /// that was written alongside the composite delete (for P2P broadcast).
     /// Go emits a second update for this so collection subscribers / replicators
@@ -241,7 +242,7 @@ pub struct DeleteResult {
     pub broadcast_cid: Option<Cid>,
     /// For branchable collections: the raw bytes of the collection-level head
     /// block written alongside the composite delete (for P2P broadcast).
-    pub broadcast_block: Option<Vec<u8>>,
+    pub broadcast_block: Option<Bytes>,
 }
 
 impl DeleteResult {
@@ -259,12 +260,7 @@ impl DeleteResult {
     }
 
     /// Create a result with committed block data (for P2P broadcast).
-    pub fn with_commit(
-        doc_id: DocID,
-        existed: bool,
-        commit_cid: Cid,
-        commit_block: Vec<u8>,
-    ) -> Self {
+    pub fn with_commit(doc_id: DocID, existed: bool, commit_cid: Cid, commit_block: Bytes) -> Self {
         Self {
             doc_id,
             existed,

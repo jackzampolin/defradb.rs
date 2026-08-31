@@ -1,5 +1,5 @@
 use super::*;
-use crate::backends::MemoryStore;
+use crate::backends::RegolithStore;
 use crate::corekv::Store;
 use crate::index::{CollectionIndex, SimpleIndex, UniqueIndex};
 use schema::IndexedFieldDescription;
@@ -20,7 +20,7 @@ fn test_index_description(unique: bool) -> IndexDescription {
 
 #[tokio::test]
 async fn test_in_iterator_simple_finds_multiple_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description(false);
@@ -68,7 +68,7 @@ async fn test_in_iterator_simple_finds_multiple_values() {
 
 #[tokio::test]
 async fn test_in_iterator_simple_handles_duplicates_same_value() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description(false);
@@ -109,7 +109,7 @@ async fn test_in_iterator_simple_handles_duplicates_same_value() {
 
 #[tokio::test]
 async fn test_in_iterator_unique_finds_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description(true);
@@ -148,7 +148,7 @@ async fn test_in_iterator_unique_finds_values() {
 
 #[tokio::test]
 async fn test_in_iterator_empty_result() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description(false);
@@ -179,7 +179,7 @@ async fn test_in_iterator_empty_result() {
 
 #[tokio::test]
 async fn test_in_iterator_reset() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description(false);
@@ -220,7 +220,7 @@ async fn test_in_iterator_reset() {
 
 #[tokio::test]
 async fn test_in_iterator_with_null_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description(false);
@@ -249,7 +249,7 @@ async fn test_in_iterator_with_null_values() {
 
 #[tokio::test]
 async fn test_in_iterator_integer_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = IndexDescription {

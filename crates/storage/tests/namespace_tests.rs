@@ -4,10 +4,11 @@
 //! Note: prefix_key and unprefix_key are internal methods tested via
 //! the inline unit tests.
 
+use bytes::Bytes;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::{IterOptions, Store};
 use storage::namespace::{Namespace, NamespacedStore};
+use storage::RegolithStore;
 
 #[test]
 fn test_namespace_prefix() {
@@ -33,7 +34,7 @@ fn test_namespace_name() {
 
 #[tokio::test]
 async fn test_namespaced_store_isolation() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
     let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);
     let blockstore = NamespacedStore::new(store.clone(), Namespace::Blockstore);
@@ -51,12 +52,12 @@ async fn test_namespaced_store_isolation() {
     // Read from datastore - should get value1
     let txn = datastore.new_txn(true).await.unwrap();
     let value = txn.get(b"key1").await.unwrap();
-    assert_eq!(value, Some(b"value1".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
     // Read from blockstore - should get value2
     let txn = blockstore.new_txn(true).await.unwrap();
     let value = txn.get(b"key1").await.unwrap();
-    assert_eq!(value, Some(b"value2".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value2")));
 
     // Keys are isolated - blockstore shouldn't see datastore key
     let txn = blockstore.new_txn(true).await.unwrap();
@@ -65,13 +66,13 @@ async fn test_namespaced_store_isolation() {
 
     // But the actual values are different
     let value = txn.get(b"key1").await.unwrap();
-    assert_eq!(value, Some(b"value2".to_vec()));
-    assert_ne!(value, Some(b"value1".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value2")));
+    assert_ne!(value, Some(Bytes::from_static(b"value1")));
 }
 
 #[tokio::test]
 async fn test_namespaced_iterator() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);
 
     // Write multiple keys
@@ -97,7 +98,7 @@ async fn test_namespaced_iterator() {
 
 #[tokio::test]
 async fn test_namespace_prefix_iteration() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);
 
     // Write keys with common prefix
@@ -122,7 +123,7 @@ async fn test_namespace_prefix_iteration() {
 
 #[tokio::test]
 async fn test_namespace_no_prefix_collision() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
     // Create a key in datastore that starts with 'b' (blockstore prefix)
     // This tests that namespace isolation prevents cross-namespace access
@@ -153,7 +154,7 @@ async fn test_namespace_no_prefix_collision() {
 #[tokio::test]
 async fn test_namespace_default_prefix_scoping() {
     // Test that iterating with no prefix still stays within namespace
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
 
     // Write to multiple namespaces
     let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);

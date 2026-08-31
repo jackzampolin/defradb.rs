@@ -11,10 +11,8 @@ use std::sync::Arc;
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
 
-#[cfg(feature = "redb")]
 use std::path::Path;
-#[cfg(feature = "redb")]
-use storage::RedbStore;
+use storage::RegolithStore;
 
 use crate::error::{Error, Result};
 use crate::relation::RelationTuple;
@@ -36,10 +34,10 @@ use crate::store::AcpStore;
 ///
 /// ```ignore
 /// use acp::PersistentAcpStore;
-/// use storage::RedbStore;
+/// use storage::RegolithStore;
 /// use std::sync::Arc;
 ///
-/// let main_store = Arc::new(RedbStore::open("/data")?);
+/// let main_store = Arc::new(RegolithStore::open("/data")?);
 /// let acp_store = PersistentAcpStore::from_store(main_store);
 /// ```
 ///
@@ -74,11 +72,11 @@ impl<S: Store> PersistentAcpStore<S> {
     }
 }
 
-#[cfg(feature = "redb")]
-impl PersistentAcpStore<RedbStore> {
+impl PersistentAcpStore<RegolithStore> {
     /// Open a persistent ACP store at the given directory path.
     ///
-    /// Creates the directory and database file (`acp.redb`) if they don't exist.
+    /// Creates the directory and the store directory (`acp.regolith`) if they do
+    /// not exist.
     /// The path should be a directory (e.g., `<root>/local_document_acp/`).
     ///
     /// This method provides backward compatibility for standalone ACP stores.
@@ -116,7 +114,7 @@ impl PersistentAcpStore<RedbStore> {
             })?;
         }
 
-        let db_path = dir_path.join("acp.redb");
+        let db_path = dir_path.join("acp.regolith");
         if db_path.exists() {
             let metadata = std::fs::metadata(&db_path).map_err(|e| {
                 Error::Storage(format!(
@@ -126,15 +124,15 @@ impl PersistentAcpStore<RedbStore> {
                 ))
             })?;
 
-            if !metadata.is_file() {
+            if !metadata.is_dir() {
                 return Err(Error::Storage(format!(
-                    "ACP database path is not a file: {}",
+                    "ACP database path is not a directory: {}",
                     db_path.display()
                 )));
             }
         }
 
-        let store = RedbStore::open(&db_path).map_err(|e| {
+        let store = RegolithStore::open(&db_path).map_err(|e| {
             Error::Storage(format!(
                 "failed to open ACP database '{}': {}",
                 db_path.display(),
@@ -422,12 +420,20 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::storage_iter("register_doc_atomic:iterator", e))?;
 
-        if iter
+        let already_registered = iter
             .next()
             .await
             .map_err(|e| Error::storage_iter("register_doc_atomic:next", e))?
-            .is_some()
-        {
+            .is_some();
+
+        // The scan has to be finished before the transaction can commit, and
+        // dropping the handle is what releases the transaction's hold on it.
+        iter.close()
+            .await
+            .map_err(|e| Error::storage_iter("register_doc_atomic:close", e))?;
+        drop(iter);
+
+        if already_registered {
             return Ok(false);
         }
 

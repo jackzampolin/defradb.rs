@@ -1,5 +1,5 @@
 use super::*;
-use crate::backends::MemoryStore;
+use crate::backends::RegolithStore;
 use crate::corekv::Store;
 use crate::index::{CollectionIndex, SimpleIndex};
 use schema::IndexedFieldDescription;
@@ -40,7 +40,7 @@ fn composite_index_description() -> IndexDescription {
 
 #[tokio::test]
 async fn test_range_scan_all() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description();
@@ -71,7 +71,7 @@ async fn test_range_scan_all() {
 
 #[tokio::test]
 async fn test_range_scan_reverse() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description();
@@ -106,7 +106,7 @@ async fn test_range_scan_reverse() {
 
 #[tokio::test]
 async fn test_range_prefix_scan() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = composite_index_description();
@@ -158,7 +158,7 @@ async fn test_range_prefix_scan() {
 
 #[tokio::test]
 async fn test_range_bounded() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description();
@@ -202,7 +202,7 @@ fn build_age_seek_key(age: i64) -> Vec<u8> {
 async fn test_cursor_seek_forward_exclusive_skips_boundary() {
     // Setup: age index with doc 1 = 20, doc 2 = 30, doc 3 = 40.
     // Forward exclusive seek at age=30 → should return only doc 3 (age=40).
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description();
@@ -252,7 +252,7 @@ async fn test_cursor_seek_forward_exclusive_skips_boundary() {
 async fn test_cursor_seek_backward_inclusive_starts_at_boundary() {
     // Setup: age index with doc 1 = 20, doc 2 = 30, doc 3 = 40.
     // Backward inclusive seek at age=30 → should return doc 2 then doc 1.
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description();
@@ -312,7 +312,7 @@ async fn test_cursor_seek_reversed_param_controls_upper_bound() {
     // The upper_bound_key should be set (reverse path), not lower_bound_key.
     // The existing test_cursor_seek_backward_inclusive_starts_at_boundary already
     // validates the behavioral outcome; this test checks the bound slot directly.
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let desc = test_index_description();

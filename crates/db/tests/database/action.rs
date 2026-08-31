@@ -5,8 +5,8 @@ use defra_core::ActionStatus;
 use events::Bus;
 use events::ChannelBus;
 use events::EventName;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
+use storage::RegolithStore;
 
 #[test]
 fn status_decoder_rejects_trailing_bytes() {
@@ -20,7 +20,7 @@ fn status_decoder_rejects_trailing_bytes() {
 #[tokio::test]
 async fn action_lifecycle_retains_only_incomplete_executions() {
     let bus: std::sync::Arc<dyn Bus> = std::sync::Arc::new(ChannelBus::new());
-    let mut db = db::DB::new(MemoryStore::new()).unwrap();
+    let mut db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_event_bus(std::sync::Arc::clone(&bus));
     let mut events = bus.subscribe(&[EventName::ActionExecution]);
 
@@ -86,7 +86,7 @@ async fn action_lifecycle_retains_only_incomplete_executions() {
 
 #[tokio::test]
 async fn abandoned_execution_can_overwrite_stale_persisted_status() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = db::DB::new(store.clone()).unwrap();
 
     let abandoned = db
@@ -112,7 +112,7 @@ async fn abandoned_execution_can_overwrite_stale_persisted_status() {
 
 #[tokio::test]
 async fn finalization_failure_releases_process_local_claim() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = db::DB::new(store.clone()).unwrap();
     let lease = db
         .register_action("collection", Action::TRUNCATE)

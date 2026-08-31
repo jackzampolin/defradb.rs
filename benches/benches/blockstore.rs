@@ -8,7 +8,7 @@ use lru::LruCache;
 use multihash::Multihash;
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 mod common;
 
@@ -26,8 +26,8 @@ fn make_payload(size: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
-fn make_blockstore() -> DefraBlockstore<MemoryStore> {
-    DefraBlockstore::new(Arc::new(MemoryStore::new()), false)
+fn make_blockstore() -> DefraBlockstore<RegolithStore> {
+    DefraBlockstore::new(Arc::new(RegolithStore::in_memory().unwrap()), false)
 }
 
 fn bench_raw_lru(c: &mut Criterion) {
@@ -112,7 +112,7 @@ fn bench_blockstore(c: &mut Criterion) {
     });
 
     let miss_payload = make_payload(1024, 23);
-    let miss_store = Arc::new(MemoryStore::new());
+    let miss_store = Arc::new(RegolithStore::in_memory().unwrap());
     let miss_writer = DefraBlockstore::new(miss_store.clone(), false);
     let miss_cid = cid_from_data(&miss_payload);
     common::shared_runtime().block_on(async {
@@ -131,7 +131,7 @@ fn bench_blockstore(c: &mut Criterion) {
     });
 
     let has_payload = make_payload(512, 29);
-    let has_store = Arc::new(MemoryStore::new());
+    let has_store = Arc::new(RegolithStore::in_memory().unwrap());
     let has_writer = DefraBlockstore::new(has_store.clone(), false);
     let has_cid = cid_from_data(&has_payload);
     common::shared_runtime().block_on(async {

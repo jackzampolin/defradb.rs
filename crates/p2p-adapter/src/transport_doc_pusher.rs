@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::{P2PError, P2PErrorExt as _, P2PResult};
@@ -46,7 +47,7 @@ pub trait TransportDocPusher: Send + Sync {
     async fn retry_collection_commit(&self, peer_id: &PeerId, collection_id: &str)
         -> P2PResult<()>;
 
-    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
+    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Bytes)>>;
 
     async fn load_doc_creator_did(
         &self,
@@ -233,7 +234,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         .map_err(P2PError::from)
     }
 
-    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
+    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Bytes)>> {
         db::merge::load_document_head_blocks(&self.db, doc_id)
             .await
             .map_err(P2PError::internal)

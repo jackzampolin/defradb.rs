@@ -8,6 +8,7 @@ pub mod memory;
 
 pub use memory::MemoryNodeStore;
 
+use bytes::Bytes;
 use defra_core::thread_bounds::{MaybeSend, MaybeSendSync};
 
 use crate::index::error::Result;
@@ -93,7 +94,7 @@ pub trait VectorNodeStore: MaybeSendSync {
     /// `kind` separates concepts and `key` is the kind's own encoding, so a
     /// kind adds a concept without a port change. Graph-only kinds never call
     /// these.
-    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Bytes>>;
 
     async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()>;
 
