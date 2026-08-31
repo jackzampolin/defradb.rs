@@ -201,7 +201,7 @@ fn build_indexed_fields(values: &[NormalValue], desc: &IndexDescription) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::MemoryStore;
+    use crate::backends::RegolithStore;
     use crate::corekv::Store;
     use crate::index::{CollectionIndex, SimpleIndex, UniqueIndex};
     use schema::IndexedFieldDescription;
@@ -222,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_match_simple_single_result() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
         let desc = test_index_description(false);
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_match_simple_multiple_results() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
         let desc = test_index_description(false);
@@ -294,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_match_unique_single_result() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
         let desc = test_index_description(true);
@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_match_unique_not_found() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
         let desc = test_index_description(true);
@@ -355,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_match_unique_null_multiple() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
 
         let desc = test_index_description(true);

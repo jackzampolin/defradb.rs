@@ -13,12 +13,12 @@ use defra_core::encryption::EncryptionConfig;
 use document::Document;
 use document::NormalValue;
 use std::collections::HashSet;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::namespace::Namespace;
+use storage::RegolithStore;
 
 async fn stores() -> (NamespaceView, NamespaceView) {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let shared = SharedTxn::new(txn);
     (

@@ -2,6 +2,7 @@
 
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
@@ -148,9 +149,9 @@ impl<S: Store + 'static> DbDocMutator<S> {
         collection_id: String,
         doc_id: String,
         doc_cid: Cid,
-        doc_block: Vec<u8>,
+        doc_block: Bytes,
         document_json: Option<serde_json::Value>,
-        collection_block: Option<(Cid, Vec<u8>)>,
+        collection_block: Option<(Cid, Bytes)>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
         let txn = txn_guard.as_mut().ok_or_else(|| {
@@ -259,6 +260,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc.set_id(doc_id.clone());
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -487,6 +489,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -597,6 +600,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,

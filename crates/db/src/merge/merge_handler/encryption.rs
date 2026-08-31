@@ -141,7 +141,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?
         {
-            enc_data.to_vec()
+            enc_data
         } else {
             return Err(MergeError::Storage(format!(
                 "Encryption block {} not found",

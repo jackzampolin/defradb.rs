@@ -3,16 +3,17 @@
 //! These tests verify the chunking behavior for large values,
 //! basic CRUD operations, and data isolation.
 
+use bytes::Bytes;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::keys::datastore::DataStoreKey;
 use storage::keys::utils::InstanceType;
 use storage::stores::datastore::{Datastore, DatastoreTxn, CHUNK_SIZE};
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn test_datastore_basic() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     let key = DataStoreKey::new(1, InstanceType::Value, 1, "field1");
@@ -29,12 +30,12 @@ async fn test_datastore_basic() {
     let txn = datastore.new_txn(true).await.unwrap();
     let txn = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
     let value = txn.get_value(&key).await.unwrap();
-    assert_eq!(value, Some(b"value1".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value1")));
 }
 
 #[tokio::test]
 async fn test_datastore_chunking() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     let key = DataStoreKey::new(1, InstanceType::Value, 1, "large_field");
@@ -54,12 +55,12 @@ async fn test_datastore_chunking() {
     let txn = datastore.new_txn(true).await.unwrap();
     let txn = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
     let value = txn.get_value(&key).await.unwrap();
-    assert_eq!(value, Some(large_value));
+    assert_eq!(value, Some(Bytes::from(large_value)));
 }
 
 #[tokio::test]
 async fn test_datastore_delete_chunked() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     let key = DataStoreKey::new(1, InstanceType::Value, 1, "large_field");
@@ -99,7 +100,7 @@ async fn test_datastore_delete_chunked() {
 
 #[tokio::test]
 async fn test_datastore_isolation() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     // Write to datastore
@@ -110,13 +111,13 @@ async fn test_datastore_isolation() {
     // Read back
     let txn = datastore.new_txn(true).await.unwrap();
     let value = txn.get(b"test_key").await.unwrap();
-    assert_eq!(value, Some(b"datastore_value".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"datastore_value")));
 }
 
 #[tokio::test]
 async fn test_datastore_exact_chunk_size() {
     // Test value exactly equal to CHUNK_SIZE (boundary condition)
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     let key = DataStoreKey::new(1, InstanceType::Value, 1, "exact_field");
@@ -136,13 +137,13 @@ async fn test_datastore_exact_chunk_size() {
     let txn = datastore.new_txn(true).await.unwrap();
     let txn_ds = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
     let value = txn_ds.get_value(&key).await.unwrap();
-    assert_eq!(value, Some(exact_value.clone()));
+    assert_eq!(value, Some(Bytes::from(exact_value.clone())));
 }
 
 #[tokio::test]
 async fn test_datastore_chunk_size_plus_one() {
     // Test value exactly CHUNK_SIZE + 1 (should be chunked)
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     let key = DataStoreKey::new(1, InstanceType::Value, 1, "plus_one_field");
@@ -162,13 +163,13 @@ async fn test_datastore_chunk_size_plus_one() {
     let txn = datastore.new_txn(true).await.unwrap();
     let txn_ds = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
     let retrieved = txn_ds.get_value(&key).await.unwrap();
-    assert_eq!(retrieved, Some(value));
+    assert_eq!(retrieved, Some(Bytes::from(value)));
 }
 
 #[tokio::test]
 async fn test_datastore_chunk_update_cleanup() {
     // Test that updating a chunked value with fewer chunks cleans up old chunks
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let datastore = Datastore::new(store);
 
     let key = DataStoreKey::new(1, InstanceType::Value, 1, "shrink_field");
@@ -187,7 +188,7 @@ async fn test_datastore_chunk_update_cleanup() {
     let txn = datastore.new_txn(true).await.unwrap();
     let txn_ds = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
     let retrieved = txn_ds.get_value(&key).await.unwrap();
-    assert_eq!(retrieved, Some(large_value.clone()));
+    assert_eq!(retrieved, Some(Bytes::from(large_value.clone())));
     drop(txn);
 
     // Now update with a smaller 2-chunk value (1.5 MB - just over CHUNK_SIZE)
@@ -206,5 +207,5 @@ async fn test_datastore_chunk_update_cleanup() {
     let txn = datastore.new_txn(true).await.unwrap();
     let txn_ds = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
     let retrieved = txn_ds.get_value(&key).await.unwrap();
-    assert_eq!(retrieved, Some(smaller_value));
+    assert_eq!(retrieved, Some(Bytes::from(smaller_value)));
 }

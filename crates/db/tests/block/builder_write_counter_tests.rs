@@ -6,12 +6,12 @@ use document::CType;
 use document::Document;
 use document::NormalValue;
 use std::collections::HashSet;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::namespace::Namespace;
+use storage::RegolithStore;
 
 async fn first_counter_update() -> Cid {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let shared = SharedTxn::new(txn);
     let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);

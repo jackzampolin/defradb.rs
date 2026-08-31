@@ -5,6 +5,7 @@ use async_lock::RwLock;
 /// this provides namespaced access to a single underlying transaction.
 /// This matches Go DefraDB's internal/datastore/multi.go pattern.
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::Arc;
 use storage::corekv::{Error, IterOptions, Iterator, Reader, Result, Txn, Writer};
 use storage::namespace::Namespace;
@@ -28,7 +29,7 @@ impl SharedTxn {
     }
 
     /// Get a value with namespace prefix.
-    pub async fn get(&self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn get(&self, namespace: Namespace, key: &[u8]) -> Result<Option<Bytes>> {
         let prefixed = prefix_key(namespace, key);
         let txn = self.txn.read().await;
         txn.get(&prefixed).await
@@ -75,7 +76,7 @@ impl SharedTxn {
     }
 
     /// Get from rootstore (no namespace prefix).
-    pub async fn root_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn root_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let txn = self.txn.read().await;
         txn.get(key).await
     }
@@ -130,7 +131,7 @@ impl NamespaceView {
     }
 
     /// Get a value.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(self.namespace, key).await
     }
 
@@ -175,7 +176,7 @@ impl storage::corekv::private::Sealed for NamespaceView {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for NamespaceView {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(self.namespace, key).await
     }
 
@@ -220,7 +221,7 @@ impl RootView {
     }
 
     /// Get a value.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.root_get(key).await
     }
 
@@ -278,9 +279,6 @@ fn prefix_iter_options(namespace: Namespace, opts: IterOptions) -> IterOptions {
     prefixed_opts = prefixed_opts
         .with_reverse(opts.reverse())
         .with_keys_only(opts.keys_only());
-    if opts.commutative_set() {
-        prefixed_opts = prefixed_opts.with_commutative_set();
-    }
 
     prefixed_opts
 }
@@ -330,12 +328,12 @@ impl Iterator for NamespacedIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use storage::backends::MemoryStore;
     use storage::corekv::Store;
+    use storage::RegolithStore;
 
     #[tokio::test]
     async fn test_shared_txn_namespace_isolation() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 
@@ -354,17 +352,17 @@ mod tests {
         // Read back - each should see its own value
         assert_eq!(
             shared.get(Namespace::Datastore, b"key").await.unwrap(),
-            Some(b"datastore_value".to_vec())
+            Some(Bytes::from_static(b"datastore_value"))
         );
         assert_eq!(
             shared.get(Namespace::Systemstore, b"key").await.unwrap(),
-            Some(b"systemstore_value".to_vec())
+            Some(Bytes::from_static(b"systemstore_value"))
         );
     }
 
     #[tokio::test]
     async fn test_namespace_view() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 
@@ -378,17 +376,17 @@ mod tests {
         // Read back
         assert_eq!(
             ds.get(b"key").await.unwrap(),
-            Some(b"datastore_value".to_vec())
+            Some(Bytes::from_static(b"datastore_value"))
         );
         assert_eq!(
             ss.get(b"key").await.unwrap(),
-            Some(b"systemstore_value".to_vec())
+            Some(Bytes::from_static(b"systemstore_value"))
         );
     }
 
     #[tokio::test]
     async fn test_root_view_sees_prefixed() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 
@@ -400,12 +398,12 @@ mod tests {
 
         // Root should see it with 'd' prefix
         let value = root.get(b"dmykey").await.unwrap();
-        assert_eq!(value, Some(b"value".to_vec()));
+        assert_eq!(value, Some(Bytes::from_static(b"value")));
     }
 
     #[tokio::test]
     async fn test_namespace_iterator() {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let txn = store.new_txn(false).await.unwrap();
         let shared = SharedTxn::new(txn);
 

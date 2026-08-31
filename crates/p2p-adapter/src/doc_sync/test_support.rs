@@ -56,7 +56,10 @@ impl TransportDocPusher for StubPusher {
         unimplemented!("not reached by doc-sync tests")
     }
 
-    async fn load_document_head_blocks(&self, _doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
+    async fn load_document_head_blocks(
+        &self,
+        _doc_id: &str,
+    ) -> P2PResult<Vec<(Cid, bytes::Bytes)>> {
         unimplemented!("not reached by doc-sync tests")
     }
 

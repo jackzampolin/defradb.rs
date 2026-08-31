@@ -17,6 +17,7 @@ pub use collection::write_collection_block;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 pub use write::{write_delete_block, write_document_blocks};
 
+use bytes::Bytes;
 use std::collections::HashMap;
 
 use tracing::warn;
@@ -79,7 +80,7 @@ pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
 pub fn compute_signature(
     block: &Block,
     signer: &SigningConfig,
-) -> Result<Option<(Cid, Vec<u8>)>, String> {
+) -> Result<Option<(Cid, Bytes)>, String> {
     // Only sign first field blocks (priority <= 1) and composite blocks.
     // Higher-priority field blocks are not signed — their integrity is
     // guaranteed by the signature on the parent composite block.
@@ -167,7 +168,7 @@ pub fn compute_signature(
     let sig_cid = generate_cid_from_bytes(&sig_cbor)
         .map_err(|e| format!("Failed to generate signature CID: {}", e))?;
 
-    Ok(Some((sig_cid, sig_cbor)))
+    Ok(Some((sig_cid, sig_cbor.into())))
 }
 
 /// Sign a block and store the signature as a separate IPLD block.
@@ -198,7 +199,7 @@ pub struct BlockResult {
     /// The CID of the composite (root) block
     pub cid: Cid,
     /// The raw composite block bytes (DAG-CBOR encoded)
-    pub block: Vec<u8>,
+    pub block: Bytes,
     /// The document ID
     pub doc_id: String,
     /// CIDs of all field blocks created

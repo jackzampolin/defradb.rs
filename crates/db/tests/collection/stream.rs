@@ -8,12 +8,12 @@ use document::NormalValue;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 /// Create a DB with a `Users` collection and `n` committed documents,
 /// named `user-0`..`user-{n-1}` in insertion order.
-async fn fixture_with_docs(n: usize) -> (Arc<DB<MemoryStore>>, String) {
-    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+async fn fixture_with_docs(n: usize) -> (Arc<DB<RegolithStore>>, String) {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     for i in 0..n {
@@ -29,12 +29,12 @@ async fn fixture_with_docs(n: usize) -> (Arc<DB<MemoryStore>>, String) {
     (db, "Users".to_string())
 }
 
-async fn fetcher(db: &Arc<DB<MemoryStore>>) -> DbDocFetcher<MemoryStore> {
+async fn fetcher(db: &Arc<DB<RegolithStore>>) -> DbDocFetcher<RegolithStore> {
     DbDocFetcher::new(db.new_txn(true).await.unwrap())
 }
 
 /// Delete the `n`th document in insertion order.
-async fn delete_nth_document(db: &Arc<DB<MemoryStore>>, collection_name: &str, n: usize) {
+async fn delete_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str, n: usize) {
     let doc_id = {
         let f = fetcher(db).await;
         let docs = f.get_all(collection_name).await.unwrap();
@@ -50,7 +50,7 @@ async fn delete_nth_document(db: &Arc<DB<MemoryStore>>, collection_name: &str, n
 
 /// Overwrite the `n`th document's blob (in insertion order) with bytes
 /// that fail to decode as CBOR.
-async fn corrupt_nth_document(db: &Arc<DB<MemoryStore>>, collection_name: &str, n: usize) {
+async fn corrupt_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str, n: usize) {
     let txn = db.new_txn(false).await.unwrap();
     let shared = Arc::new(Mutex::new(Some(txn)));
     {

@@ -88,15 +88,17 @@ async fn policy_counter_advances_in_session_test(cluster: TestCluster) {
 for_each_runtime!(
     policy_counter_survives_restart,
     policy_counter_survives_restart_test,
-    // One store string for both runtimes: Go takes badger, and Rust accepts it
-    // as the alias for its persistent redb backend.
+    // The harness hands one `--store` string to both binaries, and this test
+    // restarts a node so it cannot use `memory`. `badger` is the only name Go
+    // and Rust both take.
     .with_acp_local().with_store("badger")
 );
 
 for_each_runtime!(
     policy_counter_advances_in_session,
     policy_counter_advances_in_session_test,
-    // One store string for both runtimes: Go takes badger, and Rust accepts it
-    // as the alias for its persistent redb backend.
+    // The harness hands one `--store` string to both binaries, and this test
+    // restarts a node so it cannot use `memory`. `badger` is the only name Go
+    // and Rust both take.
     .with_acp_local().with_store("badger")
 );

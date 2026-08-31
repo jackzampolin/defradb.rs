@@ -10,7 +10,7 @@ mod registry;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use storage::MemoryStore;
+use storage::RegolithStore;
 use zeroize::Zeroizing;
 
 use blockstore::DefraBlockstore;
@@ -25,18 +25,15 @@ pub use registry::{
 
 /// Storage backend enum for FFI nodes.
 ///
-/// Wraps all backend implementations so that `DB<FfiStore>` works for
-/// any backend without requiring separate type aliases or code paths.
+/// The store `DB<FfiStore>` runs on.
+///
+/// One variant, because there is one store. It stays an enum so the FFI
+/// type aliases below keep their shape and a future variant does not
+/// churn every signature.
 #[non_exhaustive]
 pub enum FfiStore {
-    Memory(MemoryStore),
-    Redb(storage::RedbStore),
-    #[cfg(feature = "fjall")]
-    Fjall(storage::FjallStore),
-    #[cfg(feature = "rocksdb")]
-    RocksDb(storage::RocksDbStore),
-    #[cfg(feature = "lark")]
-    Lark(storage::LarkStore),
+    /// A regolith database, in memory or on a path.
+    Regolith(RegolithStore),
 }
 
 impl storage::corekv::private::Sealed for FfiStore {}
@@ -45,27 +42,13 @@ impl storage::corekv::private::Sealed for FfiStore {}
 impl storage::Store for FfiStore {
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
-            FfiStore::Memory(s) => s.new_txn(readonly).await,
-            FfiStore::Redb(s) => s.new_txn(readonly).await,
-            #[cfg(feature = "fjall")]
-            FfiStore::Fjall(s) => s.new_txn(readonly).await,
-            #[cfg(feature = "rocksdb")]
-            FfiStore::RocksDb(s) => s.new_txn(readonly).await,
-            #[cfg(feature = "lark")]
-            FfiStore::Lark(s) => s.new_txn(readonly).await,
+            FfiStore::Regolith(s) => s.new_txn(readonly).await,
         }
     }
 
     async fn close(&self) -> storage::Result<()> {
         match self {
-            FfiStore::Memory(s) => s.close().await,
-            FfiStore::Redb(s) => s.close().await,
-            #[cfg(feature = "fjall")]
-            FfiStore::Fjall(s) => s.close().await,
-            #[cfg(feature = "rocksdb")]
-            FfiStore::RocksDb(s) => s.close().await,
-            #[cfg(feature = "lark")]
-            FfiStore::Lark(s) => s.close().await,
+            FfiStore::Regolith(s) => s.close().await,
         }
     }
 }

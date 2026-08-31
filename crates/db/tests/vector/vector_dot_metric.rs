@@ -12,10 +12,10 @@ use schema::IndexDescription;
 use schema::IndexedFieldDescription;
 use schema::VectorAlgorithm;
 use schema::VectorIndexDescription;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::index::CollectionIndex;
+use storage::RegolithStore;
 
 const COLLECTION: u32 = 11;
 const INDEX_ID: u32 = 4;
@@ -43,12 +43,12 @@ fn index(metric: DistanceMetric) -> VectorIndex {
     VectorIndex::try_new(COLLECTION, desc).expect("a valid vector description")
 }
 
-async fn txn(store: &MemoryStore) -> Box<dyn Txn> {
+async fn txn(store: &RegolithStore) -> Box<dyn Txn> {
     store.new_txn(false).await.unwrap()
 }
 
 async fn stored(metric: DistanceMetric, vector: Vec<f64>) -> Option<Vec<f32>> {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index(metric);
     let mut write = txn(&store).await;
     index
@@ -67,7 +67,7 @@ async fn stored(metric: DistanceMetric, vector: Vec<f64>) -> Option<Vec<f32>> {
 
 /// Documents 1 and 2 are collinear, 2 four times longer; 3 points elsewhere.
 async fn ranked(metric: DistanceMetric, query: &[f64]) -> Vec<u64> {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index(metric);
 
     let mut write = txn(&store).await;

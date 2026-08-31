@@ -1,5 +1,6 @@
 //! DocFetcher trait method implementations.
 
+use bytes::Bytes;
 use document::Document;
 use query::runner::FetchByIdsResult;
 use storage::corekv::Store;
@@ -258,7 +259,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
     pub(super) async fn get_view_cache_items_impl(
         &self,
         collection_id: u32,
-    ) -> query::error::Result<Vec<Vec<u8>>> {
+    ) -> query::error::Result<Vec<Bytes>> {
         use storage::corekv::IterOptions;
         use storage::keys::datastore::ViewCacheKey;
 

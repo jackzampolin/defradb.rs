@@ -12,7 +12,7 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use sha2::Digest;
 use sha2::Sha256;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 /// A distinct, reproducible document id per index.
 fn doc_id(index: usize) -> document::DocID {
@@ -41,7 +41,7 @@ fn schema() -> CollectionVersion {
 }
 
 /// Writes `count` documents and returns their short ids paired with titles.
-async fn populate(db: &DB<MemoryStore>, count: usize) -> Vec<(u64, String)> {
+async fn populate(db: &DB<RegolithStore>, count: usize) -> Vec<(u64, String)> {
     let txn = db.new_txn(false).await.unwrap();
     let mut written = Vec::new();
     {
@@ -80,7 +80,7 @@ async fn populate(db: &DB<MemoryStore>, count: usize) -> Vec<(u64, String)> {
 
 #[tokio::test]
 async fn a_seek_reads_only_what_was_asked_for() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let written = populate(&db, 20).await;
 
     let txn = db.new_txn(false).await.unwrap();
@@ -116,7 +116,7 @@ async fn a_seek_reads_only_what_was_asked_for() {
 /// id from an index may hold a stale one.
 #[tokio::test]
 async fn absent_ids_are_skipped() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let written = populate(&db, 5).await;
 
     let txn = db.new_txn(false).await.unwrap();
@@ -143,7 +143,7 @@ async fn absent_ids_are_skipped() {
 /// two paths have diverged about what a loaded document looks like.
 #[tokio::test]
 async fn a_seek_agrees_with_a_scan() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     populate(&db, 30).await;
 
     let txn = db.new_txn(false).await.unwrap();

@@ -31,6 +31,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "Deferred-ACP overlay consistency",
     "Index-maintenance consistency",
     "Order-preserving key encoding",
+    "Concurrent collection-head transitions",
 ];
 
 pub fn properties_for(family: &'static str) -> impl Iterator<Item = &'static Property> {

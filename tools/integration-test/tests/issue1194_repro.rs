@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 async fn build_cluster() -> TestCluster {
     TestCluster::builder()
         .rust_nodes(1)
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .expect("build cluster")
@@ -43,7 +43,7 @@ async fn gql(http: &reqwest::Client, url: &str, query: &str) -> Result<Value, St
     Ok(body["data"].clone())
 }
 
-/// The reported workload over HTTP GraphQL on redb: eight documents, eight
+/// The reported workload over HTTP GraphQL on regolith: eight documents, eight
 /// barrier-synchronized writers, each round rewriting `status: "streaming"`
 /// unchanged (the snapshot-flush shape that makes delta blocks byte-identical
 /// across documents). Every attempt must succeed on the first try — no client

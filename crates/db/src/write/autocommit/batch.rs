@@ -1,5 +1,6 @@
 use async_lock::{Mutex as TokioMutex, MutexGuardArc};
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use parking_lot::Mutex as PlMutex;
@@ -117,8 +118,8 @@ impl<S: Store + 'static> BatchMutator<S> {
         collection_id: String,
         doc_id: String,
         doc_cid: Cid,
-        doc_block: Vec<u8>,
-        collection_block: Option<(Cid, Vec<u8>)>,
+        doc_block: Bytes,
+        collection_block: Option<(Cid, Bytes)>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
         let txn = txn_guard.as_mut().ok_or_else(|| {
@@ -253,6 +254,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -388,6 +390,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,
@@ -486,6 +489,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
             let col_block_data = write_branchable_collection_block(
+                &self.db,
                 collection_name,
                 &collection,
                 &blockstore,

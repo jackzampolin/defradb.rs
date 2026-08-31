@@ -8,7 +8,7 @@ use defra_core::signing::{set_signing_config, SigningConfig, SigningKeyType};
 use document::{DocID, Document, NormalValue};
 use query::mutator::DocMutator;
 use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 use crate::browser_sync_adapter::BrowserSyncAdapter;
 
@@ -48,7 +48,7 @@ fn users_schema(policy: bool) -> CollectionVersion {
 }
 
 async fn update_document(
-    database: &Arc<db::DB<MemoryStore>>,
+    database: &Arc<db::DB<RegolithStore>>,
     doc_id: &str,
     field: &str,
     value: &str,
@@ -62,7 +62,7 @@ async fn update_document(
         .unwrap();
 }
 
-async fn read_document(database: &Arc<db::DB<MemoryStore>>, doc_id: &str) -> Document {
+async fn read_document(database: &Arc<db::DB<RegolithStore>>, doc_id: &str) -> Document {
     let txn = database.new_txn(true).await.unwrap();
     database
         .get_collection("Users")
@@ -79,7 +79,7 @@ async fn read_document(database: &Arc<db::DB<MemoryStore>>, doc_id: &str) -> Doc
 }
 
 async fn create_document(
-    database: &Arc<db::DB<MemoryStore>>,
+    database: &Arc<db::DB<RegolithStore>>,
     name: &str,
 ) -> defra_core::browser_sync::BrowserSyncDocument {
     let mut document = Document::new();
@@ -96,7 +96,7 @@ async fn create_document(
 
 /// Create a document whose DAG cannot fit in a sync payload. Returns its
 /// doc id; it deliberately cannot be loaded through `load_document`.
-async fn create_oversized_document(database: &Arc<db::DB<MemoryStore>>) -> String {
+async fn create_oversized_document(database: &Arc<db::DB<RegolithStore>>) -> String {
     let mut document = Document::new();
     document.set(
         "name",
@@ -115,7 +115,7 @@ async fn create_oversized_document(database: &Arc<db::DB<MemoryStore>>) -> Strin
 /// cursor could never advance past it, wedging the whole sync.
 #[tokio::test]
 async fn pull_skips_a_document_that_exceeds_the_payload_limit() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database
         .create_collection(users_schema(false))
         .await
@@ -164,7 +164,7 @@ async fn pull_skips_a_document_that_exceeds_the_payload_limit() {
 
 #[tokio::test]
 async fn pull_uses_advancing_cursor_pages() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database
         .create_collection(users_schema(false))
         .await
@@ -213,8 +213,8 @@ async fn pull_uses_advancing_cursor_pages() {
 
 #[tokio::test]
 async fn sync_registers_only_new_signed_documents() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema(true)).await.unwrap();
     target.create_collection(users_schema(true)).await.unwrap();
     let public_document = create_document(&source, "Public").await;
@@ -269,8 +269,8 @@ async fn sync_registers_only_new_signed_documents() {
 
 #[tokio::test]
 async fn foreign_signed_document_cannot_be_squatted_by_pushing_caller() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema(true)).await.unwrap();
     target.create_collection(users_schema(true)).await.unwrap();
 
@@ -316,8 +316,8 @@ async fn foreign_signed_document_cannot_be_squatted_by_pushing_caller() {
 
 #[tokio::test]
 async fn unsigned_document_stays_unregistered_for_authenticated_caller() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema(true)).await.unwrap();
     target.create_collection(users_schema(true)).await.unwrap();
 
@@ -350,8 +350,8 @@ async fn unsigned_document_stays_unregistered_for_authenticated_caller() {
 
 #[tokio::test]
 async fn invalid_batch_is_rejected_before_any_document_is_written() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema(false)).await.unwrap();
     target.create_collection(users_schema(false)).await.unwrap();
     let valid = create_document(&source, "Valid").await;
@@ -382,8 +382,8 @@ async fn invalid_batch_is_rejected_before_any_document_is_written() {
 
 #[tokio::test]
 async fn duplicate_document_batch_is_rejected_before_merge() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema(false)).await.unwrap();
     target.create_collection(users_schema(false)).await.unwrap();
     let document = create_document(&source, "Alice").await;
@@ -412,8 +412,8 @@ async fn duplicate_document_batch_is_rejected_before_merge() {
 
 #[tokio::test]
 async fn protected_document_rejects_updates_from_another_identity() {
-    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     source.create_collection(users_schema(true)).await.unwrap();
     target.create_collection(users_schema(true)).await.unwrap();
     let owner = install_signing_identity();
@@ -466,8 +466,8 @@ async fn protected_document_rejects_updates_from_another_identity() {
 
 #[tokio::test]
 async fn concurrent_changes_converge_through_push_pull_exchange() {
-    let browser = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
-    let server = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let browser = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let server = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     browser
         .create_collection(users_schema(false))
         .await
@@ -542,7 +542,7 @@ async fn concurrent_changes_converge_through_push_pull_exchange() {
 /// sits between two loadable ones before checking that both are served.
 #[tokio::test]
 async fn pull_reaches_documents_ordered_after_an_oversized_document() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database
         .create_collection(users_schema(false))
         .await
@@ -612,7 +612,7 @@ async fn pull_reaches_documents_ordered_after_an_oversized_document() {
 #[tokio::test]
 #[ignore]
 async fn pull_skips_a_block_heavy_document_and_keeps_paginating() {
-    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let database = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     database
         .create_collection(users_schema(false))
         .await

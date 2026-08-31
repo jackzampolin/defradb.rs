@@ -8,7 +8,7 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use schema::PolicyDescription;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn test_collection_with_policy() -> CollectionVersion {
     CollectionVersion::new(
@@ -25,7 +25,7 @@ fn test_collection_with_policy() -> CollectionVersion {
 
 #[tokio::test]
 async fn resolves_collection_for_known_doc() {
-    let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(test_collection_with_policy())
         .await
         .expect("create collection");
@@ -54,7 +54,7 @@ async fn resolves_collection_for_known_doc() {
 
 #[tokio::test]
 async fn returns_none_for_unknown_doc() {
-    let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     let info = resolve_collection_from_doc_id(&db, "bafy-not-a-real-doc")
         .await
         .expect("resolve");

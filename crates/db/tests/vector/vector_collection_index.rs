@@ -12,10 +12,10 @@ use schema::IndexDescription;
 use schema::IndexedFieldDescription;
 use schema::VectorAlgorithm;
 use schema::VectorIndexDescription;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::index::CollectionIndex;
+use storage::RegolithStore;
 
 const COLLECTION: u32 = 7;
 const DIMENSIONS: u32 = 4;
@@ -50,7 +50,7 @@ fn index() -> VectorIndex {
     VectorIndex::try_new(COLLECTION, description(DIMENSIONS)).expect("a valid vector description")
 }
 
-async fn txn(store: &MemoryStore) -> Box<dyn Txn> {
+async fn txn(store: &RegolithStore) -> Box<dyn Txn> {
     store.new_txn(false).await.unwrap()
 }
 
@@ -63,7 +63,7 @@ fn narrow(values: &[f32]) -> Vec<NormalValue> {
 }
 
 /// How many live nodes the index holds, read back through a fresh transaction.
-async fn live_ids(store: &MemoryStore, index: &VectorIndex) -> Vec<NodeId> {
+async fn live_ids(store: &RegolithStore, index: &VectorIndex) -> Vec<NodeId> {
     let mut read = txn(store).await;
     let kv = KvNodeStore::new(&mut read, COLLECTION, index.description().id, 0);
     let mut ids = Vec::new();
@@ -79,7 +79,7 @@ async fn live_ids(store: &MemoryStore, index: &VectorIndex) -> Vec<NodeId> {
 
 #[tokio::test]
 async fn a_saved_document_becomes_a_searchable_node() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
 
     let mut write = txn(&store).await;
@@ -113,7 +113,7 @@ async fn every_element_width_indexes_identically() {
         wide(&as_wide),
         vec![NormalValue::IntArray(as_int)],
     ] {
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let index = index();
         let mut write = txn(&store).await;
         index.save(&mut write, 1, &values).await.unwrap();
@@ -133,7 +133,7 @@ async fn every_element_width_indexes_identically() {
 /// peer can send an integer vector and this must index it, not refuse it.
 #[tokio::test]
 async fn an_integer_vector_is_accepted() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
     let mut write = txn(&store).await;
     index
@@ -164,7 +164,7 @@ async fn an_integer_vector_is_accepted() {
 /// wrong and enormous, so the whole array must reach the index intact.
 #[tokio::test]
 async fn a_vector_is_indexed_whole_not_per_component() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
     let mut write = txn(&store).await;
     index
@@ -188,7 +188,7 @@ async fn a_vector_is_indexed_whole_not_per_component() {
 /// answer a null field gives.
 #[tokio::test]
 async fn documents_without_a_usable_vector_are_not_indexed() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
     let mut write = txn(&store).await;
 
@@ -213,7 +213,7 @@ async fn documents_without_a_usable_vector_are_not_indexed() {
 /// A dimension mismatch is a user error worth naming, unlike a missing vector.
 #[tokio::test]
 async fn a_dimension_mismatch_is_rejected() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
     let mut write = txn(&store).await;
 
@@ -244,7 +244,7 @@ async fn a_dimension_mismatch_is_rejected() {
 
 #[tokio::test]
 async fn deleting_a_document_removes_it_from_results() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
 
     let mut write = txn(&store).await;
@@ -268,7 +268,7 @@ async fn deleting_a_document_removes_it_from_results() {
 /// A field that became null must not leave the old vector ranking.
 #[tokio::test]
 async fn clearing_a_vector_on_update_removes_the_node() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
 
     let mut write = txn(&store).await;
@@ -292,7 +292,7 @@ async fn clearing_a_vector_on_update_removes_the_node() {
 
 #[tokio::test]
 async fn dropping_the_index_removes_every_key() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index();
 
     let mut write = txn(&store).await;

@@ -553,7 +553,7 @@ pub async fn write_document_blocks(
 
     Ok(BlockResult {
         cid: composite_cid,
-        block: composite_bytes,
+        block: composite_bytes.into(),
         doc_id: doc_id_str,
         field_cids,
         encryption_cids,
@@ -642,7 +642,7 @@ pub async fn write_delete_block(
 
     Ok(BlockResult {
         cid: composite_cid,
-        block: composite_bytes,
+        block: composite_bytes.into(),
         doc_id: doc_id.to_string(),
         field_cids: vec![],
         encryption_cids: vec![],

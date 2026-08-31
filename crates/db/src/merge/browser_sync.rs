@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -43,7 +44,7 @@ pub struct ValidatedBrowserSyncDocument {
     doc_id: String,
     collection_id: String,
     roots: Vec<Cid>,
-    blocks: Vec<(Cid, Vec<u8>)>,
+    blocks: Vec<(Cid, Bytes)>,
     verified_genesis_creator: Option<String>,
 }
 
@@ -291,7 +292,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
         let block_refs: Vec<_> = document
             .blocks
             .iter()
-            .map(|(cid, data)| (cid, data.as_slice()))
+            .map(|(cid, data)| (cid, data.as_ref()))
             .collect();
         self.blockstore
             .put_many(&block_refs)
@@ -302,7 +303,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             let data = document
                 .blocks
                 .iter()
-                .find_map(|(cid, data)| (cid == root).then_some(data.as_slice()))
+                .find_map(|(cid, data)| (cid == root).then_some(data.as_ref()))
                 .expect("validated roots are present in blocks");
             match self
                 .merge_handler

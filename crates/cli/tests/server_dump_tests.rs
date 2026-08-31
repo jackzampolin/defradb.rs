@@ -1,5 +1,3 @@
-#![cfg(feature = "lark")]
-
 use std::process::Command;
 use std::sync::Arc;
 
@@ -8,7 +6,7 @@ use keyring::{FileKeyring, Keyring, ENCRYPTION_KEY, KEYRING_SECRET_ENV};
 use storage::encrypted_store::EncryptedStore;
 
 #[tokio::test]
-async fn server_dump_reads_encrypted_lark_store() {
+async fn server_dump_reads_encrypted_regolith_store() {
     let root = tempfile::tempdir().unwrap();
     let secret = "server-dump-test-secret";
     let encryption_key = [42; 32];
@@ -29,7 +27,7 @@ async fn server_dump_reads_encrypted_lark_store() {
     .unwrap();
 
     let expected = {
-        let backend = storage::LarkStore::open(config.data_path()).unwrap();
+        let backend = storage::RegolithStore::open(config.data_path()).unwrap();
         let store = Arc::new(EncryptedStore::new(backend, encryption_key));
         let database = DB::open_from_arc(store).await.unwrap();
         let collections = query::parse_sdl("type Users { name: String }").unwrap();

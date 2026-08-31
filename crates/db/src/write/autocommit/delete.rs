@@ -145,6 +145,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
                     let col_block_data = write_branchable_collection_block(
+                        &self.db,
                         collection_name,
                         &collection,
                         &blockstore,
@@ -342,6 +343,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
                 let col_block_data = write_branchable_collection_block(
+                    &self.db,
                     collection_name,
                     &collection,
                     &blockstore,

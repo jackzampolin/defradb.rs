@@ -1,4 +1,5 @@
 use super::*;
+use bytes::Bytes;
 
 use crate::block::builder::BlockResult;
 use crate::collection::Collection;
@@ -9,19 +10,20 @@ use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};
 
-pub(crate) async fn write_branchable_collection_block(
+pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store + 'static>(
+    db: &crate::database::DB<S>,
     collection_name: &str,
     collection: &Collection,
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc_cid: Cid,
     signing_config: Option<&defra_core::signing::SigningConfig>,
-) -> query::error::Result<Option<(Cid, Vec<u8>)>> {
+) -> query::error::Result<Option<(Cid, Bytes)>> {
     if !collection.schema().is_branchable {
         return Ok(None);
     }
 
-    write_collection_block(
+    let written = write_collection_block(
         blockstore,
         headstore,
         collection.resolved_root_id(),
@@ -36,7 +38,21 @@ pub(crate) async fn write_branchable_collection_block(
             "failed to write collection block for branchable mutation on collection {}: {}",
             collection_name, error
         ))
-    })
+    })?;
+
+    // The append just superseded the heads it was built on, and the keys it
+    // superseded are reclaimed by a transaction of their own. Every branchable
+    // mutation in the crate funnels through here, so this is the one place
+    // that has to remember.
+    //
+    // The reclaiming transaction is opened while the caller's is still open,
+    // which is sound: transactions are optimistic so neither blocks the other,
+    // and the keys it removes were superseded before the caller began, so it
+    // cannot touch anything the caller wrote.
+    db.maybe_prune_collection_heads(collection.resolved_root_id())
+        .await;
+
+    Ok(written)
 }
 
 /// Persist a local UPDATE: apply CRDT field deltas to the authoritative store
@@ -725,8 +741,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         collection: &Collection,
         doc_id_str: &str,
         doc_cid: Cid,
-        doc_block: Vec<u8>,
-        collection_block: Option<(Cid, Vec<u8>)>,
+        doc_block: Bytes,
+        collection_block: Option<(Cid, Bytes)>,
     ) {
         if let Some(bus) = self.db.event_bus() {
             let update = Update::new(

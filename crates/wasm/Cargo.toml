@@ -16,6 +16,7 @@ bench = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bytes = { workspace = true }
 # WASM bindings
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -58,7 +59,7 @@ getrandom = { version = "0.2", features = ["js"] }
 
 # Internal crates - use db crate which provides everything
 db = { path = "../db", default-features = false }
-storage = { path = "../storage", default-features = false, features = ["leveldb"] }
+storage = { path = "../storage", default-features = false, features = ["wasm"] }
 schema = { path = "../schema" }
 document = { path = "../document" }
 query = { path = "../query" }

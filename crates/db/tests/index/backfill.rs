@@ -15,7 +15,7 @@ use document::NormalValue;
 use schema::IndexedFieldDescription;
 use sha2::Digest;
 use sha2::Sha256;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 /// A spread of directions, so no two documents collapse onto one point.
 fn corpus(count: usize) -> Vec<(u64, Document)> {
@@ -43,7 +43,7 @@ fn corpus(count: usize) -> Vec<(u64, Document)> {
 async fn creating_a_vector_index_backfills_every_document() {
     const DOCUMENTS: usize = 50;
 
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let schema = docs_schema();
     let mut manager = IndexManager::new(COLLECTION_SHORT_ID);
@@ -109,7 +109,7 @@ async fn creating_a_vector_index_backfills_every_document() {
 /// stop the backfill.
 #[tokio::test]
 async fn backfill_skips_documents_without_a_vector() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let schema = docs_schema();
     let mut manager = IndexManager::new(COLLECTION_SHORT_ID);
@@ -163,7 +163,7 @@ async fn backfill_skips_documents_without_a_vector() {
 /// maintained by construction. Proven rather than assumed.
 #[tokio::test]
 async fn merged_documents_are_indexed() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let schema = docs_schema();
     let mut manager = IndexManager::new(COLLECTION_SHORT_ID);
@@ -260,7 +260,7 @@ fn merge_doc_id(short_id: u64) -> document::DocID {
 #[tokio::test]
 async fn an_index_can_be_cleared_and_rebuilt() {
     const DOCUMENTS: usize = 40;
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let schema = docs_schema();
     let mut manager = IndexManager::new(COLLECTION_SHORT_ID);

@@ -80,7 +80,7 @@ impl<S: Store> DB<S> {
         let _ = txn.discard();
 
         Ok(raw
-            .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).ok())
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_ref()).ok())
             .map(u32::from_be_bytes))
     }
 

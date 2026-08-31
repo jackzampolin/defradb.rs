@@ -5,14 +5,14 @@ use defra_core::Block;
 use defra_core::CompositeDeltaPayload;
 use defra_core::CrdtDelta;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::headstore::HeadstoreDocKey;
 use storage::keys::headstore::HeadstorePriorityKey;
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn current_composite_frontier_retains_lower_priority_sibling() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
     let doc_short_id = 7_u64;
     let first = Block::new_with_options(
@@ -104,7 +104,7 @@ async fn current_composite_frontier_retains_lower_priority_sibling() {
 
 #[tokio::test]
 async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
     let peerstore = storage::stores::Peerstore::new(store);
     let peer_id = "peer";

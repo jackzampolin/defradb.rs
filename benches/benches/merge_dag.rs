@@ -13,6 +13,7 @@
 //! The merge-depth policy caps the walk; the depths benched here stay under the
 //! default so the measurement is of the walk itself rather than the guard.
 
+use bytes::Bytes;
 use std::collections::HashSet;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -26,7 +27,7 @@ use db::DB;
 use defra_core::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 use document::{DocID, Document, NormalValue};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 use storage::Store;
 
 const SCHEMA_VERSION_ID: &str = "v1";
@@ -35,7 +36,7 @@ const CREATOR: &str = "did:key:z6MkrMergeDagBench";
 const DEPTHS: [usize; 3] = [1, 8, 64];
 const FIELD_COUNTS: [usize; 2] = [1, 4];
 
-type BenchHandler = DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>;
+type BenchHandler = DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -61,8 +62,8 @@ fn collection_version(field_count: usize) -> CollectionVersion {
     CollectionVersion::new("Users", SCHEMA_VERSION_ID, COLLECTION_ID, fields)
 }
 
-async fn make_handler(field_count: usize) -> (BenchHandler, Arc<DefraBlockstore<MemoryStore>>) {
-    let store = Arc::new(MemoryStore::new());
+async fn make_handler(field_count: usize) -> (BenchHandler, Arc<DefraBlockstore<RegolithStore>>) {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
     db.create_collection(collection_version(field_count))
         .await
@@ -83,15 +84,19 @@ fn make_document(field_count: usize, revision: usize) -> Document {
 /// A composite tip plus every ancestor block needed to merge it.
 struct SyntheticDag {
     tip_cid: Cid,
-    tip_bytes: Vec<u8>,
+    tip_bytes: Bytes,
     doc_id: String,
-    blocks: Vec<(Cid, Vec<u8>)>,
+    blocks: Vec<(Cid, Bytes)>,
 }
 
 /// Build a linear composite chain of `depth` revisions on a throwaway store,
 /// then collect every block so it can be replayed into a fresh handler.
 async fn build_dag(depth: usize, field_count: usize) -> SyntheticDag {
-    let txn = MemoryStore::new().new_txn(false).await.unwrap();
+    let txn = RegolithStore::in_memory()
+        .unwrap()
+        .new_txn(false)
+        .await
+        .unwrap();
     let shared = SharedTxn::new(txn);
     let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);
     let headstore = NamespaceView::new(shared.clone(), Namespace::Headstore);

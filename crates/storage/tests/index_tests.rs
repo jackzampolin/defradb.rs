@@ -7,9 +7,9 @@
 
 use document::NormalValue;
 use schema::{IndexDescription, IndexedFieldDescription};
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::index::{CollectionIndex, SimpleIndex, UniqueIndex};
+use storage::RegolithStore;
 
 // ============================================================================
 // Helper Functions
@@ -69,7 +69,7 @@ fn composite_index_description(unique: bool) -> IndexDescription {
 
 #[tokio::test]
 async fn test_simple_index_save_too_few_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, composite_index_description(false));
@@ -104,7 +104,7 @@ async fn test_simple_index_save_too_few_values() {
 
 #[tokio::test]
 async fn test_simple_index_save_too_many_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, simple_index_description());
@@ -137,7 +137,7 @@ async fn test_simple_index_save_too_many_values() {
 
 #[tokio::test]
 async fn test_simple_index_update_old_values_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, composite_index_description(false));
@@ -156,7 +156,7 @@ async fn test_simple_index_update_old_values_mismatch() {
 
 #[tokio::test]
 async fn test_simple_index_update_new_values_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, composite_index_description(false));
@@ -175,7 +175,7 @@ async fn test_simple_index_update_new_values_mismatch() {
 
 #[tokio::test]
 async fn test_simple_index_delete_values_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = SimpleIndex::new(1, composite_index_description(false));
@@ -190,7 +190,7 @@ async fn test_simple_index_delete_values_mismatch() {
 
 #[tokio::test]
 async fn test_unique_index_save_too_few_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, composite_index_description(true));
@@ -205,7 +205,7 @@ async fn test_unique_index_save_too_few_values() {
 
 #[tokio::test]
 async fn test_unique_index_save_too_many_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, unique_index_description());
@@ -223,7 +223,7 @@ async fn test_unique_index_save_too_many_values() {
 
 #[tokio::test]
 async fn test_unique_index_empty_values() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, unique_index_description());
@@ -281,7 +281,7 @@ fn test_unique_index_try_new_rejects_non_unique() {
 async fn test_concurrent_saves_to_simple_index() {
     use std::sync::Arc;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let index = Arc::new(SimpleIndex::new(1, simple_index_description()));
 
     // Spawn multiple concurrent save operations
@@ -322,7 +322,7 @@ async fn test_concurrent_saves_to_simple_index() {
 async fn test_concurrent_saves_to_unique_index_different_values() {
     use std::sync::Arc;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let index = Arc::new(UniqueIndex::new(1, unique_index_description()));
 
     // Spawn multiple concurrent save operations with different values
@@ -363,7 +363,7 @@ async fn test_concurrent_saves_to_unique_index_different_values() {
 async fn test_concurrent_save_and_delete() {
     use std::sync::Arc;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let index = Arc::new(SimpleIndex::new(1, simple_index_description()));
 
     // First, save some entries
@@ -434,7 +434,7 @@ async fn test_concurrent_save_and_delete() {
 async fn test_concurrent_updates() {
     use std::sync::Arc;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let index = Arc::new(SimpleIndex::new(1, simple_index_description()));
 
     // First, save some entries
@@ -489,7 +489,7 @@ async fn test_concurrent_updates() {
 
 #[tokio::test]
 async fn test_composite_unique_partial_null_first_field() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, composite_index_description(true));
@@ -506,7 +506,7 @@ async fn test_composite_unique_partial_null_first_field() {
 
 #[tokio::test]
 async fn test_composite_unique_partial_null_second_field() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, composite_index_description(true));
@@ -531,7 +531,7 @@ async fn test_composite_unique_partial_null_second_field() {
 
 #[tokio::test]
 async fn test_composite_unique_enforced_on_non_null() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let index = UniqueIndex::new(1, composite_index_description(true));

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 /// Core KV trait definitions matching the Go corekv package.
 ///
 /// This module defines the complete trait hierarchy for key-value storage:
@@ -15,7 +16,7 @@
 /// For WASM targets, all `Send + Sync` bounds are removed since WASM is
 /// single-threaded. The `#[cfg_attr]` pattern is used to conditionally
 /// apply `async_trait(?Send)` for WASM builds.
-use async_trait::async_trait;
+use bytes::Bytes;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -79,7 +80,7 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     /// * `Ok(Some(value))` if the key exists
     /// * `Ok(None)` if the key does not exist
     /// * `Err(Error)` if an error occurred
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
 
     /// Check if a key exists in the store.
     ///
@@ -195,10 +196,7 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Store: MaybeSendSync + private::Sealed {
-    /// Returns transaction diagnostics for stores that support them.
-    ///
-    /// Unsupported stores return `None`.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Transaction diagnostics for stores that keep them.
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         None
     }
@@ -409,7 +407,7 @@ impl<T> TxnStore for T where T: Store {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for Box<dyn Txn> {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         (**self).get(key).await
     }
 

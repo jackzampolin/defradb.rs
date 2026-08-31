@@ -13,10 +13,10 @@ use document::Document;
 use document::NormalValue;
 use std::sync::Arc;
 use std::sync::Mutex;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
-fn make_test_blockstore() -> Arc<DefraBlockstore<MemoryStore>> {
-    let store = Arc::new(MemoryStore::new());
+fn make_test_blockstore() -> Arc<DefraBlockstore<RegolithStore>> {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     Arc::new(DefraBlockstore::new(store, false))
 }
 

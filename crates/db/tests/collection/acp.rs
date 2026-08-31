@@ -21,7 +21,7 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use schema::PolicyDescription;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn test_did() -> Did {
     Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
@@ -354,7 +354,7 @@ async fn different_owner_collection_registration_fails_closed() {
 
 #[tokio::test]
 async fn branchable_permissioned_create_fails_closed_if_collection_acp_registration_fails() {
-    let db = db::DB::new(MemoryStore::new()).unwrap();
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let acp = Arc::new(FailingDocumentAcp);
     let owner = test_did();
 

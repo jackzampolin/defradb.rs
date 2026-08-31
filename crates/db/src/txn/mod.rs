@@ -370,8 +370,8 @@ impl<S: Store> DbTxn<S> {
         let version_id = match maybe_version_id {
             Some(data) => {
                 // Try to parse as version_id string first (new format)
-                match String::from_utf8(data.clone()) {
-                    Ok(vid) if !vid.starts_with('{') => vid, // Not JSON, it's a version_id
+                match std::str::from_utf8(&data) {
+                    Ok(vid) if !vid.starts_with('{') => vid.to_string(), // Not JSON, it's a version_id
                     _ => {
                         // Fallback: Old format where full JSON is stored at name key
                         // This handles backward compatibility during migration
@@ -490,11 +490,10 @@ impl<S: Store> DbTxn<S> {
                 .to_string();
 
             // Check if value is a version_id string or full JSON (backward compat)
-            let value_str = String::from_utf8(pair.value.clone()).ok();
-            if let Some(ref s) = value_str {
+            if let Ok(s) = std::str::from_utf8(&pair.value) {
                 if !s.starts_with('{') {
                     // New format: value is version_id
-                    name_version_pairs.push((name, s.clone()));
+                    name_version_pairs.push((name, s.to_string()));
                     continue;
                 }
             }

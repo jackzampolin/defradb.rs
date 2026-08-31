@@ -168,8 +168,8 @@ pub struct NodeInitOptions {
     pub db_path: *const c_char,
     /// Use in-memory storage (1=true, 0=false).
     pub in_memory: c_int,
-    /// Storage backend name: "redb" (default), "fjall", "rocksdb", "memory".
-    /// Null uses "redb" for persistent or "memory" for in-memory.
+    /// Storage backend name: "regolith" (default) or "memory".
+    /// Null uses "regolith" for persistent or "memory" for in-memory.
     pub datastore_backend: *const c_char,
     /// Enable block signing (1=true, 0=false).
     /// When enabled, the node uses a signing key for block signatures.

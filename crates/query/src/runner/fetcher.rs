@@ -1,6 +1,7 @@
 //! FetcherWrapper for converting references to owned DocFetcher.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use document::Document;
 use std::marker::PhantomData;
 
@@ -267,7 +268,7 @@ impl DocFetcher for FetcherWrapper {
             })
     }
 
-    async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Vec<u8>>> {
+    async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Bytes>> {
         self.get_fetcher()
             .get_view_cache_items(collection_id)
             .await

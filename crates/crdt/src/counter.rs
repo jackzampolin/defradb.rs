@@ -11,6 +11,7 @@
 
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
+use bytes::Bytes;
 use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -579,7 +580,7 @@ impl Counter {
     }
 
     /// Get current value bytes (for internal use)
-    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Bytes> {
         reader
             .get(&self.value_key)
             .await
@@ -636,7 +637,7 @@ impl ReplicatedData for Counter {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ValueReader for Counter {
-    async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+    async fn value(&self, reader: &dyn Reader) -> Result<Bytes> {
         self.get_value_internal(reader).await
     }
 }

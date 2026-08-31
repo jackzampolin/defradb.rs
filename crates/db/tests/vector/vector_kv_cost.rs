@@ -27,9 +27,9 @@ use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
+use storage::RegolithStore;
 
 /// Counts every key read and write reaching the store.
 #[derive(Debug, Default)]
@@ -98,7 +98,7 @@ impl<S: VectorNodeStore> VectorNodeStore for Counting<S> {
         self.inner.iterate_nodes(visit).await
     }
 
-    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<bytes::Bytes>> {
         self.inner.get_aux(kind, key).await
     }
 
@@ -129,7 +129,7 @@ async fn cost_against_a_kv_store() {
         let mut corpus = Corpus::new(CORPUS_SEED);
         let vectors = corpus.vectors(count, dimensions);
 
-        let store = MemoryStore::new();
+        let store = RegolithStore::in_memory().unwrap();
         let mut write: Box<dyn Txn> = store.new_txn(false).await.unwrap();
         let (insert_reads, insert_writes, _) = {
             let mut index = Hnsw::new(
