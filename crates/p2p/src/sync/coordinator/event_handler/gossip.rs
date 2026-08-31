@@ -109,10 +109,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             })?;
         // Being the propagation hop is not routability evidence. iroh-gossip
         // keeps its own overlay and can hand us a hint straight from its
-        // origin over a connection the transport never made; a durable
-        // obligation bound to that origin defers until it "reconnects", which
-        // never happens. Only a peer the transport reports as connected can
-        // serve a rooted fetch, so ask the peer tracker in every case.
+        // origin over a connection the transport never made, and a durable
+        // obligation bound to an unreachable origin defers until it
+        // "reconnects" — which never happens. Only a peer the transport
+        // reports as connected can serve a rooted fetch.
         let origin_is_routable = self.access.peer_state.is_connected(authenticated_origin);
         if !origin_is_routable {
             tracing::warn!(
