@@ -347,6 +347,12 @@ pub trait DocFetcher: MaybeSendSync {
     /// `collection_short_id` is the queried collection: documents belonging to
     /// another collection are excluded, so a foreign collection's commit CID
     /// yields an empty result (Go parity).
+    ///
+    /// Defaulted to an error rather than to a delegation to
+    /// [`get_document_at_cid`](Self::get_document_at_cid): that method takes no
+    /// collection, so delegating would return a document the caller then
+    /// ACP-checks against the wrong collection. A fetcher supporting CID-based
+    /// queries must scope them itself.
     async fn get_documents_at_cid(
         &self,
         collection_short_id: u32,
@@ -354,12 +360,10 @@ pub trait DocFetcher: MaybeSendSync {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&Did>,
     ) -> Result<Vec<Document>> {
-        let _ = collection_short_id;
-        // Default: delegate to single-document method
-        let doc = self
-            .get_document_at_cid(cid, expected_doc_id, caller_identity)
-            .await?;
-        Ok(vec![doc])
+        let _ = (collection_short_id, cid, expected_doc_id, caller_identity);
+        Err(crate::error::QueryError::execution(
+            "CID-based time-travel queries are not supported by this fetcher".to_string(),
+        ))
     }
 
     /// Get all cached view items for a materialized view.
@@ -418,3 +422,75 @@ pub struct CommitsQueryOptions {
 ///
 /// This trait abstracts collection resolution, allowing the QueryRunner to
 pub use crate::collection_provider::{CollectionProvider, StaticCollectionProvider};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Overrides only the single-document CID method, as an out-of-tree fetcher
+    /// reasonably might.
+    struct SingleDocOnlyFetcher;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl DocFetcher for SingleDocOnlyFetcher {
+        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
+            unreachable!()
+        }
+
+        async fn stream_by_doc_short_ids(
+            &self,
+            _collection_name: &str,
+            _doc_short_ids: &[u64],
+            _show_deleted: bool,
+        ) -> Result<Box<dyn DocStream>> {
+            unreachable!()
+        }
+
+        async fn stream_all_with_deleted(
+            &self,
+            _collection_name: &str,
+            _show_deleted: bool,
+        ) -> Result<Box<dyn DocStream>> {
+            unreachable!()
+        }
+
+        async fn get_by_ids(
+            &self,
+            _collection_name: &str,
+            _doc_ids: &[String],
+        ) -> Result<FetchByIdsResult> {
+            unreachable!()
+        }
+
+        async fn get_by_field_value(
+            &self,
+            _collection_name: &str,
+            _field_name: &str,
+            _value: &str,
+        ) -> Result<Vec<Document>> {
+            unreachable!()
+        }
+
+        async fn get_document_at_cid(
+            &self,
+            _cid: &str,
+            _expected_doc_id: Option<&str>,
+            _caller_identity: Option<&Did>,
+        ) -> Result<Document> {
+            Ok(Document::new())
+        }
+    }
+
+    /// The defaulted collection-scoped fetch cannot honour `collection_short_id`,
+    /// so it must refuse rather than hand back a document the query runner would
+    /// then ACP-check against the wrong collection.
+    #[tokio::test]
+    async fn defaulted_documents_at_cid_does_not_return_unscoped_documents() {
+        let result = SingleDocOnlyFetcher
+            .get_documents_at_cid(1, "bafy", None, None)
+            .await;
+
+        assert!(result.is_err(), "expected refusal, got {result:?}");
+    }
+}
