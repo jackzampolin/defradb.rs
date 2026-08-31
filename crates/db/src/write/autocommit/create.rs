@@ -44,9 +44,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // No per-doc write guard for creates: the DocID is derived from the
         // genesis block inside the txn, so no identity exists to guard yet.
         // The DocID-mapping duplicate check is the gate.
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_mutation_txn().await?;
 
         // Acquire store views up front (dropped before commit); the mutation
         // itself runs in an async block so errors fall through to the discard.
@@ -166,49 +164,28 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         drop(blockstore);
         drop(headstore);
 
-        match result {
-            Ok((doc_id, cid, block, col_data)) => {
-                // Commit the transaction (all store references now dropped)
-                if let Err(e) = txn.commit().await {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to commit transaction after create"
-                    );
-                    return Err(crate::error::commit_query_error(e));
-                }
+        let (doc_id, cid, block, col_data) = self
+            .finish_mutation(txn, result, collection_name, "create")
+            .await?;
 
-                self.register_created_doc_with_acp(&collection, &doc_id.to_string())
-                    .await?;
+        self.register_created_doc_with_acp(&collection, &doc_id.to_string())
+            .await?;
 
-                // Emit update event for subscriptions
-                self.emit_update_events(
-                    &collection,
-                    &doc_id.to_string(),
-                    cid,
-                    block.clone(),
-                    col_data.clone(),
-                );
+        // Emit update event for subscriptions
+        self.emit_update_events(
+            &collection,
+            &doc_id.to_string(),
+            cid,
+            block.clone(),
+            col_data.clone(),
+        );
 
-                let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
-                if let Some((col_cid, col_bytes)) = col_data {
-                    result.broadcast_cid = Some(col_cid);
-                    result.broadcast_block = Some(col_bytes);
-                }
-                Ok(result)
-            }
-            Err(e) => {
-                // Discard the transaction on error
-                if let Err(discard_err) = txn.discard() {
-                    warn!(
-                        collection = %collection_name,
-                        error = %discard_err,
-                        "Failed to discard transaction after create error"
-                    );
-                }
-                Err(e)
-            }
+        let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
+        if let Some((col_cid, col_bytes)) = col_data {
+            result.broadcast_cid = Some(col_cid);
+            result.broadcast_block = Some(col_bytes);
         }
+        Ok(result)
     }
 
     pub(super) async fn create_many_impl(
@@ -278,9 +255,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // the txn; the DocID-mapping duplicate check is the gate.
 
         // === Phase 2: Transaction — allocate identities, then compute blocks ===
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_mutation_txn().await?;
 
         let mut identities = Vec::with_capacity(prepared_docs.len());
         for _ in &prepared_docs {

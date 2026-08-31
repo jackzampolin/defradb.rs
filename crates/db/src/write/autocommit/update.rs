@@ -140,10 +140,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
         doc = current_doc;
 
-        // Create a write transaction
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_mutation_txn().await?;
 
         // Acquire store views up front (dropped before commit); the mutation
         // itself runs in an async block so errors fall through to the discard.
@@ -156,8 +153,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let systemstore = txn.systemstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
+        let blockstore = txn.blockstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+        })?;
+        let headstore = txn.headstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+        })?;
 
-        let result: query::error::Result<u64> = async {
+        let result: query::error::Result<CommitArtifacts> = async {
             // Create an IndexManager for index maintenance
             let short_id = collection.resolved_root_id();
             let index_manager = IndexManager::from_indexes(
@@ -205,137 +208,88 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &index_manager,
             )
             .await?;
-            Ok(doc_short_id)
+
+            // Use version_id for collectionVersionID (matches Go's VersionID())
+            let schema_version_id = collection.version_id();
+            // Explicit config from the mutation only. A document created
+            // encrypted keeps its encryption because the block writer
+            // inherits it from the previous block, matching Go's
+            // determineBlockEncryption.
+            let enc_config = get_encryption_config();
+            // Get signing config from thread-local (set by FFI exec_request)
+            let sign_config = get_signing_config();
+
+            let identity = DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
+
+            // For update operations, pass the modified fields to only create blocks
+            // for the fields that actually changed
+            let block_result = write_document_blocks(
+                &blockstore,
+                &headstore,
+                &doc,
+                schema_version_id,
+                identity,
+                Some(&modified_fields),
+                enc_config.as_ref(),
+                sign_config.as_ref(),
+                None,
+            )
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for update on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
+
+            if let Some(doc_id) = doc.id() {
+                register_block_doc_id_mappings(&systemstore, &block_result, &doc_id.to_string())
+                    .await?;
+            }
+
+            let col_block_data = write_branchable_collection_block(
+                &self.db,
+                collection_name,
+                &collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                sign_config.as_ref(),
+            )
+            .await?;
+
+            Ok((block_result.cid, block_result.block, col_block_data))
         }
         .await;
 
         drop(datastore);
         drop(systemstore);
+        drop(blockstore);
+        drop(headstore);
 
-        match result {
-            Ok(doc_short_id) => {
-                // Build blocks and write to blockstore/headstore in a scoped block
-                // This enables _commits queries to find the document's version history
-                // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
-                let commit_result: CommitArtifacts = {
-                    let blockstore = txn.blockstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get blockstore: {}",
-                            e
-                        ))
-                    })?;
-                    let headstore = txn.headstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get headstore: {}",
-                            e
-                        ))
-                    })?;
+        let commit_result = self
+            .finish_mutation(txn, result, collection_name, "update")
+            .await?;
 
-                    // Use version_id for collectionVersionID (matches Go's VersionID())
-                    let schema_version_id = collection.version_id();
-                    // Explicit config from the mutation only. A document created
-                    // encrypted keeps its encryption because the block writer
-                    // inherits it from the previous block, matching Go's
-                    // determineBlockEncryption.
-                    let enc_config = get_encryption_config();
-                    // Get signing config from thread-local (set by FFI exec_request)
-                    let sign_config = get_signing_config();
-
-                    let identity =
-                        DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
-
-                    // For update operations, pass the modified fields to only create blocks
-                    // for the fields that actually changed
-                    let block_result = write_document_blocks(
-                        &blockstore,
-                        &headstore,
-                        &doc,
-                        schema_version_id,
-                        identity,
-                        Some(&modified_fields),
-                        enc_config.as_ref(),
-                        sign_config.as_ref(),
-                        None,
-                    )
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to write document blocks for update on collection {}: {}",
-                            collection_name, e
-                        ))
-                    })?;
-
-                    if let Some(doc_id) = doc.id() {
-                        let systemstore = txn.systemstore().map_err(|e| {
-                            query::error::QueryError::execution(format!(
-                                "failed to get systemstore: {}",
-                                e
-                            ))
-                        })?;
-                        register_block_doc_id_mappings(
-                            &systemstore,
-                            &block_result,
-                            &doc_id.to_string(),
-                        )
-                        .await?;
-                    }
-
-                    let col_block_data = write_branchable_collection_block(
-                        &self.db,
-                        collection_name,
-                        &collection,
-                        &blockstore,
-                        &headstore,
-                        block_result.cid,
-                        sign_config.as_ref(),
-                    )
-                    .await?;
-
-                    (block_result.cid, block_result.block, col_block_data)
-                }; // blockstore and headstore dropped here
-
-                // Commit the transaction (all store references now dropped)
-                if let Err(e) = txn.commit().await {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to commit transaction after update"
-                    );
-                    return Err(crate::error::commit_query_error(e));
-                }
-
-                if let Some(doc_id) = doc.id() {
-                    let (cid, block, col_data) = &commit_result;
-                    self.emit_update_events(
-                        &collection,
-                        &doc_id.to_string(),
-                        *cid,
-                        block.clone(),
-                        col_data.clone(),
-                    );
-                }
-
-                // Count modified fields
-                let fields_modified = doc.values().len();
-                let (cid, block, col_data) = commit_result;
-                let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
-                if let Some((col_cid, col_bytes)) = col_data {
-                    result.broadcast_cid = Some(col_cid);
-                    result.broadcast_block = Some(col_bytes);
-                }
-                Ok(result)
-            }
-            Err(e) => {
-                // Discard the transaction on error
-                if let Err(discard_err) = txn.discard() {
-                    warn!(
-                        collection = %collection_name,
-                        error = %discard_err,
-                        "Failed to discard transaction after update error"
-                    );
-                }
-                Err(e)
-            }
+        if let Some(doc_id) = doc.id() {
+            let (cid, block, col_data) = &commit_result;
+            self.emit_update_events(
+                &collection,
+                &doc_id.to_string(),
+                *cid,
+                block.clone(),
+                col_data.clone(),
+            );
         }
+
+        // Count modified fields
+        let fields_modified = doc.values().len();
+        let (cid, block, col_data) = commit_result;
+        let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
+        if let Some((col_cid, col_bytes)) = col_data {
+            result.broadcast_cid = Some(col_cid);
+            result.broadcast_block = Some(col_bytes);
+        }
+        Ok(result)
     }
 }
