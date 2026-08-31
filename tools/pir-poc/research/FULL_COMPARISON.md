@@ -104,19 +104,40 @@ matrix and runs all upstream InsPIRe tests. The publication comparison uses
 `run-repeated-gpu-comparison.sh`: five fresh processes alternate both suite
 order and Dense/DPF internal order, then emit p50/min/max JSON.
 
-## Final ranking for the measured objective
+## Final privacy-first ranking
 
-This is a decision ladder, not one universal cryptographic ranking. Stop at the
-first row whose leakage, trust and deployment conditions are acceptable:
+The first gate is the privacy guarantee, not raw server time. The 100-candidate
+control is therefore last even though it is faster: it reveals the candidate
+set, supports longitudinal intersection and provides no cryptographic query
+privacy. There is no honest single ordering across different query lifecycles,
+so the final ranking is three short ladders:
 
-| Rank | Query shape | Choice | Why it is selected |
-|---:|---|---|---|
-| 0 | Exact lookup where the provider may see 100 candidates | 100 indexed decoys | Lowest measured server work by orders of magnitude; it is deliberately weaker because candidates, repeats and intersections are visible. |
-| 1 | Cold strict snapshot, 2+ independent operators, Dense upload fits | Exact populated table plus replicated Dense XOR | Lowest measured aggregate strict server work at every locally comparable 1 and 4 GiB batch. No client database hint is required beyond key-to-ordinal metadata. |
-| 2 | Cold strict snapshot, one operator or Dense upload does not fit | GPU InsPIRe | Computational single-server privacy and 379,904 B upload; more server work than Dense on the same local 1 GiB GPU. |
-| 3 | Cold strict snapshot, compact upload is mandatory and a large queue exists | GPU-DPF | 4,160 B upload and cheap client query. At batch 128 it approached but did not beat Dense locally; batch 1 is decisively worse. |
-| 4 | Warm repeated reads of one immutable generation | SinglePass | Microsecond online server work after downloading the generation and retaining mutable client state; exactly two-server and unsuitable as the cold default. |
-| 5 | Fixed-cadence live presence | Packed-presence Dense | The correct live shape: ingest once, answer each registered subscriber once per public epoch; supports 2, 3, or more replicas. |
+| Rank | Cold snapshot | Why |
+|---:|---|---|
+| 1 | Exact-MPHF/Fuse plus replicated Dense XOR | Lowest measured aggregate strict server work, cold client, simple XOR construction and 2/3/more-server flexibility |
+| 2 | GPU InsPIRe | Strict computational single-server fallback when independent operators are unavailable; heavier locally than Dense |
+| 3 | GPU-DPF | Strict compact-upload fallback for exactly two operators and a large ready batch; poor batch-1 server work |
+| 4 | Split-trust blind exact search | One point lookup, but equality/access/update leakage means it is not PIR |
+| 5 | 100 indexed decoys | Last-resort privacy downgrade after every strict deployment path fails |
+
+For the normal cold single-query case InsPIRe ranks above GPU-DPF: the measured
+batch-1 work was 32.21 versus 437.73 ms. With exactly two operators and a ready
+batch of 32, GPU-DPF moves ahead (13.74 versus 18.86 ms) and also has the
+smaller upload. This is a conditional fork, not a claim that one dominates.
+
+| Rank | Warm immutable generation | Why |
+|---:|---|---|
+| 1 | SinglePass | Microsecond online work after generation download; ideal when many reads amortize exactly-two-server client state |
+| 2 | Replicated Dense XOR | No full preload or mutable client state; retains 3+ server support |
+| 3 | GPU InsPIRe or batched GPU-DPF | Same single-server versus compact-upload split as the cold ladder |
+| 4 | Split-trust blind exact search | Weaker access-pattern tier |
+| 5 | 100 indexed decoys | Final candidate-visible fallback |
+
+| Rank | Live presence | Why |
+|---:|---|---|
+| 1 | Packed-presence Dense per public epoch | Ingest once, answer once/subscriber/epoch, lowest measured strict work and 2/3/more-server support |
+| 2 | Immediate Compact DPF | Only when sub-epoch delivery is required; exactly two parties and work grows as events times subscribers |
+| 3 | Visible subscriptions/decoys | Last resort; exposes watched buckets, hits, popularity and repeated interest |
 
 Finite-differences PIR stays a narrow research result: on the 262,144 x 96 B
 CPU corpus it beat Dense server time (3.33 versus 6.01 ms) but required 8x
@@ -131,15 +152,23 @@ fallback, and cuckoo was dominated in the POC.
 - Prefer Dense when two or more independently operated replicas are available,
   aggregate server work wins, and its `N/8` bytes per server upload is within
   the client/network budget.
+- Prefer SinglePass over Dense only for repeated reads of the same immutable
+  generation when the client can download it, retain mutable state and complete
+  the atomic two-server update after every query.
+- Prefer packed-presence Dense for live queries whenever a block/epoch delay is
+  acceptable. Use immediate Compact DPF only for a measured sub-epoch product
+  requirement.
 - Prefer GPU InsPIRe when a single-server trust model is required or Dense's
   growing upload dominates end-to-end latency. Its lack of a client database
   hint makes it a legitimate cold-client design, despite heavier query crypto.
 - Keep GPU-DPF only if compact upload is essential and same-hardware measured
   server work becomes competitive at the deployment's real batch size. The
   current batch-1 result is not competitive.
-- Use 100 visible decoys when the strict protocols miss the server-work budget
-  and candidate-set leakage is explicitly accepted. It is a different privacy
-  guarantee, not a PIR optimization.
+- Use split-trust blind search only when an independent index provider cannot
+  map tokens to plaintext and equality/access leakage is acceptable.
+- Use 100 visible decoys only after the strict and split-trust options miss the
+  deployment budget and candidate-set leakage is explicitly accepted. It is
+  the final degraded mode, not a PIR optimization or the default recommendation.
 
 ## Final same-card GPU result
 

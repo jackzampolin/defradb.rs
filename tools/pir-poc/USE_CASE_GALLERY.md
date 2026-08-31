@@ -3,8 +3,9 @@
 This document turns the selected PIR primitives into small application-shaped
 POCs. It is a catalog, not a claim that nine separate protocols should be
 maintained. Every snapshot fixture exercises the same `PrivateTable` and
-replicated Dense XOR implementation so correctness is comparable, even where
-the production recommendation is 100 visible decoys. The served live fixtures
+replicated Dense XOR implementation so correctness is comparable. The 100
+visible-candidate path is a measured last-resort control, not a default. The
+served live fixtures
 use the same immediate two-party Compact-DPF implementation; the measured
 production direction batches alerts into packed-presence Dense epochs. The
 authoritative decision ladder and scale conditions are in
@@ -33,12 +34,12 @@ operations and exclude HTTP, OHTTP, queues and artifact building.
 | Product | Use case | Why it is useful | POC shape | Selected protocol |
 |---|---|---|---|---|
 | Mizu / Shieldd | Wallet note recovery | A remote wallet retrieves only encrypted actions matching its proof-bound routing prefix instead of downloading every compact block | Public generation/window + private routing prefix -> four-slot encrypted-action page | Dense XOR, 2+ replicas |
-| Mizu / Shieldd | Nullifier non-membership witness | A wallet obtains the path needed to prove its note remains unspent without identifying the nullifier to a provider | 32-byte nullifier -> fixed 2,008-byte witness | 100 plausible decoy path/index reads by default; Dense high-privacy tier |
+| Mizu / Shieldd | Nullifier non-membership witness | A wallet obtains the path needed to prove its note remains unspent without identifying the nullifier to a provider | Stable future leaf index + active-generation checkpoint -> fixed 2,008-byte witness | Dense XOR, 2+ replicas; decoys only after bounded strict paths fail |
 | Mizu / Shieldd | Routing-tag alert | A wallet learns that an encrypted action for its routing tag appeared without registering the tag in plaintext | Routing-prefix event bucket -> private match/miss hint | Packed-presence Dense per public epoch; immediate Compact DPF fallback |
 | Shinzo | Historical contract logs | A researcher or wallet hides which contract and event signature it is investigating | Public block window + private address/topic0 -> four-slot log page | Dense XOR, 2+ replicas |
-| Shinzo | Private transaction receipt | A wallet retrieves public transaction/receipt/attestation data without disclosing which transaction matters to it | Transaction hash -> fixed receipt and provenance projection | 100 same-block decoys; one-block Dense high-privacy tier |
+| Shinzo | Private transaction receipt | A wallet retrieves public transaction/receipt/attestation data without disclosing which transaction matters to it | Public inclusion block + private transaction hash -> fixed receipt and provenance projection | Dense XOR over the inclusion block; decoys only for degraded global lookup |
 | Shinzo | Contract event alert | A wallet privately follows an address or topic in the live DefraDB log stream | Canonical address/topic bucket -> private match/miss hint | Packed-presence Dense per block/epoch; immediate Compact DPF fallback |
-| DefraDB | Private document by ID | An application retrieves an authorized projection while hiding a high-entropy document ID | Collection generation + document ID -> fixed encrypted projection | Dense for bounded collection/generation; decoys when no bounded partition exists |
+| DefraDB | Private document by ID | An application retrieves an authorized projection while hiding a high-entropy document ID | Collection generation + document ID -> fixed encrypted projection | Dense for bounded collection/generation; split-trust search then decoys only as degraded fallbacks |
 | DefraDB | Private secondary-index page | Equality queries can return many documents without exposing the indexed value | Collection/field/value/page -> four fixed result slots | Dense XOR, 2+ replicas |
 | DefraDB | Private change feed | An application follows equality-filtered updates without sending the filter value to the provider | Collection/field/value event bucket -> private hint | Packed-presence Dense per public epoch; immediate Compact DPF fallback |
 
