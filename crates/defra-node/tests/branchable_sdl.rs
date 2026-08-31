@@ -59,14 +59,14 @@ async fn graphql_write_records_collection_head_under_persisted_id() {
     node.shutdown().await;
     drop(node);
 
-    // The node releases the redb file lock shortly after shutdown; retry the
-    // reopen briefly rather than racing it (same pacing as blob_size_cost.rs).
+    // The node releases the store's file lock shortly after shutdown; retry
+    // the reopen briefly rather than racing it.
     let mut store = None;
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        match storage::RedbStore::open_with_options(
+        match storage::RegolithStore::open_with_options(
             dir.path().to_str().expect("utf-8 path"),
-            storage::RedbStoreOptions::new(),
+            storage::RegolithStoreOptions::new(),
         ) {
             Ok(s) => {
                 store = Some(s);
@@ -148,9 +148,9 @@ async fn signed_graphql_write_records_collection_head_under_persisted_id() {
     let mut store = None;
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        match storage::RedbStore::open_with_options(
+        match storage::RegolithStore::open_with_options(
             dir.path().to_str().expect("utf-8 path"),
-            storage::RedbStoreOptions::new(),
+            storage::RegolithStoreOptions::new(),
         ) {
             Ok(s) => {
                 store = Some(s);
