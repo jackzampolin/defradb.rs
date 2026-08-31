@@ -20,7 +20,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         topic: String,
         data: Vec<u8>,
     ) -> Result<()> {
-        // KMS short-circuit (libp2p only — Go's KMS rides gossipsub). Go layers
+        // KMS short-circuit, on any transport that emits raw gossip. Go layers
         // the go-libp2p-pubsub-rpc protocol on the `encryption` topic: bare-CBOR
         // requests on `encryption`, and reply envelopes on the per-peer
         // `encryption/<caller>/_response` sub-topic. Both must reach the KMS
@@ -51,9 +51,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         #[cfg(feature = "libp2p-transport")]
         {
             let Some(services) = self.pubsub_services.as_ref() else {
-                // Services are only present on libp2p; the iroh transport never
-                // emits GossipRawMessage so this branch should be unreachable
-                // outside of tests. Log and drop for defensive hygiene.
+                // Services are started only by the libp2p runtime; a raw
+                // message on a pubsub_rpc topic that arrives before they
+                // exist has no owner. Log and drop for defensive hygiene.
                 debug!(
                     topic = %topic,
                     "GossipRawMessage received but pubsub services not started; dropping"
