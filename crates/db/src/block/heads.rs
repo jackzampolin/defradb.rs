@@ -208,9 +208,9 @@ pub async fn prune_superseded_heads(
         {
             marker = next_marker(marker_iter.as_mut(), marker_prefix_len).await?;
         }
-        if !marker
+        if marker
             .as_ref()
-            .is_some_and(|(parent, _)| parent.as_slice() == cid_text)
+            .is_none_or(|(parent, _)| parent.as_slice() != cid_text)
         {
             continue;
         }
