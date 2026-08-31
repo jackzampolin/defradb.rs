@@ -1,4 +1,4 @@
-use integration_test::{DefraClient, TestCluster};
+use integration_test::{query_both, DefraClient, TestCluster};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -99,13 +99,6 @@ fn assert_counter_history_matches(
         deterministic(&go_commits),
         "{stage}: LWW field CIDs diverged"
     );
-}
-
-fn query_both(rust: &DefraClient, go: &DefraClient, query: &str) -> (Value, Value) {
-    (
-        rust.query(query).expect("Rust query"),
-        go.query(query).expect("Go query"),
-    )
 }
 
 #[tokio::test]
