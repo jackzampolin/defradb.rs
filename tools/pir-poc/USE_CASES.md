@@ -106,6 +106,55 @@ InsPIRe2 server wall time was 115.90 versus 415.10 ms at batch 1, 49.11 versus
 used 5.71--6.87 GiB peak RSS and 30.5--36.1 s offline preprocessing. It is not
 the recommended edge-server lane.
 
+### Quantitative acceptance envelopes
+
+The use-case decisions below use the following explicit cost envelopes. `M`
+is a directly executed use-case measurement. `P` is a bandwidth projection
+from the repeated RTX 2070 SUPER Dense result: 6.17 ms aggregate server work
+per resident GiB scanned and 2.68 ms client query generation per 2 MiB aggregate
+selector upload. Projections exclude transport, OHTTP, queues, storage faults
+and kernel-launch floors. The assumed row counts are conservative upper bounds;
+fewer populated key/pages cost less.
+
+| Snapshot use case | Production query class | Strict upload / download | Strict server / client CPU | 100-decoy upload / download | Decoy server / client CPU | Strict server / decoy | Acceptance |
+|---|---|---:|---:|---:|---:|---:|---|
+| Mizu note recovery | At most 320K populated routing pages in 32 blocks | 80.0 KB / 1.61 KB | **~1.48 / ~0.11 ms `P`** | 3.10 KB / 80.4 KB | 0.0284 / 0.0042 ms `M` | ~52x slower | About 1.45 ms extra server work; total wire is nearly equal (81.6 versus 83.5 KB) |
+| Mizu active nullifier witness | 1.05M-leaf active generation | 1.082 MB / 116.7 KB | **34.45 / 22.29 ms `M`** | 3.20 KB / 200.8 KB | 0.141 / 0.00010 ms `M` | 244x slower | Acceptable for occasional proof preparation, not a per-event path; strict saves 84 KB response and hides the candidate set |
+| Shinzo historical logs | At most 320K populated pages in 32 blocks | 80.0 KB / 1.10 KB | **~1.01 / ~0.11 ms `P`** | 3.61 KB / 54.8 KB | 0.0264 / 0.0042 ms `M` | ~38x slower | Roughly 1 ms absolute server cost for private address/topic; one-block queries are nearly free |
+| Shinzo transaction receipt | At most 10K receipts in one block | 2.50 KB / 368 B | **~0.011 / <0.01 ms `P`** | 3.79 KB / 18.4 KB | 0.0257 / 0.0039 ms `M` | ~0.4x; Dense faster | Strict is both cheaper in projected server work and about 7.7x smaller in total wire |
+| DefraDB document by ID | 1M fixed 256-byte projections | 250 KB / 560 B | **~1.61 / ~0.33 ms `P`** | 3.30 KB / 28.0 KB | 0.0265 / 0.0042 ms `M` | ~61x slower | About 1.6 ms server and 0.3 ms client CPU is small; Dense upload makes the public partition mandatory on constrained networks |
+| DefraDB secondary-index page | 1M fixed four-value pages | 250 KB / 1.10 KB | **~3.15 / ~0.33 ms `P`** | 3.90 KB / 54.8 KB | 0.0266 / 0.0039 ms `M` | ~118x slower | About 3 ms is acceptable for one private page; continuation count must be capped because high fanout multiplies work |
+
+The snapshot decoy figures are the same-row in-process gallery measurements;
+the generic 1 GiB point-read control was 0.01138 ms. Consequently, projected
+ratios are planning estimates, not same-kernel claims. The important admission
+test is absolute compute and wire cost: a 50x ratio can mean 1.5 ms versus 0.03
+ms, while an unpartitioned 10.4-second scan is rejected even if privacy is
+valuable.
+
+The selected live protocol has a directly measured production-shaped batch:
+
+| Live use case | Strict packed-Dense registration / response | Strict client setup / server per epoch | 100-visible registration / response | Visible client setup / server per epoch | Strict server / visible | Acceptance |
+|---|---:|---:|---:|---:|---:|---|
+| Mizu routing-tag alert | 16,384 B once / 2 B | **33.8 us once / 0.182 us** | 400 B once / 1,600 B | 0.240 us once / 0.206 us | **0.88x; strict 12% faster** | No server slowdown and 800x smaller recurring response |
+| Shinzo contract event alert | 16,384 B once / 2 B | **33.8 us once / 0.182 us** | 400 B once / 1,600 B | 0.240 us once / 0.206 us | **0.88x; strict 12% faster** | No server slowdown; the block already supplies the natural epoch |
+| DefraDB private change feed | 16,384 B once / 2 B | **33.8 us once / 0.182 us** | 400 B once / 1,600 B | 0.240 us once / 0.206 us | **0.88x; strict 12% faster** | No server slowdown; one commit/second cadence amortizes registration |
+
+These batch-512 numbers measure resident GPU selectors. Copying selectors from
+host memory every epoch adds 4.778 us/subscriber: about 24x the visible server
+baseline but still under 5 us absolute. Production therefore retains
+registrations on the GPU or stages long-lived pinned batches. Combining a
+two-byte client answer was not isolated by the runner and is expected below
+0.01 ms; transport will dominate it.
+
+For client-network intuition, sending 80 KB takes about 64/6.4 ms at 10/100
+Mbit/s; 250 KB takes 200/20 ms; the 1.082 MB nullifier query takes about
+866/87 ms; and the 16,384 B live registration takes 13/1.3 ms once. These are
+payload-only transfer times before RTT, OHTTP/Tor and framing. Thus note/log/
+receipt queries remain phone-capable, the 1M-row generic queries prefer normal
+broadband or a smaller partition, and the current nullifier path is the main
+mobile optimization target.
+
 ### Production recommendation for each implemented use case
 
 The selected defaults are summarized first. A public partition reveals only the
@@ -137,6 +186,12 @@ that is a reason to shorten the window or redesign the page. Use a full/padded
 routing-prefix domain when populated low-bit prefixes would permit a dictionary
 attack. No higher protocol was eliminated: first-ranked cold Dense fits.
 
+For the 32-block maximum envelope, expect about 80 KB upload, 1.61 KB download,
+1.48 ms aggregate GPU server work and 0.11 ms client CPU. The same-row decoy
+control used 3.10/80.4 KB up/down and 0.0284/0.0042 ms server/client. Dense is
+about 52x slower on the server but adds only about 1.45 ms, while total wire is
+actually almost identical. That is a good trade for strict tag privacy.
+
 Carry each replica share through a different OHTTP relay/gateway path and use
 fixed page sizes and cadence. Tor is an optional stronger-origin mode when the
 measured roughly 0.88 s warm latency is acceptable.
@@ -149,6 +204,13 @@ with replicated Dense XOR. The executed 1.05M-leaf strict path used **34.45 ms
 server**, **22.29 ms client**, and 116.7 KB download. The 100-candidate control
 used 0.141 ms server and 200.8 KB download, but exposed all path/index
 candidates; it is not the default.
+
+The strict request uploaded 1.082 MB versus 3.20 KB for decoys and was 244x
+slower on the server. This is the one selected snapshot case where the slowdown
+is material rather than merely a large ratio over a tiny baseline. It is
+acceptable for occasional proof preparation; it is not acceptable as a
+per-event query, and synchronized wallets should maintain/update cached
+witnesses when possible.
 
 A 32B-coordinate sparse tree must not become a 32B-row PIR table. Production
 requires stable insertion indices plus authenticated sparse nodes or
@@ -175,6 +237,11 @@ answer per subscriber; one million subscribers imply about 182 ms aggregate
 answer work/epoch and about 8.2 GB retained selector state/server. No higher
 live protocol was eliminated: epoch batching is acceptable.
 
+Registration is 16,384 B once and took 33.8 us/client in the batch-512 run; the
+answer is 2 B/epoch. Visible candidates register 400 B and return 1,600 B/epoch.
+Strict server work is 0.88x the visible baseline--about 12% faster--so this case
+does not pay a PIR server slowdown at all.
+
 Poll on a fixed cadence through padded OHTTP. Tor is optional; constant cadence
 is especially important to prevent matching an alert to a later public spend.
 
@@ -185,6 +252,12 @@ Use replicated Dense XOR over a public 32-block window, with one-block and
 classes contain 10K, 320K and 2.56M events. Admit a class only while its padded
 artifact remains within the measured 1 GiB/6.17 ms-per-page budget. No higher
 cold protocol was eliminated for the bounded endpoint.
+
+At the 320K-page upper bound, expect about 80 KB upload, 1.10 KB download, 1.01
+ms aggregate server work and 0.11 ms client CPU. The 100-decoy control used
+3.61/54.8 KB up/down and 0.0264/0.0042 ms server/client. The roughly 38x server
+ratio means only about 0.98 ms additional work. A one-block query is smaller
+again, so hiding the investigated address/topic is affordable.
 
 An unwindowed endpoint eventually exceeds 1B records. There Dense loses its
 edge budget, SinglePass requires a history-sized preload and persistent state,
@@ -201,6 +274,12 @@ Use replicated Dense XOR over the public inclusion block. A 5K TPS/two-second
 block has at most 10K receipts, far below the 1 GiB anchor; the tiny 256-row
 gallery measured 2.3 us Dense server work versus 25.7 us for 100 indexed
 candidates. No higher cold protocol was eliminated when the block is known.
+
+At the maximum 10K-receipt block, the strict request is about 2.50 KB up and
+368 B down, with a bandwidth projection of 0.011 ms server and below 0.01 ms
+client CPU. Decoys use 3.79 KB up, 18.4 KB down and 0.0257 ms server. Dense is
+projected faster and uses about 7.7x less total wire; this is the clearest cold
+case where privacy is essentially free once the inclusion block is public.
 
 If the client cannot supply the block, require it to learn a coarse inclusion
 range first. A two-stage global hash-to-block directory does not create free
@@ -221,6 +300,12 @@ live protocol was eliminated. Immediate Compact DPF is used only for a real
 sub-block SLA; at 5K TPS, 10K events and 10K subscribers, the measured CPU
 baseline projects roughly 78 seconds of aggregate work per two-second block.
 
+The packed registration/query geometry is the same as Mizu: 16,384 B and 33.8
+us once, 2 B and 0.182 us server/subscriber/block thereafter. The visible
+alternative returns 1,600 B and costs 0.206 us. Strict is 12% faster in the
+measured resident batch; the reason to avoid immediate DPF is its event-times-
+subscriber scaling, not the cost of privacy itself.
+
 Use fixed-cadence padded OHTTP, independent replica operators and optional Tor.
 
 #### 7. DefraDB document by ID
@@ -229,6 +314,13 @@ Use replicated Dense XOR for an authorization-equivalent collection/generation
 artifact. The 1 GiB/8.39M-row anchor costs **6.17 ms server** and 2 MiB upload;
 4 GiB/33.55M rows costs **23.07 ms** and 8 MiB upload. No higher protocol was
 eliminated while the collection/generation is bounded.
+
+For a representative 1M-row artifact of fixed 256-byte projections, expect 250
+KB upload, 560 B download, about 1.61 ms server and 0.33 ms client CPU. Decoys
+use 3.30/28.0 KB up/down and 0.0265/0.0042 ms server/client, making Dense about
+61x slower in relative server time but only 1.58 ms slower absolutely. This is
+acceptable on a desktop or normal broadband path; a phone on a constrained
+uplink should use a smaller public partition rather than weaken privacy.
 
 At a global 1B rows, require a tenant, collection, generation or public time
 partition. If none is semantically safe, an independent encrypted sidecar may
@@ -246,6 +338,13 @@ unpartitioned strict model cost **10.40 s server**, 38.9 ms client and 38.9 MB
 download; 100 candidates cost 106.79 ms server and 31.39 ms client but **1.943
 GB download**. Neither is a viable unpartitioned endpoint, so the API must
 require a partition small enough for the measured 1 GiB class.
+
+For a one-page query over 1M fixed index pages, expect 250 KB upload, 1.10 KB
+download, about 3.15 ms server and 0.33 ms client CPU. Decoys use 3.90/54.8 KB
+up/down and 0.0266/0.0039 ms server/client. The ratio is about 118x, but the
+absolute premium is only 3.12 ms and strict returns 50x less result data. This
+is acceptable for a capped page count; it ceases to be acceptable when fanout
+forces hundreds of full-table continuation scans.
 
 A two-stage design is admitted only if stage one has materially fewer distinct
 keys and stage two selects a fixed padded partition without revealing the
@@ -265,6 +364,12 @@ by a bounded private snapshot page on a hit. Capacity is 8 KiB selector
 state/subscriber/server, or about 8.2 GB for one million subscribers. No higher
 live protocol was eliminated. Immediate Compact DPF is reserved for a genuine
 sub-epoch requirement; visible subscriptions are last.
+
+The one-time strict registration is 16,384 B/33.8 us, followed by a 2 B answer
+and 0.182 us aggregate server work per epoch. The visible path is 400 B once,
+1,600 B/epoch and 0.206 us server work. Strict is 12% faster on the measured
+resident batch and removes 99.875% of recurring response bytes, so privacy is
+not the capacity compromise in this use case.
 
 Use fixed-cadence padded OHTTP. Durable cursors, replay and misses must retain
 the same externally visible schedule; Tor remains optional.
@@ -745,12 +850,15 @@ memory behavior.
   9.9 million non-target ciphertexts without AEAD.
 
 No Dense micro-optimization removes the full encrypted-projection traversal.
-For this workload the useful policy is explicit:
+For this workload the privacy-first policy is explicit:
 
-- public immutable time/collection windows when their leakage is acceptable;
-- 100 decoys when server work is the primary constraint;
-- strict Dense when candidate-set leakage is unacceptable or 1.943 GB download
-  is unreasonable.
+- require a public immutable time/collection window small enough for strict
+  Dense, or a valid private two-stage partition;
+- reject the unpartitioned endpoint when that cannot be done;
+- use split-trust encrypted exact search only when its equality/access leakage
+  is accepted;
+- use 100 decoys only as the final degraded mode when candidate visibility and
+  the 1.943 GB response are both explicitly accepted.
 
 Ciphertext projection data is effectively incompressible. Three replicas add
 approximately 50% aggregate Dense work and are an availability/trust choice,
@@ -919,3 +1027,42 @@ documents with the production signature chain, add abuse controls that do not
 introduce stable wallet identifiers, define a rotation overlap in time rather
 than only key count, and evaluate batching/jitter if spend-timing correlation
 is in scope.
+
+## What could change this decision in the future
+
+This ranking is a benchmark-backed decision for August 2026, not a permanent
+claim about PIR. Ethereum's [Reads private-state workstream](https://reads.ethereum.foundation/workstreams/pir/)
+has converged on the same high-level conclusion as this POC: use different
+engines for hot mutable state, proof-carrying state, immutable logs and archival
+data rather than forcing one PIR construction over every query. The following
+advances would justify rerunning the ranking.
+
+| Potential advance | Evidence/status now | Measurable trigger for changing this POC | Use cases most affected |
+|---|---|---|---|
+| Production GPU InsPIRe | Ethereum Reads reports 3.2 ms/1 GB, under 10 ms/4 GB and 36 ms/16 GB on one RTX 5090, roughly 300--400 KB round trip, under 2x memory expansion and no per-client server state ([May/June update](https://reads.ethereum.foundation/feed/update-may-june-2026/)) | On identical hardware/corpus, beat Dense's total server work or offer a deployment-winning one-server trust/wire result without unacceptable client CPU | Global receipt/document lookup, hot nullifier state and cold clients where Dense upload is too large |
+| VIA, OnionPIRv2 or a later double-stateless scheme | VIA has a Rust implementation under parameter review; OnionPIRv2 and VIA are being compared with InsPIRe on GPU ([Ethereum scheme list](https://reads.ethereum.foundation/workstreams/pir/)) | Audited >=128-bit parameters plus lower measured server joules/query and acceptable wire on the same 1/4/16 GiB matrix | Could replace InsPIRe as the one-server fallback; does not displace Dense merely by reducing wall time through more parallel hardware |
+| Skirrt-style batched proof PIR | Ethereum Reads says its in-progress design retrieves a complete Merkle proof in one double-stateless batch with >10x lower communication than prior batching ([May/June update](https://reads.ethereum.foundation/feed/update-may-june-2026/)) | Beat the active-nullifier baseline of 34.45 ms server, 22.29 ms client, 1.082 MB upload and 116.7 KB download while supporting live checkpoint updates | Mizu active nullifier witness first; any authenticated document/path query second |
+| Private sharding or private two-stage routing | Ethereum is designing sharded PIR for 1--10 GB hot slices, 100--300 GB proof state, hundreds-of-GB immutable logs and 2--30 TB archives. Raven already re-encodes changed shards, but explicitly sends the shard ID in the clear ([Raven](https://github.com/hisoka-io/raven)) | Hide the selected shard, or prove that a coarse public shard leaks nothing sensitive, without restoring a global first-stage scan | Unwindowed receipts/logs, billion-row document IDs and secondary indexes; this is the advance most likely to remove mandatory public windows |
+| Immutable preprocessing schemes | Harmony/RMS24 are being developed for immutable or slowly changing slices where hint construction is amortized ([Ethereum scheme list](https://reads.ethereum.foundation/workstreams/pir/)) | End-to-end lifetime work, client state and generation refresh beat SinglePass/Dense at the real query count | Historical logs, receipts and old Mizu generations; not the active generation |
+| PIR-friendly authenticated state layouts | Ethereum's Verifiable UBT work explores a flat binary trie and proof binding; the current analysis reports about 9x PIR read overhead for the binary tree versus 48x for the MPT ([COSIC presentation](https://reads.ethereum.foundation/presentations/cosic-applied-crypto/index.html)) | A production, incrementally updated authenticated layout with small proofs and independently verifiable root equivalence | Nullifier paths, DefraDB authenticated projections and two-stage indexes; it improves representation, not the underlying linear PIR law |
+| Universal PIR and access-layer interfaces | Ethereum is building middleware that keeps wallet RPC stable while shards/schemes change, plus a network-agnostic origin layer ([projects](https://reads.ethereum.foundation/projects/)) | A stable audited interface and implementations that can be selected per slice without client forks | Validates this POC's sidecar/adapter boundary and makes adding a new backend cheaper; it does not itself change benchmarks |
+| Embedded Tor/Arti maturity | Ethereum Reads has a functional Arti-to-WASM wallet prototype and TorJS, but still lists audit, WASM isolation, fingerprinting and bootstrap caveats ([engineering report](https://reads.ethereum.foundation/feed/embedding-arti-in-the-browser/)) | External audit plus phone battery/memory/latency results that beat the present roughly 0.88 s warm desktop path | Could make Tor rather than OHTTP the normal origin layer; it never replaces PIR because it hides who asked, not what was asked |
+
+Two thresholds prevent ordinary incremental progress from being mistaken for a
+breakthrough:
+
+- The unpartitioned 1B-document/0.01%-fanout tag query needs about a **100x
+  server-work reduction** (10.40 s toward the 106.79 ms decoy control), or
+  genuinely private partition selection. A 2--5x faster GPU does not change the
+  product decision.
+- Immediate live PIR must improve from 32.589 us to around **0.182
+  us/subscriber**--roughly 180x--or remove the `events * subscribers` scaling
+  before it displaces packed epochs. Faster event-by-event DPF that remains
+  above that threshold does not change the three live recommendations.
+
+Multi-GPU execution can make a huge query return sooner, but the objective here
+is aggregate server work and energy. Parallelizing the same scan changes
+latency, not the ranking, unless a future construction also reduces bytes read,
+joules consumed, or trust/client costs. Conversely, a mature one-server scheme
+may be worth some extra work because removing the non-collusion assumption is a
+privacy/deployment improvement rather than a speed claim.
