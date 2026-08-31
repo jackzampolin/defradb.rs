@@ -13,8 +13,8 @@ use p2p::sync::DocumentHeadProvider;
 use query::mutator::DocMutator;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use std::sync::Arc;
-use storage::RegolithStore;
 use storage::corekv::{IterOptions, Store};
+use storage::RegolithStore;
 
 fn branchable_schema() -> CollectionVersion {
     CollectionVersion::new(
