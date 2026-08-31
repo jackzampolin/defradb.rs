@@ -35,6 +35,7 @@ fn test_new_collection() {
     assert_eq!(coll.name, "users");
     assert_eq!(coll.version_id, "v1");
     assert!(coll.is_active);
+    assert!(coll.is_materialized);
     assert_eq!(coll.fields.len(), 3);
 }
 
@@ -143,6 +144,17 @@ fn test_validate_invalid_crdt_fails() {
 fn test_validate_valid_collection() {
     let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields());
     assert!(coll.validate().is_ok());
+}
+
+#[test]
+fn test_validate_non_view_collection_is_materialized() {
+    let mut coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields());
+    coll.is_materialized = false;
+
+    assert!(matches!(
+        coll.validate().unwrap_err(),
+        SchemaError::NonMaterializedCollection(name) if name == "users"
+    ));
 }
 
 #[test]

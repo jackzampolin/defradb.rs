@@ -216,7 +216,7 @@ impl CollectionVersion {
             fulltext_indexes: Vec::new(),
             policy: None,
             is_active: true,
-            is_materialized: false,
+            is_materialized: true,
             downsample_interval: None,
             downsample_time_field: None,
             downsample_retention: None,
@@ -326,6 +326,7 @@ impl CollectionVersion {
 
     /// Validate the collection schema
     pub fn validate(&self) -> Result<()> {
+        self.validate_materialization()?;
         self.validate_no_duplicate_names()?;
         self.validate_no_duplicate_index_names()?;
         self.validate_encrypted_indexes()?;
@@ -333,6 +334,13 @@ impl CollectionVersion {
         self.validate_relation_id_field_kinds()?;
         self.validate_policy()?;
         self.validate_downsample()?;
+        Ok(())
+    }
+
+    fn validate_materialization(&self) -> Result<()> {
+        if self.query.is_none() && !self.is_materialized {
+            return Err(SchemaError::NonMaterializedCollection(self.name.clone()));
+        }
         Ok(())
     }
 

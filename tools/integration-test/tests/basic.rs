@@ -8,6 +8,8 @@ mod collection_management;
 mod cross_runtime_cids;
 #[path = "basic/cross_runtime_queries.rs"]
 mod cross_runtime_queries;
+#[path = "basic/cross_runtime_schema_validation.rs"]
+mod cross_runtime_schema_validation;
 #[path = "basic/document_lifecycle.rs"]
 mod document_lifecycle;
 #[path = "basic/multi_collection.rs"]
