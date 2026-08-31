@@ -163,7 +163,7 @@ jobs:
             group: surfaces
             packages: >-
               -p defra-http -p embedded -p cli -p ffi -p defra-node
-              -p lens-host -p defra-wasm -p benches
+              -p lens-host -p defra-wasm -p benches -p ffi-test
           - os: macos-latest
             group: core
             packages: >-
@@ -181,7 +181,7 @@ jobs:
             group: surfaces
             packages: >-
               -p defra-http -p embedded -p cli -p ffi -p defra-node
-              -p lens-host -p defra-wasm -p benches
+              -p lens-host -p defra-wasm -p benches -p ffi-test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

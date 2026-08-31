@@ -499,12 +499,12 @@ build-apple:
 # Test
 # ---------------------------------------------------------------------------
 
-# Workspace unit tests. Mirrors CI's Build & Test step, which excludes the three suites that
+# Workspace unit tests. Mirrors CI's unit-tests jobs, which exclude the two suites that
 # need a built binary or an external runtime.
-[doc("Workspace unit tests (mirrors CI's Build & Test step).")]
+[doc("Workspace unit tests (mirrors CI's unit-tests jobs).")]
 [group('test')]
 test:
-    cargo test --workspace --profile {{ profile }} --exclude integration-test --exclude ffi-test --exclude conformance
+    cargo test --workspace --profile {{ profile }} --exclude integration-test --exclude conformance
 
 # The only place the wasm SIMD kernels execute; they are compiled out of every
 # host build.
@@ -559,7 +559,7 @@ integration-p2p:
 integration-go:
     cargo test -p integration-test --test p2p --profile {{ profile }} -- --test-threads=1 ::go_
 
-# FFI compatibility against Go. Needs `just setup-go` and the generated header.
+# The ffi-test tool's own unit tests. No Go checkout or generated header needed.
 [group('test')]
 test-ffi:
     cargo test -p ffi-test --profile {{ profile }}
