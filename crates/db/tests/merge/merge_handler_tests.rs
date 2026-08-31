@@ -48,9 +48,9 @@ use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::CollectionID;
+use storage::RegolithStore;
 use tokio::time::timeout;
 use tokio::time::Duration;
 
@@ -126,7 +126,7 @@ impl<B: blockstore::Blockstore> blockstore::Blockstore for CountingBlockstore<B>
 }
 
 async fn register_test_block_owner(
-    handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+    handler: &DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
     collection_short_id: u32,
     doc_id: &str,
     cid: &Cid,
@@ -149,7 +149,7 @@ async fn register_test_block_owner(
 /// Create a document locally through the genesis-CID identity flow:
 /// blocks first (derives the DocID), then mappings, then the blob.
 async fn create_doc_locally(
-    handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+    handler: &DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
     collection: &Collection,
     doc: &mut Document,
     schema_version_id: &str,
@@ -213,10 +213,10 @@ async fn create_doc_locally(
 }
 
 fn make_handler() -> (
-    DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
-    Arc<DefraBlockstore<MemoryStore>>,
+    DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
+    Arc<DefraBlockstore<RegolithStore>>,
 ) {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let store_arc = Arc::new(store);
     let db = Arc::new(DB::from_arc(store_arc.clone()).unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store_arc, false));
@@ -225,11 +225,11 @@ fn make_handler() -> (
 }
 
 async fn make_handler_with_schema_and_bus() -> (
-    DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
-    Arc<DefraBlockstore<MemoryStore>>,
+    DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
+    Arc<DefraBlockstore<RegolithStore>>,
     Arc<ChannelBus>,
 ) {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let bus = Arc::new(ChannelBus::new());
 
     let mut db = DB::from_arc(store.clone()).unwrap();
@@ -255,11 +255,11 @@ async fn make_handler_with_schema_and_bus() -> (
 }
 
 async fn make_counting_handler_with_schema() -> (
-    DbMergeHandler<MemoryStore, CountingBlockstore<DefraBlockstore<MemoryStore>>>,
-    Arc<DefraBlockstore<MemoryStore>>,
-    Arc<CountingBlockstore<DefraBlockstore<MemoryStore>>>,
+    DbMergeHandler<RegolithStore, CountingBlockstore<DefraBlockstore<RegolithStore>>>,
+    Arc<DefraBlockstore<RegolithStore>>,
+    Arc<CountingBlockstore<DefraBlockstore<RegolithStore>>>,
 ) {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
     db.create_collection(CollectionVersion::new(
         "Users",
@@ -277,10 +277,10 @@ async fn make_counting_handler_with_schema() -> (
 }
 
 async fn make_handler_with_counter_schema() -> (
-    DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
-    Arc<DefraBlockstore<MemoryStore>>,
+    DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
+    Arc<DefraBlockstore<RegolithStore>>,
 ) {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
 
     db.create_collection(CollectionVersion::new(
@@ -326,7 +326,7 @@ impl CompositeMergeHook for FailingCompositeHook {
 }
 
 async fn build_merge_block(
-    blockstore: &Arc<DefraBlockstore<MemoryStore>>,
+    blockstore: &Arc<DefraBlockstore<RegolithStore>>,
     name: &str,
     age: i64,
 ) -> MergeBlock {
@@ -340,7 +340,7 @@ async fn build_merge_block(
 
     MergeBlock {
         cid: result.cid,
-        block_data: bytes::Bytes::from(result.block),
+        block_data: result.block,
         doc_id: result.doc_id,
         collection_id: "col-users".to_string(),
         creator: "did:key:z6MkrBatchMergeTest".to_string(),
@@ -383,7 +383,7 @@ fn make_lww_block(signature_cid: Option<Cid>) -> Block {
 
 #[tokio::test]
 async fn test_merge_handler_creation() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let store_arc = Arc::new(store);
     let db = Arc::new(DB::from_arc(store_arc.clone()).unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store_arc, false));
@@ -411,7 +411,7 @@ async fn verify_unsigned_block_returns_none() {
 /// Returns (private_key, hex_pubkey, did).
 async fn sign_block_ed25519(
     block: &mut Block,
-    blockstore: &DefraBlockstore<MemoryStore>,
+    blockstore: &DefraBlockstore<RegolithStore>,
 ) -> (crypto::Ed25519PrivateKey, String, String) {
     let private_key = crypto::generate_ed25519().unwrap();
     let public_key = private_key.public_key();
@@ -660,7 +660,7 @@ async fn verify_corrupt_signature_block_returns_error() {
 /// Returns (hex_pubkey, did).
 async fn sign_block_bls(
     block: &mut Block,
-    blockstore: &DefraBlockstore<MemoryStore>,
+    blockstore: &DefraBlockstore<RegolithStore>,
 ) -> (String, String) {
     // Generate a BLS secret key from random bytes
     let mut ikm = [0u8; 32];
@@ -942,7 +942,7 @@ async fn counter_merge_marks_cid_merged() {
 /// Read the PNCounter accumulation store value (authoritative store, not the
 /// materialized blob) for a doc/field via a fresh read txn on `db`.
 async fn read_counter_accumulation_store(
-    db: &Arc<DB<MemoryStore>>,
+    db: &Arc<DB<RegolithStore>>,
     schema_version_id: &str,
     doc_id: &str,
     field: &str,
@@ -961,7 +961,7 @@ async fn read_counter_accumulation_store(
         .await
         .expect("counter value");
     assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-    i64::from_be_bytes(bytes.try_into().unwrap())
+    i64::from_be_bytes(bytes.as_ref().try_into().unwrap())
 }
 
 /// Build + store a standalone counter delta block for `doc_id`/`score` with the
@@ -969,7 +969,7 @@ async fn read_counter_accumulation_store(
 /// The block is persisted in the blockstore so `process_counter_delta` can find
 /// and mark it merged.
 async fn put_counter_delta_block(
-    blockstore: &Arc<DefraBlockstore<MemoryStore>>,
+    blockstore: &Arc<DefraBlockstore<RegolithStore>>,
     _doc_id: &str,
     increment: i64,
     priority: u64,
@@ -1006,7 +1006,7 @@ async fn put_counter_delta_block(
 /// the finalize's held window, but a merge that COMMITS *before* the
 /// interactive finalize makes the interactive txn's `begin()` snapshot stale →
 /// on commit the storage SSI/OCC conflict tracker (`ConflictTracker` in
-/// `storage::backends::shared`, used by `MemoryStore`) aborts the interactive
+/// `storage::backends::shared`, used by `RegolithStore`) aborts the interactive
 /// commit with a `TxnConflict` ("transaction conflict. Please retry"), and the
 /// merge's value survives. No data loss, no double-apply — the client retries.
 /// This matches Go's storage-txn isolation.
@@ -1031,7 +1031,7 @@ async fn put_counter_delta_block(
 async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let db = Arc::clone(handler.db());
-    // Same DB / same MemoryStore => same ConflictTracker shared across the
+    // Same DB / same RegolithStore => same ConflictTracker shared across the
     // interactive registry txn and the merge handler's own txn.
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
@@ -1452,10 +1452,10 @@ async fn composite_merge_skips_locally_merged_counter_parent() {
 }
 
 async fn make_handler_with_immutable_schema() -> (
-    DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
-    Arc<DefraBlockstore<MemoryStore>>,
+    DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
+    Arc<DefraBlockstore<RegolithStore>>,
 ) {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
 
     db.create_collection(CollectionVersion::new(
@@ -2019,7 +2019,7 @@ async fn batch_merge_rejects_immutable_change_without_partial_write() {
     let sibling_id = sibling_result.doc_id.clone();
     let sibling_merge = MergeBlock {
         cid: sibling_result.cid,
-        block_data: bytes::Bytes::from(sibling_result.block),
+        block_data: sibling_result.block,
         doc_id: sibling_result.doc_id,
         collection_id: "col-agentdocs".to_string(),
         creator: "did:key:z6MkrSib".to_string(),
@@ -2916,10 +2916,10 @@ async fn decrypt_block_data_no_kms_no_cid_passthrough() {
 }
 
 async fn make_handler_with_unique_index_schema() -> (
-    DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
-    Arc<DefraBlockstore<MemoryStore>>,
+    DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
+    Arc<DefraBlockstore<RegolithStore>>,
 ) {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
 
     db.create_collection(
@@ -3106,7 +3106,7 @@ async fn remote_composite_merge_with_corrupted_unique_index_entry_is_rejected() 
 // `non_storage_index_error_is_not_classified`).
 
 async fn build_session_merge_block(
-    blockstore: &Arc<DefraBlockstore<MemoryStore>>,
+    blockstore: &Arc<DefraBlockstore<RegolithStore>>,
     name: &str,
     session_id: &str,
 ) -> (MergeBlock, DocID) {
@@ -3119,7 +3119,7 @@ async fn build_session_merge_block(
     let doc_id = DocID::from_string(&result.doc_id).unwrap();
     let merge_block = MergeBlock {
         cid: result.cid,
-        block_data: bytes::Bytes::from(result.block),
+        block_data: result.block,
         doc_id: result.doc_id,
         collection_id: "col-sessions".to_string(),
         creator: format!("did:key:z6MkrSession{name}"),
@@ -3132,7 +3132,7 @@ async fn build_session_merge_block(
 }
 
 async fn read_session_doc(
-    handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+    handler: &DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
     collection: &Collection,
     doc_id: &DocID,
 ) -> Option<Document> {
@@ -3160,7 +3160,7 @@ async fn read_session_doc(
 /// `MergeOutcome::Rejected`, rather than the live-twin case #1126 now
 /// resolves deterministically.
 async fn corrupt_unique_index_entry(
-    handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+    handler: &DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
     collection: &Collection,
     session_id: &str,
 ) {

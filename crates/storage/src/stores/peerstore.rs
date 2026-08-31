@@ -1,7 +1,3 @@
-/// Peerstore - Peer and replication metadata
-///
-/// The Peerstore handles storage of replicator configuration, replication
-/// retry tracking, and search engine retry tracking for P2P operations.
 use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
 use crate::keys::peerstore::{
     ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
@@ -9,6 +5,11 @@ use crate::keys::peerstore::{
 use crate::namespace::{Namespace, NamespacedStore};
 use async_lock::{RwLock, RwLockWriteGuardArc};
 use async_trait::async_trait;
+/// Peerstore - Peer and replication metadata
+///
+/// The Peerstore handles storage of replicator configuration, replication
+/// retry tracking, and search engine retry tracking for P2P operations.
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -151,7 +152,7 @@ impl<S: Store> Peerstore<S> {
     /// Get a replicator's configuration by peer ID.
     ///
     /// Returns None if the replicator doesn't exist.
-    pub async fn get_replicator(&self, peer_id: &str) -> Result<Option<Vec<u8>>> {
+    pub async fn get_replicator(&self, peer_id: &str) -> Result<Option<Bytes>> {
         let key = ReplicatorKey::new(peer_id);
         let txn = self.store.new_txn(true).await?;
         txn.get(&key.bytes()).await
@@ -211,7 +212,7 @@ impl<S: Store> Peerstore<S> {
     ///
     /// Returns a list of (peer_id, data) pairs. Keys that don't match the
     /// expected format are logged and skipped.
-    pub async fn list_replicators(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    pub async fn list_replicators(&self) -> Result<Vec<(String, Bytes)>> {
         let prefix = ReplicatorKey::replicator_prefix();
         let txn = self.store.new_txn(true).await?;
         let opts = IterOptions::new().with_prefix(prefix);
@@ -249,7 +250,7 @@ impl<S: Store> Peerstore<S> {
     }
 
     /// Load stored P2P collection subscriptions.
-    pub async fn get_p2p_collections(&self) -> Result<Option<Vec<u8>>> {
+    pub async fn get_p2p_collections(&self) -> Result<Option<Bytes>> {
         let txn = self.store.new_txn(true).await?;
         txn.get(b"/p2p/collections").await
     }
@@ -262,7 +263,7 @@ impl<S: Store> Peerstore<S> {
     }
 
     /// Load stored P2P document subscriptions.
-    pub async fn get_p2p_documents(&self) -> Result<Option<Vec<u8>>> {
+    pub async fn get_p2p_documents(&self) -> Result<Option<Bytes>> {
         let txn = self.store.new_txn(true).await?;
         txn.get(b"/p2p/documents").await
     }
@@ -693,7 +694,7 @@ impl<S: Store> Peerstore<S> {
     }
 
     /// Get retry info bytes for a peer.
-    pub async fn get_retry_info(&self, peer_id: &str) -> Result<Option<Vec<u8>>> {
+    pub async fn get_retry_info(&self, peer_id: &str) -> Result<Option<Bytes>> {
         let txn = self.store.new_txn(true).await?;
         let key = ReplicatorRetryIDKey::new(peer_id);
         txn.get(&key.bytes()).await
@@ -702,16 +703,16 @@ impl<S: Store> Peerstore<S> {
     /// Get all peers that have pending retries.
     ///
     /// Returns `(peer_id, retry_info_bytes)` pairs.
-    pub async fn get_all_retry_peers(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    pub async fn get_all_retry_peers(&self) -> Result<Vec<(String, Bytes)>> {
         self.get_retry_peers(false).await
     }
 
     /// Get retry peers that still have a persisted replicator.
-    pub async fn get_replicator_retry_peers(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    pub async fn get_replicator_retry_peers(&self) -> Result<Vec<(String, Bytes)>> {
         self.get_retry_peers(true).await
     }
 
-    async fn get_retry_peers(&self, require_replicator: bool) -> Result<Vec<(String, Vec<u8>)>> {
+    async fn get_retry_peers(&self, require_replicator: bool) -> Result<Vec<(String, Bytes)>> {
         let prefix = ReplicatorRetryIDKey::retry_prefix();
         let txn = self.store.new_txn(true).await?;
         let opts = IterOptions::new().with_prefix(prefix);

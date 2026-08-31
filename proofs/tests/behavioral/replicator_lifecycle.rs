@@ -154,7 +154,7 @@ async fn replicator_resume_across_restart() {
         .with_p2p()
         // A disk store so node1's state (schema + documents) survives the restart;
         // the default in-memory store is wiped when the process is respawned.
-        .with_store("redb")
+        .with_store("regolith")
         .with_rust_binary(support::release_binary())
         .build()
         .await

@@ -75,7 +75,7 @@ fn non_nillable_field_rejects_null_and_missing_values() {
 
 #[tokio::test]
 async fn atomic_creation_rejects_an_unknown_relation_target() {
-    let database = db::DB::open(storage::backends::MemoryStore::new())
+    let database = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .unwrap();
     let author = FieldDescription::new("1", "author", FieldKind::named("Missing", false))
@@ -95,7 +95,7 @@ async fn atomic_creation_rejects_an_unknown_relation_target() {
 
 #[tokio::test]
 async fn creation_rejects_an_invalid_default_value() {
-    let database = db::DB::open(storage::backends::MemoryStore::new())
+    let database = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .unwrap();
     let count = FieldDescription::new("1", "count", FieldKind::int())
@@ -111,7 +111,7 @@ async fn creation_rejects_an_invalid_default_value() {
 
 #[tokio::test]
 async fn creation_accepts_supported_scalar_defaults() {
-    let database = db::DB::open(storage::backends::MemoryStore::new())
+    let database = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .unwrap();
     let collections = query::parse_sdl(

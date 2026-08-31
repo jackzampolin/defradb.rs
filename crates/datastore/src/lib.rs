@@ -21,9 +21,9 @@
 ///
 /// ```ignore
 /// use datastore::BasicTxn;
-/// use storage::backends::MemoryStore;
+/// use storage::RegolithStore;
 ///
-/// let store = MemoryStore::new();
+/// let store = RegolithStore::in_memory().unwrap();
 /// let mut txn = BasicTxn::new(&store, 1, false).await?;
 ///
 /// // Access namespaced stores

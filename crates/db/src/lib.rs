@@ -23,10 +23,10 @@
 /// ```ignore
 /// use db::{DB, Collection};
 /// use document::Document;
-/// use storage::backends::MemoryStore;
+/// use storage::RegolithStore;
 ///
 /// // Create database
-/// let store = MemoryStore::new();
+/// let store = RegolithStore::in_memory().unwrap();
 /// let db = DB::new(store)?;
 ///
 /// // Create a transaction
@@ -119,7 +119,7 @@ pub use write::doc::DbDocMutator;
 pub use write::queue::DocWriteQueue;
 
 // NAC exports
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub use nac::create_persistent_nac_manager;
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
 

@@ -338,7 +338,7 @@ fn build_env(ctx: &WorktreeContext, package: &str) -> HashMap<String, String> {
     // Enable vector embedding tests
     env.insert("DEFRA_VECTOR_EMBEDDING".to_string(), "true".to_string());
 
-    // Enable file-based database tests (Go env var name; Rust uses redb for persistence)
+    // Enable file-based database tests (Go env var name; Rust uses regolith for persistence)
     env.insert("DEFRA_BADGER_FILE".to_string(), "true".to_string());
 
     // Isolate the cgo build cache per worktree and package

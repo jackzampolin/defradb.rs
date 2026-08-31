@@ -4,7 +4,7 @@ use db::database::DB;
 use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn user_schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -58,7 +58,7 @@ fn related_schemas() -> Vec<CollectionVersion> {
 
 #[tokio::test]
 async fn delete_collections_removes_single_name() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(vec![user_schema()])
         .await
         .unwrap();
@@ -75,7 +75,7 @@ async fn delete_collections_removes_single_name() {
 
 #[tokio::test]
 async fn delete_collections_removes_multiple_names_atomically() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(vec![user_schema(), book_schema()])
         .await
         .unwrap();
@@ -96,7 +96,7 @@ async fn delete_collections_removes_multiple_names_atomically() {
 
 #[tokio::test]
 async fn delete_collections_errors_on_empty_names() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let err = db
         .delete_collections(vec![], true)
         .await
@@ -111,7 +111,7 @@ async fn delete_collections_errors_on_empty_names() {
 
 #[tokio::test]
 async fn delete_collections_rejects_empty_name_without_deleting_valid_names() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(vec![user_schema()])
         .await
         .unwrap();
@@ -127,7 +127,7 @@ async fn delete_collections_rejects_empty_name_without_deleting_valid_names() {
 
 #[tokio::test]
 async fn delete_collections_errors_on_unknown_name() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(vec![user_schema()])
         .await
         .unwrap();
@@ -152,7 +152,7 @@ async fn delete_collections_errors_on_unknown_name() {
 
 #[tokio::test]
 async fn delete_collections_dedupes_repeated_names() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(vec![user_schema()])
         .await
         .unwrap();
@@ -169,7 +169,7 @@ async fn delete_collections_dedupes_repeated_names() {
 
 #[tokio::test]
 async fn delete_collections_rejects_dangling_relation_targets() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(related_schemas())
         .await
         .unwrap();
@@ -188,7 +188,7 @@ async fn delete_collections_rejects_dangling_relation_targets() {
 
 #[tokio::test]
 async fn delete_collections_allows_deleting_both_sides_of_relation() {
-    let db = DB::new(MemoryStore::new()).unwrap();
+    let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.create_collections_atomic(related_schemas())
         .await
         .unwrap();

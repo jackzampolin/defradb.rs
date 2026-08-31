@@ -10,7 +10,7 @@ use events::Bus;
 use futures::channel::oneshot;
 use futures::future::{AbortHandle, Abortable};
 use futures::lock::Mutex;
-use storage::LevelDbStore;
+use storage::RegolithStore;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::error::{Result, WasmError};
@@ -41,7 +41,7 @@ impl Drop for SyncTask {
 }
 
 pub(crate) async fn start(
-    database: Arc<db::DB<LevelDbStore>>,
+    database: Arc<db::DB<RegolithStore>>,
     event_bus: &Arc<events::ChannelBus>,
     server_url: &str,
     auth_token: Option<String>,
@@ -85,7 +85,7 @@ pub(crate) async fn start(
 }
 
 struct SyncSession {
-    engine: db::merge::BrowserSyncEngine<LevelDbStore>,
+    engine: db::merge::BrowserSyncEngine<RegolithStore>,
     http: SyncHttpClient,
     exchange_lock: Mutex<()>,
     full_sync_lock: Mutex<()>,

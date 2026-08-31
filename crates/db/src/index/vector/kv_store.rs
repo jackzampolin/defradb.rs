@@ -4,6 +4,7 @@
 //! caller's transaction. That is also what gives the engine its single-writer
 //! discipline without a lock.
 
+use bytes::Bytes;
 use defra_core::thread_bounds::MaybeSend;
 use storage::corekv::{IterOptions, Key, Reader, Writer};
 use storage::keys::datastore::{VectorAuxKey, VectorIndexKey};
@@ -143,7 +144,7 @@ impl<T: Reader + Writer + MaybeSend> VectorNodeStore for KvNodeStore<'_, T> {
         Ok(())
     }
 
-    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get_aux(&self, kind: u8, key: &[u8]) -> Result<Option<Bytes>> {
         Ok(self.txn.get(&self.aux_key(kind, key)).await?)
     }
 

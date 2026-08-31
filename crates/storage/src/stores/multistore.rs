@@ -8,12 +8,7 @@
 /// - Systemstore: Metadata and configuration
 /// - Peerstore: Peer and replication metadata
 /// - Encstore: Encrypted blocks (uses blockstore implementation)
-#[cfg(not(target_arch = "wasm32"))]
-use crate::backends::MemoryStore;
-
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-use crate::backends::RedbStore;
-
+use crate::backends::RegolithStore;
 use crate::corekv::{Result, Store};
 use crate::stores::{
     blockstore::Blockstore, datastore::Datastore, headstore::Headstore, peerstore::Peerstore,
@@ -67,28 +62,23 @@ impl<S: Store> Multistore<S> {
     }
 }
 
-/// Multistore specialized for MemoryStore
-#[cfg(not(target_arch = "wasm32"))]
-pub type MemoryMultistore = Multistore<MemoryStore>;
+/// An in-memory multistore, for tests and for a node that is
+/// deliberately ephemeral.
+pub type MemoryMultistore = Multistore<RegolithStore>;
 
-#[cfg(not(target_arch = "wasm32"))]
 impl MemoryMultistore {
-    /// Create a new in-memory Multistore
-    pub fn new_memory() -> Self {
-        Self::new(Arc::new(MemoryStore::new()))
+    /// Open a multistore that never touches a filesystem.
+    pub fn new_memory() -> Result<Self> {
+        Ok(Self::new(Arc::new(RegolithStore::in_memory()?)))
     }
 }
+/// A multistore on a persistent regolith database.
+pub type PersistentMultistore = Multistore<RegolithStore>;
 
-/// Multistore specialized for RedbStore
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub type RedbMultistore = Multistore<RedbStore>;
-
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-impl RedbMultistore {
-    /// Create a new Redb-backed Multistore
-    pub fn new_redb(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let store = Arc::new(RedbStore::open(path)?);
-        Ok(Self::new(store))
+impl PersistentMultistore {
+    /// Open a multistore at `path`.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Self::new(Arc::new(RegolithStore::open(path)?)))
     }
 }
 

@@ -80,9 +80,9 @@ fn record_max(max_seen: &AtomicUsize, value: usize) {
 
 #[tokio::test]
 async fn unfinished_replay_is_persisted_and_marks_replicator_inactive() {
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = storage::stores::Peerstore::new(store.clone());
     let peer = PeerId::new("peer-durable".to_string());
     let info =
@@ -120,9 +120,9 @@ async fn unfinished_replay_is_persisted_and_marks_replicator_inactive() {
 
 #[tokio::test]
 async fn unfinished_replay_uses_the_peer_retry_writer() {
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = storage::stores::Peerstore::new(store.clone());
     let peer = PeerId::new("peer-durable".to_string());
     let info =

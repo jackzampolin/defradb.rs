@@ -3,6 +3,7 @@
 //! This keeps startup and doc-pusher code from depending on individual module
 //! paths, which makes later internal decomposition less invasive.
 
+use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::database::DB;
@@ -119,7 +120,7 @@ pub async fn load_persisted_collections<B: Blockstore + 'static, T: P2PTransport
 pub async fn load_document_head_blocks<S: Store + 'static>(
     db: &Arc<DB<S>>,
     doc_id: &str,
-) -> Result<Vec<(Cid, Vec<u8>)>, String> {
+) -> Result<Vec<(Cid, Bytes)>, String> {
     let provider = create_head_provider(db.clone());
     let heads = <DbHeadProvider<S> as DocumentHeadProvider>::get_document_heads(&provider, doc_id)
         .await

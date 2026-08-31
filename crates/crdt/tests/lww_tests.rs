@@ -9,11 +9,11 @@
 use crdt::traits::{Context, MergeResult, ReplicatedData, ValueReader};
 use crdt::{CounterDelta, Lww, LwwDelta};
 use defra_core::types::DocId;
-use storage::{MemoryStore, Store};
+use storage::{RegolithStore, Store};
 
 #[tokio::test]
 async fn test_lww_higher_priority_wins() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -34,7 +34,7 @@ async fn test_lww_higher_priority_wins() {
 
     let mut txn = store.new_txn(false).await.unwrap();
     lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Second write with higher priority 20
     let delta2 = LwwDelta::new(
@@ -46,14 +46,14 @@ async fn test_lww_higher_priority_wins() {
     )
     .unwrap();
     lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Bob"[..]);
 
     txn.commit().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_lww_lower_priority_ignored() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -85,14 +85,14 @@ async fn test_lww_lower_priority_ignored() {
     )
     .unwrap();
     lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     txn.commit().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_lww_same_priority_lexicographic() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -125,14 +125,14 @@ async fn test_lww_same_priority_lexicographic() {
     )
     .unwrap();
     lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Bob"[..]);
 
     txn.commit().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_lww_deletion() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -173,7 +173,7 @@ async fn test_lww_deletion() {
 
 #[tokio::test]
 async fn test_lww_empty_data_tie_breaking() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -194,7 +194,7 @@ async fn test_lww_empty_data_tie_breaking() {
     )
     .unwrap();
     lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Delete (empty data) at same priority 10
     // Lexicographically, empty < "Alice", so "Alice" should win
@@ -209,7 +209,7 @@ async fn test_lww_empty_data_tie_breaking() {
     lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
     // Value should still be "Alice" (empty data lost tie-break)
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Now delete at higher priority 20
     let delta3 = LwwDelta::new(
@@ -230,7 +230,7 @@ async fn test_lww_empty_data_tie_breaking() {
 
 #[tokio::test]
 async fn test_lww_deletion_resurrection_with_priority() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -258,7 +258,7 @@ async fn test_lww_deletion_resurrection_with_priority() {
     lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
     // Value should still exist (deletion was lower priority)
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Delete at same priority 20
     // Since priorities are equal, lexicographic tie-breaking applies
@@ -268,7 +268,7 @@ async fn test_lww_deletion_resurrection_with_priority() {
     lww.merge(&mut *txn, &ctx, &delta3).await.unwrap();
 
     // Value should still be "Alice" (tie-break)
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Delete at higher priority 30
     let delta4 =
@@ -304,7 +304,7 @@ async fn test_lww_deletion_resurrection_with_priority() {
     lww.merge(&mut *txn, &ctx, &delta6).await.unwrap();
 
     // Value should now be resurrected
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Bob"[..]);
 
     txn.commit().await.unwrap();
 }
@@ -364,7 +364,7 @@ fn test_lww_delta_validation_rejects_empty_values() {
 
 #[tokio::test]
 async fn test_lww_wrong_delta_type() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -395,7 +395,7 @@ async fn test_lww_wrong_delta_type() {
 
 #[tokio::test]
 async fn test_lww_merge_result_applied() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -420,7 +420,7 @@ async fn test_lww_merge_result_applied() {
 
 #[tokio::test]
 async fn test_lww_merge_result_rejected_lower_priority() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -464,7 +464,7 @@ async fn test_lww_merge_result_rejected_lower_priority() {
 
 #[tokio::test]
 async fn test_lww_merge_result_rejected_tie_break() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -503,7 +503,7 @@ async fn test_lww_merge_result_rejected_tie_break() {
 
 #[tokio::test]
 async fn test_lww_priority_zero() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -525,7 +525,7 @@ async fn test_lww_priority_zero() {
     .unwrap();
     let result1 = lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
     assert!(matches!(result1, MergeResult::Applied));
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Second write with priority 0 should use tie-breaking
     // "Bob" > "Alice" so Bob should win
@@ -539,12 +539,12 @@ async fn test_lww_priority_zero() {
     .unwrap();
     let result2 = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
     assert!(matches!(result2, MergeResult::Applied));
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Bob"[..]);
 }
 
 #[tokio::test]
 async fn test_lww_priority_max() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -566,7 +566,7 @@ async fn test_lww_priority_max() {
     .unwrap();
     let result1 = lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
     assert!(matches!(result1, MergeResult::Applied));
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 
     // Any subsequent write with lower priority should be rejected
     let delta2 = LwwDelta::new(
@@ -579,12 +579,12 @@ async fn test_lww_priority_max() {
     .unwrap();
     let result2 = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
     assert!(matches!(result2, MergeResult::RejectedLowerPriority { .. }));
-    assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+    assert_eq!(lww.value(&*txn).await.unwrap(), &b"Alice"[..]);
 }
 
 #[tokio::test]
 async fn test_lww_field_name_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -614,7 +614,7 @@ async fn test_lww_field_name_mismatch() {
 
 #[tokio::test]
 async fn test_lww_schema_version_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
@@ -672,7 +672,7 @@ fn test_lww_constructor_empty_field_name() {
 async fn test_lww_large_payload() {
     // Test LWW with large payloads (1MB, 10MB)
     // Verifies no memory issues or data corruption with large values
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "content".to_string()).unwrap();
 
     let ctx = Context {
@@ -729,7 +729,7 @@ async fn test_lww_large_payload() {
 #[tokio::test]
 async fn test_lww_large_payload_priority_rejected() {
     // Test that large payloads with lower priority are correctly rejected
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let lww = Lww::new("v1".to_string(), b"doc1", "content".to_string()).unwrap();
 
     let ctx = Context {
@@ -771,7 +771,7 @@ async fn test_lww_large_payload_priority_rejected() {
 
     // Value should still be the small one
     let retrieved = lww.value(&*txn).await.unwrap();
-    assert_eq!(retrieved, small_data);
+    assert_eq!(retrieved, &small_data[..]);
 
     txn.commit().await.unwrap();
 }

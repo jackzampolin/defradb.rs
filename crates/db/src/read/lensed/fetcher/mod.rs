@@ -22,6 +22,7 @@ pub mod migration;
 mod scan;
 pub mod stream;
 
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -364,7 +365,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
-    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Bytes>> {
         self.get_view_cache_items_impl(collection_id).await
     }
 }

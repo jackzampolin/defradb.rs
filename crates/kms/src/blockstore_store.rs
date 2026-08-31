@@ -11,6 +11,7 @@
 //! implements over its encstore→blockstore.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use defra_core::thread_bounds::MaybeSendSync;
 use rand::RngCore;
 
@@ -31,10 +32,10 @@ use crate::types::{EncryptionCid, KeyScope};
 pub trait EncBlockStore: MaybeSendSync {
     /// Fetch the raw CBOR bytes of the `Encryption` block for this CID.
     /// `None` if not held in the durable store.
-    async fn get_block(&self, cid: &EncryptionCid) -> Result<Option<Vec<u8>>>;
+    async fn get_block(&self, cid: &EncryptionCid) -> Result<Option<Bytes>>;
 
     /// Persist the raw CBOR bytes of an `Encryption` block under its CID.
-    async fn put_block(&self, cid: EncryptionCid, bytes: Vec<u8>) -> Result<()>;
+    async fn put_block(&self, cid: EncryptionCid, bytes: Bytes) -> Result<()>;
 }
 
 /// `KeyStore` backed by the node's durable `Encryption`-block store.
@@ -53,7 +54,7 @@ impl BlockstoreKeyStore {
     }
 }
 
-fn decode_stored(block_bytes: Vec<u8>) -> Result<StoredKey> {
+fn decode_stored(block_bytes: Bytes) -> Result<StoredKey> {
     let block = Encryption::from_dag_cbor(&block_bytes)
         .map_err(|e| Error::Storage(format!("decode encryption block: {e}")))?;
     let key: [u8; 32] = block.key.as_slice().try_into().map_err(|_| {
@@ -62,14 +63,19 @@ fn decode_stored(block_bytes: Vec<u8>) -> Result<StoredKey> {
             block.key.len()
         ))
     })?;
-    Ok(StoredKey { key, block_bytes })
+    Ok(StoredKey {
+        key,
+        block_bytes: block_bytes.into(),
+    })
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl KeyStore for BlockstoreKeyStore {
     async fn put(&self, cid: EncryptionCid, stored: StoredKey) -> Result<()> {
-        self.inner.put_block(cid, stored.block_bytes.clone()).await
+        self.inner
+            .put_block(cid, stored.block_bytes.clone().into())
+            .await
     }
 
     async fn get(&self, cid: &EncryptionCid) -> Result<Option<StoredKey>> {
@@ -92,7 +98,9 @@ impl KeyStore for BlockstoreKeyStore {
         let cid = generate_cid_from_bytes(&block_bytes)
             .map_err(|e| Error::Storage(format!("cid from block: {e}")))?;
 
-        self.inner.put_block(cid, block_bytes.clone()).await?;
+        self.inner
+            .put_block(cid, block_bytes.clone().into())
+            .await?;
         Ok((cid, StoredKey { key, block_bytes }))
     }
 
@@ -118,15 +126,15 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEncBlockStore {
-        inner: RwLock<HashMap<EncryptionCid, Vec<u8>>>,
+        inner: RwLock<HashMap<EncryptionCid, Bytes>>,
     }
 
     #[async_trait]
     impl EncBlockStore for FakeEncBlockStore {
-        async fn get_block(&self, cid: &EncryptionCid) -> Result<Option<Vec<u8>>> {
+        async fn get_block(&self, cid: &EncryptionCid) -> Result<Option<Bytes>> {
             Ok(self.inner.read().await.get(cid).cloned())
         }
-        async fn put_block(&self, cid: EncryptionCid, bytes: Vec<u8>) -> Result<()> {
+        async fn put_block(&self, cid: EncryptionCid, bytes: Bytes) -> Result<()> {
             self.inner.write().await.insert(cid, bytes);
             Ok(())
         }
@@ -163,7 +171,9 @@ mod tests {
         };
         let block_bytes = block.to_dag_cbor().unwrap();
         let cid = generate_cid_from_bytes(&block_bytes).unwrap();
-        fake.put_block(cid, block_bytes.clone()).await.unwrap();
+        fake.put_block(cid, block_bytes.clone().into())
+            .await
+            .unwrap();
 
         let store = BlockstoreKeyStore::new(fake);
         let got = store.get(&cid).await.unwrap().unwrap();

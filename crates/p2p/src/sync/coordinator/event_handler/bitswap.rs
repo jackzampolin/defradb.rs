@@ -220,7 +220,7 @@ mod tests {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     use crate::error::Result as P2PResult;
     use crate::message::{
@@ -523,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn bitswap_block_received_retries_only_waiting_dags() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, mut events) =
@@ -580,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn bitswap_block_coalesces_without_blocking_the_transport_drain() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let (coordinator, _events) =
@@ -624,7 +624,7 @@ mod tests {
     /// claim and emit `DagNeedsFetch`, preventing an immediate retry storm.
     #[tokio::test(start_paused = true)]
     async fn bitswap_complete_failure_defers_reissue_to_retry_clock() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let transport_handle = transport.clone();
@@ -711,7 +711,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn bitswap_complete_retries_only_its_registered_and_due_root() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
         let transport_handle = transport.clone();

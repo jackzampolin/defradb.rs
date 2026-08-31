@@ -8,7 +8,7 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use std::collections::HashSet;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 fn test_collection() -> CollectionVersion {
     CollectionVersion::new(
@@ -30,7 +30,7 @@ fn test_collection() -> CollectionVersion {
 /// written by the first update.
 #[tokio::test]
 async fn stale_disjoint_field_update_without_precondition_preserves_committed_fields() {
-    let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(test_collection())
         .await
         .expect("schema");
@@ -73,7 +73,7 @@ async fn stale_disjoint_field_update_without_precondition_preserves_committed_fi
 /// predicate that is no longer known to hold.
 #[tokio::test]
 async fn stale_conditional_update_returns_conflict() {
-    let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(test_collection())
         .await
         .expect("schema");

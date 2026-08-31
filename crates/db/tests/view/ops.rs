@@ -60,7 +60,7 @@ fn an_embedded_only_view_is_never_refreshed() {
 /// filter alone returned `Ok(())` over an empty list.
 #[tokio::test]
 async fn an_unknown_version_id_is_an_error_not_a_silent_success() {
-    let db = db::DB::open(storage::backends::MemoryStore::new())
+    let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
 
@@ -80,7 +80,7 @@ async fn an_unknown_version_id_is_an_error_not_a_silent_success() {
 
 #[tokio::test]
 async fn a_name_precedes_an_unknown_version_id() {
-    let db = db::DB::open(storage::backends::MemoryStore::new())
+    let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
     db.create_collection(materialized("OrdersView"))
@@ -98,7 +98,7 @@ async fn a_name_precedes_an_unknown_version_id() {
 
 #[tokio::test]
 async fn an_unknown_collection_id_is_an_error() {
-    let db = db::DB::open(storage::backends::MemoryStore::new())
+    let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
 
@@ -115,7 +115,7 @@ async fn an_unknown_collection_id_is_an_error() {
 
 #[tokio::test]
 async fn get_inactive_is_allowed_when_no_inactive_view_is_selected() {
-    let db = db::DB::open(storage::backends::MemoryStore::new())
+    let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
 
@@ -132,7 +132,7 @@ async fn get_inactive_is_allowed_when_no_inactive_view_is_selected() {
 /// would clear the shared cache and rebuild it from the active definition.
 #[tokio::test]
 async fn refreshing_a_selected_inactive_view_is_refused() {
-    let db = db::DB::open(storage::backends::MemoryStore::new())
+    let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
     let mut inactive_view = materialized("InactiveView");

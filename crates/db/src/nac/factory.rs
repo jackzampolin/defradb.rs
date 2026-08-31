@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use acp::MemoryZanzibarStore;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(not(target_arch = "wasm32"))]
 use acp::PersistentZanzibarStore;
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
-use storage::RedbStore;
+#[cfg(not(target_arch = "wasm32"))]
+use storage::RegolithStore;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::nac::error::{Error, Result};
 
 use super::{NacConfig, NacManager};
@@ -23,10 +23,10 @@ pub fn create_memory_nac_manager(config: NacConfig) -> NacManager<MemoryZanzibar
 /// Create a persistent NAC manager.
 ///
 /// The NAC data is stored in a separate directory (`local_node_acp/`) under the data path.
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn create_persistent_nac_manager(
     data_path: &std::path::Path,
-) -> Result<NacManager<PersistentZanzibarStore<RedbStore>>> {
+) -> Result<NacManager<PersistentZanzibarStore<RegolithStore>>> {
     let nac_path = data_path.join("local_node_acp");
     std::fs::create_dir_all(&nac_path)
         .map_err(|e| Error::Other(format!("failed to create NAC data directory: {}", e)))?;

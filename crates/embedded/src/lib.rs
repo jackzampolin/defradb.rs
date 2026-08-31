@@ -243,15 +243,16 @@ impl ManagedP2PSystem {
     }
 }
 
-/// Storage backends supported by the public `NodeBuilder`.
+/// How the public `NodeBuilder` stores data.
+///
+/// regolith is the store, whether it is keeping the database in memory or
+/// on disk, so the choice here is only whether anything is persisted and
+/// whether values are encrypted at rest.
 #[non_exhaustive]
 pub enum EmbeddedStore {
-    Memory(storage::MemoryStore),
-    #[cfg(feature = "lark")]
-    Lark(storage::LarkStore),
-    #[cfg(feature = "redb")]
-    Redb(storage::RedbStore),
-    /// A backend wrapped in transparent at-rest value encryption.
+    /// A regolith database, in memory or on a path.
+    Regolith(storage::RegolithStore),
+    /// A store wrapped in transparent at-rest value encryption.
     Encrypted(Box<storage::encrypted_store::EncryptedStore<EmbeddedStore>>),
 }
 
@@ -270,22 +271,14 @@ impl storage::corekv::private::Sealed for EmbeddedStore {}
 impl storage::Store for EmbeddedStore {
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
-            Self::Memory(store) => store.new_txn(readonly).await,
-            #[cfg(feature = "lark")]
-            Self::Lark(store) => store.new_txn(readonly).await,
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => store.new_txn(readonly).await,
+            Self::Regolith(store) => store.new_txn(readonly).await,
             Self::Encrypted(store) => store.new_txn(readonly).await,
         }
     }
 
     async fn close(&self) -> storage::Result<()> {
         match self {
-            Self::Memory(store) => store.close().await,
-            #[cfg(feature = "lark")]
-            Self::Lark(store) => store.close().await,
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => store.close().await,
+            Self::Regolith(store) => store.close().await,
             Self::Encrypted(store) => store.close().await,
         }
     }

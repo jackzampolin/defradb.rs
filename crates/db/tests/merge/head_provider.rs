@@ -12,14 +12,14 @@ use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::headstore::HeadstoreDocKey;
 use storage::keys::headstore::HeadstorePriorityKey;
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn batch_create_docs_expose_composite_heads() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
     db.create_collection(CollectionVersion::new(
         "Transcript",
@@ -57,7 +57,7 @@ async fn batch_create_docs_expose_composite_heads() {
 
 #[tokio::test]
 async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
     db.create_collection(CollectionVersion::new(
         "Transcript",
@@ -98,7 +98,7 @@ async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
 
 #[tokio::test]
 async fn falls_back_to_blockstore_scan_when_head_indexes_are_missing() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
     db.create_collection(CollectionVersion::new(
         "Transcript",
@@ -149,7 +149,7 @@ async fn falls_back_to_blockstore_scan_when_head_indexes_are_missing() {
 
 #[tokio::test]
 async fn falls_back_to_ownership_index_when_head_indexes_are_missing() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
 
     let block = Block::new_with_options(
@@ -190,7 +190,7 @@ async fn falls_back_to_ownership_index_when_head_indexes_are_missing() {
     assert_eq!(heads, vec![cid]);
 }
 
-async fn doc_short_id_for(db: &Arc<DB<MemoryStore>>, doc_id: &str) -> u64 {
+async fn doc_short_id_for(db: &Arc<DB<RegolithStore>>, doc_id: &str) -> u64 {
     let txn = db.new_txn(true).await.unwrap();
     let systemstore = txn.systemstore().unwrap();
     db::docid::map::get_doc_ref(&systemstore, doc_id)

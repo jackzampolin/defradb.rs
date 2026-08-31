@@ -3,6 +3,7 @@
 //! These tests verify namespace isolation, prefix stripping, and
 //! correct coordination between all specialized stores.
 
+use bytes::Bytes;
 use cid::Cid;
 use std::str::FromStr;
 use storage::corekv::{IterOptions, Key, Store};
@@ -14,13 +15,13 @@ use storage::stores::multistore::MemoryMultistore;
 
 #[tokio::test]
 async fn test_multistore_creation() {
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
     assert!(ms.close().await.is_ok());
 }
 
 #[tokio::test]
 async fn test_multistore_all_stores_isolated() {
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write to each store with same logical key
     // Datastore
@@ -59,28 +60,28 @@ async fn test_multistore_all_stores_isolated() {
     // Verify each store has its own value
     let txn = ms.datastore.new_txn(true).await.unwrap();
     let val = txn.get(&ds_key.bytes()).await.unwrap();
-    assert_eq!(val, Some(b"datastore_value".to_vec()));
+    assert_eq!(val, Some(Bytes::from_static(b"datastore_value")));
 
     let txn = ms.blockstore.new_txn(true).await.unwrap();
     let val = txn.get(&bs_key.bytes()).await.unwrap();
-    assert_eq!(val, Some(b"blockstore_value".to_vec()));
+    assert_eq!(val, Some(Bytes::from_static(b"blockstore_value")));
 
     let txn = ms.headstore.new_txn(true).await.unwrap();
     let val = txn.get(&hs_key.bytes()).await.unwrap();
-    assert_eq!(val, Some(b"headstore_value".to_vec()));
+    assert_eq!(val, Some(Bytes::from_static(b"headstore_value")));
 
     let txn = ms.systemstore.new_txn(true).await.unwrap();
     let val = txn.get(&ss_key.bytes()).await.unwrap();
-    assert_eq!(val, Some(b"systemstore_value".to_vec()));
+    assert_eq!(val, Some(Bytes::from_static(b"systemstore_value")));
 
     let txn = ms.peerstore.new_txn(true).await.unwrap();
     let val = txn.get(&ps_key.bytes()).await.unwrap();
-    assert_eq!(val, Some(b"peerstore_value".to_vec()));
+    assert_eq!(val, Some(Bytes::from_static(b"peerstore_value")));
 }
 
 #[tokio::test]
 async fn test_multistore_rootstore_sees_all() {
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write to datastore (namespace 'd')
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -90,7 +91,7 @@ async fn test_multistore_rootstore_sees_all() {
     // Read from rootstore with full prefixed key
     let txn = ms.root.new_txn(true).await.unwrap();
     let value = txn.get(b"dkey1").await.unwrap();
-    assert_eq!(value, Some(b"value1".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value1")));
 }
 
 // =========================================================================
@@ -99,7 +100,7 @@ async fn test_multistore_rootstore_sees_all() {
 
 #[tokio::test]
 async fn test_multistore_stores_cannot_see_each_others_data() {
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write to datastore
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -130,7 +131,7 @@ async fn test_multistore_stores_cannot_see_each_others_data() {
 #[tokio::test]
 async fn test_multistore_same_key_different_values() {
     // Each store can have the same key with different values
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write same key to multiple stores with different values
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -147,23 +148,29 @@ async fn test_multistore_same_key_different_values() {
 
     // Each store should have its own value
     let txn = ms.datastore.new_txn(true).await.unwrap();
-    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"datastore".to_vec()));
+    assert_eq!(
+        txn.get(b"key").await.unwrap(),
+        Some(Bytes::from_static(b"datastore"))
+    );
 
     let txn = ms.systemstore.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"key").await.unwrap(),
-        Some(b"systemstore".to_vec())
+        Some(Bytes::from_static(b"systemstore"))
     );
 
     let txn = ms.peerstore.new_txn(true).await.unwrap();
-    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"peerstore".to_vec()));
+    assert_eq!(
+        txn.get(b"key").await.unwrap(),
+        Some(Bytes::from_static(b"peerstore"))
+    );
 }
 
 #[tokio::test]
 async fn test_multistore_raw_prefix_collision_prevented() {
     // Test that writing raw bytes that happen to match another namespace's prefix
     // doesn't cause data to leak between stores
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Datastore uses prefix 'd', so let's write a key that starts with 'b'
     // (blockstore prefix) to datastore
@@ -185,7 +192,7 @@ async fn test_multistore_raw_prefix_collision_prevented() {
     let value = txn.get(b"dbfake_block").await.unwrap();
     assert_eq!(
         value,
-        Some(b"not_a_real_block".to_vec()),
+        Some(Bytes::from_static(b"not_a_real_block")),
         "Key should be prefixed with datastore namespace"
     );
 }
@@ -193,7 +200,7 @@ async fn test_multistore_raw_prefix_collision_prevented() {
 #[tokio::test]
 async fn test_multistore_iterator_isolation() {
     // Test that iterators only see data from their own namespace
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write to multiple stores
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -244,7 +251,7 @@ async fn test_multistore_iterator_isolation() {
 #[tokio::test]
 async fn test_multistore_delete_isolation() {
     // Test that deleting from one store doesn't affect others
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write same key to multiple stores
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -268,7 +275,7 @@ async fn test_multistore_delete_isolation() {
     let txn = ms.systemstore.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"key").await.unwrap(),
-        Some(b"systemstore".to_vec()),
+        Some(Bytes::from_static(b"systemstore")),
         "Systemstore should be unaffected by datastore delete"
     );
 }
@@ -276,7 +283,7 @@ async fn test_multistore_delete_isolation() {
 #[tokio::test]
 async fn test_multistore_encstore_separate_from_blockstore() {
     // Encstore uses blockstore implementation but different namespace
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write to blockstore
     let mut txn = ms.blockstore.new_txn(false).await.unwrap();
@@ -292,13 +299,13 @@ async fn test_multistore_encstore_separate_from_blockstore() {
     let txn = ms.blockstore.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"block").await.unwrap(),
-        Some(b"blockstore_data".to_vec())
+        Some(Bytes::from_static(b"blockstore_data"))
     );
 
     let txn = ms.encstore.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"block").await.unwrap(),
-        Some(b"encstore_data".to_vec())
+        Some(Bytes::from_static(b"encstore_data"))
     );
 }
 
@@ -311,7 +318,7 @@ async fn test_multistore_encstore_separate_from_blockstore() {
 async fn test_namespace_iterator_strips_prefix() {
     // This test verifies that when iterating within a namespace,
     // the returned keys have the namespace prefix removed
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write keys to datastore (namespace 'd')
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -343,7 +350,7 @@ async fn test_namespace_iterator_strips_prefix() {
 async fn test_namespace_iterator_strips_prefix_with_user_prefix() {
     // Test that when user specifies a prefix, the returned keys
     // are relative to that prefix (namespace still stripped)
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
     txn.set(b"users/alice", b"data1").await.unwrap();
@@ -368,7 +375,7 @@ async fn test_namespace_iterator_strips_prefix_with_user_prefix() {
 
 #[tokio::test]
 async fn test_namespace_iterator_reverse_strips_prefix() {
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     let mut txn = ms.systemstore.new_txn(false).await.unwrap();
     txn.set(b"a", b"1").await.unwrap();
@@ -399,7 +406,7 @@ async fn test_namespace_iterator_reverse_strips_prefix() {
 async fn test_rootstore_iterator_shows_full_keys() {
     // Rootstore has no namespace, so it should show the raw keys
     // including other stores' namespace prefixes
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     // Write to datastore (prefix 'd')
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -433,7 +440,7 @@ async fn test_rootstore_iterator_shows_full_keys() {
 
 #[tokio::test]
 async fn test_get_size_through_namespace() {
-    let ms = MemoryMultistore::new_memory();
+    let ms = MemoryMultistore::new_memory().unwrap();
 
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
     txn.set(b"sized_key", b"12345").await.unwrap();
@@ -447,19 +454,18 @@ async fn test_get_size_through_namespace() {
 
 // =========================================================================
 // REDB MULTISTORE INTEGRATION TESTS
-// These tests verify the redb backend works correctly through the multistore
+// These tests verify the regolith backend works correctly through the multistore
 // =========================================================================
-
-#[cfg(feature = "redb")]
-mod redb_multistore_tests {
+mod persistent_multistore_tests {
+    use bytes::Bytes;
     use storage::corekv::{IterOptions, Store};
-    use storage::stores::multistore::RedbMultistore;
+    use storage::stores::multistore::PersistentMultistore;
     use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_redb_multistore_creation_and_close() {
         let temp_dir = TempDir::new().unwrap();
-        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+        let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
         assert!(ms.close().await.is_ok());
     }
 
@@ -469,7 +475,7 @@ mod redb_multistore_tests {
 
         // Write to multiple stores
         {
-            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+            let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
             let mut txn = ms.datastore.new_txn(false).await.unwrap();
             txn.set(b"doc:1", b"document_data").await.unwrap();
@@ -488,12 +494,12 @@ mod redb_multistore_tests {
 
         // Reopen and verify data persisted with namespace isolation
         {
-            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+            let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
             let txn = ms.datastore.new_txn(true).await.unwrap();
             assert_eq!(
                 txn.get(b"doc:1").await.unwrap(),
-                Some(b"document_data".to_vec()),
+                Some(Bytes::from_static(b"document_data")),
                 "Datastore data should persist"
             );
             txn.discard();
@@ -501,7 +507,7 @@ mod redb_multistore_tests {
             let txn = ms.systemstore.new_txn(true).await.unwrap();
             assert_eq!(
                 txn.get(b"schema:users").await.unwrap(),
-                Some(b"schema_data".to_vec()),
+                Some(Bytes::from_static(b"schema_data")),
                 "Systemstore data should persist"
             );
             txn.discard();
@@ -509,7 +515,7 @@ mod redb_multistore_tests {
             let txn = ms.peerstore.new_txn(true).await.unwrap();
             assert_eq!(
                 txn.get(b"peer:1").await.unwrap(),
-                Some(b"peer_data".to_vec()),
+                Some(Bytes::from_static(b"peer_data")),
                 "Peerstore data should persist"
             );
             txn.discard();
@@ -530,7 +536,7 @@ mod redb_multistore_tests {
     #[tokio::test]
     async fn test_redb_multistore_namespace_isolation() {
         let temp_dir = TempDir::new().unwrap();
-        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+        let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
         // Write same key to different stores
         let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -549,21 +555,21 @@ mod redb_multistore_tests {
         let txn = ms.datastore.new_txn(true).await.unwrap();
         assert_eq!(
             txn.get(b"shared_key").await.unwrap(),
-            Some(b"datastore_value".to_vec())
+            Some(Bytes::from_static(b"datastore_value"))
         );
         txn.discard();
 
         let txn = ms.systemstore.new_txn(true).await.unwrap();
         assert_eq!(
             txn.get(b"shared_key").await.unwrap(),
-            Some(b"systemstore_value".to_vec())
+            Some(Bytes::from_static(b"systemstore_value"))
         );
         txn.discard();
 
         let txn = ms.blockstore.new_txn(true).await.unwrap();
         assert_eq!(
             txn.get(b"shared_key").await.unwrap(),
-            Some(b"blockstore_value".to_vec())
+            Some(Bytes::from_static(b"blockstore_value"))
         );
         txn.discard();
 
@@ -573,7 +579,7 @@ mod redb_multistore_tests {
     #[tokio::test]
     async fn test_redb_multistore_iterator_isolation() {
         let temp_dir = TempDir::new().unwrap();
-        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+        let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
         // Write to multiple stores
         let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -618,7 +624,7 @@ mod redb_multistore_tests {
     #[tokio::test]
     async fn test_redb_multistore_transaction_across_stores() {
         let temp_dir = TempDir::new().unwrap();
-        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+        let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
         // Write initial data
         let mut txn = ms.datastore.new_txn(false).await.unwrap();
@@ -637,7 +643,7 @@ mod redb_multistore_tests {
         let value = reader.get(b"key1").await.unwrap();
         assert_eq!(
             value,
-            Some(b"initial".to_vec()),
+            Some(Bytes::from_static(b"initial")),
             "Reader should see original value due to snapshot isolation"
         );
         reader.discard();
@@ -647,7 +653,7 @@ mod redb_multistore_tests {
         let value = new_reader.get(b"key1").await.unwrap();
         assert_eq!(
             value,
-            Some(b"modified".to_vec()),
+            Some(Bytes::from_static(b"modified")),
             "New reader should see committed changes"
         );
         new_reader.discard();
@@ -661,7 +667,7 @@ mod redb_multistore_tests {
 
         // Write but don't commit
         {
-            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+            let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
             let mut txn = ms.datastore.new_txn(false).await.unwrap();
             txn.set(b"uncommitted", b"value").await.unwrap();
@@ -672,7 +678,7 @@ mod redb_multistore_tests {
 
         // Reopen - uncommitted data should be gone
         {
-            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+            let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
             let txn = ms.datastore.new_txn(true).await.unwrap();
             assert_eq!(
@@ -692,7 +698,7 @@ mod redb_multistore_tests {
 
         // Write and then delete
         {
-            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+            let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
             let mut txn = ms.datastore.new_txn(false).await.unwrap();
             txn.set(b"to_delete", b"value").await.unwrap();
@@ -708,7 +714,7 @@ mod redb_multistore_tests {
 
         // Reopen and verify delete persisted
         {
-            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+            let ms = PersistentMultistore::open(temp_dir.path()).unwrap();
 
             let txn = ms.datastore.new_txn(true).await.unwrap();
             assert_eq!(
@@ -718,7 +724,7 @@ mod redb_multistore_tests {
             );
             assert_eq!(
                 txn.get(b"to_keep").await.unwrap(),
-                Some(b"value".to_vec()),
+                Some(Bytes::from_static(b"value")),
                 "Non-deleted key should persist"
             );
             txn.discard();
@@ -733,7 +739,7 @@ mod redb_multistore_tests {
         use std::sync::Arc;
 
         let temp_dir = TempDir::new().unwrap();
-        let ms = Arc::new(RedbMultistore::new_redb(temp_dir.path()).unwrap());
+        let ms = Arc::new(PersistentMultistore::open(temp_dir.path()).unwrap());
 
         let datastore_writes = Arc::new(AtomicUsize::new(0));
         let blockstore_writes = Arc::new(AtomicUsize::new(0));

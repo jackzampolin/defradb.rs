@@ -24,8 +24,8 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use schema::PolicyDescription;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
+use storage::RegolithStore;
 
 fn branchable_collection() -> CollectionVersion {
     CollectionVersion::new(
@@ -163,7 +163,7 @@ fn float32_counter_collection() -> CollectionVersion {
 /// committed store (a fresh read txn), proving the authoritative store — not
 /// just the materialized blob — advanced.
 async fn read_counter_store(
-    db: &Arc<DB<MemoryStore>>,
+    db: &Arc<DB<RegolithStore>>,
     schema_version_id: &str,
     doc_id: &str,
     field: &str,
@@ -182,7 +182,7 @@ async fn read_counter_store(
         .await
         .expect("counter value");
     assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-    i64::from_be_bytes(bytes.try_into().unwrap())
+    i64::from_be_bytes(bytes.as_ref().try_into().unwrap())
 }
 
 #[tokio::test]
@@ -238,7 +238,10 @@ async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
     .unwrap();
     let bytes = ValueReader::value(&counter, &datastore).await.unwrap();
     assert_eq!(bytes.len(), 4);
-    assert_eq!(f32::from_be_bytes(bytes.try_into().unwrap()), expected);
+    assert_eq!(
+        f32::from_be_bytes(bytes.as_ref().try_into().unwrap()),
+        expected
+    );
 }
 
 #[tokio::test]
@@ -518,7 +521,7 @@ async fn explicit_txn_multi_doc_counter_finalize_advances_both_stores() {
 /// key is absent (the counter was never durably finalized). Used by the
 /// discard test to prove a rolled-back interactive txn ran no RMW.
 async fn read_counter_store_opt(
-    db: &Arc<DB<MemoryStore>>,
+    db: &Arc<DB<RegolithStore>>,
     schema_version_id: &str,
     doc_id: &str,
     field: &str,
@@ -536,7 +539,7 @@ async fn read_counter_store_opt(
     match ValueReader::value(&counter, &datastore).await {
         Ok(bytes) => {
             assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-            Some(i64::from_be_bytes(bytes.try_into().unwrap()))
+            Some(i64::from_be_bytes(bytes.as_ref().try_into().unwrap()))
         }
         Err(_) => None,
     }
@@ -544,7 +547,7 @@ async fn read_counter_store_opt(
 
 /// Read a doc from the committed store via a fresh read txn; `None` if absent.
 async fn read_committed_doc(
-    db: &Arc<DB<MemoryStore>>,
+    db: &Arc<DB<RegolithStore>>,
     collection_name: &str,
     doc_id: &str,
 ) -> Option<Document> {

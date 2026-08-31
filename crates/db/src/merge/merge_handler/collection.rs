@@ -376,19 +376,18 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             )));
         };
         if let Ok(headstore) = txn.headstore() {
-            // Remove only the heads that this block supersedes (its parents).
-            // This preserves concurrent branches in the headstore.
+            // Record the heads this block supersedes rather than deleting
+            // them. Two peers replicating siblings would otherwise both delete
+            // the shared parent's key, and one of the merges would be refused.
             if let Some(heads) = &block.heads {
-                for parent_cid in heads {
-                    let parent_key =
-                        storage::keys::headstore::HeadstoreColKey::new(short_id, *parent_cid);
-                    let _ = headstore
-                        .delete(
-                            &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
-                                &parent_key,
-                            ),
-                        )
-                        .await;
+                if let Err(e) =
+                    crate::block::heads::record_supersedes(&headstore, short_id, heads, *cid).await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        collection_id = %collection_id,
+                        "Failed to record superseded collection heads"
+                    );
                 }
             }
 
@@ -412,6 +411,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             }
         }
         txn.force_commit().await?;
+        // Replication supersedes heads the same way a local append does, so
+        // the same reclamation applies.
+        self.db.maybe_prune_collection_heads(short_id).await;
 
         tracing::info!(
             cid = %cid,
@@ -750,17 +752,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         {
             if let Some(heads) = &block.heads {
-                for parent_cid in heads {
-                    let parent_key =
-                        storage::keys::headstore::HeadstoreColKey::new(short_id, *parent_cid);
-                    let _ = headstore
-                        .delete(
-                            &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
-                                &parent_key,
-                            ),
-                        )
-                        .await;
-                }
+                let _ =
+                    crate::block::heads::record_supersedes(headstore, short_id, heads, *cid).await;
             }
 
             let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);

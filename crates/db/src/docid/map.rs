@@ -6,6 +6,7 @@
 //! genesis-CID-derived DocIDs, plus a block-CID -> DocID ownership index.
 
 use async_lock::Mutex;
+use bytes::Bytes;
 use datastore::NamespaceView;
 use std::sync::Arc;
 use storage::corekv::{Key, Store};
@@ -100,11 +101,12 @@ impl<S: Store> DocShortIdAllocator<S> {
     }
 }
 
-pub fn decode_sequence(value: Option<Vec<u8>>) -> Result<u64> {
+pub fn decode_sequence(value: Option<Bytes>) -> Result<u64> {
     match value {
         None => Ok(0),
         Some(bytes) => {
             let bytes: [u8; 8] = bytes
+                .as_ref()
                 .try_into()
                 .map_err(|_| Error::Other("invalid persisted document short-ID sequence".into()))?;
             Ok(u64::from_be_bytes(bytes))
@@ -190,7 +192,7 @@ pub async fn get_doc_id(systemstore: &NamespaceView, doc_short_id: u64) -> Resul
         .await
         .map_err(Error::Storage)?
     {
-        Some(bytes) => Ok(Some(String::from_utf8(bytes).map_err(|e| {
+        Some(bytes) => Ok(Some(String::from_utf8(bytes.into()).map_err(|e| {
             Error::InvalidDocument(format!("invalid utf-8 in doc-ID mapping: {e}"))
         })?)),
         None => Ok(None),

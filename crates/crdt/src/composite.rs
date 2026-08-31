@@ -290,7 +290,7 @@ impl CompositeDAG {
                                 .await
                                 .map_err(|e| Error::Storage(e.to_string()))?
                                 .unwrap_or_default();
-                            if data.as_slice() <= current_value.as_slice() {
+                            if data.as_slice() <= &current_value[..] {
                                 return Ok(MergeResult::RejectedTieBreak);
                             }
                         }

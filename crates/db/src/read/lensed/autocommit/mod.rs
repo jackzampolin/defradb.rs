@@ -9,6 +9,7 @@ mod scan;
 pub mod stream;
 mod vector;
 
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -255,7 +256,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         result
     }
 
-    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Bytes>> {
         self.get_view_cache_items_impl(collection_id).await
     }
 }

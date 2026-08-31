@@ -1,22 +1,23 @@
 //! Integration tests for BasicTxn.
 
+use bytes::Bytes;
 use datastore::BasicTxn;
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use storage::backends::MemoryStore;
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn test_basic_txn_id() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 42, false).await.unwrap();
     assert_eq!(txn.id(), 42);
 }
 
 #[tokio::test]
 async fn test_basic_txn_readonly() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
 
     let txn = BasicTxn::new(&store, 1, true).await.unwrap();
     assert!(txn.is_readonly());
@@ -27,7 +28,7 @@ async fn test_basic_txn_readonly() {
 
 #[tokio::test]
 async fn test_basic_txn_multistore_access() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // Write to different stores
@@ -43,11 +44,11 @@ async fn test_basic_txn_multistore_access() {
     // Read back
     assert_eq!(
         txn.datastore().get(b"key").await.unwrap(),
-        Some(b"datastore_value".to_vec())
+        Some(Bytes::from_static(b"datastore_value"))
     );
     assert_eq!(
         txn.systemstore().get(b"key").await.unwrap(),
-        Some(b"systemstore_value".to_vec())
+        Some(Bytes::from_static(b"systemstore_value"))
     );
 
     // Commit
@@ -57,13 +58,13 @@ async fn test_basic_txn_multistore_access() {
     let txn = BasicTxn::new(&store, 2, true).await.unwrap();
     assert_eq!(
         txn.datastore().get(b"key").await.unwrap(),
-        Some(b"datastore_value".to_vec())
+        Some(Bytes::from_static(b"datastore_value"))
     );
 }
 
 #[tokio::test]
 async fn test_basic_txn_on_success_callback() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let called = Arc::new(AtomicBool::new(false));
@@ -79,7 +80,7 @@ async fn test_basic_txn_on_success_callback() {
 
 #[tokio::test]
 async fn test_basic_txn_multiple_callbacks() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let counter = Arc::new(AtomicU32::new(0));
@@ -97,7 +98,7 @@ async fn test_basic_txn_multiple_callbacks() {
 
 #[tokio::test]
 async fn test_basic_txn_discard_callback() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let called = Arc::new(AtomicBool::new(false));
@@ -121,7 +122,7 @@ async fn test_basic_txn_discard_callback() {
 
 #[tokio::test]
 async fn test_basic_txn_rootstore_access() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // Write through datastore
@@ -129,14 +130,14 @@ async fn test_basic_txn_rootstore_access() {
 
     // Read through rootstore with prefix
     let value = txn.rootstore().get(b"dmykey").await.unwrap();
-    assert_eq!(value, Some(b"value".to_vec()));
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
 
     txn.commit().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_basic_txn_error_callback_not_called_on_success() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let error_called = Arc::new(AtomicBool::new(false));
@@ -160,7 +161,7 @@ async fn test_basic_txn_error_callback_not_called_on_success() {
 
 #[tokio::test]
 async fn test_basic_txn_discard_callback_not_called_on_commit() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let discard_called = Arc::new(AtomicBool::new(false));
@@ -177,7 +178,7 @@ async fn test_basic_txn_discard_callback_not_called_on_commit() {
 
 #[tokio::test]
 async fn test_basic_txn_success_callback_not_called_on_discard() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let success_called = Arc::new(AtomicBool::new(false));
@@ -194,7 +195,7 @@ async fn test_basic_txn_success_callback_not_called_on_discard() {
 
 #[tokio::test]
 async fn test_basic_txn_double_commit_returns_error() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // First commit succeeds
@@ -206,7 +207,7 @@ async fn test_basic_txn_double_commit_returns_error() {
 
 #[tokio::test]
 async fn test_basic_txn_discard_already_discarded_returns_error() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // First discard succeeds
@@ -218,7 +219,7 @@ async fn test_basic_txn_discard_already_discarded_returns_error() {
 
 #[tokio::test]
 async fn test_basic_txn_all_stores_accessible() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // All stores should be accessible and work
@@ -235,33 +236,33 @@ async fn test_basic_txn_all_stores_accessible() {
     let txn = BasicTxn::new(&store, 2, true).await.unwrap();
     assert_eq!(
         txn.datastore().get(b"d").await.unwrap(),
-        Some(b"data".to_vec())
+        Some(Bytes::from_static(b"data"))
     );
     assert_eq!(
         txn.blockstore().get(b"b").await.unwrap(),
-        Some(b"block".to_vec())
+        Some(Bytes::from_static(b"block"))
     );
     assert_eq!(
         txn.encstore().get(b"e").await.unwrap(),
-        Some(b"enc".to_vec())
+        Some(Bytes::from_static(b"enc"))
     );
     assert_eq!(
         txn.headstore().get(b"h").await.unwrap(),
-        Some(b"head".to_vec())
+        Some(Bytes::from_static(b"head"))
     );
     assert_eq!(
         txn.peerstore().get(b"p").await.unwrap(),
-        Some(b"peer".to_vec())
+        Some(Bytes::from_static(b"peer"))
     );
     assert_eq!(
         txn.systemstore().get(b"s").await.unwrap(),
-        Some(b"sys".to_vec())
+        Some(Bytes::from_static(b"sys"))
     );
 }
 
 #[tokio::test]
 async fn test_basic_txn_commit_with_outstanding_view_fails() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // Hold a reference to a namespace view
@@ -277,7 +278,7 @@ async fn test_basic_txn_commit_with_outstanding_view_fails() {
 
 #[tokio::test]
 async fn test_basic_txn_discard_with_outstanding_view_fails() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     // Hold a reference to a namespace view
@@ -293,7 +294,7 @@ async fn test_basic_txn_discard_with_outstanding_view_fails() {
 async fn test_basic_txn_async_success_callback() {
     use std::time::Duration;
 
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -314,7 +315,7 @@ async fn test_basic_txn_async_success_callback() {
 
 #[tokio::test]
 async fn test_basic_txn_mixed_success_callbacks_preserve_execution_order() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let execution_order = Arc::new(Mutex::new(Vec::new()));
@@ -355,7 +356,7 @@ async fn test_basic_txn_mixed_success_callbacks_preserve_execution_order() {
 async fn test_basic_txn_async_discard_callback() {
     use std::time::Duration;
 
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -378,7 +379,7 @@ async fn test_basic_txn_async_discard_callback() {
 async fn test_basic_txn_discard_spawns_async_callbacks_before_sync_callbacks() {
     use std::time::Duration;
 
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -399,7 +400,7 @@ async fn test_basic_txn_discard_spawns_async_callbacks_before_sync_callbacks() {
 
 #[tokio::test]
 async fn test_basic_txn_success_callback_panic_propagates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let counter = Arc::new(AtomicU32::new(0));
@@ -427,7 +428,7 @@ async fn test_basic_txn_success_callback_panic_propagates() {
 
 #[tokio::test]
 async fn test_basic_txn_async_success_callback_panic_propagates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let counter = Arc::new(AtomicU32::new(0));
@@ -461,7 +462,7 @@ async fn test_basic_txn_async_success_callback_panic_propagates() {
 
 #[tokio::test]
 async fn test_basic_txn_discard_callback_panic_propagates() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let counter = Arc::new(AtomicU32::new(0));

@@ -161,7 +161,7 @@ mod tests {
     use super::DbBlockClassifier;
     use p2p::bitswap::{BlockClass, BlockClassifier};
     use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     fn test_collection() -> CollectionVersion {
         CollectionVersion::new(
@@ -195,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_uses_serving_cid_owner_metadata() {
-        let db = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+        let db = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
         db.create_collection(test_collection()).await.unwrap();
         let (cid, bytes) = data_block("doc-from-delta");
 
@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_denies_field_block_without_owner_metadata() {
-        let db = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+        let db = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
         db.create_collection(test_collection()).await.unwrap();
         let (cid, bytes) = data_block("doc-from-delta");
 

@@ -1,4 +1,5 @@
 use super::*;
+use bytes::Bytes;
 
 /// Pre-computed blocks ready for batch insertion into storage.
 ///
@@ -6,7 +7,7 @@ use super::*;
 /// access). The caller inserts them into blockstore/headstore inside a transaction.
 #[derive(Debug, Clone)]
 pub struct ComputedBlocks {
-    pub blockstore_entries: Vec<(Vec<u8>, Vec<u8>)>,
+    pub blockstore_entries: Vec<(Vec<u8>, Bytes)>,
     pub headstore_entries: Vec<(Vec<u8>, Vec<u8>)>,
     pub block_result: BlockResult,
 }
@@ -31,7 +32,7 @@ pub fn compute_document_blocks(
 ) -> Result<ComputedBlocks, String> {
     let doc_ref_bytes = identity.doc_ref_bytes();
 
-    let mut blockstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut blockstore_entries: Vec<(Vec<u8>, Bytes)> = Vec::new();
     let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
@@ -73,7 +74,7 @@ pub fn compute_document_blocks(
                     .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
                 let enc_cid = generate_cid_from_bytes(&enc_bytes)
                     .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
-                blockstore_entries.push((enc_cid.to_bytes(), enc_bytes));
+                blockstore_entries.push((enc_cid.to_bytes(), enc_bytes.into()));
 
                 (encrypted, Some(enc_cid))
             } else {
@@ -130,7 +131,7 @@ pub fn compute_document_blocks(
         let field_cid = generate_cid_from_bytes(&field_block_bytes)
             .map_err(|e| format!("Failed to generate field CID: {}", e))?;
 
-        blockstore_entries.push((field_cid.to_bytes(), field_block_bytes));
+        blockstore_entries.push((field_cid.to_bytes(), field_block_bytes.into()));
 
         // Head entry: /d/{doc_short_id}/{field_name}/{cid} -> priority
         let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
@@ -155,7 +156,7 @@ pub fn compute_document_blocks(
                 .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
             let enc_cid = generate_cid_from_bytes(&enc_bytes)
                 .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
-            blockstore_entries.push((enc_cid.to_bytes(), enc_bytes));
+            blockstore_entries.push((enc_cid.to_bytes(), enc_bytes.into()));
             Some(enc_cid)
         } else {
             None
@@ -195,7 +196,7 @@ pub fn compute_document_blocks(
     let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
-    blockstore_entries.push((composite_cid.to_bytes(), composite_bytes.clone()));
+    blockstore_entries.push((composite_cid.to_bytes(), composite_bytes.clone().into()));
 
     let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
@@ -210,7 +211,7 @@ pub fn compute_document_blocks(
         headstore_entries,
         block_result: BlockResult {
             cid: composite_cid,
-            block: composite_bytes,
+            block: composite_bytes.into(),
             doc_id: derive_doc_id(&composite_cid),
             field_cids,
             encryption_cids,

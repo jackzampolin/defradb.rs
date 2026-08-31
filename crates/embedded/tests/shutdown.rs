@@ -78,12 +78,10 @@ async fn shutdown_concurrent_calls_are_safe() -> Result<()> {
 
     Ok(())
 }
-
-#[cfg(feature = "lark")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("data.lark");
+    let path = dir.path().join("data.regolith");
     let config = EmbeddedNodeConfig {
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
@@ -92,24 +90,36 @@ async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
         ..Default::default()
     };
     let node =
-        embedded::build_with_store(Arc::new(storage::LarkStore::open(&path)?), config).await?;
+        embedded::build_with_store(Arc::new(storage::RegolithStore::open(&path)?), config).await?;
 
     node.shutdown().await;
     drop(node);
 
-    let reopened = storage::LarkStore::open(&path)?;
+    let reopened = storage::RegolithStore::open(&path)?;
     storage::Store::close(&reopened).await?;
 
     Ok(())
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct SlowCloseStore {
-    inner: storage::MemoryStore,
+    inner: storage::RegolithStore,
     close_calls: Arc<AtomicUsize>,
     close_started: Arc<Notify>,
     close_finished: Arc<AtomicBool>,
     allow_close: Arc<Notify>,
+}
+
+impl SlowCloseStore {
+    fn new() -> Self {
+        Self {
+            inner: storage::RegolithStore::in_memory().expect("in-memory regolith"),
+            close_calls: Arc::new(AtomicUsize::new(0)),
+            close_started: Arc::new(Notify::new()),
+            close_finished: Arc::new(AtomicBool::new(false)),
+            allow_close: Arc::new(Notify::new()),
+        }
+    }
 }
 
 impl SlowCloseStore {
@@ -144,7 +154,7 @@ impl storage::Store for SlowCloseStore {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_shutdown_callers_wait_for_teardown_completion() -> Result<()> {
-    let store = Arc::new(SlowCloseStore::default());
+    let store = Arc::new(SlowCloseStore::new());
     let node =
         Arc::new(embedded::build_with_store(store.clone(), EmbeddedNodeConfig::default()).await?);
 
