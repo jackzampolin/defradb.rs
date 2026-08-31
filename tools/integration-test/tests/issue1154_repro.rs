@@ -105,7 +105,7 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     // make the respawned hub an empty stranger the pushers cannot dial.
     let mut cluster = TestCluster::builder()
         .rust_nodes(1 + PUSHERS)
-        .with_node_store(0, "redb")
+        .with_node_store(0, "regolith")
         .with_keyring()
         .with_p2p()
         .build()

@@ -13,7 +13,7 @@
 ///     use crate::backends::test_suite::*;
 ///
 ///     async fn create_store() -> impl Store {
-///         MemoryStore::new()
+///         RegolithStore::in_memory().unwrap()
 ///     }
 ///
 ///     // Then invoke the test macros or call test functions

@@ -86,12 +86,6 @@ pub struct IterOptions {
     /// When true, the iterator will not fetch values from storage,
     /// improving performance when only keys are needed.
     keys_only: bool,
-
-    /// Treat this prefix scan as an observed-remove/add set transition.
-    ///
-    /// The conflict tracker permits overlapping keys only when both
-    /// transactions mark a scan covering the key this way.
-    commutative_set: bool,
 }
 
 impl IterOptions {
@@ -130,17 +124,6 @@ impl IterOptions {
         self
     }
 
-    /// Mark this prefix scan as an observed-remove/add set transition.
-    ///
-    /// This is only meaningful for prefix scans. Callers must limit writes in
-    /// the prefix to removing keys observed by the scan and adding new keys;
-    /// otherwise allowing concurrent transitions could weaken serializability.
-    /// Overlap is permitted only when both transactions opt in.
-    pub fn with_commutative_set(mut self) -> Self {
-        self.commutative_set = true;
-        self
-    }
-
     /// Get the prefix filter, if set.
     pub fn prefix(&self) -> Option<&[u8]> {
         self.prefix.as_deref()
@@ -165,11 +148,6 @@ impl IterOptions {
     pub fn keys_only(&self) -> bool {
         self.keys_only
     }
-
-    /// Check whether this scan is a commutative set transition.
-    pub fn commutative_set(&self) -> bool {
-        self.commutative_set
-    }
 }
 
 impl fmt::Display for IterOptions {
@@ -186,8 +164,8 @@ impl fmt::Display for IterOptions {
         }
         write!(
             f,
-            "reverse: {}, keys_only: {}, commutative_set: {} }}",
-            self.reverse, self.keys_only, self.commutative_set
+            "reverse: {}, keys_only: {} }}",
+            self.reverse, self.keys_only
         )
     }
 }
@@ -203,15 +181,13 @@ mod tests {
             .with_start(b"a".to_vec())
             .with_end(b"z".to_vec())
             .with_reverse(true)
-            .with_keys_only(true)
-            .with_commutative_set();
+            .with_keys_only(true);
 
         assert_eq!(opts.prefix(), Some(b"test".as_slice()));
         assert_eq!(opts.start(), Some(b"a".as_slice()));
         assert_eq!(opts.end(), Some(b"z".as_slice()));
         assert!(opts.reverse());
         assert!(opts.keys_only());
-        assert!(opts.commutative_set());
     }
 
     #[test]

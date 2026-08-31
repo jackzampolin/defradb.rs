@@ -23,7 +23,7 @@ use query::QueryExecutor;
 use query::QueryRequest;
 use std::sync::Arc;
 use storage::corekv::Store;
-use storage::MemoryStore;
+use storage::RegolithStore;
 
 const COLLECTION_SIZE: usize = 2000;
 const LIMIT: usize = 10;
@@ -96,35 +96,30 @@ async fn assert_limit_query_reads_keys_proportional_to_the_limit<S: Store + 'sta
 
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit() {
-    assert_limit_query_reads_keys_proportional_to_the_limit(MemoryStore::new()).await;
+    assert_limit_query_reads_keys_proportional_to_the_limit(RegolithStore::in_memory().unwrap())
+        .await;
 }
-
-#[cfg(feature = "redb")]
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit_redb() {
     let dir = tempfile::tempdir().unwrap();
     assert_limit_query_reads_keys_proportional_to_the_limit(
-        storage::RedbStore::open(dir.path()).unwrap(),
+        storage::RegolithStore::open(dir.path()).unwrap(),
     )
     .await;
 }
-
-#[cfg(feature = "rocksdb")]
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit_rocksdb() {
     let dir = tempfile::tempdir().unwrap();
     assert_limit_query_reads_keys_proportional_to_the_limit(
-        storage::RocksDbStore::open(dir.path()).unwrap(),
+        storage::RegolithStore::open(dir.path()).unwrap(),
     )
     .await;
 }
-
-#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn limit_query_reads_keys_proportional_to_the_limit_fjall() {
     let dir = tempfile::tempdir().unwrap();
     assert_limit_query_reads_keys_proportional_to_the_limit(
-        storage::FjallStore::open(dir.path()).unwrap(),
+        storage::RegolithStore::open(dir.path()).unwrap(),
     )
     .await;
 }
@@ -175,35 +170,32 @@ async fn assert_explain_execute_reads_keys_proportional_to_the_limit<S: Store + 
 
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit() {
-    assert_explain_execute_reads_keys_proportional_to_the_limit(MemoryStore::new()).await;
+    assert_explain_execute_reads_keys_proportional_to_the_limit(
+        RegolithStore::in_memory().unwrap(),
+    )
+    .await;
 }
-
-#[cfg(feature = "redb")]
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit_redb() {
     let dir = tempfile::tempdir().unwrap();
     assert_explain_execute_reads_keys_proportional_to_the_limit(
-        storage::RedbStore::open(dir.path()).unwrap(),
+        storage::RegolithStore::open(dir.path()).unwrap(),
     )
     .await;
 }
-
-#[cfg(feature = "rocksdb")]
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit_rocksdb() {
     let dir = tempfile::tempdir().unwrap();
     assert_explain_execute_reads_keys_proportional_to_the_limit(
-        storage::RocksDbStore::open(dir.path()).unwrap(),
+        storage::RegolithStore::open(dir.path()).unwrap(),
     )
     .await;
 }
-
-#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn explain_execute_reads_keys_proportional_to_the_limit_fjall() {
     let dir = tempfile::tempdir().unwrap();
     assert_explain_execute_reads_keys_proportional_to_the_limit(
-        storage::FjallStore::open(dir.path()).unwrap(),
+        storage::RegolithStore::open(dir.path()).unwrap(),
     )
     .await;
 }

@@ -87,7 +87,7 @@ crates/
 ├── replication-filter/ # Query-filter-backed replication matcher
 ├── schema/             # Schema validation
 ├── sourcehub/          # On-chain ACP client (Cosmos/EVM)
-├── storage/            # Storage backends (lark, redb, fjall, rocksdb, memory)
+├── storage/            # Storage layer over regolith, the one engine
 ├── telemetry/          # OpenTelemetry exporter setup
 ├── wasm/               # Browser client (WebAssembly)
 └── zanzibar/           # Google Zanzibar permission engine
@@ -170,7 +170,7 @@ Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 
 | Area | Binary | Modules |
 |------|--------|---------|
-| Basic | `--test basic` | batch_mutations, collection_delete_4657, collection_management, document_lifecycle, lark_crash_reopen, multi_collection, patch_secondary_relation_4709, self_ref_relations_4712, smoke, transactions, truncate_parallel |
+| Basic | `--test basic` | batch_mutations, collection_delete_4657, collection_management, document_lifecycle, regolith_crash_reopen, multi_collection, patch_secondary_relation_4709, self_ref_relations_4712, smoke, transactions, truncate_parallel |
 | Query | `--test query` | commits_aggregate, commits_collection_id, commits_height_filter, continuous_rollup, datetime_index_range, default_values_v1, downsample, downsample_gc, exhaustive_orphans_4454, explain_nested, gql_list_args, index_fallback_4633, index_management, lens, lens_persistence, lens_reindex_secondary_index_979, limits, multi_cid_vectors, planner_4656, planner_4684, sdl_generate, subscription_docid, view |
 | ACP | `--test acp` | audit, basic, cross_object, custom_policy, events_sse, index, link_collection, multi_identity, multi_role, negative, negative_p2p, node_access, p2p, p2p_lifecycle, policy_validation, register_ops, relation_queries, relationship, revoke_lifecycle, secp256k1_round_trip, transaction_rollback, xarchive_access_matrix |
 | P2P Iroh | `--test p2p_iroh` | acp, connection, peer, replication, schema, sync |
@@ -277,17 +277,27 @@ git worktree remove ../defradb.rs-foo              # Remove worktree
 - When fixing ACP (Access Control Policy) filtering, always verify BOTH User queries AND Commits queries are filtered. These are two separate code paths that both require ACP checks.
 - After fixing any ACP-related code, run the full ACP test suite not just the immediately failing one.
 
-## Storage Backends
+## Storage
 
-Five backends available, selectable via the `--store` flag:
+[regolith](https://github.com/sourcenetwork/regolith) is the storage engine, on
+every target: server, embedded, and WASM. There is no other backend and no
+feature flag selecting one.
 
-| Backend | Type | Use Case |
-|---------|------|----------|
-| `lark` | LSM-tree | Default, `sourcenetwork/lark` |
-| `redb` | COW B+ tree | Single-writer, reliable |
-| `fjall` | LSM-tree | High write throughput, Shinzo indexer |
-| `rocksdb` | LSM-tree | Production, configurable via `ROCKS_*` env vars |
-| `memory` | In-memory | Testing only |
+`--store` chooses whether anything is persisted:
+
+| Value | Meaning |
+|-------|---------|
+| `regolith` | A regolith database on disk. The default. |
+| `memory` | A regolith database kept in memory, which nothing outlives. |
+
+The names of the backends regolith replaced (`lark`, `redb`, `fjall`, `rocksdb`,
+`badger`) are still accepted and resolve to `regolith`, so an existing config
+file keeps loading.
+
+Profiles come from regolith itself: `Options::default()` for a server,
+`Options::embedded()` for a 1-4 MiB working set, and `Options::wasm()` for a
+browser or wasi module. Transactions run at `Serializable` with
+`DurabilityMode::Immediate`.
 
 ## Goal
 

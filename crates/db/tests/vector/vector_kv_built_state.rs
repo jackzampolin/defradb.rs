@@ -14,16 +14,16 @@ use db::index::vector::kv_store::KvNodeStore;
 use db::index::vector::params::Params;
 use db::index::vector::params::DEFAULT_M;
 use db::index::vector::store::NodeId;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
+use storage::RegolithStore;
 
 const COLLECTION: u32 = 51;
 const INDEX: u32 = 3;
 const DIMENSIONS: usize = 16;
 const SEED: u64 = 0x0D15_C0DE;
 
-async fn txn(store: &MemoryStore) -> Box<dyn Txn> {
+async fn txn(store: &RegolithStore) -> Box<dyn Txn> {
     store.new_txn(false).await.unwrap()
 }
 
@@ -35,7 +35,7 @@ fn corpus(count: usize) -> Vec<Vec<f32>> {
 /// or a reopened index silently answers from its staging path forever.
 #[tokio::test]
 async fn ivfpq_training_survives_a_commit() {
-    let backing = MemoryStore::new();
+    let backing = RegolithStore::in_memory().unwrap();
     let vectors = corpus(400);
     let params = IvfPqParams {
         nlist: 8,
@@ -80,7 +80,7 @@ async fn ivfpq_training_survives_a_commit() {
 
 #[tokio::test]
 async fn ssg_graph_survives_a_commit() {
-    let backing = MemoryStore::new();
+    let backing = RegolithStore::in_memory().unwrap();
     let vectors = corpus(300);
 
     let mut write = txn(&backing).await;
@@ -136,7 +136,7 @@ async fn ssg_graph_survives_a_commit() {
 /// This is what makes a rebuild-and-swap possible.
 #[tokio::test]
 async fn a_build_stays_inside_its_epoch() {
-    let backing = MemoryStore::new();
+    let backing = RegolithStore::in_memory().unwrap();
     let vectors = corpus(400);
     let params = IvfPqParams {
         nlist: 8,

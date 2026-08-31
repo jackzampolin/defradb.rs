@@ -8,8 +8,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use storage::backends::MemoryStore;
 use storage::stores::Peerstore;
+use storage::RegolithStore;
 
 const DOCUMENT_COUNTS: [usize; 3] = [1, 10, 100];
 const REPLICATOR_COUNTS: [usize; 2] = [1, 4];
@@ -21,8 +21,8 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-async fn fixture(replicators: usize) -> Peerstore<MemoryStore> {
-    let peerstore = Peerstore::new(Arc::new(MemoryStore::new()));
+async fn fixture(replicators: usize) -> Peerstore<RegolithStore> {
+    let peerstore = Peerstore::new(Arc::new(RegolithStore::in_memory().unwrap()));
     for peer in 0..replicators {
         peerstore
             .create_replicator(&format!("peer-{peer}"), b"replicator")

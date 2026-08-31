@@ -1,3 +1,5 @@
+use crate::corekv::{Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn, Writer};
+use async_trait::async_trait;
 /// Namespace isolation for multi-store architectures
 ///
 /// This module provides byte-prefix namespacing to logically separate
@@ -12,8 +14,7 @@
 ///
 /// The NamespacedStore wraps any Store implementation and automatically
 /// prepends the prefix to all keys, ensuring complete isolation between stores.
-use crate::corekv::{Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn, Writer};
-use async_trait::async_trait;
+use bytes::Bytes;
 use std::sync::Arc;
 
 /// Store namespace prefixes
@@ -152,7 +153,7 @@ impl crate::corekv::private::Sealed for NamespacedTxn {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for NamespacedTxn {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let prefixed = self.namespace.prefix_key(key);
         self.txn.get(&prefixed).await
     }
@@ -192,9 +193,6 @@ impl Reader for NamespacedTxn {
         prefixed_opts = prefixed_opts
             .with_reverse(opts.reverse())
             .with_keys_only(opts.keys_only());
-        if opts.commutative_set() {
-            prefixed_opts = prefixed_opts.with_commutative_set();
-        }
 
         let iter = self.txn.iterator(prefixed_opts).await?;
         Ok(Box::new(NamespacedIterator {

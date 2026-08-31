@@ -7,7 +7,7 @@ mod tests {
     use query::txn::TransactionRegistry;
     use query::{QueryExecutor, QueryRequest};
     use serde_json::json;
-    use storage::LevelDbStore;
+    use storage::RegolithStore;
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -15,7 +15,7 @@ mod tests {
     #[wasm_bindgen_test]
     #[allow(clippy::arc_with_non_send_sync)]
     async fn query_in_txn_sees_uncommitted_schema() {
-        let store = LevelDbStore::open("test_query_in_txn_schema").unwrap();
+        let store = RegolithStore::in_memory().unwrap();
         let db = Arc::new(DB::new(store).unwrap());
         let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
         let handle = registry.begin(false).await.unwrap();

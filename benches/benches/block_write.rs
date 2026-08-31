@@ -16,7 +16,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use datastore::{Namespace, NamespaceView, SharedTxn};
 use db::block::builder::{write_document_blocks, DocStorageIdentity};
 use document::{DocID, Document, NormalValue};
-use storage::{backends::MemoryStore, Store};
+use storage::{backends::RegolithStore, Store};
 
 const SCHEMA_VERSION_ID: &str = "bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq";
 const FIELD_COUNTS: [usize; 3] = [2, 8, 32];
@@ -44,7 +44,11 @@ fn modified_fields(field_count: usize) -> HashSet<String> {
 /// A fresh transaction with the blockstore and headstore namespace views the
 /// write path needs.
 async fn new_stores() -> (NamespaceView, NamespaceView) {
-    let txn = MemoryStore::new().new_txn(false).await.unwrap();
+    let txn = RegolithStore::in_memory()
+        .unwrap()
+        .new_txn(false)
+        .await
+        .unwrap();
     let shared = SharedTxn::new(txn);
     (
         NamespaceView::new(shared.clone(), Namespace::Blockstore),

@@ -12,10 +12,10 @@ use schema::IndexDescription;
 use schema::IndexedFieldDescription;
 use schema::VectorAlgorithm;
 use schema::VectorIndexDescription;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::index::CollectionIndex;
+use storage::RegolithStore;
 
 const COLLECTION: u32 = 21;
 const INDEX_ID: u32 = 6;
@@ -51,12 +51,15 @@ fn index(algorithm: VectorAlgorithm) -> VectorIndex {
     .expect("a valid vector description")
 }
 
-async fn txn(store: &MemoryStore) -> Box<dyn Txn> {
+async fn txn(store: &RegolithStore) -> Box<dyn Txn> {
     store.new_txn(false).await.unwrap()
 }
 
-async fn populated(algorithm: VectorAlgorithm, vectors: &[Vec<f32>]) -> (MemoryStore, VectorIndex) {
-    let store = MemoryStore::new();
+async fn populated(
+    algorithm: VectorAlgorithm,
+    vectors: &[Vec<f32>],
+) -> (RegolithStore, VectorIndex) {
+    let store = RegolithStore::in_memory().unwrap();
     let index = index(algorithm);
     let mut write = txn(&store).await;
     for (i, vector) in vectors.iter().enumerate() {
@@ -89,7 +92,7 @@ async fn ranked(
 
 #[tokio::test]
 async fn the_flat_algorithm_is_selectable_and_dispatched() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let index = index(VectorAlgorithm::Flat);
     let mut write = txn(&store).await;
     index
@@ -217,7 +220,7 @@ async fn the_ivfpq_algorithm_is_selectable() {
     });
     let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid IVF-PQ description");
 
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut corpus = crate::support::Corpus::new(0x1F);
     let vectors = corpus.vectors(60, DIMENSIONS as usize);
 
@@ -281,7 +284,7 @@ async fn the_ssg_algorithm_is_selectable() {
     });
     let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid SSG description");
 
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut corpus = crate::support::Corpus::new(0x55);
     let vectors = corpus.clustered(120, DIMENSIONS as usize, 6, 0.2);
 

@@ -14,9 +14,9 @@ use defra_core::encryption::EncryptionConfig;
 use document::Document;
 use document::NormalValue;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::namespace::Namespace;
+use storage::RegolithStore;
 
 /// Stub KMS that mirrors the real `MemoryKeyStore::generate` block shape so
 /// the returned CID matches what the legacy path would produce for the same
@@ -79,7 +79,7 @@ fn expected_field_cid() -> Cid {
 
 #[tokio::test]
 async fn kms_write_path_links_field_block_to_kms_encryption_cid() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let shared = SharedTxn::new(txn);
     let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);
@@ -132,7 +132,7 @@ async fn kms_write_path_links_field_block_to_kms_encryption_cid() {
 /// fails an update that carries no config of its own.
 #[tokio::test]
 async fn inheritance_resolves_the_key_through_the_kms() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let shared = SharedTxn::new(txn);
     let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);
@@ -202,7 +202,7 @@ async fn inheritance_resolves_the_key_through_the_kms() {
 /// that key belongs in the KMS, not in an inline block.
 #[tokio::test]
 async fn document_policy_fallback_mints_through_the_kms() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let shared = SharedTxn::new(txn);
     let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);

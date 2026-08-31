@@ -52,7 +52,7 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
         match iter.next().await {
             Ok(Some(kv)) => {
                 // The value at /collection/name/<name> is the collection ID
-                let collection_id = match String::from_utf8(kv.value) {
+                let collection_id = match String::from_utf8(kv.value.into()) {
                     Ok(id) => id,
                     Err(e) => {
                         load_error = Some(Error::Other(format!(

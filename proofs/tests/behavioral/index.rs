@@ -252,7 +252,7 @@ async fn index_reconciles_lww_merge_after_restart() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
-        .with_store("redb")
+        .with_store("regolith")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()

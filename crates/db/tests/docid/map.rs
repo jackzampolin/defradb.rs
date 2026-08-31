@@ -4,21 +4,21 @@ use db::docid::map::*;
 use db::error::Error;
 use db::DB;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::corekv::Store;
 use storage::keys::doc_id_index::DocShortIDSequenceKey;
 use storage::keys::doc_id_index::DocShortIDToDocIDAliasKey;
 use storage::namespace::Namespace;
 use storage::stores::Systemstore;
+use storage::RegolithStore;
 
 async fn systemstore() -> NamespaceView {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     NamespaceView::new(SharedTxn::new(txn), Namespace::Systemstore)
 }
 
-async fn persisted_sequence(store: Arc<MemoryStore>) -> u64 {
+async fn persisted_sequence(store: Arc<RegolithStore>) -> u64 {
     let systemstore = Systemstore::new(store);
     let txn = systemstore.new_txn(true).await.unwrap();
     decode_sequence(
@@ -38,7 +38,7 @@ async fn short_ids_allocate_from_one() {
 
 #[tokio::test]
 async fn malformed_sequence_is_rejected() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let systemstore = Systemstore::new(store.clone());
     let mut txn = systemstore.new_txn(false).await.unwrap();
     txn.set(&DocShortIDSequenceKey::new().bytes(), b"invalid")
@@ -92,7 +92,7 @@ async fn mapping_roundtrip() {
 
 #[tokio::test]
 async fn allocator_reserves_ranges_across_instances_and_restarts() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let allocator_a = DocShortIdAllocator::with_reservation_size(store.clone(), 4);
     let allocator_b = DocShortIdAllocator::with_reservation_size(store.clone(), 4);
 
@@ -112,7 +112,7 @@ async fn allocator_keeps_ids_unique_across_many_database_instances() {
     const DATABASES: usize = 8;
     const IDS_PER_DATABASE: usize = 128;
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let mut tasks = Vec::with_capacity(DATABASES);
     for _ in 0..DATABASES {
         let db = DB::from_arc(store.clone()).unwrap();
@@ -138,7 +138,7 @@ async fn allocator_keeps_ids_unique_across_many_database_instances() {
 
 #[tokio::test]
 async fn allocations_do_not_conflict_unrelated_caller_transactions() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::from_arc(store).unwrap();
     let txn_a = db.new_txn(false).await.unwrap();
     let txn_b = db.new_txn(false).await.unwrap();
@@ -169,7 +169,7 @@ async fn allocations_do_not_conflict_unrelated_caller_transactions() {
 
 #[tokio::test]
 async fn database_resolve_or_allocate_is_idempotent() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::from_arc(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let systemstore = txn.systemstore().unwrap();

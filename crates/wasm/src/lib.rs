@@ -20,7 +20,7 @@
 //!     ↓
 //! db crate (DB, Collection, QueryRunner)
 //!     ↓
-//! storage crate (LevelDbStore)
+//! storage crate (RegolithStore on OPFS)
 //! ```
 //!
 //! # Example
@@ -31,7 +31,7 @@
 //! await init();
 //!
 //! // Create client
-//! const client = await DefraClient.create({ storage: 'leveldb' });
+//! const client = await DefraClient.create({ db_name: 'defradb' });
 //!
 //! // Add schema
 //! await client.add_schema(`

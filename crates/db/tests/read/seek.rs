@@ -2,15 +2,15 @@ use datastore::NamespaceView;
 use datastore::SharedTxn;
 use db::read::seek::*;
 use query::planner::index_selection::CursorSeek;
-use storage::backends::MemoryStore;
 use storage::corekv::Store;
 use storage::keys::doc_id_index::encode_doc_short_id;
 use storage::keys::SEPARATOR;
 use storage::namespace::Namespace;
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn cursor_boundary_uses_doc_short_id_suffix() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let txn = store.new_txn(false).await.unwrap();
     let systemstore = NamespaceView::new(SharedTxn::new(txn), Namespace::Systemstore);
     db::docid::map::set_doc_id_mapping(&systemstore, 7, 42, "bae-boundary")

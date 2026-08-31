@@ -338,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_failure_recorder_registers_then_clears_current_scope() {
-        let store = Arc::new(storage::backends::MemoryStore::new());
+        let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
         let peerstore = storage::stores::Peerstore::new(Arc::clone(&store));
         let replicator = p2p::ReplicatorInfo::from_raw(
             "peer-a".to_string(),

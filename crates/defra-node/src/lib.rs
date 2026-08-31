@@ -8,7 +8,6 @@
 //!
 //! ## Cargo features
 //!
-//! - `lark` / `redb` / `rocksdb` — storage backends. Default: `lark`, `redb`.
 //! - `native` — native host (tokio, event channel). Default-on.
 //! - `sourcehub` — on-chain document ACP. Default-on. Omit for local-only ACP.
 //! - `wasmtime-runtime` — Lens WASM execution. Default-on. Without it,
@@ -178,8 +177,6 @@ pub struct EmbeddedNode {
     signed_query_runtime: Option<SignedQueryRuntime>,
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
-    #[cfg(feature = "rocksdb")]
-    rocksdb_stats: Option<storage::RocksDbStatsHandle>,
     #[cfg(feature = "http")]
     txn_cleanup_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(feature = "p2p")]
@@ -585,18 +582,6 @@ impl EmbeddedNode {
         telemetry::conflict_metrics_snapshot()
     }
 
-    /// Capture RocksDB diagnostics when this node uses the RocksDB backend.
-    ///
-    /// Gauges are sampled at call time. Cumulative RocksDB counters are present
-    /// only when `ROCKS_STATISTICS=1` or explicit store options enable them.
-    #[cfg(feature = "rocksdb")]
-    pub fn rocksdb_stats(&self) -> storage::Result<Option<storage::RocksDbStatsSnapshot>> {
-        self.rocksdb_stats
-            .as_ref()
-            .map(storage::RocksDbStatsHandle::snapshot)
-            .transpose()
-    }
-
     /// Access P2P operations (if P2P is enabled and configured).
     #[cfg(feature = "p2p")]
     pub fn p2p(&self) -> Option<&dyn defra_http::P2POperations> {
@@ -789,19 +774,13 @@ fn timeout_secs(timeout: Duration) -> u64 {
 }
 
 /// Selects which persistent storage backend to use when `data_path` is set.
-///
-/// Defaults to `Redb` for backwards compatibility.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub enum StorageBackend {
-    /// Pure-Rust LSM-tree backend.
-    Lark,
-    /// Pure-Rust embedded database using redb.
+    /// regolith, the one store. Kept as an enum so `with_storage_backend`
+    /// stays on the builder and a later variant does not churn it.
     #[default]
-    Redb,
-    /// RocksDB LSM-tree backend. Constant-time open regardless of dataset size,
-    /// but requires the `rocksdb` feature to be enabled at compile time.
-    RocksDb,
+    Regolith,
 }
 
 /// Builder for constructing an `EmbeddedNode`.
@@ -810,8 +789,6 @@ pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
     storage_durability: storage::backends::DurabilityMode,
-    #[cfg(feature = "rocksdb")]
-    rocksdb_options: Option<storage::RocksDbStoreOptions>,
     embedding_url: Option<String>,
     embedding_model: Option<String>,
     embedding_api_key: Option<String>,
@@ -893,17 +870,6 @@ impl NodeBuilder {
         durability: storage::backends::DurabilityMode,
     ) -> Self {
         self.storage_durability = durability;
-        self
-    }
-
-    /// Set options for the RocksDB persistent storage backend.
-    ///
-    /// When omitted, RocksDB options are loaded from the `ROCKS_*`
-    /// environment variables. [`NodeBuilder::with_storage_durability`] always
-    /// supplies the final durability mode.
-    #[cfg(feature = "rocksdb")]
-    pub fn with_rocksdb_options(mut self, options: storage::RocksDbStoreOptions) -> Self {
-        self.rocksdb_options = Some(options);
         self
     }
 
@@ -1081,9 +1047,6 @@ impl NodeBuilder {
         let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
         let node_acp_enabled = self.node_acp_enabled;
-        #[cfg(feature = "rocksdb")]
-        let rocksdb_options =
-            resolve_rocksdb_options(self.rocksdb_options, self.storage_durability);
 
         // Telemetry handle (if any) was moved into the builder via
         // `with_telemetry`. Threaded through `StoreBuildArgs` to the
@@ -1114,98 +1077,27 @@ impl NodeBuilder {
                 telemetry_handle,
             };
 
-            match self.storage_backend {
-                #[cfg(feature = "lark")]
-                StorageBackend::Lark => {
-                    tracing::info!(
-                        storage_backend = "lark",
-                        data_path = %path.display(),
-                        "embedded node starting"
-                    );
-                    let opts =
-                        storage::LarkStoreOptions::new().with_durability(self.storage_durability);
-                    let store = storage::LarkStore::open_with_options(&path, opts)
-                        .map_err(|e| anyhow::anyhow!("failed to open lark store: {}", e))?;
+            tracing::info!(
+                storage_backend = "regolith",
+                data_path = %path.display(),
+                "embedded node starting"
+            );
+            let opts =
+                storage::RegolithStoreOptions::default().with_durability(self.storage_durability);
+            let store = storage::RegolithStore::open_with_options(&path, opts)
+                .map_err(|e| anyhow::anyhow!("failed to open regolith store: {}", e))?;
 
-                    Self::build_with_persistent_store(
-                        store,
-                        self.at_rest_encryption_key,
-                        persistent_args,
-                    )
-                    .await?
-                }
-                #[cfg(not(feature = "lark"))]
-                StorageBackend::Lark => {
-                    return Err(anyhow::anyhow!(
-                        "Lark backend requested but the `lark` feature is not enabled. \
-                         Rebuild with `--features lark`."
-                    ));
-                }
-                #[cfg(feature = "redb")]
-                StorageBackend::Redb => {
-                    tracing::info!(
-                        storage_backend = "redb",
-                        data_path = %path.display(),
-                        "embedded node starting"
-                    );
-                    let opts =
-                        storage::RedbStoreOptions::new().with_durability(self.storage_durability);
-                    let store = storage::RedbStore::open_with_options(
-                        path.to_str().ok_or_else(|| {
-                            anyhow::anyhow!("data_path contains non-UTF8 characters")
-                        })?,
-                        opts,
-                    )
-                    .map_err(|e| anyhow::anyhow!("failed to open redb store: {}", e))?;
-
-                    Self::build_with_persistent_store(
-                        store,
-                        self.at_rest_encryption_key,
-                        persistent_args,
-                    )
-                    .await?
-                }
-                #[cfg(not(feature = "redb"))]
-                StorageBackend::Redb => {
-                    return Err(anyhow::anyhow!(
-                        "Redb backend requested but the `redb` feature is not enabled. \
-                         Rebuild with `--features redb`."
-                    ));
-                }
-                #[cfg(feature = "rocksdb")]
-                StorageBackend::RocksDb => {
-                    tracing::info!(
-                        storage_backend = "rocksdb",
-                        data_path = %path.display(),
-                        options = ?rocksdb_options,
-                        "embedded node starting"
-                    );
-                    let store = storage::RocksDbStore::open_with_options(&path, rocksdb_options)
-                        .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?;
-                    let stats = store.stats_handle();
-                    let mut node = Self::build_with_persistent_store(
-                        store,
-                        self.at_rest_encryption_key,
-                        persistent_args,
-                    )
-                    .await?;
-                    node.rocksdb_stats = Some(stats);
-                    node
-                }
-                #[cfg(not(feature = "rocksdb"))]
-                StorageBackend::RocksDb => {
-                    return Err(anyhow::anyhow!(
-                        "RocksDB backend requested but the `rocksdb` feature is not enabled. \
-                         Rebuild with `--features rocksdb`."
-                    ));
-                }
-            }
+            Self::build_with_persistent_store(store, self.at_rest_encryption_key, persistent_args)
+                .await?
         } else {
             tracing::info!(
                 storage_backend = "memory",
                 "embedded node starting (ephemeral, no data_path)"
             );
-            let store = Arc::new(storage::MemoryStore::new());
+            let store = Arc::new(
+                storage::RegolithStore::in_memory()
+                    .map_err(|e| anyhow::anyhow!("failed to open in-memory regolith: {}", e))?,
+            );
 
             Self::build_with_store(
                 store,
@@ -1659,8 +1551,6 @@ impl NodeBuilder {
             signed_query_runtime,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
-            #[cfg(feature = "rocksdb")]
-            rocksdb_stats: None,
             #[cfg(feature = "http")]
             txn_cleanup_task: tokio::sync::Mutex::new(txn_cleanup_task),
             #[cfg(feature = "p2p")]
@@ -1671,16 +1561,6 @@ impl NodeBuilder {
             telemetry: std::sync::Mutex::new(telemetry_handle),
         })
     }
-}
-
-#[cfg(feature = "rocksdb")]
-fn resolve_rocksdb_options(
-    explicit: Option<storage::RocksDbStoreOptions>,
-    durability: storage::backends::DurabilityMode,
-) -> storage::RocksDbStoreOptions {
-    explicit
-        .unwrap_or_else(storage::RocksDbStoreOptions::from_env)
-        .with_durability(durability)
 }
 
 #[cfg(test)]
@@ -1701,10 +1581,6 @@ mod tests {
     use super::HttpConfig;
 
     pub(super) static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    #[cfg(feature = "rocksdb")]
-    static ROCKS_ENV_GUARD: LazyLock<std::sync::Mutex<()>> =
-        LazyLock::new(|| std::sync::Mutex::new(()));
-
     #[cfg(feature = "http")]
     #[test]
     fn http_config_accepts_extra_routes() {
@@ -1818,73 +1694,6 @@ mod tests {
         let builder = EmbeddedNode::builder().with_query_timeout(timeout);
 
         assert_eq!(builder.query_timeout, Some(timeout));
-    }
-
-    #[cfg(feature = "rocksdb")]
-    #[test]
-    fn node_builder_accepts_explicit_rocksdb_options() {
-        let options = storage::RocksDbStoreOptions::new().with_block_cache_size(8 * 1024 * 1024);
-        let builder = EmbeddedNode::builder().with_rocksdb_options(options);
-
-        assert_eq!(
-            builder
-                .rocksdb_options
-                .expect("explicit RocksDB options should be retained")
-                .block_cache_size(),
-            8 * 1024 * 1024
-        );
-    }
-
-    #[cfg(feature = "rocksdb")]
-    #[test]
-    fn embedded_rocksdb_options_load_environment_and_override_durability() {
-        use storage::backends::DurabilityMode;
-
-        let _guard = ROCKS_ENV_GUARD.lock().expect("environment guard poisoned");
-        let original = std::env::var_os("ROCKS_BLOCK_CACHE_MB");
-        let original_statistics = std::env::var_os("ROCKS_STATISTICS");
-        std::env::set_var("ROCKS_BLOCK_CACHE_MB", "8192");
-        std::env::set_var("ROCKS_STATISTICS", "true");
-        let options = super::resolve_rocksdb_options(None, DurabilityMode::Immediate);
-        match original {
-            Some(value) => std::env::set_var("ROCKS_BLOCK_CACHE_MB", value),
-            None => std::env::remove_var("ROCKS_BLOCK_CACHE_MB"),
-        }
-        match original_statistics {
-            Some(value) => std::env::set_var("ROCKS_STATISTICS", value),
-            None => std::env::remove_var("ROCKS_STATISTICS"),
-        }
-
-        assert_eq!(options.block_cache_size(), 8192 * 1024 * 1024);
-        assert!(options.statistics_enabled());
-        assert_eq!(options.durability(), DurabilityMode::Immediate);
-    }
-
-    #[cfg(feature = "rocksdb")]
-    #[tokio::test]
-    async fn embedded_node_retains_rocksdb_stats_through_encryption_wrapper() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let node = EmbeddedNode::builder()
-            .data_path(temp_dir.path())
-            .with_storage_backend(super::StorageBackend::RocksDb)
-            .with_rocksdb_options(
-                storage::RocksDbStoreOptions::new()
-                    .with_block_cache_size(1024 * 1024)
-                    .with_statistics_enabled(true),
-            )
-            .with_at_rest_encryption_key([7; 32])
-            .build()
-            .await
-            .unwrap();
-
-        let stats = node
-            .rocksdb_stats()
-            .unwrap()
-            .expect("RocksDB node should expose a diagnostics snapshot");
-        assert_eq!(stats.block_cache.capacity_bytes, 1024 * 1024);
-        assert!(stats.counters.is_some());
-
-        node.shutdown().await;
     }
 
     #[test]

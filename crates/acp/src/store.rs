@@ -12,7 +12,7 @@ use crate::relation::RelationTuple;
 /// Trait for storing and querying relation tuples.
 ///
 /// This abstraction allows different storage backends to be used
-/// (in-memory for testing, redb for production, etc.)
+/// (in-memory for testing, regolith for production, etc.)
 ///
 /// # Security: Input Validation
 ///

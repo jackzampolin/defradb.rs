@@ -287,7 +287,8 @@ async fn p2p_collection_subscription_persists_after_restart_test(mut cluster: Te
 for_each_p2p_topology!(
     p2p_collection_subscription_persists_after_restart,
     p2p_collection_subscription_persists_after_restart_test,
-    // This macro runs Rust and Go topologies with one store string. Go requires
-    // badger, and Rust accepts badger as its persistent redb-compatible alias.
+    // This macro runs Rust and Go topologies with one store string, and the
+    // test restarts a node so it cannot use `memory`. `badger` is the only
+    // name both binaries take.
     .with_p2p().with_store("badger")
 );

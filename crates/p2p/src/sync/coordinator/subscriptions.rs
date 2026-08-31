@@ -203,7 +203,7 @@ mod tests {
     use async_trait::async_trait;
     use blockstore::DefraBlockstore;
     use cid::Cid;
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     use crate::bitswap::AccessMode;
     use crate::message::{
@@ -219,7 +219,7 @@ mod tests {
 
     use super::SyncCoordinator;
 
-    type TestBlockstore = DefraBlockstore<MemoryStore>;
+    type TestBlockstore = DefraBlockstore<RegolithStore>;
 
     #[derive(Clone)]
     struct RecordingTransport {
@@ -502,7 +502,7 @@ mod tests {
     }
 
     async fn new_test_coordinator(
-        store: Arc<MemoryStore>,
+        store: Arc<RegolithStore>,
         transport: RecordingTransport,
     ) -> SyncCoordinator<TestBlockstore, RecordingTransport> {
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
@@ -521,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_p2p_collections_reinstalls_subscriptions_after_restart() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let initial_transport = RecordingTransport::new("initial-peer");
         let initial = new_test_coordinator(store.clone(), initial_transport.clone()).await;
 
@@ -551,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_collection_rolls_back_persistence_when_transport_subscribe_fails() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
         let failing_transport = RecordingTransport::new("failing-peer").fail_subscribe("users");
         let failing = new_test_coordinator(store.clone(), failing_transport.clone()).await;
 

@@ -22,13 +22,13 @@ use db::index::vector::store::Meta;
 use db::index::vector::store::Node;
 use db::index::vector::store::NodeId;
 use db::index::vector::store::VectorNodeStore;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::corekv::Reader;
 use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::corekv::Writer;
 use storage::keys::datastore::VectorIndexKey;
+use storage::RegolithStore;
 
 const COLLECTION: u32 = 7;
 const INDEX: u32 = 3;
@@ -38,7 +38,7 @@ const SEED: u64 = 0x0000_1234_5678_9ABC;
 /// A fresh writable transaction. `Box<dyn Txn>` is what `Store::new_txn`
 /// hands back, and it satisfies `Reader + Writer` through the blanket impls,
 /// so it is exactly the shape a real caller threads into the adapter.
-async fn txn(store: &MemoryStore) -> Box<dyn Txn> {
+async fn txn(store: &RegolithStore) -> Box<dyn Txn> {
     store.new_txn(false).await.unwrap()
 }
 
@@ -180,7 +180,7 @@ fn corrupt_values_are_rejected() {
 
 #[tokio::test]
 async fn a_graph_round_trips_through_the_store() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let vectors: Vec<Vec<f32>> = (0..200)
         .map(|i| {
             let a = i as f32 * 0.37;
@@ -225,7 +225,7 @@ async fn a_graph_round_trips_through_the_store() {
 /// equal after a lossy re-encode.
 #[tokio::test]
 async fn stored_nodes_are_byte_identical() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let node = node_fixture();
 
     let mut write = txn(&store).await;
@@ -255,7 +255,7 @@ async fn stored_nodes_are_byte_identical() {
 /// key, not a neighbouring epoch, not a neighbouring index or collection.
 #[tokio::test]
 async fn a_node_scan_sees_one_epoch_only() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = txn(&store).await;
 
     let elsewhere = [
@@ -359,7 +359,7 @@ fn keys_sort_into_contiguous_epochs() {
 
 #[tokio::test]
 async fn clearing_an_epoch_leaves_its_neighbours_alone() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = txn(&store).await;
 
     for epoch in [EPOCH, EPOCH + 1] {
@@ -410,7 +410,7 @@ async fn clearing_an_epoch_leaves_its_neighbours_alone() {
 /// a silently skipped node.
 #[tokio::test]
 async fn a_corrupt_stored_value_is_an_error() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let mut txn = txn(&store).await;
     txn.set(
         &VectorIndexKey::node(COLLECTION, INDEX, EPOCH, 1).bytes(),

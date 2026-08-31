@@ -10,15 +10,15 @@ use lens::LensModule;
 use schema::CollectionVersion;
 use schema::ORPHAN_COLLECTION_ID;
 use std::sync::Arc;
-use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::CollectionID;
 use storage::keys::systemstore::CollectionKey;
 use storage::keys::systemstore::CollectionNameKey;
+use storage::RegolithStore;
 
 #[tokio::test]
 async fn test_load_empty_database() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
 
     let collections = load_active_collections(&db).await.unwrap();
@@ -30,7 +30,7 @@ async fn test_load_empty_database() {
 
 #[tokio::test]
 async fn test_load_single_collection() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::new((*store).clone()).unwrap();
 
     // Manually insert a collection into systemstore
@@ -78,7 +78,7 @@ async fn test_load_single_collection() {
 
 #[tokio::test]
 async fn test_load_multiple_collections() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::new((*store).clone()).unwrap();
 
     let collections = vec![
@@ -138,7 +138,7 @@ async fn test_load_multiple_collections() {
 
 #[tokio::test]
 async fn test_load_collection_requires_short_id_mapping() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::new((*store).clone()).unwrap();
 
     let collection = CollectionVersion::new("users", "bafytest123", "bafytest123", vec![]);
@@ -148,7 +148,7 @@ async fn test_load_collection_requires_short_id_mapping() {
 
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-        let txn = DbTxn::<MemoryStore>::new(basic_txn);
+        let txn = DbTxn::<RegolithStore>::new(basic_txn);
 
         txn.systemstore()
             .unwrap()
@@ -170,7 +170,7 @@ async fn test_load_collection_requires_short_id_mapping() {
 
 #[tokio::test]
 async fn test_load_missing_collection_definition_returns_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::new((*store).clone()).unwrap();
 
     // Store only the name mapping, NOT the collection definition
@@ -200,7 +200,7 @@ async fn test_load_missing_collection_definition_returns_error() {
 
 #[tokio::test]
 async fn test_db_store_accessor_returns_shared_store() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
 
     // store() should return a reference to the underlying Arc<S>
@@ -214,7 +214,7 @@ async fn test_db_store_accessor_returns_shared_store() {
 
 #[tokio::test]
 async fn test_db_store_accessor_same_instance() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let db = DB::new(store).unwrap();
 
     // Two calls to store() should return the same Arc
@@ -225,7 +225,7 @@ async fn test_db_store_accessor_same_instance() {
 
 #[tokio::test]
 async fn test_load_invalid_json_collection_returns_error() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::new((*store).clone()).unwrap();
 
     // Store name mapping pointing to invalid JSON
@@ -265,7 +265,7 @@ async fn test_load_invalid_json_collection_returns_error() {
 
 #[tokio::test]
 async fn test_set_migration_placeholder_persists_short_id_mapping() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = DB::new((*store).clone()).unwrap();
 
     let config = LensConfig::new(
@@ -279,7 +279,7 @@ async fn test_set_migration_placeholder_persists_short_id_mapping() {
     assert_eq!(versions.len(), 2);
 
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::<MemoryStore>::new(basic_txn);
+    let txn = DbTxn::<RegolithStore>::new(basic_txn);
     let systemstore = txn.systemstore().unwrap();
     let short_id = systemstore
         .get(&CollectionID::new(ORPHAN_COLLECTION_ID).bytes())

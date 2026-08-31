@@ -1,5 +1,6 @@
 use crate::common::schema::users_schema;
 use async_trait::async_trait;
+use bytes::Bytes;
 use db::AutoCommitMutator;
 use db::DB;
 use futures::StreamExt;
@@ -27,7 +28,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use storage::corekv::IterOptions;
 use storage::index::IndexIterator;
-use storage::MemoryStore;
+use storage::RegolithStore;
 use tokio::sync::Notify;
 
 #[derive(Default)]
@@ -238,7 +239,7 @@ fn indexed_users_schema() -> CollectionVersion {
     schema
 }
 
-async fn seed_user(db: &Arc<DB<MemoryStore>>) -> document::DocID {
+async fn seed_user(db: &Arc<DB<RegolithStore>>) -> document::DocID {
     let mut doc = document::Document::new();
     doc.set("name", document::NormalValue::String("Alice".to_string()));
     AutoCommitMutator::new(db.clone())
@@ -248,7 +249,7 @@ async fn seed_user(db: &Arc<DB<MemoryStore>>) -> document::DocID {
         .doc_id
 }
 
-async fn add_verified_version(db: &Arc<DB<MemoryStore>>) -> String {
+async fn add_verified_version(db: &Arc<DB<RegolithStore>>) -> String {
     db.patch_collection(
         "Users",
         r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"verified","Kind":"Boolean"}}]"#,
@@ -259,7 +260,7 @@ async fn add_verified_version(db: &Arc<DB<MemoryStore>>) -> String {
     .version_id
 }
 
-async fn add_placeholder_version(db: &Arc<DB<MemoryStore>>, field_name: &str) -> String {
+async fn add_placeholder_version(db: &Arc<DB<RegolithStore>>, field_name: &str) -> String {
     db.patch_collection(
         "Users",
         &format!(
@@ -272,7 +273,11 @@ async fn add_placeholder_version(db: &Arc<DB<MemoryStore>>, field_name: &str) ->
     .version_id
 }
 
-async fn seed_old_user(db: &Arc<DB<MemoryStore>>, version_id: &str, name: &str) -> document::DocID {
+async fn seed_old_user(
+    db: &Arc<DB<RegolithStore>>,
+    version_id: &str,
+    name: &str,
+) -> document::DocID {
     let collection = db.get_collection("Users").unwrap().unwrap();
     let index_manager = db::index::IndexManager::from_collection(
         collection.resolved_root_id(),
@@ -314,7 +319,7 @@ async fn seed_old_user(db: &Arc<DB<MemoryStore>>, version_id: &str, name: &str) 
     doc_id
 }
 
-async fn verified_index_count(db: &Arc<DB<MemoryStore>>) -> usize {
+async fn verified_index_count(db: &Arc<DB<RegolithStore>>) -> usize {
     let collection = db.get_collection("Users").unwrap().unwrap();
     let index_manager = db::index::IndexManager::from_collection(
         collection.resolved_root_id(),
@@ -334,7 +339,7 @@ async fn verified_index_count(db: &Arc<DB<MemoryStore>>) -> usize {
     entries.len()
 }
 
-async fn load_user(db: &Arc<DB<MemoryStore>>, doc_id: &document::DocID) -> document::Document {
+async fn load_user(db: &Arc<DB<RegolithStore>>, doc_id: &document::DocID) -> document::Document {
     let collection = db.get_collection("Users").unwrap().unwrap();
     let txn = db.new_txn(true).await.unwrap();
     let doc = collection
@@ -350,7 +355,7 @@ async fn load_user(db: &Arc<DB<MemoryStore>>, doc_id: &document::DocID) -> docum
     doc
 }
 
-async fn load_user_blob(db: &Arc<DB<MemoryStore>>, doc_id: &document::DocID) -> Vec<u8> {
+async fn load_user_blob(db: &Arc<DB<RegolithStore>>, doc_id: &document::DocID) -> Bytes {
     let collection = db.get_collection("Users").unwrap().unwrap();
     let txn = db.new_txn(true).await.unwrap();
     let datastore = txn.datastore().unwrap();
@@ -371,7 +376,7 @@ async fn load_user_blob(db: &Arc<DB<MemoryStore>>, doc_id: &document::DocID) -> 
     blob
 }
 
-async fn namespace_counts(db: &Arc<DB<MemoryStore>>) -> (usize, usize, usize) {
+async fn namespace_counts(db: &Arc<DB<RegolithStore>>) -> (usize, usize, usize) {
     async fn count(view: datastore::NamespaceView) -> usize {
         let mut iter = view.iterator(IterOptions::new()).await.unwrap();
         let mut count = 0;
@@ -394,7 +399,7 @@ async fn namespace_counts(db: &Arc<DB<MemoryStore>>) -> (usize, usize, usize) {
 
 #[tokio::test]
 async fn lazy_lensed_read_writes_back_without_new_commits() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::from_arc(store.clone()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
@@ -465,7 +470,7 @@ async fn lazy_lensed_read_writes_back_without_new_commits() {
 
 #[tokio::test]
 async fn eager_materialize_restamps_transformless_paths() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
 
     db.create_collection(users_schema()).await.unwrap();
@@ -495,7 +500,7 @@ async fn eager_materialize_restamps_transformless_paths() {
 #[tokio::test]
 async fn migration_context_cache_invalidates_when_graph_changes_without_version_change() {
     let transform_store = Arc::new(StepTransformStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
@@ -555,7 +560,7 @@ async fn migration_context_cache_invalidates_when_graph_changes_without_version_
 #[tokio::test]
 async fn lazy_write_back_updates_secondary_indexes_for_late_document() {
     let transform_store = Arc::new(SetVerifiedStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
@@ -604,7 +609,7 @@ async fn lazy_full_scan_flushes_write_back_in_bounded_batches() {
     let options = db::DbOptions::new().with_migration_write_back_batch_size(
         NonZeroUsize::new(2).expect("batch size is non-zero"),
     );
-    let mut raw_db = DB::with_options(MemoryStore::new(), options).unwrap();
+    let mut raw_db = DB::with_options(RegolithStore::in_memory().unwrap(), options).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -674,7 +679,7 @@ async fn implicit_full_scan_defers_one_collection_instead_of_each_document() {
     let options = db::DbOptions::new().with_migration_write_back_batch_size(
         NonZeroUsize::new(2).expect("batch size is non-zero"),
     );
-    let mut raw_db = DB::with_options(MemoryStore::new(), options).unwrap();
+    let mut raw_db = DB::with_options(RegolithStore::in_memory().unwrap(), options).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -719,7 +724,7 @@ async fn implicit_full_scan_defers_one_collection_instead_of_each_document() {
 #[tokio::test]
 async fn implicit_query_flushes_lazy_migration_after_read_snapshot_closes() {
     let transform_store = Arc::new(SetVerifiedStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
@@ -797,7 +802,7 @@ async fn implicit_query_flushes_lazy_migration_after_read_snapshot_closes() {
 #[tokio::test]
 async fn field_value_fetch_filters_after_lens_transform() {
     let transform_store = Arc::new(StepTransformStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
@@ -833,7 +838,7 @@ async fn field_value_fetch_filters_after_lens_transform() {
 #[tokio::test]
 async fn concurrent_lazy_reads_of_same_document_are_idempotent() {
     let transform_store = Arc::new(BlockingVerifiedStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -908,7 +913,7 @@ async fn concurrent_lazy_reads_of_same_document_are_idempotent() {
 #[tokio::test]
 async fn concurrent_update_wins_over_stale_lazy_write_back() {
     let transform_store = Arc::new(BlockingVerifiedStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -984,7 +989,7 @@ async fn streaming_lensed_read_defers_per_document_not_full_scan() {
     let options = db::DbOptions::new().with_migration_write_back_batch_size(
         NonZeroUsize::new(2).expect("batch size is non-zero"),
     );
-    let mut raw_db = DB::with_options(MemoryStore::new(), options).unwrap();
+    let mut raw_db = DB::with_options(RegolithStore::in_memory().unwrap(), options).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -1048,7 +1053,7 @@ async fn streaming_lensed_read_defers_per_document_not_full_scan() {
 /// just correct in isolation but matches `get_all`'s observable contract.
 #[tokio::test]
 async fn streaming_auto_commit_read_migrates_and_persists() {
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::from_arc(store.clone()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
@@ -1111,7 +1116,7 @@ async fn streaming_auto_commit_read_migrates_and_persists() {
 #[tokio::test]
 async fn streaming_auto_commit_read_persists_after_partial_consumption() {
     let transform_store = Arc::new(SetVerifiedStore::default());
-    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 

@@ -6,7 +6,7 @@ use integration_test::TestCluster;
 async fn rust_lens_survives_restart() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
-        .with_store("redb")
+        .with_store("regolith")
         .build()
         .await
         .unwrap();
@@ -49,7 +49,7 @@ async fn rust_lens_survives_restart() {
         list_result
     );
 
-    // Restart the node (same rootdir, redb persists to disk)
+    // Restart the node (same rootdir, regolith persists to disk)
     cluster
         .restart_node(0, Duration::from_secs(30))
         .await

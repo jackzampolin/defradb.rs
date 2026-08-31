@@ -7,14 +7,15 @@
 //! - Float64 support
 //! - Validation and error cases
 
+use bytes::Bytes;
 use crdt::traits::{Context, MergeResult, ReplicatedData, ValueReader};
 use crdt::{Counter, CounterDelta, LwwDelta, NumericKind};
 use defra_core::types::DocId;
-use storage::{MemoryStore, Store};
+use storage::{RegolithStore, Store};
 
 #[tokio::test]
 async fn test_counter_increment() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -58,7 +59,7 @@ async fn test_counter_increment() {
 
     // Should be 8
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = i64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert_eq!(value, 8);
 
     txn.commit().await.unwrap();
@@ -71,7 +72,7 @@ async fn test_counter_increment() {
 /// unconditional-apply behaviour if the blockstore ever doesn't.
 #[tokio::test]
 async fn test_counter_retransmit_applies_twice() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -108,7 +109,7 @@ async fn test_counter_retransmit_applies_twice() {
     assert_eq!(second, MergeResult::Applied);
 
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = i64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert_eq!(value, 10);
 
     txn.commit().await.unwrap();
@@ -116,7 +117,7 @@ async fn test_counter_retransmit_applies_twice() {
 
 #[tokio::test]
 async fn test_counter_decrement_not_allowed() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -151,7 +152,7 @@ async fn test_counter_decrement_not_allowed() {
 
 #[tokio::test]
 async fn test_counter_overflow_wrapping() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -195,7 +196,7 @@ async fn test_counter_overflow_wrapping() {
 
     // Should wrap: (i64::MAX - 10) + 20 = i64::MIN + 9
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = i64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert_eq!(value, (i64::MAX - 10).wrapping_add(20));
     assert_eq!(value, i64::MIN + 9); // Verify wrapping behavior
 
@@ -204,7 +205,7 @@ async fn test_counter_overflow_wrapping() {
 
 #[tokio::test]
 async fn test_counter_field_name_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -243,7 +244,7 @@ async fn test_counter_field_name_mismatch() {
 
 #[tokio::test]
 async fn test_counter_schema_version_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -321,7 +322,7 @@ fn test_counter_float64_constructor_accepts_negative_infinity() {
 
 #[tokio::test]
 async fn test_counter_float64_overflow_becomes_positive_infinity() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -365,14 +366,14 @@ async fn test_counter_float64_overflow_becomes_positive_infinity() {
     counter.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = f64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert!(value.is_infinite());
     assert!(value.is_sign_positive());
 }
 
 #[tokio::test]
 async fn test_counter_float64_nan_increment_propagates_nan() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -403,13 +404,13 @@ async fn test_counter_float64_nan_increment_propagates_nan() {
     counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
 
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = f64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert!(value.is_nan());
 }
 
 #[tokio::test]
 async fn test_counter_float64_negative_zero_normalizes_to_positive_zero() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -440,13 +441,13 @@ async fn test_counter_float64_negative_zero_normalizes_to_positive_zero() {
     counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
 
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = f64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert_eq!(value.to_bits(), 0.0f64.to_bits());
 }
 
 #[tokio::test]
 async fn test_counter_float64_basic() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -490,7 +491,7 @@ async fn test_counter_float64_basic() {
 
     // Should be 8.7
     let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    let value = f64::from_be_bytes(value_bytes.as_ref().try_into().unwrap());
     assert!((value - 8.7).abs() < 0.0001);
 
     txn.commit().await.unwrap();
@@ -498,7 +499,7 @@ async fn test_counter_float64_basic() {
 
 #[tokio::test]
 async fn test_counter_merge_result_applied() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -532,7 +533,7 @@ async fn test_counter_merge_result_applied() {
 
 #[tokio::test]
 async fn test_counter_wrong_delta_type() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -570,7 +571,7 @@ async fn test_counter_wrong_delta_type() {
 
 #[tokio::test]
 async fn test_counter_numeric_kind_mismatch() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -687,7 +688,7 @@ fn test_counter_delta_validation_rejects_empty_values() {
 
 #[tokio::test]
 async fn test_counter_float32_basic() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -729,7 +730,7 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
     // Go accumulates float32 counters in f32 precision, not f64.
     // This test verifies Rust does the same by checking that the result
     // matches f32 arithmetic (which differs from f64 for 1.1 + 2.2).
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
         b"doc1",
@@ -780,7 +781,7 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
 /// (never lower), so reconcile can never clobber.
 #[tokio::test]
 async fn test_pcounter_reconcile_migrates_via_max_never_lowers() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     // allow_decrement = false => PCounter.
     let counter = Counter::new(
         "v1".to_string(),
@@ -792,7 +793,7 @@ async fn test_pcounter_reconcile_migrates_via_max_never_lowers() {
     .unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
-    let read = |bytes: Vec<u8>| i64::from_be_bytes(bytes.try_into().unwrap());
+    let read = |bytes: Bytes| i64::from_be_bytes(bytes.as_ref().try_into().unwrap());
 
     // Absent -> initialize from the materialized value.
     counter.reconcile_int64(&mut *txn, 5).await.unwrap();
@@ -814,7 +815,7 @@ async fn test_pcounter_reconcile_migrates_via_max_never_lowers() {
 /// ambiguous (a legitimate decrement vs. a stale store), so `max` would be unsound.
 #[tokio::test]
 async fn test_pncounter_reconcile_init_if_absent_only() {
-    let store = MemoryStore::new();
+    let store = RegolithStore::in_memory().unwrap();
     // allow_decrement = true => PNCounter.
     let counter = Counter::new(
         "v1".to_string(),
@@ -826,7 +827,7 @@ async fn test_pncounter_reconcile_init_if_absent_only() {
     .unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
-    let read = |bytes: Vec<u8>| i64::from_be_bytes(bytes.try_into().unwrap());
+    let read = |bytes: Bytes| i64::from_be_bytes(bytes.as_ref().try_into().unwrap());
 
     counter.reconcile_int64(&mut *txn, 5).await.unwrap();
     assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
