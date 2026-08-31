@@ -12,7 +12,8 @@
 //! The fence: once A's documents have provably reached B (so the gossip path
 //! ran), C must hold no pending roots and must never have deferred a fetch
 //! for lack of a reachable provider. This is deliberately not a data-delivery
-//! test: with post-merge gossip rebroadcast off, C does not receive the
+//! test: post-merge gossip rebroadcast is forced off per node (so no
+//! runner-provided environment can flip it on), C does not receive the
 //! documents here, and that is expected.
 //!
 //! Run with:
@@ -60,6 +61,7 @@ async fn overlay_delivered_hint_from_unknown_origin_leaves_no_pending_root() {
     let cluster = TestCluster::builder()
         .rust_nodes(3)
         .with_iroh_transport()
+        .with_extra_rust_args(["--p2p-rebroadcast-on-merge=false"])
         .build()
         .await
         .expect("cluster start");
