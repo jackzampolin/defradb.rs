@@ -1798,3 +1798,93 @@ async fn p2p_shutdown_releases_store_for_immediate_reopen() {
     drop(reopened);
     let _ = std::fs::remove_dir_all(&data_path);
 }
+
+/// An embedded node must serve its branchable-collection heads to
+/// `sync_branchable_collection`, the same way a CLI node does.
+///
+/// The write side is fenced elsewhere: SDL keeps `@branchable`, and every
+/// mutation path records the collection head under the persisted short-id
+/// prefix (`crates/defra-node/tests/branchable_sdl.rs`,
+/// `crates/db/tests/merge/collection_heads.rs`). This test pins the serving
+/// side: a coordinator wired with a `NoOpHeadProvider` answers every
+/// BranchableSync response (and DocSync head lookup) with zero heads, and a
+/// late-joining peer can never pull the collection.
+#[tokio::test]
+async fn branchable_sync_pulls_collection_from_embedded_peer() {
+    init_tracing();
+
+    let source = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build source");
+    let joiner = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build joiner");
+
+    const SCHEMA: &str = "type BranchNote @branchable { name: String age: Int }";
+    source.add_schema(SCHEMA).await.expect("schema on source");
+    joiner.add_schema(SCHEMA).await.expect("schema on joiner");
+
+    // Documents exist before the joiner ever connects: this is the
+    // late-joiner catch-up path, not live replication.
+    for (name, age) in [("first", 1), ("second", 2)] {
+        let response = source
+            .execute(&format!(
+                r#"mutation {{ create_BranchNote(input: {{name: "{name}", age: {age}}}) {{ _docID }} }}"#
+            ))
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "create failed: {:?}",
+            response.errors
+        );
+    }
+
+    // Prefer the loopback listen address: iroh lists interface addresses in
+    // arbitrary order and the first can be a NAT-side address a localhost
+    // test cannot dial.
+    let addr_source = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let addrs = source
+                .p2p()
+                .expect("source p2p")
+                .listen_addresses()
+                .await
+                .expect("listen_addresses");
+            if let Some(addr) = addrs.iter().find(|a| a.starts_with("127.0.0.1:")) {
+                break addr.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "source never exposed a loopback listen address: {addrs:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let joiner_p2p = joiner.p2p().expect("joiner p2p");
+    joiner_p2p
+        .connect_peer(&addr_source)
+        .await
+        .expect("connect joiner -> source");
+    wait_for_connected_peer(&joiner).await;
+    wait_for_connected_peer(&source).await;
+
+    let collection_id = source
+        .get_collection("BranchNote")
+        .expect("get collection")
+        .expect("collection exists")
+        .collection_id;
+    joiner_p2p
+        .sync_branchable_collection(&collection_id)
+        .await
+        .expect("sync_branchable_collection");
+
+    wait_for_collection_len(&joiner, "BranchNote", 2).await;
+
+    source.shutdown().await;
+    joiner.shutdown().await;
+}
