@@ -11,8 +11,9 @@ use axum::Router;
 use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
-use tower::ServiceBuilder;
+use tower::{Layer, ServiceBuilder};
 use tower_http::cors::CorsLayer;
+use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
 
 use query::executor::QueryExecutor;
@@ -567,7 +568,10 @@ impl Server {
 
         router = router.layer(TraceLayer::new_for_http()).layer(cors);
 
-        Ok(router)
+        // Router layers run after route matching, so normalize misses through a
+        // clone that already carries the complete auth and request middleware.
+        let normalized = NormalizePathLayer::trim_trailing_slash().layer(router.clone());
+        Ok(router.fallback_service(normalized))
     }
 
     /// Build CORS layer matching Go DefraDB behavior.
