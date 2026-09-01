@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+mod cross_runtime;
 mod feature_binaries;
 
+pub use cross_runtime::{assert_query_equivalent, query_both};
 pub use feature_binaries::build_cli_variant;
 
 // Re-export modules from defra-harness
