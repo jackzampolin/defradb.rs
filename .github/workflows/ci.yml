@@ -94,7 +94,9 @@ jobs:
               cargo clippy -p defra-node --no-default-features --features native --all-targets -- -D warnings
               cargo clippy -p defra-node --no-default-features --features native,p2p --all-targets -- -D warnings
               cargo clippy -p ffi --no-default-features --features native,libp2p --all-targets -- -D warnings
-              cargo check -p ffi --no-default-features --features native
+              cargo clippy -p ffi --no-default-features --features native --all-targets -- -D warnings
+              cargo check -p ffi --no-default-features --features native,iroh
+              cargo test -p ffi --no-default-features --features native --lib
               cargo check -p p2p --no-default-features --features iroh-transport
               cargo check -p db --no-default-features --features native
     steps:
