@@ -222,6 +222,29 @@ impl Author {
     }
 }
 
+/// The genesis composite of a fragment, decoded.
+fn genesis_block_of(fragment: &Fragment) -> Block {
+    fragment
+        .blocks
+        .iter()
+        .find(|(cid, _)| *cid == fragment.genesis)
+        .map(|(_, bytes)| Block::from_dag_cbor(bytes).expect("genesis decodes"))
+        .expect("the genesis block is in the fragment")
+}
+
+/// The signature block a fragment's genesis links to.
+fn signature_block_of(fragment: &Fragment) -> (Cid, Vec<u8>) {
+    let cid = genesis_block_of(fragment)
+        .signature
+        .expect("a signed fragment links its signature");
+    fragment
+        .blocks
+        .iter()
+        .find(|(candidate, _)| *candidate == cid)
+        .cloned()
+        .expect("the signature block is in the fragment")
+}
+
 fn reading(seq: i64, centicelsius: i64) -> Vec<(&'static str, NormalValue)> {
     vec![
         ("device", NormalValue::String("sensor-7".into())),
@@ -535,7 +558,7 @@ async fn a_forged_signature_is_refused() {
     // impostor made over different content. The header still names the
     // impostor, so this is not a key confusion: the signature simply does not
     // cover these bytes.
-    let mut fragment = build(
+    let fragment = build(
         &reading(1, 2137),
         &node.version_id,
         Some(&author.key),
@@ -548,25 +571,33 @@ async fn a_forged_signature_is_refused() {
         false,
     );
 
-    let genesis_block = fragment
-        .blocks
-        .iter()
-        .find(|(cid, _)| *cid == fragment.genesis)
-        .map(|(_, bytes)| Block::from_dag_cbor(bytes).unwrap())
-        .unwrap();
-    let signature_cid = genesis_block.signature.unwrap();
-    let decoy_signature = decoy
-        .blocks
-        .iter()
-        .find(|(_, bytes)| Signature::from_dag_cbor(bytes).is_ok())
-        .map(|(_, bytes)| bytes.clone())
-        .unwrap();
+    // Swap in the impostor's signature block *and* relink the genesis to it,
+    // so every block still hashes to the CID it is filed under. Replacing the
+    // bytes alone would be caught by CID validation first, and the test would
+    // pass without signature verification ever running.
+    let (decoy_signature_cid, decoy_signature) = signature_block_of(&decoy);
+    let genesis_block = genesis_block_of(&fragment);
+    let author_signature_cid = genesis_block.signature.expect("the author signed");
 
-    for (cid, bytes) in fragment.blocks.iter_mut() {
-        if *cid == signature_cid {
-            *bytes = decoy_signature.clone();
-        }
-    }
+    let mut forged = genesis_block;
+    forged.signature = Some(decoy_signature_cid);
+    let (forged_cid, forged_bytes) = encode(&forged);
+
+    // Keep the field blocks; drop the author's genesis and signature.
+    let genesis_cid = fragment.genesis;
+    let mut blocks: Vec<(Cid, Vec<u8>)> = fragment
+        .blocks
+        .into_iter()
+        .filter(|(cid, _)| *cid != genesis_cid && *cid != author_signature_cid)
+        .collect();
+    blocks.push((decoy_signature_cid, decoy_signature));
+    blocks.push((forged_cid, forged_bytes));
+
+    let fragment = Fragment {
+        doc_id: DocID::new_v0(forged_cid).to_string(),
+        genesis: forged_cid,
+        blocks,
+    };
 
     let (status, body) = node
         .sync(vec![fragment.wire(&node.collection_id)], None)
@@ -574,6 +605,10 @@ async fn a_forged_signature_is_refused() {
     assert!(
         !(200..300).contains(&status),
         "the node accepted a signature that does not cover the block: {status} {body}"
+    );
+    assert!(
+        !body.contains("does not match claimed CID"),
+        "this must fail signature verification, not CID validation: {body}"
     );
 }
 
