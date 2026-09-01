@@ -59,6 +59,14 @@ fn identity_only_routes() {
 #[test]
 fn dynamic_routes() {
     assert_eq!(
+        route_permission("/api/v0/ccip", &Method::POST),
+        RoutePermission::Dynamic
+    );
+    assert_eq!(
+        route_permission("/api/v0/ccip/{sender}/{data}", &Method::GET),
+        RoutePermission::Dynamic
+    );
+    assert_eq!(
         route_permission("/api/v0/graphql", &Method::POST),
         RoutePermission::Dynamic
     );
@@ -223,6 +231,12 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Exempt,
         ),
         // GraphQL
+        ("/api/v0/ccip", Method::POST, RoutePermission::Dynamic),
+        (
+            "/api/v0/ccip/:sender/:data",
+            Method::GET,
+            RoutePermission::Dynamic,
+        ),
         (
             "/api/v0/graphql",
             Method::GET,

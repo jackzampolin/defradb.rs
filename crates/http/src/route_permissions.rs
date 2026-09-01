@@ -53,6 +53,9 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::POST => RoutePermission::Dynamic,
             _ => RoutePermission::Required(NodePermission::DocumentRead),
         },
+        "/api/v0/ccip" | "/api/v0/ccip/:sender/:data" | "/api/v0/ccip/{sender}/{data}" => {
+            RoutePermission::Dynamic
+        }
         "/api/v0/events" => RoutePermission::Dynamic,
         "/api/v0/sync" => RoutePermission::Dynamic,
         "/api/v0/actions" => RoutePermission::Required(NodePermission::ActionList),
