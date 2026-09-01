@@ -804,7 +804,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             if self.runtime.shutdown.is_shutting_down() {
                 return;
             }
-            self.manager.resync_persisted_pending_dags().await;
+            tokio::select! {
+                _ = self.runtime.shutdown.cancelled() => return,
+                _ = self.manager.resync_persisted_pending_dags() => {}
+            }
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
                 _ = self.runtime.shutdown.cancelled() => return,
@@ -1086,12 +1089,84 @@ mod dag_fetch_limiter_tests {
 
 #[cfg(test)]
 mod shutdown_tests {
-    use super::{SyncShutdownHandle, NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT};
+    use super::broadcast::tests::TestTransport;
+    use super::{SyncCoordinator, SyncShutdownHandle, NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT};
     use cid::Cid;
     use multihash_codetable::{Code, MultihashDigest};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    struct BlockingResyncStore {
+        load_calls: std::sync::atomic::AtomicUsize,
+        resync_entered: tokio::sync::Notify,
+    }
+
+    impl BlockingResyncStore {
+        fn new() -> Self {
+            Self {
+                load_calls: std::sync::atomic::AtomicUsize::new(0),
+                resync_entered: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sync::pending_store::PendingDagStorage for BlockingResyncStore {
+        async fn put(
+            &self,
+            _root_cid: &Cid,
+            _record: &crate::sync::pending_store::PersistedPendingDag,
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn replace_scope_head(
+            &self,
+            _superseded_root: Option<&Cid>,
+            _root_cid: &Cid,
+            _record: &crate::sync::pending_store::PersistedPendingDag,
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn remove(&self, _root_cid: &Cid) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn load_all(
+            &self,
+        ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
+            if self.load_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Vec::new());
+            }
+            self.resync_entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn quarantine(
+            &self,
+            _root_cid: &Cid,
+            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn is_quarantined(&self, _root_cid: &Cid) -> crate::Result<bool> {
+            unreachable!()
+        }
+
+        async fn load_quarantined(
+            &self,
+        ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedQuarantinedDag)>>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn remove_quarantined(&self, _root_cid: &Cid) -> crate::Result<()> {
+            unreachable!()
+        }
+    }
 
     #[tokio::test]
     async fn shutdown_waits_for_in_flight_background_task_completion() {
@@ -1292,6 +1367,49 @@ mod shutdown_tests {
             .expect("loop must wake on the signal, not wait out its interval")
             .expect("loop task should not panic");
         assert!(exited.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_in_flight_pending_resync() {
+        let blockstore = Arc::new(blockstore::DefraBlockstore::new(
+            Arc::new(storage::RegolithStore::in_memory().expect("in-memory store")),
+            true,
+        ));
+        let (coordinator, _events) = SyncCoordinator::new(
+            TestTransport::new(Vec::new()),
+            blockstore,
+            crate::sync::SyncConfig::default(),
+        )
+        .await
+        .expect("coordinator");
+        let pending_store = Arc::new(BlockingResyncStore::new());
+        coordinator
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+        let coordinator = Arc::new(coordinator);
+
+        let resync_task = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            async move {
+                coordinator
+                    .run_pending_dag_resync(Duration::from_secs(3600))
+                    .await;
+            }
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            pending_store.resync_entered.notified(),
+        )
+        .await
+        .expect("resync did not enter durable storage");
+        assert!(coordinator.manager().pending_resync_in_flight());
+
+        coordinator.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), resync_task)
+            .await
+            .expect("resync did not stop on shutdown")
+            .expect("resync task should not panic");
+        assert!(!coordinator.manager().pending_resync_in_flight());
     }
 
     #[tokio::test]
