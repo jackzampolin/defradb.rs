@@ -81,8 +81,7 @@ async fn the_stored_signature_is_the_clients_not_the_nodes() {
     );
 
     // The contrast: a document the node authored over the ordinary mutation
-    // path carries whatever its own signing configuration produced, which is
-    // the gap `/sync` exists to close.
+    // path carries whatever its own signing configuration produced.
     let created = node
         .graphql(
             r#"mutation { add_Reading(input: {device: "sensor-9", seq: 2, centicelsius: 1900}) { _docID } }"#,

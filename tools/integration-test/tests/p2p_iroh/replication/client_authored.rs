@@ -5,17 +5,14 @@
 //! the node validates and merges rather than authors. What the node then owes
 //! the rest of the network is the subject here.
 //!
-//! A pushed fragment used to stop where it landed. The merge itself worked --
-//! the document was stored, queryable and correctly attributed -- but nothing
-//! announced it, so no replicator and no gossip topic ever heard about it, and
-//! a device-signed document could not leave the node it was pushed to. The
-//! only way to fan one out was an HTTP hop in front of the nodes, pushing the
-//! same bytes to each of them in turn.
+//! Merging is not enough on its own: the node that took the push is the only
+//! one that holds the blocks, so unless it announces what it merged, no
+//! replicator and no gossip topic ever hears about the document.
 //!
-//! These pin the two halves of the fix: the document travels, and the
-//! signature travels with it. The second is what makes the first safe --
-//! a peer registers the owner the *signature* proves, not whichever node
-//! happened to hand it over.
+//! These pin both halves of that: the document travels, and the signature
+//! travels with it. The second is what makes the first safe -- a peer
+//! registers the owner the *signature* proves, not whichever node happened to
+//! hand it over.
 
 use integration_test::{setup_two_node_replicated, wait_for_doc_count};
 use serde_json::json;

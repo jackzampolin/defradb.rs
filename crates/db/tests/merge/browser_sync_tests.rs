@@ -459,9 +459,9 @@ async fn apply_and_capture(
 
 #[tokio::test]
 async fn a_merged_fragment_is_announced_to_peers() {
-    // The gap this closes: a fragment pushed to `/sync` used to stop at the
-    // node it landed on. It reached no replicator and no gossip topic, so a
-    // device-signed document could never leave the node it was pushed to.
+    // A device-signed document leaves the node it was pushed to only if that
+    // node announces what it merged: nothing else on this path talks to a
+    // replicator or a gossip topic.
     let (wire_document, signer_did, events) = apply_and_capture(true).await;
 
     assert_eq!(events.len(), 1, "a merged fragment must be announced once");

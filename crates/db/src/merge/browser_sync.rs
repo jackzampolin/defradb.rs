@@ -79,7 +79,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
     }
 
     /// Use this when running with the P2P stack, so that a fragment pushed to
-    /// `/sync` reaches peers instead of stopping at the node it landed on.
+    /// `/sync` reaches peers.
     pub fn with_broadcaster(db: Arc<crate::DB<S>>, broadcaster: Arc<dyn TxnBroadcaster>) -> Self {
         Self::build(db, Some(broadcaster))
     }
@@ -380,8 +380,8 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             .unwrap_or_default();
 
         // A replicator with a filter on this collection is skipped unless the
-        // push carries a document to match against, so the merged state is
-        // read back rather than leaving filtered peers silently unreached.
+        // push carries a document to match against, and a fragment is blocks
+        // rather than a document, so the merged state is read back.
         let document_json = self
             .merged_document_json(&document.doc_id, &document.collection_id)
             .await;
@@ -415,7 +415,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
     /// A pushed fragment carries blocks rather than a document body, so this
     /// reads back what the merge produced. Failing to read it is not a reason
     /// to withhold the announcement: unfiltered replicators and gossip do not
-    /// need it, and a filtered peer is no worse off than before.
+    /// need it.
     async fn merged_document_json(
         &self,
         doc_id: &str,
