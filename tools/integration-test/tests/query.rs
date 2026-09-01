@@ -62,5 +62,7 @@ mod relation_rendering_1597;
 mod sdl_generate;
 #[path = "query/subscription_docid.rs"]
 mod subscription_docid;
+#[path = "query/subscription_root_shape.rs"]
+mod subscription_root_shape;
 #[path = "query/view.rs"]
 mod view;
