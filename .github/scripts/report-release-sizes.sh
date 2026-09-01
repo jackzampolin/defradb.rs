@@ -109,7 +109,7 @@ for archive in "$ARTIFACT_DIR"/*.tar.gz; do
       ;;
     defra-ffi-*ios_xcframework*)
       ;;
-    defra-ffi_*)
+    defra-ffi_*|defra-ffi-lean_*)
       member=$(tar -tzf "$archive" | awk '/^libdefra_ffi\.(so|dylib)$/ { member = $0 } END { print member }')
       [ -n "$member" ] || { echo "No FFI library found in $name" >&2; exit 1; }
       current=$(member_size "$archive" "$member")
