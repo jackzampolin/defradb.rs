@@ -26,9 +26,15 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
     pub fn new_arc(
         database: Arc<db::DB<S>>,
         document_acp: Arc<dyn acp::DocumentACP>,
+        txn_broadcaster: Option<Arc<dyn db::event::emission::TxnBroadcaster>>,
     ) -> Arc<dyn BrowserSyncOperations> {
         Arc::new(Self {
-            engine: db::merge::BrowserSyncEngine::new(database),
+            engine: match txn_broadcaster {
+                Some(broadcaster) => {
+                    db::merge::BrowserSyncEngine::with_broadcaster(database, broadcaster)
+                }
+                None => db::merge::BrowserSyncEngine::new(database),
+            },
             document_acp,
         })
     }

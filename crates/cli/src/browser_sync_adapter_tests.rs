@@ -124,7 +124,7 @@ async fn pull_skips_a_document_that_exceeds_the_payload_limit() {
     create_document(&database, "Alice").await;
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+    let adapter = BrowserSyncAdapter::new_arc(database, acp, None);
 
     let mut cursor = None;
     let mut seen: Vec<String> = Vec::new();
@@ -173,7 +173,7 @@ async fn pull_uses_advancing_cursor_pages() {
     create_document(&database, "Bob").await;
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+    let adapter = BrowserSyncAdapter::new_arc(database, acp, None);
     let first = adapter
         .sync(
             BrowserSyncRequest {
@@ -225,7 +225,7 @@ async fn sync_registers_only_new_signed_documents() {
     let protected_doc_id = protected_document.doc_id.clone();
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone());
+    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone(), None);
     adapter
         .sync(
             BrowserSyncRequest {
@@ -283,7 +283,7 @@ async fn foreign_signed_document_cannot_be_squatted_by_pushing_caller() {
     // Bob obtains Alice's DAG and pushes it to a server that has never seen
     // the document. Bob must not become the registered ACP owner.
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone());
+    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone(), None);
     let bob = "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH";
     adapter
         .sync(
@@ -326,7 +326,7 @@ async fn unsigned_document_stays_unregistered_for_authenticated_caller() {
     let doc_id = document.doc_id.clone();
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone());
+    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone(), None);
     let caller = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
     adapter
         .sync(
@@ -360,7 +360,7 @@ async fn invalid_batch_is_rejected_before_any_document_is_written() {
     invalid.doc_id = "bae-forged".into();
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(target.clone(), acp);
+    let adapter = BrowserSyncAdapter::new_arc(target.clone(), acp, None);
     assert!(adapter
         .sync(
             BrowserSyncRequest {
@@ -390,7 +390,7 @@ async fn duplicate_document_batch_is_rejected_before_merge() {
     let doc_id = document.doc_id.clone();
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(target.clone(), acp);
+    let adapter = BrowserSyncAdapter::new_arc(target.clone(), acp, None);
     assert!(adapter
         .sync(
             BrowserSyncRequest {
@@ -421,7 +421,7 @@ async fn protected_document_rejects_updates_from_another_identity() {
     set_signing_config(None);
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(target, acp);
+    let adapter = BrowserSyncAdapter::new_arc(target, acp, None);
     adapter
         .sync(
             BrowserSyncRequest {
@@ -477,7 +477,7 @@ async fn concurrent_changes_converge_through_push_pull_exchange() {
     let doc_id = initial.doc_id.clone();
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(server.clone(), acp);
+    let adapter = BrowserSyncAdapter::new_arc(server.clone(), acp, None);
     adapter
         .sync(
             BrowserSyncRequest {
@@ -561,7 +561,7 @@ async fn pull_reaches_documents_ordered_after_an_oversized_document() {
     );
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+    let adapter = BrowserSyncAdapter::new_arc(database, acp, None);
 
     let mut cursor = None;
     let mut seen: Vec<String> = Vec::new();
@@ -648,7 +648,7 @@ async fn pull_skips_a_block_heavy_document_and_keeps_paginating() {
     );
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+    let adapter = BrowserSyncAdapter::new_arc(database, acp, None);
 
     let mut cursor: Option<String> = None;
     let mut seen: Vec<String> = Vec::new();

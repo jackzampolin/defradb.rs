@@ -299,38 +299,7 @@ async fn validation_accepts_reachable_signature_blocks() {
         .unwrap()
         .unwrap();
     let mut wire_document = sync.load_document(&document_ref).await.unwrap().unwrap();
-
-    let old_root = wire_document.roots[0].clone();
-    let root = wire_document
-        .blocks
-        .iter_mut()
-        .find(|block| block.cid == old_root)
-        .unwrap();
-    let mut decoded_root = Block::from_dag_cbor(&hex::decode(&root.data).unwrap()).unwrap();
-    let private_key = crypto::generate_ed25519().unwrap();
-    let public_key = private_key.public_key();
-    let signer_did = public_key.did().unwrap();
-    let signed_bytes = decoded_root.to_dag_cbor().unwrap();
-    let signature = Signature::new(
-        SignatureHeader::new(
-            SignatureType::EdDSA,
-            hex::encode(public_key.raw()).into_bytes(),
-        ),
-        private_key.sign(&signed_bytes).unwrap(),
-    );
-    let signature_data = signature.to_dag_cbor().unwrap();
-    let signature_cid = generate_cid_from_bytes(&signature_data).unwrap();
-    decoded_root.signature = Some(signature_cid);
-    let root_data = decoded_root.to_dag_cbor().unwrap();
-    let root_cid = generate_cid_from_bytes(&root_data).unwrap();
-    root.cid = root_cid.to_string();
-    root.data = hex::encode(root_data);
-    wire_document.roots[0] = root_cid.to_string();
-    wire_document.doc_id = db::block::builder::derive_doc_id(&root_cid);
-    wire_document.blocks.push(BrowserSyncBlock {
-        cid: signature_cid.to_string(),
-        data: hex::encode(signature_data),
-    });
+    let signer_did = sign_genesis(&mut wire_document);
 
     let validated = sync.validate_document(&wire_document).unwrap();
     assert_eq!(
@@ -385,4 +354,157 @@ async fn validation_rejects_forged_genesis_signature() {
         .err()
         .expect("an unverifiable genesis signature must reject the push");
     assert!(matches!(error, BrowserSyncError::Invalid(_)));
+}
+
+/// Re-sign a wire document's genesis with a fresh key, as a device authoring
+/// its own commits does with a key the node never holds. Returns the DID the
+/// node should verify from that signature.
+fn sign_genesis(wire_document: &mut BrowserSyncDocument) -> String {
+    let old_root = wire_document.roots[0].clone();
+    let root = wire_document
+        .blocks
+        .iter_mut()
+        .find(|block| block.cid == old_root)
+        .unwrap();
+    let mut decoded_root = Block::from_dag_cbor(&hex::decode(&root.data).unwrap()).unwrap();
+    let private_key = crypto::generate_ed25519().unwrap();
+    let public_key = private_key.public_key();
+    let signer_did = public_key.did().unwrap();
+    let signed_bytes = decoded_root.to_dag_cbor().unwrap();
+    let signature = Signature::new(
+        SignatureHeader::new(
+            SignatureType::EdDSA,
+            hex::encode(public_key.raw()).into_bytes(),
+        ),
+        private_key.sign(&signed_bytes).unwrap(),
+    );
+    let signature_data = signature.to_dag_cbor().unwrap();
+    let signature_cid = generate_cid_from_bytes(&signature_data).unwrap();
+    decoded_root.signature = Some(signature_cid);
+    let root_data = decoded_root.to_dag_cbor().unwrap();
+    let root_cid = generate_cid_from_bytes(&root_data).unwrap();
+    root.cid = root_cid.to_string();
+    root.data = hex::encode(root_data);
+    wire_document.roots[0] = root_cid.to_string();
+    wire_document.doc_id = db::block::builder::derive_doc_id(&root_cid);
+    wire_document.blocks.push(BrowserSyncBlock {
+        cid: signature_cid.to_string(),
+        data: hex::encode(signature_data),
+    });
+    signer_did
+}
+
+/// `TxnBroadcaster` test double: captures every event it is handed.
+struct CapturingBroadcaster {
+    events: Arc<std::sync::Mutex<Vec<db::event::emission::TxnBroadcastEvent>>>,
+}
+
+#[async_trait::async_trait]
+impl db::event::emission::TxnBroadcaster for CapturingBroadcaster {
+    async fn broadcast_update(&self, event: db::event::emission::TxnBroadcastEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+/// A wire document from `source`, its genesis signed by a key neither node
+/// holds. `None` leaves the node's own signature in place.
+async fn pushable_document(
+    source: Arc<db::DB<RegolithStore>>,
+    signed: bool,
+) -> (BrowserSyncDocument, Option<String>) {
+    let mut document = Document::new();
+    document.set("name", "Alice");
+    let created = db::AutoCommitMutator::new(source.clone())
+        .create("Users", document)
+        .await
+        .unwrap();
+    let sync = BrowserSyncEngine::new(source);
+    let document_ref = sync
+        .document_ref(&created.doc_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut wire_document = sync.load_document(&document_ref).await.unwrap().unwrap();
+    let signer_did = signed.then(|| sign_genesis(&mut wire_document));
+    (wire_document, signer_did)
+}
+
+async fn apply_and_capture(
+    signed: bool,
+) -> (
+    BrowserSyncDocument,
+    Option<String>,
+    Vec<db::event::emission::TxnBroadcastEvent>,
+) {
+    let source = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let target = Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    source.create_collection(users_schema()).await.unwrap();
+    target.create_collection(users_schema()).await.unwrap();
+
+    let (wire_document, signer_did) = pushable_document(source, signed).await;
+
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let broadcaster: Arc<dyn db::event::emission::TxnBroadcaster> =
+        Arc::new(CapturingBroadcaster {
+            events: events.clone(),
+        });
+    BrowserSyncEngine::with_broadcaster(target, broadcaster)
+        .apply_document(&wire_document, "the-pusher")
+        .await
+        .unwrap();
+
+    let captured = events.lock().unwrap().drain(..).collect();
+    (wire_document, signer_did, captured)
+}
+
+#[tokio::test]
+async fn a_merged_fragment_is_announced_to_peers() {
+    // The gap this closes: a fragment pushed to `/sync` used to stop at the
+    // node it landed on. It reached no replicator and no gossip topic, so a
+    // device-signed document could never leave the node it was pushed to.
+    let (wire_document, signer_did, events) = apply_and_capture(true).await;
+
+    assert_eq!(events.len(), 1, "a merged fragment must be announced once");
+    let event = &events[0];
+    assert_eq!(event.doc_id, wire_document.doc_id);
+    assert_eq!(event.collection_id, wire_document.collection_id);
+    assert_eq!(
+        event.doc_cid.to_string(),
+        wire_document.roots[0],
+        "peers must be announced the root that was merged"
+    );
+    assert_eq!(
+        event.creator_did.as_deref(),
+        signer_did.as_deref(),
+        "the announced creator must be the DID proven by the signature, never the caller who delivered the push"
+    );
+
+    // A replicator with a filter on the collection is skipped unless the push
+    // carries a document to match against, so a fragment -- which is blocks,
+    // not a body -- has to have the merged state read back for it.
+    assert_eq!(
+        event
+            .document_json
+            .as_ref()
+            .and_then(|json| json.get("name")),
+        Some(&serde_json::json!("Alice")),
+        "a filtered replicator has nothing to match on without the merged document"
+    );
+}
+
+#[tokio::test]
+async fn an_unsigned_fragment_is_announced_without_a_creator_claim() {
+    // Announcing is not the same as vouching. An unsigned fragment still has
+    // to reach peers, but it carries no DID for them to register as owner.
+    let (_, _, events) = apply_and_capture(false).await;
+
+    assert_eq!(
+        events.len(),
+        1,
+        "an unsigned fragment must still be announced"
+    );
+    assert_eq!(
+        events[0].creator_did, None,
+        "with no signature there is no owner to claim on the receiving node"
+    );
 }
