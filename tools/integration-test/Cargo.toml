@@ -109,6 +109,10 @@ path = "tests/cursor.rs"
 name = "http_contract"
 path = "tests/http_contract.rs"
 
+[[test]]
+name = "client_authored"
+path = "tests/client_authored.rs"
+
 [dependencies]
 hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30" }
 defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "9526a4ebfaa1cebf07fc3592de6f0a62d77f9e30" }
@@ -138,6 +142,8 @@ p2p = { path = "../../crates/p2p", features = ["iroh-transport"] }
 base64 = "0.22"
 hex = "0.4"
 cid = { workspace = true }
+defra-core = { path = "../../crates/defra-core" }
+ciborium = { workspace = true }
 serial_test = "3"
 
 [lints]
