@@ -9,7 +9,7 @@ use crate::router::{AppState, NodePermission};
 
 /// Health check response.
 pub async fn health_check() -> impl IntoResponse {
-    (StatusCode::OK, "Healthy")
+    Json("Healthy")
 }
 
 /// Version endpoint handler.
