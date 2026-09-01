@@ -152,7 +152,7 @@ jobs:
           git clean -fd
 
   build-ffi:
-    name: FFI (${{ matrix.platform }})
+    name: FFI ${{ matrix.variant }} (${{ matrix.platform }})
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -161,19 +161,51 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["ubuntu-latest"]'
+            variant: full
+            artifact: defra-ffi
             features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
           - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
+            variant: full
+            artifact: defra-ffi
             features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
           - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
+            variant: full
+            artifact: defra-ffi
             features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
           - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
+            variant: full
+            artifact: defra-ffi
             features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
+          - target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: '["ubuntu-latest"]'
+            variant: lean
+            artifact: defra-ffi-lean
+            features: "--no-default-features --features native"
+          - target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: '["self-hosted", "Linux", "ARM64"]'
+            variant: lean
+            artifact: defra-ffi-lean
+            features: "--no-default-features --features native"
+          - target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
+            variant: lean
+            artifact: defra-ffi-lean
+            features: "--no-default-features --features native"
+          - target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
+            variant: lean
+            artifact: defra-ffi-lean
+            features: "--no-default-features --features native"
     steps:
       - uses: actions/checkout@v4
 
@@ -184,7 +216,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-ffi"
-          shared-key: ${{ matrix.target }}
+          shared-key: ${{ matrix.target }}-${{ matrix.variant }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -237,7 +269,7 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="defra-ffi_${TAG}_${{ matrix.platform }}.tar.gz"
+          ARCHIVE="${{ matrix.artifact }}_${TAG}_${{ matrix.platform }}.tar.gz"
           RELEASE_DIR="target/${{ matrix.target }}/release"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             LIB="libdefra_ffi.dylib"
@@ -253,10 +285,21 @@ jobs:
             -C "${GITHUB_WORKSPACE}" defra.h
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
+      - name: Capability manifest
+        shell: bash
+        run: |
+          MANIFEST="${ARCHIVE%.tar.gz}.capabilities"
+          printf '%s|%s|%s\n' \
+            "${{ matrix.artifact }}" "${{ matrix.platform }}" "${{ matrix.features }}" \
+            > "${MANIFEST}"
+          echo "MANIFEST=${MANIFEST}" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-ffi-${{ matrix.platform }}
-          path: ${{ env.ARCHIVE }}
+          name: ${{ matrix.artifact }}-${{ matrix.platform }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.MANIFEST }}
 
       - name: Cleanup
         if: always()
@@ -265,8 +308,18 @@ jobs:
           git clean -fd
 
   build-apple-ffi:
-    name: FFI iOS XCFramework
+    name: FFI iOS XCFramework (${{ matrix.variant }})
     runs-on: ["self-hosted", "macOS", "ARM64", "studio"]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: iroh
+            artifact: defra-ffi-iroh
+            features: iroh,native,sourcehub
+          - variant: lean
+            artifact: defra-ffi-lean
+            features: native
     steps:
       - uses: actions/checkout@v4
 
@@ -277,7 +330,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-apple-ffi"
-          shared-key: "ios"
+          shared-key: "ios-${{ matrix.variant }}"
 
       - name: Install system dependencies
         run: brew install protobuf
@@ -291,7 +344,7 @@ jobs:
 
       - name: Build Apple FFI
         env:
-          FEATURES: iroh,native,sourcehub
+          FEATURES: ${{ matrix.features }}
           NO_DEFAULT_FEATURES: "1"
           OUT_DIR: ${{ github.workspace }}/target/apple-ffi
         run: |
@@ -304,14 +357,25 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="defra-ffi-iroh_${TAG}_ios_xcframework.tar.gz"
+          ARCHIVE="${{ matrix.artifact }}_${TAG}_ios_xcframework.tar.gz"
           tar czf "${ARCHIVE}" -C target/apple-ffi include lib xcframework swift
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
+      - name: Capability manifest
+        shell: bash
+        run: |
+          MANIFEST="${ARCHIVE%.tar.gz}.capabilities"
+          printf '%s|ios_xcframework|--no-default-features --features %s\n' \
+            "${{ matrix.artifact }}" "${{ matrix.features }}" \
+            > "${MANIFEST}"
+          echo "MANIFEST=${MANIFEST}" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-ffi-iroh-ios_xcframework
-          path: ${{ env.ARCHIVE }}
+          name: ${{ matrix.artifact }}-ios_xcframework
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.MANIFEST }}
 
       - name: Cleanup
         if: always()
@@ -425,10 +489,17 @@ jobs:
           bash .github/scripts/report-release-sizes.sh \
             artifacts previous-artifacts "$GITHUB_REF_NAME" "$PREVIOUS_TAG"
 
+      - name: Build the capability matrix
+        run: |
+          bash .github/scripts/release-capability-matrix.sh artifacts > capability-matrix.md
+          cat capability-matrix.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: List release artifacts
         run: find artifacts -type f | sort
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: artifacts/*.tar.gz
           generate_release_notes: true
+          body_path: capability-matrix.md
+          append_body: true
