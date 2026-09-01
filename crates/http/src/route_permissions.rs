@@ -39,6 +39,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // Exempt routes (no auth needed)
         // =====================================================================
         "/health-check" => RoutePermission::Exempt,
+        "/openapi.json" => RoutePermission::Exempt,
         "/api/v0/version" => RoutePermission::Exempt,
         "/api/v0/graphql/ws" => RoutePermission::Exempt,
         "/api/v0/batch/verify" => RoutePermission::Exempt,
@@ -53,6 +54,9 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::POST => RoutePermission::Dynamic,
             _ => RoutePermission::Required(NodePermission::DocumentRead),
         },
+        "/api/v0/ccip" | "/api/v0/ccip/:sender/:data" | "/api/v0/ccip/{sender}/{data}" => {
+            RoutePermission::Dynamic
+        }
         "/api/v0/events" => RoutePermission::Dynamic,
         "/api/v0/sync" => RoutePermission::Dynamic,
         "/api/v0/actions" => RoutePermission::Required(NodePermission::ActionList),
@@ -299,6 +303,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         "/api/v0/debug/dump" => RoutePermission::Required(NodePermission::DocumentRead),
         "/api/v0/purge" => RoutePermission::Required(NodePermission::DocumentUpdate),
+        "/api/v0/node/options" => RoutePermission::Required(NodePermission::P2pPeerInfo),
         "/api/v0/node/identity" => RoutePermission::Required(NodePermission::P2pPeerConnect),
 
         // =====================================================================

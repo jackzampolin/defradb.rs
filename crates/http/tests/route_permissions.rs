@@ -27,6 +27,10 @@ fn exempt_routes() {
         RoutePermission::Exempt
     );
     assert_eq!(
+        route_permission("/openapi.json", &Method::GET),
+        RoutePermission::Exempt
+    );
+    assert_eq!(
         route_permission("/api/v0/version", &Method::GET),
         RoutePermission::Exempt
     );
@@ -58,6 +62,14 @@ fn identity_only_routes() {
 
 #[test]
 fn dynamic_routes() {
+    assert_eq!(
+        route_permission("/api/v0/ccip", &Method::POST),
+        RoutePermission::Dynamic
+    );
+    assert_eq!(
+        route_permission("/api/v0/ccip/{sender}/{data}", &Method::GET),
+        RoutePermission::Dynamic
+    );
     assert_eq!(
         route_permission("/api/v0/graphql", &Method::POST),
         RoutePermission::Dynamic
@@ -215,6 +227,7 @@ fn all_registered_routes_return_expected_permission() {
     let routes: Vec<(&str, Method, RoutePermission)> = vec![
         // Exempt
         ("/health-check", Method::GET, RoutePermission::Exempt),
+        ("/openapi.json", Method::GET, RoutePermission::Exempt),
         ("/api/v0/version", Method::GET, RoutePermission::Exempt),
         ("/api/v0/graphql/ws", Method::GET, RoutePermission::Exempt),
         (
@@ -223,6 +236,12 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Exempt,
         ),
         // GraphQL
+        ("/api/v0/ccip", Method::POST, RoutePermission::Dynamic),
+        (
+            "/api/v0/ccip/:sender/:data",
+            Method::GET,
+            RoutePermission::Dynamic,
+        ),
         (
             "/api/v0/graphql",
             Method::GET,
@@ -553,6 +572,11 @@ fn all_registered_routes_return_expected_permission() {
             "/api/v0/purge",
             Method::POST,
             RoutePermission::Required(NodePermission::DocumentUpdate),
+        ),
+        (
+            "/api/v0/node/options",
+            Method::GET,
+            RoutePermission::Required(NodePermission::P2pPeerInfo),
         ),
         (
             "/api/v0/node/identity",

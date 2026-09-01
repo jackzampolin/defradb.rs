@@ -18,6 +18,7 @@ use tower_http::trace::TraceLayer;
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 use query::QueryLimits;
+use serde_json::Map;
 
 use crate::error::Result;
 use crate::router::{
@@ -107,6 +108,7 @@ pub struct Server {
     dump: Option<Arc<dyn DumpOperations>>,
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
+    node_options: Option<Arc<Map<String, serde_json::Value>>>,
     node_identity_did: Option<String>,
     dev_mode: bool,
 }
@@ -136,6 +138,7 @@ impl Server {
             dump: None,
             txn_ops: None,
             event_bus: None,
+            node_options: None,
             node_identity_did: None,
             dev_mode: false,
         }
@@ -165,6 +168,7 @@ impl Server {
             dump: None,
             txn_ops: None,
             event_bus: None,
+            node_options: None,
             node_identity_did: None,
             dev_mode: false,
         }
@@ -194,6 +198,7 @@ impl Server {
             dump: None,
             txn_ops: None,
             event_bus: None,
+            node_options: None,
             node_identity_did: None,
             dev_mode: false,
         }
@@ -223,6 +228,7 @@ impl Server {
             dump: None,
             txn_ops: None,
             event_bus: None,
+            node_options: None,
             node_identity_did: None,
             dev_mode: false,
         }
@@ -406,6 +412,12 @@ impl Server {
         self
     }
 
+    /// Set the effective node configuration exposed by `/node/options`.
+    pub fn with_node_options(mut self, options: Map<String, serde_json::Value>) -> Self {
+        self.node_options = Some(Arc::new(options));
+        self
+    }
+
     /// Set the node identity DID for signing config fallback.
     pub fn with_node_identity_did(mut self, did: String) -> Self {
         self.node_identity_did = Some(did);
@@ -488,6 +500,9 @@ impl Server {
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));
+        }
+        if let Some(ref options) = self.node_options {
+            builder = builder.with_node_options((**options).clone());
         }
         if let Some(ref did) = self.node_identity_did {
             builder = builder.with_node_identity_did(did.clone());
