@@ -148,7 +148,7 @@ mod shared_owner_tests {
 
         let version_txn = db.new_txn(true).await.unwrap();
         let documents = VersionedFetcher::new(Arc::new(Mutex::new(Some(version_txn))))
-            .get_documents_at_cid(&cid.to_string(), None)
+            .get_documents_at_cid(&cid.to_string(), None, None)
             .await
             .unwrap();
         let document_owners: HashSet<_> = documents
