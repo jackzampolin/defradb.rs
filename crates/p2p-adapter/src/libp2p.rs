@@ -78,7 +78,7 @@ async fn wait_for_branchable_merges(
     }
 }
 
-async fn unmerged_doc_sync_heads<B, I>(blockstore: &B, heads: I) -> HashSet<cid::Cid>
+async fn unmerged_heads<B, I>(blockstore: &B, heads: I) -> HashSet<cid::Cid>
 where
     B: Blockstore,
     I: IntoIterator<Item = cid::Cid>,
@@ -951,7 +951,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 return Err(error);
             }
         };
-        let mut pending_heads = unmerged_doc_sync_heads(coord.blockstore().as_ref(), heads).await;
+        let mut pending_heads = unmerged_heads(coord.blockstore().as_ref(), heads).await;
 
         while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
             match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await {
@@ -1013,7 +1013,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 event_bus.unsubscribe(sub.id());
                 return Ok(());
             }
-            coord
+            let replies = coord
                 .pubsub_sync_branchable_collection(
                     collection_id.to_string(),
                     Some(std::time::Duration::from_secs(8)),
@@ -1024,14 +1024,26 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                     event_bus.unsubscribe(sub.id());
                     P2PError::transport(format!("pubsub_rpc branchable-sync failed: {error}"))
                 })?;
-            wait_for_branchable_merges(
-                &mut sub,
-                &collection_id_string,
-                start,
-                overall_timeout,
-                idle_timeout,
-            )
-            .await;
+            let heads = replies
+                .into_iter()
+                .flat_map(|(_, reply)| reply.heads)
+                .filter_map(|head| cid::Cid::try_from(head.as_slice()).ok());
+            let mut pending_heads = unmerged_heads(coord.blockstore().as_ref(), heads).await;
+
+            while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
+                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
+                {
+                    Ok(Some(msg)) => {
+                        if let Some(data) = msg.as_merge_complete() {
+                            if data.collection_id == collection_id_string {
+                                pending_heads.remove(&data.cid);
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+            }
             event_bus.unsubscribe(sub.id());
             return Ok(());
         }
@@ -1145,7 +1157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merged_doc_sync_heads_are_not_pending() {
+    async fn merged_heads_are_not_pending() {
         let blockstore = DefraBlockstore::new(Arc::new(RegolithStore::in_memory().unwrap()), true);
         let merged =
             cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
@@ -1157,7 +1169,7 @@ mod tests {
         blockstore.put(&unmerged, b"unmerged").await.unwrap();
         blockstore.mark_as_merged(&merged).await.unwrap();
 
-        let pending = unmerged_doc_sync_heads(&blockstore, [merged, unmerged, unmerged]).await;
+        let pending = unmerged_heads(&blockstore, [merged, unmerged, unmerged]).await;
 
         assert_eq!(pending, HashSet::from([unmerged]));
     }
@@ -1189,7 +1201,7 @@ mod tests {
 
         let heads = crate::doc_sync::pubsub_replies::advertised_heads(2, &doc_set, &replies)
             .expect("an advertised head is a result even when a peer stays silent");
-        let pending = unmerged_doc_sync_heads(&blockstore, heads).await;
+        let pending = unmerged_heads(&blockstore, heads).await;
 
         assert!(
             pending.is_empty(),
