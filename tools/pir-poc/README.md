@@ -12,23 +12,26 @@ DefraDB query execution or storage:
 Strict Dense XOR and the visible-candidate baseline share the same immutable
 serving rows. The benchmark uses 100 candidates; the decoy client decodes only
 its known target row and drops the others.
-The complete protocol explanation, client/server benchmark table, privacy
-comparison and two-versus-three-server discussion live in
-[USE_CASES.md](USE_CASES.md). It is the single authoritative design document;
-this README is only the operating guide.
+## Documentation map
 
-Nine small Mizu, Shinzo and general DefraDB scenarios are catalogued and
-executable through [USE_CASE_GALLERY.md](USE_CASE_GALLERY.md).
-The optional [encrypted exact-search lane](ENCRYPTED_SEARCH.md) demonstrates
-the one-lookup/search-pattern-leakage tradeoff.
+The documentation has one owner for each question:
 
-The end-to-end threat model and research-backed privacy layers outside PIR—
-origin hiding, timing resistance, anonymous admission, live delivery and
-private transaction broadcast—are documented in [PRIVACY.md](PRIVACY.md).
+| Read this | For |
+|---|---|
+| [USE_CASES.md](USE_CASES.md) | The authoritative protocol ranking, production use-case choices, benchmark evidence, and future decision triggers |
+| [PRODUCTION.md](PRODUCTION.md) | The minimal DefraDB export/event adapter, artifact, authorization, and deployment boundary |
+| [PRIVACY.md](PRIVACY.md) | OHTTP, Tor, timing, admission, live delivery, and write-path privacy |
+| [USE_CASE_GALLERY.md](USE_CASE_GALLERY.md) | Runnable 256-row fixtures that prove application data shapes and correctness, not scale |
+| [PORTABLE_READINESS.md](PORTABLE_READINESS.md) | Client portability budgets and remaining production gates |
+| [ENCRYPTED_SEARCH.md](ENCRYPTED_SEARCH.md) | The optional, weaker blind exact-search lane and its explicit leakage |
+| [research/README.md](research/README.md) | Historical protocol comparisons, GPU/CPU artifacts, benchmark ledgers, and reproduction commands |
+
+This README is only the operating guide. Research documents are evidence, not
+additional serving choices.
 
 ## Commands
 
-The default binary deliberately has seven top-level commands:
+The default binary deliberately has eight top-level commands:
 
 ```text
 pir-poc demo
@@ -36,6 +39,7 @@ pir-poc use-cases [mizu|shinzo|defra]
 pir-poc encrypted-search [ROWS<=1000000]
 pir-poc build INPUT_JSON OUTPUT_ROOT
 pir-poc serve REPLICA_STORE BIND_ADDRESS
+pir-poc bucket shinzo address|topic0 HEX_VALUE [BUCKET_COUNT]
 pir-poc query ...
 pir-poc benchmark [quick|full]
 ```
@@ -94,7 +98,13 @@ fallback. Two onion services on one Tor process validate the transport but do
 not establish operator non-collusion; production needs independently operated
 relay/gateway/replica paths.
 
-## Build and serve an immutable generation
+## Build and serve the bundled demo generation
+
+The JSON schema intentionally bundles the nullifier, encrypted-tag, and Shinzo
+fixtures so one command can exercise every POC endpoint. It is not the future
+DefraDB adapter contract. Production should publish one artifact per bounded
+query class through the boundary in [PRODUCTION.md](PRODUCTION.md), rather than
+teaching DefraDB about this demo bundle.
 
 `build`, `serve`, and `query` obtain the operator authentication key from an
 out-of-band environment variable:

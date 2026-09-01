@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DefraDB PIR selected-use-case immutable generation",
+  "description": "Bundled executable POC input for nullifier, encrypted-tag, and Shinzo fixtures; not the production DefraDB adapter contract",
   "type": "object",
   "additionalProperties": false,
   "required": [

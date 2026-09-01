@@ -1,9 +1,13 @@
-//! Product-shaped storage shared by the three selected POC use cases.
+//! Bundled product-demo storage for the selected POC use cases.
 //!
 //! Dense XOR and the 100-decoy baseline deliberately use the same immutable
 //! rows.  Strict mode evaluates a random selector share; decoy mode performs
 //! visible ordinal reads.  This keeps the comparison honest and avoids a
 //! second server-side index built only for the baseline.
+//!
+//! `PrivateTable` is the generic kernel worth extracting. `UseCaseStore` is not
+//! an integration contract: it intentionally combines Mizu and Shinzo fixtures
+//! so one CLI build can exercise every endpoint.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};

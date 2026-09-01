@@ -1,10 +1,12 @@
 # DefraDB PIR POC: research comparison archive
 
-The product-shaped default POC now exposes only the three paths in
-`USE_CASES.md`. This file preserves the experiments that produced those
-choices; their code is compiled only with the `research` feature.
+The bundled default POC exercises three protocol shapes. The current product
+ranking and eight use-case decisions are in [`../USE_CASES.md`](../USE_CASES.md).
+This file preserves the experiments that produced those choices; their code is
+compiled only with the `research` feature.
 
-This document is the decision summary for the POC. The primary metric is
+This document is the experiment-stage summary that preceded the current
+decision record. The primary metric is
 **aggregate server work per complete useful private result**. Build, client
 setup, online server work, maintenance, traffic, storage, latency, and client
 CPU are kept separate. Results with different privacy, leakage, or result
@@ -17,12 +19,11 @@ AMD Ryzen 7 3700X under WSL2 unless explicitly labelled as paper or upstream
 artifact data. They exclude HTTP/TLS/WAN time and are not audited production
 cryptography.
 
-The selected paths are implemented as correctness-checked in-process research
-modules and benchmark commands. The existing `build` / `serve` / `query` HTTP
-demo still uses the earlier paged Snapshot plus `ParallelEvaluator`; it must
-not be presented as the serving endpoint for the choices below.
+The selected paths are implemented as correctness-checked modules and benchmark
+commands. Treat the tables below as an experiment ledger: where they record an
+earlier winner, the later decision and benchmark in `../USE_CASES.md` wins.
 
-## Current choices
+## Choices at this experiment stage
 
 | Query shape | Selected POC path | Why | Main cost or condition |
 |---|---|---|---|
@@ -429,7 +430,7 @@ p50s were 8.10 ms Dense, 446.93 ms GPU-DPF and 179.01 ms InsPIRe. InsPIRe's
 hiding it in a warm mean. Dense's GPU table setup remains a deterministic
 initializer rather than a common storage read, so cold-storage totals are not
 directly comparable. Reproduce and inspect the complete schema in
-[`research/FULL_COMPARISON.md`](research/FULL_COMPARISON.md).
+[`FULL_COMPARISON.md`](FULL_COMPARISON.md).
 
 ### Same-CPU Dense versus Poulpy InsPIRe2
 
@@ -575,21 +576,12 @@ shared only within one authorization cohort. Otherwise the projection is
 encrypted before table construction under an application/cohort key that the
 PIR replicas do not hold.
 
-See `PRODUCTION.md`, `EXPLORATION.md`, `ARTIFACTS.md`,
-`PORTABLE_READINESS.md`, and the benchmark JSON output for assumptions and
+See `../PRODUCTION.md`, `EXPLORATION.md`, `ARTIFACTS.md`,
+`../PORTABLE_READINESS.md`, and the benchmark JSON output for assumptions and
 phase-separated evidence.
 
 ## Reproduce
 
-```text
-cargo run -p pir-poc --release -- bench-mphf full
-cargo run -p pir-poc --release -- bench-dense-batch full
-cargo run -p pir-poc --release -- bench-end-to-end full
-cargo run -p pir-poc --release -- bench-warm-stateful full
-cargo run -p pir-poc --release -- bench-subscription-batches full
-cargo run -p pir-poc --release -- bench-ribbon quick
-cargo run -p pir-poc --release -- bench-mphf-subset-xor quick
-```
-
-Every benchmark emits JSON and correctness-checks recovered pages, projections,
-or event outputs. Redirect stdout to a file when retaining an artifact.
+Use the current commands in [`README.md`](README.md). Every benchmark emits
+JSON and correctness-checks recovered pages, projections, or event outputs.
+Redirect stdout to a file when retaining an artifact.

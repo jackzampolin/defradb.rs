@@ -1,7 +1,9 @@
 # PIR research archive
 
-This directory and the root-level research ledgers preserve experiments used to
-select the three POC paths. They are not runtime protocol choices.
+This directory contains every historical experiment and evidence ledger used to
+select the product paths. They are not runtime protocol choices. Start with
+`../USE_CASES.md`; enter this directory only to audit a decision or reproduce a
+measurement.
 
 The default build excludes DefraDB embedding, unsafe PtrHash/epserde client
 metadata, SinglePass, finite-differences adapters, Fuse/Ribbon/subset-XOR layouts,
@@ -34,10 +36,13 @@ Available research benchmark names:
 
 Primary evidence ledgers:
 
-- `../COMPARISON.md`: protocol comparison and decisions;
-- `../EXPLORATION.md`: exploration history;
+- `COMPARISON.md`: complete protocol comparison archive;
+- `EXPLORATION.md`: exploration program and history;
+- `ARTIFACTS.md`: external artifact pins and reproduction status;
+- `FUSE_BENCHMARK.md`, `RIBBON_BENCHMARK.md`, and `WARM_STATEFUL.md`:
+  layout/stateful benchmark records;
 - `COMPUTATIONAL_FRONTIER.md`: computational PIR artifacts;
-- `../HARDWARE_COUNTERS.md`: phase-scoped counter methodology;
+- `HARDWARE_COUNTERS.md`: phase-scoped counter methodology;
 - `../PORTABLE_READINESS.md`: portability evidence and blockers.
 
 Research results may use different privacy, result-shape, state and threat-model

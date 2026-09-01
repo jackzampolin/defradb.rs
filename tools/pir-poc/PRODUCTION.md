@@ -5,6 +5,35 @@ not as another DefraDB query executor or storage engine. The POC therefore
 builds and serves byte tables and manifests; it does not change CRDT merge,
 document storage, query planning, or transaction semantics.
 
+## Integration contract
+
+The reusable boundary is deliberately smaller than the POC's product harness:
+
+```text
+authorized committed cutoff
+  -> deterministic rows: (private key, fixed padded projection)
+  -> one immutable artifact for one query/authorization class
+  -> generic Dense evaluator sidecar
+```
+
+Do **not** integrate `UseCaseStore`, `SelectedService`, the demo JSON schema, or
+the benchmark dispatcher into DefraDB. They bundle nullifier, encrypted-tag,
+and Shinzo fixtures only to make this branch executable. The production-facing
+surface should contain three narrow contracts:
+
+1. a snapshot exporter that emits deterministic rows plus collection/schema,
+   authorization class, source cutoff, result schedule, and an ordered digest;
+2. an optional committed-event adapter that emits a canonical bucket and event
+   ID into a fixed public epoch;
+3. a sidecar client/manifest interface that has no dependency on DefraDB query,
+   CRDT, storage, or event types.
+
+That direction keeps dependencies one-way: the DefraDB adapter knows the small
+artifact/event DTOs, while the PIR evaluator never imports DefraDB crates. The
+existing embedded-node demos remain research-only contract tests for the seam.
+Each query class and ACP-equivalent reader cohort gets its own artifact; adding
+a Mizu or Shinzo projection is adapter configuration, not another PIR engine.
+
 ## Existing Defra primitives to reuse
 
 - Successful mutations already publish `events::EventName::Update` after the
@@ -147,14 +176,17 @@ crates, then add those operational controls at the serving edge.
 
 ## Minimal integration sequence
 
-1. Freeze this POC as the decision/evidence archive.
-2. Add a read-only snapshot-export adapter using the normal authorized embedded
-   query API; make its deterministic output digest the builder input.
+1. Freeze this POC as the decision/evidence archive; do not promote its bundled
+   store or CLI to a DefraDB API.
+2. Define one small versioned projection-batch DTO, then add a read-only export
+   adapter using the normal authorized embedded query API. Make the public
+   cutoff and deterministic ordered-output digest part of every build.
 3. Replace JSON-loaded table images with a versioned, bounded binary artifact
    that servers can memory-map and publish atomically.
 4. Add an optional sidecar listener on `EventName::Update` that seals fixed
    presence epochs and evaluates registered packed-Dense selectors; preserve
    immediate Compact DPF behind an explicit low-latency policy.
-5. Extract only the stable manifest, client combine/verification and selected
-   serving APIs into small crates. Do not move experimental layouts into core
+5. Extract only the generic table builder/evaluator, stable manifest, client
+   combine/verification, and selected serving DTOs into small crates. Keep
+   product adapters separate and do not move experimental layouts into core
    Defra crates.

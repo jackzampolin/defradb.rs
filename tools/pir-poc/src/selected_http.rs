@@ -1,4 +1,8 @@
-//! HTTP transport for the three selected use cases.
+//! HTTP transport for the bundled selected-use-case demo.
+//!
+//! This module intentionally owns product-shaped routes and in-memory Shinzo
+//! state. Production DefraDB integration should depend on generic artifact and
+//! manifest DTOs, not on `SelectedService` or this route set.
 //!
 //! Each replica exposes the same authenticated immutable manifest.  Dense
 //! requests contain only that replica's selector shares; decoy requests contain

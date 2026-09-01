@@ -63,7 +63,7 @@ bash tools/pir-poc/research/run-ypir-defra.sh
 The runner pins the paper artifact rather than moving `main`, runs the two
 official end-to-end tests, and uses the exact populated Defra corpus. Results
 and physical-record qualification are in
-[`research/ypir_adapter/RESULTS.md`](research/ypir_adapter/RESULTS.md).
+[`ypir_adapter/RESULTS.md`](ypir_adapter/RESULTS.md).
 
 InsPIRe official archive gate:
 
@@ -102,7 +102,7 @@ bash tools/pir-poc/research/run-gpu-pir-defra.sh full
 
 The runner clones the exact commit outside the repository and writes JSON under
 `target/pir-research-results/`. See
-[`research/gpu_dpf_adapter/README.md`](research/gpu_dpf_adapter/README.md) for
+[`gpu_dpf_adapter/README.md`](gpu_dpf_adapter/README.md) for
 the glibc/CUDA compatibility qualification and timed boundaries.
 
 Chalamet common and WASI-compatible client:
@@ -130,7 +130,7 @@ The last command has a suite-level failure only because five unrelated
 PAI/ALPR parameters load the absent native tool. The four pure-Java artifact
 configurations pass. Exact results, analytical 262,144 x 96-byte geometry,
 and the prepared two-process runner are in
-[`research/kpir_artifact/README.md`](research/kpir_artifact/README.md).
+[`kpir_artifact/README.md`](kpir_artifact/README.md).
 
 ## Reproduction qualifications
 

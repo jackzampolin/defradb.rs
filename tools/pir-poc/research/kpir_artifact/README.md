@@ -52,7 +52,7 @@ mvn -pl mpc4j-s2pc-pir -am -DskipTests install
 
 Runner dependencies are OpenJDK 17.0.19, Maven 3.9.12, and Ubuntu under
 WSL2. This gate saw 16 logical CPUs and 8,097,436 KiB total WSL memory. The
-host is recorded in `../../ARTIFACTS.md`. The cold package build passed in
+host is recorded in `../ARTIFACTS.md`. The cold package build passed in
 34:02.77 wall time with 1,185,672 KiB peak RSS. Most of that wall time was
 Maven I/O on the Windows-mounted workspace; it is not protocol setup time.
 
