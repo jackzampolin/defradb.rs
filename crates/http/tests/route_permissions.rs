@@ -569,6 +569,11 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
         (
+            "/api/v0/node/options",
+            Method::GET,
+            RoutePermission::Required(NodePermission::P2pPeerInfo),
+        ),
+        (
             "/api/v0/node/identity",
             Method::GET,
             RoutePermission::Required(NodePermission::P2pPeerConnect),

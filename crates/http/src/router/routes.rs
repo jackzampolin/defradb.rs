@@ -345,6 +345,7 @@ pub(crate) fn create_router_with_state_and_body_limits(
         .route("/debug/dump", get(handlers::utility::dump))
         // Utility endpoints (Go-compatible)
         .route("/purge", post(handlers::utility::purge))
+        .route("/node/options", get(handlers::utility::get_node_options))
         .route("/node/identity", get(handlers::utility::get_node_identity))
         .with_state(state);
 

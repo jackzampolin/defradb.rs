@@ -302,6 +302,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         "/api/v0/debug/dump" => RoutePermission::Required(NodePermission::DocumentRead),
         "/api/v0/purge" => RoutePermission::Required(NodePermission::DocumentUpdate),
+        "/api/v0/node/options" => RoutePermission::Required(NodePermission::P2pPeerInfo),
         "/api/v0/node/identity" => RoutePermission::Required(NodePermission::P2pPeerConnect),
 
         // =====================================================================
