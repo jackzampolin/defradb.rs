@@ -12,17 +12,13 @@
 //! exercise Go↔Rust KMS wire-compat over libp2p: the reader must fetch the DEK
 //! from the writer's KMS over the `encryption` gossip topic (bare CBOR
 //! `FetchEncryptionKeyRequest`/`Reply`, ECIES-wrapped key blocks) and decrypt.
-//! These require the Go KMS binary at `GO_KMS_BINARY`.
+//! These require the Go `defradb` binary on `PATH`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use integration_test::identity::generate_identity;
-use integration_test::{BinarySource, TestCluster};
-
-/// Path to the Go `defradb` binary built with KMS + the #4778 fix.
-const GO_KMS_BINARY: &str =
-    "/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb/build/defradb";
+use integration_test::TestCluster;
 
 #[tokio::test]
 async fn rust_rust_encrypted_p2p_replication() {
@@ -128,7 +124,7 @@ async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
     // `encryption`, and the Rust requester's publish has zero targets. Dev
     // mode gives both nodes a node identity. We also mint explicit request
     // identities so the fetch carries a real DID. Node index 0 = Rust, 1 = Go.
-    let go_binary = Path::new(GO_KMS_BINARY);
+    let go_binary = Path::new("defradb");
     let rust_identity =
         generate_identity(go_binary).expect("generate request identity for rust node");
     let go_identity = generate_identity(go_binary).expect("generate request identity for go node");
@@ -141,7 +137,6 @@ async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
         .with_development()
         .with_node_identity(0, rust_identity.private_key_hex)
         .with_node_identity(1, go_identity.private_key_hex)
-        .with_go_binary(BinarySource::Path(GO_KMS_BINARY.into()))
         .build()
         .await
         .expect("build mixed go/rust cluster with p2p + encryption");
