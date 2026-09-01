@@ -42,6 +42,8 @@ mod join_order_1596;
 mod json_missing_key;
 #[path = "query/lens.rs"]
 mod lens;
+#[path = "query/lens_cross_runtime.rs"]
+mod lens_cross_runtime;
 #[path = "query/lens_persistence.rs"]
 mod lens_persistence;
 #[path = "query/lens_reindex_secondary_index_979.rs"]
