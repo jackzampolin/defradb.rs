@@ -1,19 +1,30 @@
 use std::sync::Arc;
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use anyhow::{anyhow, Result};
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use p2p::sync::SyncConfig;
+#[cfg(feature = "libp2p")]
 use p2p::topics::DefraTopic;
 
-use crate::node::{
-    EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback, WireKmsCallback,
-};
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
+use crate::node::EmbeddedBlockstore;
+use crate::node::{EmbeddedMergeHandler, WireDocumentAcpCallback, WireKmsCallback};
+#[cfg(feature = "libp2p")]
 use crate::node_recovery::{restore_libp2p_documents, restore_libp2p_replicators};
-use crate::node_tasks::{spawn_libp2p_event_handler, spawn_replication_loop};
-use crate::{Libp2pConfig, ManagedP2PSystem, TransportKind};
-use defra_p2p_adapter::{
-    DbTransportDocPusher, DbVersionSyncer, P2PAdapter, ReplicatorPushOptions,
-    ReplicatorPushOptionsState, TransportDocPusher,
-};
+#[cfg(feature = "libp2p")]
+use crate::node_tasks::spawn_libp2p_event_handler;
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
+use crate::node_tasks::spawn_replication_loop;
+#[cfg(feature = "libp2p")]
+use crate::Libp2pConfig;
+use crate::ManagedP2PSystem;
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
+use crate::TransportKind;
+#[cfg(feature = "libp2p")]
+use defra_p2p_adapter::{DbTransportDocPusher, DbVersionSyncer, P2PAdapter, TransportDocPusher};
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
+use defra_p2p_adapter::{ReplicatorPushOptions, ReplicatorPushOptionsState};
 
 pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub system: Arc<ManagedP2PSystem>,
@@ -54,6 +65,7 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub manage_query_correlator: p2p::ManageQueryCorrelator,
 }
 
+#[cfg(feature = "libp2p")]
 pub(crate) async fn setup_libp2p<S>(
     store: Arc<S>,
     database: Arc<db::DB<S>>,
@@ -376,6 +388,7 @@ where
 
 /// Tee the SE key material from runtime `set_se_options` into the lazy handle
 /// read by the owner/querier transport. Skips non-32-byte keys (#976).
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 fn tee_se_key(handle: &db::merge::SeKeyHandle, options: &ReplicatorPushOptions) {
     match &options.se_encryption_key {
         Some(key_bytes) => match <[u8; 32]>::try_from(key_bytes.as_slice()) {

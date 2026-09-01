@@ -44,7 +44,7 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                 };
 
                 rt.block_on(async {
-                    let peer_id = p2p
+                    let _peer_id = p2p
                         .system
                         .ops()
                         .local_peer_id()
@@ -58,9 +58,10 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                         .map_err(FfiP2PError::from)?;
 
                     let full_addrs = match p2p.system.kind() {
+                        #[cfg(feature = "libp2p")]
                         embedded::TransportKind::Libp2p => addresses
                             .into_iter()
-                            .map(|addr| format!("{}/p2p/{}", addr, peer_id))
+                            .map(|addr| format!("{}/p2p/{}", addr, _peer_id))
                             .collect::<Vec<_>>(),
                         #[cfg(feature = "iroh")]
                         embedded::TransportKind::Iroh => addresses,

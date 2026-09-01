@@ -43,6 +43,7 @@ fn test_subscription_lifecycle() {
     node_close(node);
 }
 
+#[cfg(feature = "libp2p")]
 #[test]
 fn test_subscription_receives_mutation_event() {
     use crate::query::exec_request;

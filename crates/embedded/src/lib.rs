@@ -37,12 +37,14 @@ pub enum Persistence {
 pub enum TransportConfig {
     #[default]
     None,
+    #[cfg(feature = "libp2p")]
     Libp2p(Libp2pConfig),
     #[cfg(feature = "iroh")]
     Iroh(IrohConfig),
 }
 
 /// Libp2p transport configuration.
+#[cfg(feature = "libp2p")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Libp2pConfig {
     pub listen_addr: String,
@@ -122,6 +124,7 @@ pub struct EmbeddedNodeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransportKind {
+    #[cfg(feature = "libp2p")]
     Libp2p,
     #[cfg(feature = "iroh")]
     Iroh,

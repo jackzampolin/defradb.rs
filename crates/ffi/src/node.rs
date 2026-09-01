@@ -450,6 +450,7 @@ mod tests {
         assert_eq!(second.status, 0);
         assert_eq!(node_close(second.node_ptr).status, 0);
     }
+    #[cfg(feature = "libp2p")]
     #[test]
     fn test_persistent_p2p_nodes_reopen_after_pending_broadcasts() {
         assert!(crate::runtime::init_runtime());

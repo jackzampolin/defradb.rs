@@ -62,10 +62,12 @@ pub unsafe extern "C" fn p2p_sync_status(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "libp2p")]
     use std::ffi::{CStr, CString};
     use std::ptr;
 
     use crate::node::{new_node, node_close};
+    #[cfg(feature = "libp2p")]
     use crate::p2p::new_node_with_p2p;
     use crate::types::{defra_free_string, NodeInitOptions};
 
@@ -77,6 +79,7 @@ mod tests {
         let _ = symbol;
     }
 
+    #[cfg(feature = "libp2p")]
     #[test]
     fn p2p_sync_status_returns_live_snapshot() {
         assert!(crate::runtime::init_runtime(), "runtime init must succeed");

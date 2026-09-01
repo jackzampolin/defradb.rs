@@ -16,9 +16,10 @@ bench = false
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["native", "wasmtime-runtime", "sourcehub"]
-native = ["db/native", "db/p2p", "embedded/native"]
+default = ["native", "wasmtime-runtime", "sourcehub", "libp2p"]
+native = ["db/native", "embedded/native"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
+libp2p = ["db/p2p", "p2p/libp2p-transport", "embedded/libp2p", "dep:libp2p"]
 sourcehub = ["dep:sourcehub", "embedded/sourcehub"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
@@ -74,7 +75,7 @@ identity = { path = "../identity" }
 acp = { path = "../acp" }
 sourcehub = { path = "../sourcehub", optional = true }
 lens = { path = "../lens", default-features = false }
-p2p = { path = "../p2p", features = ["libp2p-transport"] }
+p2p = { path = "../p2p" }
 blockstore = { path = "../blockstore" }
 embedded = { path = "../embedded", default-features = false }
 
@@ -82,7 +83,7 @@ embedded = { path = "../embedded", default-features = false }
 cid.workspace = true
 
 # P2P dependencies
-libp2p = { workspace = true }
+libp2p = { workspace = true, optional = true }
 
 [build-dependencies]
 cbindgen = "0.28"

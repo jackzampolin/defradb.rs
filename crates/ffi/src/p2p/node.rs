@@ -43,7 +43,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
 fn resolve_transport(
     options: &NodeInitOptions,
-    listen_addr: &str,
+    _listen_addr: &str,
 ) -> Result<embedded::TransportConfig, String> {
     let transport = unsafe { c_str_to_string(options.p2p_transport) }
         .unwrap_or_else(|| "libp2p".to_string())
@@ -51,12 +51,22 @@ fn resolve_transport(
 
     match transport.as_str() {
         "" | "libp2p" => {
-            if listen_addr.is_empty() {
-                return Err("listen_addr is required for libp2p transport".to_string());
+            #[cfg(feature = "libp2p")]
+            {
+                if _listen_addr.is_empty() {
+                    return Err("listen_addr is required for libp2p transport".to_string());
+                }
+                Ok(embedded::TransportConfig::Libp2p(embedded::Libp2pConfig {
+                    listen_addr: _listen_addr.to_string(),
+                }))
             }
-            Ok(embedded::TransportConfig::Libp2p(embedded::Libp2pConfig {
-                listen_addr: listen_addr.to_string(),
-            }))
+            #[cfg(not(feature = "libp2p"))]
+            {
+                Err(
+                    "this build does not include the libp2p transport; rebuild with the libp2p feature"
+                        .to_string(),
+                )
+            }
         }
         "iroh" => {
             #[cfg(feature = "iroh")]
@@ -146,10 +156,10 @@ fn resolve_transport(
                     config.bind_port = Some(options.iroh_bind_port);
                 }
 
-                if !listen_addr.trim().is_empty() {
+                if !_listen_addr.trim().is_empty() {
                     let socket_addr: std::net::SocketAddr =
-                        listen_addr.parse().map_err(|error| {
-                            format!("invalid iroh listen address '{}': {}", listen_addr, error)
+                        _listen_addr.parse().map_err(|error| {
+                            format!("invalid iroh listen address '{}': {}", _listen_addr, error)
                         })?;
                     config.bind_addr = Some(socket_addr.ip());
                     config.bind_port = Some(socket_addr.port());
