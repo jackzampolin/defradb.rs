@@ -48,7 +48,7 @@ async fn kms_identity_prefers_caller_then_task_then_thread() {
 #[tokio::test]
 async fn collection_cid_doc_id_filter_accepts_an_alias() {
     use defra_core::{Block, CollectionDeltaPayload, CompositeDeltaPayload, CrdtDelta, DAGLink};
-    use storage::backends::MemoryStore;
+    use storage::RegolithStore;
 
     const COLLECTION_SHORT_ID: u32 = 7;
 
@@ -87,7 +87,7 @@ async fn collection_cid_doc_id_filter_accepts_an_alias() {
     )
     .to_string();
 
-    let db = db::DB::new(MemoryStore::new()).unwrap();
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     {
         let blockstore = txn.blockstore().unwrap();
