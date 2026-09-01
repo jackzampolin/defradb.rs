@@ -15,7 +15,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         };
 
         if authorization.collection_id != block.collection_id {
-            return Err(MergeError::MergeFailed(format!(
+            return Err(MergeError::InvalidReplayAuthorization(format!(
                 "explicit replay authorization collection '{}' does not match block collection '{}'",
                 authorization.collection_id, block.collection_id
             )));
@@ -31,7 +31,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .unwrap_or(block.creator.as_str());
 
         if effective_creator != authorization.authorizer_did {
-            return Err(MergeError::MergeFailed(format!(
+            return Err(MergeError::InvalidReplayAuthorization(format!(
                 "explicit replay authorization authorizer '{}' does not match block creator '{}'",
                 authorization.authorizer_did, effective_creator
             )));

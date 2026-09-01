@@ -9,7 +9,8 @@ use crate::sync::coordinator::dag_context::DagFetchContext;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
 use crate::sync::merge::{
-    BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata,
+    BlockMetadata, MergeBlock, MergeErrorDisposition, MergeHandler, MergeOutcome,
+    RecoveredBlockMetadata,
 };
 use crate::transport::P2PTransport;
 
@@ -53,36 +54,37 @@ fn merge_block_from_metadata(
     })
 }
 
+async fn merge_error_result<B, T, H>(
+    coordinator: &SyncCoordinator<B, T>,
+    handler: &H,
+    cid: Cid,
+    doc_id: &str,
+    collection_id: &str,
+    error: H::Error,
+) -> ReplicationResult
+where
+    B: Blockstore + 'static,
+    T: P2PTransport,
+    H: MergeHandler + ?Sized + 'static,
+{
+    let reason = error.to_string();
+    if handler.error_disposition(&error) == MergeErrorDisposition::Terminal {
+        coordinator.quarantine_pending_dag(&cid, &reason).await;
+        ReplicationResult::Quarantined {
+            cid,
+            doc_id: doc_id.to_string(),
+            collection_id: collection_id.to_string(),
+            reason,
+        }
+    } else {
+        ReplicationResult::Failed { cid, error: reason }
+    }
+}
+
 fn recovered_metadata_error(cid: Cid, details: impl Into<String>) -> ReplicationResult {
     ReplicationResult::Failed {
         cid,
         error: format!("Recovery metadata incomplete: {}", details.into()),
-    }
-}
-
-#[allow(clippy::result_large_err)]
-async fn recover_metadata_for_block<H>(
-    handler: &H,
-    cid: Cid,
-    block_data: &[u8],
-) -> Result<RecoveredBlockMetadata, ReplicationResult>
-where
-    H: MergeHandler + ?Sized + 'static,
-{
-    match handler.recover_block_metadata(&cid, block_data).await {
-        Ok(Some(metadata)) if metadata.is_complete() => Ok(metadata),
-        Ok(Some(metadata)) => Err(recovered_metadata_error(
-            cid,
-            format!(
-                "handler returned doc_id='{}', collection_id='{}', creator='{}'",
-                metadata.doc_id, metadata.collection_id, metadata.creator
-            ),
-        )),
-        Ok(None) => Err(recovered_metadata_error(
-            cid,
-            "handler did not return recovered metadata",
-        )),
-        Err(error) => Err(recovered_metadata_error(cid, error.to_string())),
     }
 }
 
@@ -264,9 +266,23 @@ where
 
     let recovered_metadata: Option<RecoveredBlockMetadata>;
     let metadata = if metadata.is_recovery && metadata.is_incomplete() {
-        let recovered = match recover_metadata_for_block(handler, cid, &block_data).await {
-            Ok(recovered) => recovered,
-            Err(result) => return result,
+        let recovered = match handler.recover_block_metadata(&cid, &block_data).await {
+            Ok(Some(recovered)) if recovered.is_complete() => recovered,
+            Ok(Some(recovered)) => {
+                return recovered_metadata_error(
+                    cid,
+                    format!(
+                        "handler returned doc_id='{}', collection_id='{}', creator='{}'",
+                        recovered.doc_id, recovered.collection_id, recovered.creator
+                    ),
+                )
+            }
+            Ok(None) => {
+                return recovered_metadata_error(cid, "handler did not return recovered metadata")
+            }
+            Err(error) => {
+                return merge_error_result(coordinator, handler, cid, "", "", error).await
+            }
         };
         recovered_metadata = Some(recovered);
         let recovered = recovered_metadata
@@ -282,6 +298,13 @@ where
         metadata
     };
 
+    // Extract identifiers before validation so terminal authorization errors
+    // can use the same durable quarantine path as merge errors.
+    let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
+    let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
+    let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
+    let creator_for_forward = metadata.creator.unwrap_or("").to_string();
+
     if metadata.explicit_replay_authorization.is_some() {
         let Some(block) = merge_block_from_metadata(cid, block_data.clone(), &metadata) else {
             return ReplicationResult::Failed {
@@ -293,18 +316,17 @@ where
             .validate_authorization(block.explicit_replay_authorization.as_ref(), &block)
             .await
         {
-            return ReplicationResult::Failed {
+            return merge_error_result(
+                coordinator,
+                handler,
                 cid,
-                error: error.to_string(),
-            };
+                &doc_id_for_result,
+                &collection_id_for_result,
+                error,
+            )
+            .await;
         }
     }
-
-    // Extract doc_id and collection_id for use in result.
-    let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
-    let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
-    let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
-    let creator_for_forward = metadata.creator.unwrap_or("").to_string();
 
     // Delegate merge to handler
     match handler.handle_block(&cid, &block_data, metadata).await {
@@ -432,10 +454,17 @@ where
             cid,
             error: "unsupported merge outcome".to_string(),
         },
-        Err(e) => ReplicationResult::Failed {
-            cid,
-            error: e.to_string(),
-        },
+        Err(error) => {
+            merge_error_result(
+                coordinator,
+                handler,
+                cid,
+                &doc_id_for_result,
+                &collection_id_for_result,
+                error,
+            )
+            .await
+        }
     }
 }
 
@@ -588,10 +617,17 @@ where
                     .validate_authorization(block.explicit_replay_authorization.as_ref(), &block)
                     .await
                 {
-                    results.push(ReplicationResult::Failed {
-                        cid,
-                        error: error.to_string(),
-                    });
+                    results.push(
+                        merge_error_result(
+                            coordinator,
+                            handler,
+                            cid,
+                            &block.doc_id,
+                            &block.collection_id,
+                            error,
+                        )
+                        .await,
+                    );
                     continue;
                 }
 
@@ -664,11 +700,18 @@ where
                     error: "unsupported merge outcome".to_string(),
                 });
             }
-            Err(e) => {
-                results.push(ReplicationResult::Failed {
-                    cid: block.cid,
-                    error: e.to_string(),
-                });
+            Err(error) => {
+                results.push(
+                    merge_error_result(
+                        coordinator,
+                        handler,
+                        block.cid,
+                        &block.doc_id,
+                        &block.collection_id,
+                        error,
+                    )
+                    .await,
+                );
             }
         }
     }
