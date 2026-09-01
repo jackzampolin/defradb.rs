@@ -145,7 +145,7 @@ graphql-parser = "0.4"
 # HTTP
 axum = { version = "0.8.9", features = ["ws"] }
 tower = { version = "0.5", features = ["timeout", "limit"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "normalize-path", "trace"] }
 hyper = "1.9.0"
 
 # Error handling
