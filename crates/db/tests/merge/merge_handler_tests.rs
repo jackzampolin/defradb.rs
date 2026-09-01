@@ -30,6 +30,7 @@ use defra_core::block::SignatureHeader;
 use defra_core::block::SignatureType;
 use defra_core::merge::BlockMetadata;
 use defra_core::merge::MergeBlock;
+use defra_core::merge::MergeErrorDisposition;
 use defra_core::merge::MergeHandler;
 use defra_core::merge::MergeOutcome;
 use defra_core::types::DocId;
@@ -542,6 +543,10 @@ async fn validate_explicit_replay_authorization_checks_collection_and_creator() 
         .await
         .unwrap_err();
     assert!(error.to_string().contains("does not match block creator"));
+    assert_eq!(
+        handler.error_disposition(&error),
+        MergeErrorDisposition::Terminal
+    );
 
     merge_block.collection_id = "other-collection".to_string();
     let error = handler
@@ -551,6 +556,27 @@ async fn validate_explicit_replay_authorization_checks_collection_and_creator() 
     assert!(error
         .to_string()
         .contains("does not match block collection"));
+    assert_eq!(
+        handler.error_disposition(&error),
+        MergeErrorDisposition::Terminal
+    );
+}
+
+#[tokio::test]
+async fn malformed_block_is_a_terminal_merge_rejection() {
+    let (handler, _blockstore) = make_handler();
+    let cid = make_lww_block(None).generate_cid().unwrap();
+
+    let outcome = handler
+        .handle_block(
+            &cid,
+            b"not dag-cbor",
+            BlockMetadata::normal("doc1", "v1", "creator", Some("peer1"), true),
+        )
+        .await
+        .expect("malformed content should be classified, not retried");
+
+    assert!(matches!(outcome, MergeOutcome::Rejected { .. }));
 }
 
 #[tokio::test]
