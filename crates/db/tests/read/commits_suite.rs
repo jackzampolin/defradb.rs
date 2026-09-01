@@ -91,9 +91,80 @@ mod shared_owner_tests {
         Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
     use document::{DocID, NormalValue};
+    use storage::corekv::Key;
+    use storage::keys::headstore::{HeadstoreColKey, HeadstoreColSuperseded};
 
     use db::read::commits::{CommitsFetcher, CommitsQueryOptions};
     use db::{VersionedFetcher, DB};
+
+    fn lww_block(value: &str, priority: u64, heads: Vec<cid::Cid>) -> Block {
+        let mut data = Vec::new();
+        ciborium::into_writer(&NormalValue::String(value.to_string()), &mut data).unwrap();
+        Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority,
+                data,
+            }),
+            heads,
+            vec![],
+        )
+    }
+
+    #[tokio::test]
+    async fn collection_commit_depth_starts_from_live_heads() {
+        let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+        let parent = lww_block("parent", 1, vec![]);
+        let parent_cid = parent.generate_cid().unwrap();
+        let child = lww_block("child", 2, vec![parent_cid]);
+        let child_cid = child.generate_cid().unwrap();
+
+        let txn = db.new_txn(false).await.unwrap();
+        {
+            let blockstore = txn.blockstore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            blockstore
+                .set(&parent_cid.to_bytes(), &parent.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            blockstore
+                .set(&child_cid.to_bytes(), &child.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            headstore
+                .set(&HeadstoreColKey::new(1, parent_cid).bytes(), &[])
+                .await
+                .unwrap();
+            headstore
+                .set(&HeadstoreColKey::new(1, child_cid).bytes(), &[])
+                .await
+                .unwrap();
+            headstore
+                .set(
+                    &HeadstoreColSuperseded::new(1, parent_cid, child_cid).bytes(),
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        let commits_txn = db.new_txn(true).await.unwrap();
+        let commits = CommitsFetcher::new(Arc::new(Mutex::new(Some(commits_txn))))
+            .fetch_commits(&CommitsQueryOptions {
+                depth: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits[0].get("cid").and_then(NormalValue::as_str),
+            Some(child_cid.to_string().as_str())
+        );
+    }
 
     #[tokio::test]
     async fn shared_field_cid_fans_out_to_every_owner() {
