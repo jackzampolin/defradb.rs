@@ -59,6 +59,7 @@ pub(crate) async fn build_node_state(
             .map(|system| Arc::new(P2PState::new(system))),
         node_identity_did: node.node_identity_did.clone(),
         signing_enabled: options.enable_signing != 0,
+        #[cfg(feature = "sourcehub")]
         sourcehub_acp: node.sourcehub_acp.clone(),
         query_limits: node.query_limits,
         se_encryption_key: None,
@@ -151,6 +152,17 @@ fn resolve_embedded_config(
         embedded::SigningConfig::Disabled
     };
 
+    #[cfg(not(feature = "sourcehub"))]
+    if !options.sourcehub_grpc_address.is_null() {
+        return Err(
+            "this build does not include SourceHub ACP; rebuild with the sourcehub feature"
+                .to_string(),
+        );
+    }
+    #[cfg(not(feature = "sourcehub"))]
+    let document_acp = embedded::DocumentAcpConfig::Local;
+
+    #[cfg(feature = "sourcehub")]
     let document_acp = if !options.sourcehub_grpc_address.is_null() {
         let grpc_address = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
             .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;

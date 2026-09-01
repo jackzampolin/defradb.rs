@@ -161,19 +161,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["ubuntu-latest"]'
-            features: "--no-default-features --features native,wasmtime-runtime"
+            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
           - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features native,wasmtime-runtime"
+            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
           - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime"
+            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
           - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features native,wasmtime-runtime"
+            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
     steps:
       - uses: actions/checkout@v4
 
@@ -291,7 +291,7 @@ jobs:
 
       - name: Build Apple FFI
         env:
-          FEATURES: iroh,native
+          FEATURES: iroh,native,sourcehub
           NO_DEFAULT_FEATURES: "1"
           OUT_DIR: ${{ github.workspace }}/target/apple-ffi
         run: |

@@ -16,9 +16,10 @@ bench = false
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["native", "wasmtime-runtime"]
+default = ["native", "wasmtime-runtime", "sourcehub"]
 native = ["db/native", "db/p2p", "embedded/native"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
+sourcehub = ["dep:sourcehub", "embedded/sourcehub"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
     
@@ -71,11 +72,11 @@ query = { path = "../query" }
 schema = { path = "../schema" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
-sourcehub = { path = "../sourcehub" }
+sourcehub = { path = "../sourcehub", optional = true }
 lens = { path = "../lens", default-features = false }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 blockstore = { path = "../blockstore" }
-embedded = { path = "../embedded", default-features = false, features = ["sourcehub"] }
+embedded = { path = "../embedded", default-features = false }
 
 # IPLD
 cid.workspace = true
