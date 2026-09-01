@@ -5,6 +5,7 @@ use std::sync::Arc;
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 use query::QueryLimits;
+use serde_json::Map;
 
 use super::{
     AcpOperations, BackupOperations, BlockOperations, BrowserSyncOperations,
@@ -49,6 +50,7 @@ pub struct AppState {
     pub dump: Option<Arc<dyn DumpOperations>>,
     pub txn_ops: Option<Arc<dyn TransactionOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
+    pub node_options: Option<Arc<Map<String, serde_json::Value>>>,
     pub node_identity_did: Option<String>,
     pub signing_enabled: bool,
     pub dev_mode: bool,
@@ -115,6 +117,10 @@ impl std::fmt::Debug for AppState {
                 &self.txn_ops.as_ref().map(|_| "<TransactionOperations>"),
             )
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
+            .field(
+                "node_options",
+                &self.node_options.as_ref().map(|_| "<NodeOptions>"),
+            )
             .field("node_identity_did", &self.node_identity_did)
             .field("dev_mode", &self.dev_mode)
             .field("max_txn_retries", &self.max_txn_retries)
@@ -306,6 +312,7 @@ pub struct AppStateBuilder {
     dump: Option<Arc<dyn DumpOperations>>,
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
+    node_options: Option<Arc<Map<String, serde_json::Value>>>,
     node_identity_did: Option<String>,
     signing_enabled: bool,
     dev_mode: bool,
@@ -337,6 +344,7 @@ impl AppStateBuilder {
             dump: None,
             txn_ops: None,
             event_bus: None,
+            node_options: None,
             node_identity_did: None,
             signing_enabled: false,
             dev_mode: false,
@@ -473,6 +481,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set the effective node configuration exposed by the HTTP API.
+    pub fn with_node_options(mut self, options: Map<String, serde_json::Value>) -> Self {
+        self.node_options = Some(Arc::new(options));
+        self
+    }
+
     /// Set the node identity DID for signing config fallback.
     pub fn with_node_identity_did(mut self, did: String) -> Self {
         self.node_identity_did = Some(did);
@@ -526,6 +540,7 @@ impl AppStateBuilder {
             dump: self.dump,
             txn_ops: self.txn_ops,
             event_bus: self.event_bus,
+            node_options: self.node_options,
             node_identity_did: self.node_identity_did,
             signing_enabled: self.signing_enabled,
             dev_mode: self.dev_mode,
