@@ -25,7 +25,7 @@ where
 }
 use query::subscription::{
     is_subscription_operation_with_limits, response_has_data, subscription_accepts_doc_id,
-    subscription_doc_ids_with_limits, subscription_to_scoped_query,
+    subscription_doc_ids_with_limits, subscription_to_scoped_query, validate_subscription,
 };
 use query::{parse_request_with_limits, ParsedOperation, QueryLimits};
 
@@ -287,6 +287,11 @@ pub async fn graphql_transactional(
                 "invalid subscription transport".to_string(),
             ));
         }
+        // Validate before opening the stream. The per-event path enforces the
+        // same rules, but by then the only place left to report a failure is
+        // the log -- the caller would hold a healthy stream that never fires.
+        validate_subscription(&request.query, request.operation_name.as_deref())
+            .map_err(|error| HttpError::BadRequest(error.to_string()))?;
         return graphql_sse(state, identity, request)
             .await
             .map(|sse| sse.into_response());

@@ -132,6 +132,15 @@ pub unsafe extern "C" fn exec_request_with_signing(
         // Subscriptions return status=2 with a handle that the Go side polls via poll_graphql_subscription.
         let trimmed_query = query_str.trim_start();
         if trimmed_query.starts_with("subscription") {
+            // Validate before subscribing. The per-event path below can only
+            // log a document it will always reject, leaving the caller polling
+            // a handle that never yields.
+            if let Err(error) =
+                query::subscription::validate_subscription(&query_str, op_name.as_deref())
+            {
+                return FfiResult::error(error.to_string());
+            }
+
             // Create an event bus subscription to receive update events
             let mut subscription = match NODES.get(node_ptr, |state| {
                 state.event_bus.subscribe(&[events::EventName::Update])

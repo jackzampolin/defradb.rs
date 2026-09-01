@@ -2,17 +2,28 @@
 //!
 //! Used by both FFI and HTTP code paths to process subscription events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use graphql_parser::query::{
-    Definition, Field, OperationDefinition, Query as GqlQuery, Selection, SelectionSet,
-    Subscription, Value,
+    Definition, Field, FragmentDefinition, OperationDefinition, Query as GqlQuery, Selection,
+    SelectionSet, Subscription, Value,
 };
 use serde_json::Value as JsonValue;
 
 use crate::error::{QueryError, Result};
 use crate::query_parse::{parse_request_with_limits, ParsedOperation};
 use crate::{QueryLimits, QueryResponse};
+
+type FragmentMap<'a> = HashMap<String, &'a FragmentDefinition<'static, String>>;
+
+/// How deep a chain of fragment spreads may be at a subscription root.
+///
+/// Expansion recurses, so a chain bounded only by the document is a stack
+/// overflow reachable from a request body. Cycle detection does not help: a
+/// chain of distinct fragments never repeats a name. Legitimate documents nest
+/// a handful deep, so this is far above any real use and far below the depth
+/// that exhausts the stack.
+const MAX_ROOT_FRAGMENT_DEPTH: usize = 32;
 
 /// Check whether the provided request resolves to a subscription operation.
 pub fn is_subscription_operation(
@@ -82,37 +93,97 @@ pub fn subscription_to_scoped_query(
         .map_err(|err| QueryError::parse(err.to_string()))?
         .into_static();
 
-    let mut fragments = Vec::new();
-    let mut scoped_operation = None;
+    // Fragments are collected before anything is scoped: a definition may
+    // appear after the operation that spreads it.
+    let (fragments, operations): (Vec<_>, Vec<_>) = document
+        .definitions
+        .into_iter()
+        .partition(|definition| matches!(definition, Definition::Fragment(_)));
+    let fragment_map = fragment_map(&fragments);
 
-    for definition in document.definitions {
-        match definition {
-            Definition::Operation(OperationDefinition::Subscription(subscription))
-                if operation_matches(&subscription.name, operation_name) =>
-            {
-                if scoped_operation.is_some() {
-                    return Err(QueryError::parse(
-                        "operation name is required when multiple subscriptions are present",
-                    ));
-                }
-                scoped_operation = Some(Definition::Operation(OperationDefinition::Query(
-                    scoped_subscription_query(subscription, event_doc_id, event_cid)?,
-                )));
-            }
-            Definition::Fragment(fragment) => fragments.push(Definition::Fragment(fragment)),
-            _ => {}
-        }
-    }
-
-    let Some(operation) = scoped_operation else {
+    let mut operations = operations;
+    let selected = matching_subscription(&operations, operation_name)?;
+    let Definition::Operation(OperationDefinition::Subscription(subscription)) =
+        operations.swap_remove(selected)
+    else {
         return Err(QueryError::parse("subscription operation not found"));
     };
+    let operation = Definition::Operation(OperationDefinition::Query(scoped_subscription_query(
+        subscription,
+        &fragment_map,
+        event_doc_id,
+        event_cid,
+    )?));
 
     let mut definitions = Vec::with_capacity(1 + fragments.len());
     definitions.push(operation);
     definitions.extend(fragments);
 
     Ok(graphql_parser::query::Document { definitions }.to_string())
+}
+
+fn fragment_map<'a>(definitions: &'a [Definition<'static, String>]) -> FragmentMap<'a> {
+    definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::Fragment(fragment) => Some((fragment.name.clone(), fragment)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Validate a subscription document without executing it.
+///
+/// [`subscription_to_scoped_query`] enforces the same rules, but it runs once
+/// per event from inside an already-open stream, where the only place left to
+/// report a failure is the log -- so a document it will always reject is
+/// answered with a healthy stream that then delivers nothing. Calling this
+/// before the stream opens is what lets the caller be told instead.
+pub fn validate_subscription(subscription_query: &str, operation_name: Option<&str>) -> Result<()> {
+    let document = graphql_parser::parse_query::<String>(subscription_query)
+        .map_err(|err| QueryError::parse(err.to_string()))?
+        .into_static();
+
+    let (fragments, operations): (Vec<_>, Vec<_>) = document
+        .definitions
+        .into_iter()
+        .partition(|definition| matches!(definition, Definition::Fragment(_)));
+    let fragment_map = fragment_map(&fragments);
+
+    let selected = matching_subscription(&operations, operation_name)?;
+    let Definition::Operation(OperationDefinition::Subscription(subscription)) =
+        &operations[selected]
+    else {
+        return Err(QueryError::parse("subscription operation not found"));
+    };
+    single_root_field(&subscription.selection_set, &fragment_map).map(|_| ())
+}
+
+/// Index of the one subscription operation a request selects.
+///
+/// Shared by validation and scoping so the two cannot disagree about which
+/// operation a request names, or about how many is too many.
+fn matching_subscription(
+    operations: &[Definition<'static, String>],
+    operation_name: Option<&str>,
+) -> Result<usize> {
+    let mut selected = None;
+    for (index, definition) in operations.iter().enumerate() {
+        let Definition::Operation(OperationDefinition::Subscription(subscription)) = definition
+        else {
+            continue;
+        };
+        if !operation_matches(&subscription.name, operation_name) {
+            continue;
+        }
+        if selected.is_some() {
+            return Err(QueryError::parse(
+                "operation name is required when multiple subscriptions are present",
+            ));
+        }
+        selected = Some(index);
+    }
+    selected.ok_or_else(|| QueryError::parse("subscription operation not found"))
 }
 
 fn variables_to_map(variables: Option<&JsonValue>) -> Option<HashMap<String, JsonValue>> {
@@ -133,11 +204,12 @@ fn operation_matches(name: &Option<String>, operation_name: Option<&str>) -> boo
 
 fn scoped_subscription_query(
     subscription: Subscription<'static, String>,
+    fragments: &FragmentMap<'_>,
     event_doc_id: &str,
     event_cid: &str,
 ) -> Result<GqlQuery<'static, String>> {
     let mut selection_set = subscription.selection_set;
-    scope_root_selection(&mut selection_set, event_doc_id, event_cid)?;
+    scope_root_selection(&mut selection_set, fragments, event_doc_id, event_cid)?;
 
     Ok(GqlQuery {
         position: subscription.position,
@@ -150,22 +222,94 @@ fn scoped_subscription_query(
 
 fn scope_root_selection(
     selection_set: &mut SelectionSet<'static, String>,
+    fragments: &FragmentMap<'_>,
     event_doc_id: &str,
     event_cid: &str,
 ) -> Result<()> {
-    if selection_set.items.len() != 1 {
-        return Err(QueryError::parse(
-            "subscription must have exactly one root field",
-        ));
+    let mut field = single_root_field(selection_set, fragments)?;
+    scope_root_field(&mut field, event_doc_id, event_cid);
+    // The root becomes the resolved field. A fragment that fed only the root
+    // is left unreferenced in the emitted document, which the executor's
+    // parser does not mind.
+    selection_set.items = vec![Selection::Field(field)];
+    Ok(())
+}
+
+/// Resolve a subscription's root selection to the one field it selects.
+///
+/// A root fragment is legal GraphQL: the spec's "exactly one root field" rule
+/// (5.2.3.1) is about the selection after fragments are expanded, not before.
+/// Expansion mirrors the query parser -- same cycle detection, and inline
+/// fragment type conditions are ignored for the same reason, that DefraDB has
+/// no interface or union types.
+fn single_root_field(
+    selection_set: &SelectionSet<'static, String>,
+    fragments: &FragmentMap<'_>,
+) -> Result<Field<'static, String>> {
+    let mut fields = Vec::new();
+    collect_root_fields(
+        &selection_set.items,
+        fragments,
+        &mut HashSet::new(),
+        0,
+        &mut fields,
+    )?;
+
+    if fields.len() != 1 {
+        return Err(QueryError::parse(format!(
+            "subscription must have exactly one root field, found {}",
+            fields.len()
+        )));
+    }
+    Ok(fields.remove(0))
+}
+
+fn collect_root_fields(
+    items: &[Selection<'static, String>],
+    fragments: &FragmentMap<'_>,
+    visiting: &mut HashSet<String>,
+    depth: usize,
+    out: &mut Vec<Field<'static, String>>,
+) -> Result<()> {
+    if depth > MAX_ROOT_FRAGMENT_DEPTH {
+        return Err(QueryError::parse(format!(
+            "subscription root nests fragments more than {MAX_ROOT_FRAGMENT_DEPTH} deep"
+        )));
     }
 
-    let Selection::Field(field) = &mut selection_set.items[0] else {
-        return Err(QueryError::parse(
-            "subscription root selection must be a field",
-        ));
-    };
-
-    scope_root_field(field, event_doc_id, event_cid);
+    for item in items {
+        match item {
+            Selection::Field(field) => out.push(field.clone()),
+            Selection::InlineFragment(inline) => {
+                collect_root_fields(
+                    &inline.selection_set.items,
+                    fragments,
+                    visiting,
+                    depth + 1,
+                    out,
+                )?;
+            }
+            Selection::FragmentSpread(spread) => {
+                if !visiting.insert(spread.fragment_name.clone()) {
+                    return Err(QueryError::parse(format!(
+                        "circular fragment reference detected: '{}'",
+                        spread.fragment_name
+                    )));
+                }
+                let fragment = fragments.get(&spread.fragment_name).ok_or_else(|| {
+                    QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
+                })?;
+                collect_root_fields(
+                    &fragment.selection_set.items,
+                    fragments,
+                    visiting,
+                    depth + 1,
+                    out,
+                )?;
+                visiting.remove(&spread.fragment_name);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -217,6 +361,139 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A root fragment is legal GraphQL and has to reach the same scoped query
+    /// a plain root field does.
+    #[test]
+    fn a_root_fragment_resolves_to_the_field_it_selects() {
+        let plain =
+            subscription_to_scoped_query("subscription { User { name } }", "bae-1", "cid-1", None)
+                .unwrap();
+
+        for query in [
+            "subscription { ...F } fragment F on Subscription { User { name } }",
+            "subscription { ... on Subscription { User { name } } }",
+            // Nested, and defined before the operation that spreads it.
+            "fragment Inner on Subscription { User { name } } \
+             fragment Outer on Subscription { ...Inner } \
+             subscription { ...Outer }",
+        ] {
+            let scoped = subscription_to_scoped_query(query, "bae-1", "cid-1", None).unwrap();
+            let (scoped_op, _) = scoped.split_once("fragment").unwrap_or((&scoped, ""));
+            let (plain_op, _) = plain.split_once("fragment").unwrap_or((&plain, ""));
+            assert_eq!(scoped_op.trim(), plain_op.trim(), "for: {query}");
+        }
+    }
+
+    #[test]
+    fn a_fragment_expanding_to_two_fields_is_still_refused() {
+        let query =
+            "subscription { ...F } fragment F on Subscription { User { name } Device { label } }";
+        let error = validate_subscription(query, None).unwrap_err().to_string();
+        assert!(error.contains("exactly one root field"), "{error}");
+        assert!(subscription_to_scoped_query(query, "bae-1", "cid-1", None).is_err());
+    }
+
+    #[test]
+    fn a_long_fragment_chain_is_refused_rather_than_exhausting_the_stack() {
+        // A chain of distinct fragments never repeats a name, so cycle
+        // detection does not bound it. Only the depth limit does.
+        let mut document = String::from("subscription { ...F0 }");
+        for i in 0..2_000 {
+            if i == 1_999 {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ User {{ name }} }}"
+                ));
+            } else {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ ...F{} }}",
+                    i + 1
+                ));
+            }
+        }
+
+        let error = validate_subscription(&document, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nests fragments more than"), "{error}");
+        assert!(subscription_to_scoped_query(&document, "bae-1", "cid-1", None).is_err());
+    }
+
+    #[test]
+    fn a_chain_within_the_limit_still_resolves() {
+        let mut document = String::from("subscription { ...F0 }");
+        for i in 0..8 {
+            if i == 7 {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ User {{ name }} }}"
+                ));
+            } else {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ ...F{} }}",
+                    i + 1
+                ));
+            }
+        }
+        validate_subscription(&document, None).unwrap();
+        assert!(subscription_to_scoped_query(&document, "bae-1", "cid-1", None).is_ok());
+    }
+
+    #[test]
+    fn a_circular_fragment_is_refused_rather_than_looping() {
+        let query = "subscription { ...A } fragment A on Subscription { ...B } \
+                     fragment B on Subscription { ...A }";
+        let error = validate_subscription(query, None).unwrap_err().to_string();
+        assert!(error.contains("circular fragment reference"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_fragment_is_named() {
+        let error = validate_subscription("subscription { ...Missing }", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown fragment"), "{error}");
+    }
+
+    #[test]
+    fn an_operation_name_selects_among_several_subscriptions() {
+        let document = "subscription Watch { User { name } } \
+                        subscription Other { Device { label } }";
+
+        // Ambiguous without a name, on both paths.
+        assert!(validate_subscription(document, None).is_err());
+        assert!(subscription_to_scoped_query(document, "bae-1", "cid-1", None).is_err());
+
+        validate_subscription(document, Some("Watch")).unwrap();
+        let scoped =
+            subscription_to_scoped_query(document, "bae-1", "cid-1", Some("Watch")).unwrap();
+        assert!(scoped.contains("User"), "{scoped}");
+        assert!(!scoped.contains("Device"), "{scoped}");
+
+        let scoped =
+            subscription_to_scoped_query(document, "bae-1", "cid-1", Some("Other")).unwrap();
+        assert!(scoped.contains("Device"), "{scoped}");
+
+        assert!(validate_subscription(document, Some("Missing")).is_err());
+    }
+
+    #[test]
+    fn validation_agrees_with_scoping() {
+        // Whatever validate_subscription accepts, scoping must handle. If the
+        // two disagree, a document that opens a stream it can never fire
+        // reaches the caller as silence.
+        for query in [
+            "subscription { User { name } }",
+            "subscription { ...F } fragment F on Subscription { User { name } }",
+            "subscription { ... on Subscription { User { name } } }",
+            "subscription { _commits { cid } }",
+        ] {
+            assert_eq!(
+                validate_subscription(query, None).is_ok(),
+                subscription_to_scoped_query(query, "bae-1", "cid-1", None).is_ok(),
+                "disagreement for: {query}"
+            );
+        }
+    }
 
     fn parse_scoped_select(
         query: &str,
