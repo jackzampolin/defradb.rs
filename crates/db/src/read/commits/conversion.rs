@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use base64::Engine;
 use cid::Cid;
 use defra_core::block::{Block, Signature};
 use document::Document;
@@ -92,7 +93,6 @@ impl<S: Store> CommitsFetcher<S> {
 
         let delta_data = self.get_delta_data(&block.delta);
         if let Some(data) = delta_data {
-            use base64::Engine;
             map.insert(
                 "delta".to_string(),
                 json!(base64::engine::general_purpose::STANDARD.encode(&data)),
@@ -191,7 +191,7 @@ impl<S: Store> CommitsFetcher<S> {
                     let sig_json = json!({
                         "type": sig_type,
                         "identity": String::from_utf8_lossy(&sig.header.identity).to_string(),
-                        "value": hex::encode(&sig.value),
+                        "value": base64::engine::general_purpose::STANDARD.encode(&sig.value),
                     });
                     tracing::debug!(sig_type, "Signature loaded successfully");
                     sig_json
