@@ -169,6 +169,25 @@ async fn test_host_creation() {
 }
 
 #[tokio::test]
+async fn connection_poll_stops_when_host_is_closed() {
+    let store = MockBitswapStore::new();
+    let (host, handle, _events, _replicators) = P2PHost::new(store).await.unwrap();
+    let host_task = tokio::spawn(host.run());
+    handle.shutdown().await.unwrap();
+    host_task.await.unwrap();
+
+    let peer_id = PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public());
+    let result = timeout(
+        Duration::from_secs(1),
+        handle.poll_until_connected(peer_id, Duration::from_secs(60)),
+    )
+    .await
+    .expect("a closed host must not consume the connection timeout");
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_host_connects_over_quic() {
     assert_hosts_connect_over("/ip4/127.0.0.1/udp/0/quic-v1").await;
 }
