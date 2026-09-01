@@ -12,10 +12,10 @@ pub const GO_COMPAT_TAG: &str = "";
 /// Deliberately independent of `GO_COMPAT_COMMIT`: that pin selects the Go
 /// binary the parity job measures against and tracks upstream drift, while this
 /// one fixes the Go *test corpus* the FFI oracle runs, so its pass rate stays
-/// comparable across baseline bumps. It lives on `jack/ffi-rust-compat`, a
-/// maintained chore branch upstream does not merge, and moves only when we
-/// retarget the parity claim or fix the client.
-pub const GO_FFI_CLIENT_COMMIT: &str = "f2f532b2";
+/// comparable across baseline bumps. It lives on a dedicated compatibility
+/// branch upstream does not merge, and moves only when we retarget the parity
+/// claim or fix the client.
+pub const GO_FFI_CLIENT_COMMIT: &str = "e7cd3a8de";
 
 /// Go compatibility metadata.
 #[derive(Debug, Clone, Serialize)]

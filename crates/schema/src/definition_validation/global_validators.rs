@@ -323,7 +323,7 @@ pub(super) fn validate_materialized_has_no_policy(
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
-        if col.is_materialized && col.policy.is_some() {
+        if col.is_materialized && col.query.is_some() && col.policy.is_some() {
             errs.push(format!(
                 "materialized views do not support ACP. Collection: {}",
                 col.name

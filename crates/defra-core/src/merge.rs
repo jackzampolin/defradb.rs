@@ -111,6 +111,18 @@ pub enum MergeOutcome {
     },
 }
 
+/// Durable disposition for an error returned by a merge handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeErrorDisposition {
+    /// The failure may succeed after local state or an external dependency changes.
+    Retryable,
+    /// Replaying the same block cannot succeed without changing its content.
+    ///
+    /// Replication quarantines terminal failures before releasing their live
+    /// pending-DAG slot.
+    Terminal,
+}
+
 impl MergeOutcome {
     /// Create a terminal skipped outcome with the given reason.
     pub fn terminal_skip(reason: impl Into<String>) -> Self {
@@ -336,6 +348,14 @@ impl<'a> BlockMetadata<'a> {
 pub trait MergeHandler: MaybeSendSync {
     /// Error type for merge operations
     type Error: std::error::Error + MaybeSendSync + 'static;
+
+    /// Classify a merge error for durable replication retry handling.
+    ///
+    /// Implementations must opt deterministic content failures into terminal
+    /// handling. Unknown errors remain retryable by default.
+    fn error_disposition(&self, _error: &Self::Error) -> MergeErrorDisposition {
+        MergeErrorDisposition::Retryable
+    }
 
     /// Handle an incoming block.
     ///

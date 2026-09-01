@@ -85,7 +85,6 @@ impl QueryRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
     /// Query result data (null if errors occurred).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<JsonValue>,
 
     /// Errors that occurred during execution.
@@ -355,6 +354,7 @@ mod tests {
         assert!(resp.has_errors());
         assert!(resp.data.is_none());
         assert_eq!(resp.errors[0].message, "something went wrong");
+        assert!(serde_json::to_value(resp).unwrap()["data"].is_null());
     }
 
     #[test]

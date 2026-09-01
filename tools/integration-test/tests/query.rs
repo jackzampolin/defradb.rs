@@ -10,6 +10,8 @@ mod commits_collection_id;
 mod commits_height_filter;
 #[path = "query/continuous_rollup.rs"]
 mod continuous_rollup;
+#[path = "query/cross_runtime_indexes.rs"]
+mod cross_runtime_indexes;
 #[path = "query/datetime_index_range.rs"]
 mod datetime_index_range;
 #[path = "query/default_values_v1.rs"]
@@ -40,6 +42,8 @@ mod join_order_1596;
 mod json_missing_key;
 #[path = "query/lens.rs"]
 mod lens;
+#[path = "query/lens_cross_runtime.rs"]
+mod lens_cross_runtime;
 #[path = "query/lens_persistence.rs"]
 mod lens_persistence;
 #[path = "query/lens_reindex_secondary_index_979.rs"]
