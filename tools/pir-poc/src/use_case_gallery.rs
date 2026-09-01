@@ -241,8 +241,8 @@ fn snapshot_specs() -> Vec<SnapshotSpec> {
     vec![
         SnapshotSpec {
             owner: UseCaseOwner::Mizu,
-            name: "wallet-note-recovery",
-            value: "Recover only encrypted action payloads matching a wallet routing prefix",
+            name: "routing-tag-retrieval",
+            value: "Retrieve only encrypted action payloads after a private routing-tag alert or catch-up query",
             source_shape: "Shieldd RoutingRecord -> encrypted note payloads for one public generation/window",
             query_shape: "generation/window + low-bit routing prefix -> padded encrypted actions",
             public_metadata: "generation or height window, table generation and fixed result class",

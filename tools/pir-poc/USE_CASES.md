@@ -118,7 +118,7 @@ fewer populated key/pages cost less.
 
 | Snapshot use case | Production query class | Strict upload / download | Strict server / client CPU | 100-decoy upload / download | Decoy server / client CPU | Strict server / decoy | Acceptance |
 |---|---|---:|---:|---:|---:|---:|---|
-| Mizu note recovery | At most 320K populated routing pages in 32 blocks | 80.0 KB / 1.61 KB | **~1.48 / ~0.11 ms `P`** | 3.10 KB / 80.4 KB | 0.0284 / 0.0042 ms `M` | ~52x slower | About 1.45 ms extra server work; total wire is nearly equal (81.6 versus 83.5 KB) |
+| Mizu routing-tag retrieval stage | At most 320K populated routing pages in 32 blocks | 80.0 KB / 1.61 KB | **~1.48 / ~0.11 ms `P`** | 3.10 KB / 80.4 KB | 0.0284 / 0.0042 ms `M` | ~52x slower | About 1.45 ms extra server work; total wire is nearly equal (81.6 versus 83.5 KB) |
 | Mizu active nullifier witness | 1.05M-leaf active generation | 1.082 MB / 116.7 KB | **34.45 / 22.29 ms `M`** | 3.20 KB / 200.8 KB | 0.141 / 0.00010 ms `M` | 244x slower | Acceptable for occasional proof preparation, not a per-event path; strict saves 84 KB response and hides the candidate set |
 | Shinzo historical logs | At most 320K populated pages in 32 blocks | 80.0 KB / 1.10 KB | **~1.01 / ~0.11 ms `P`** | 3.61 KB / 54.8 KB | 0.0264 / 0.0042 ms `M` | ~38x slower | Roughly 1 ms absolute server cost for private address/topic; one-block queries are nearly free |
 | Shinzo transaction receipt | At most 10K receipts in one block | 2.50 KB / 368 B | **~0.011 / <0.01 ms `P`** | 3.79 KB / 18.4 KB | 0.0257 / 0.0039 ms `M` | ~0.4x; Dense faster | Strict is both cheaper in projected server work and about 7.7x smaller in total wire |
@@ -164,9 +164,8 @@ back to visible candidates.
 
 | Use case | Selected private protocol | Required public bound |
 |---|---|---|
-| Mizu wallet note recovery | Replicated Dense XOR | Committed 1/32/256-block class |
+| Mizu routing-tag alert and retrieval | Packed-presence Dense alert + replicated Dense retrieval | Two-second block/epoch plus committed 1/32/256-block retrieval class |
 | Mizu active nullifier witness | Stable-index active-generation Dense XOR | Active-generation checkpoint |
-| Mizu routing-tag alert | Packed-presence Dense | Two-second block/epoch |
 | Shinzo historical contract logs | Replicated Dense XOR | 32-block default window |
 | Shinzo transaction receipt | Replicated Dense XOR | Inclusion block |
 | Shinzo contract event alert | Packed-presence Dense | Committed block/epoch |
@@ -174,7 +173,12 @@ back to visible candidates.
 | DefraDB secondary-index page | Exact-MPHF/Fuse Dense XOR | Collection plus time/generation |
 | DefraDB private change feed | Packed-presence Dense | One second or one commit |
 
-#### 1. Mizu wallet note recovery
+#### 1. Mizu routing-tag alert and retrieval
+
+This is one product flow with two protocol stages, not two independent use
+cases.
+
+##### Retrieval stage
 
 Use replicated Dense XOR over one committed block for a hit follow-up and a
 32-block public catch-up window, with a 256-block recovery class only when its
@@ -195,6 +199,49 @@ actually almost identical. That is a good trade for strict tag privacy.
 Carry each replica share through a different OHTTP relay/gateway path and use
 fixed page sizes and cadence. Tor is an optional stronger-origin mode when the
 measured roughly 0.88 s warm latency is acceptable.
+
+An online wallet first receives the alert-stage presence bit below, then
+retrieves this one-block page on a hit. An offline wallet skips registration and
+uses the same endpoint for a 32-block catch-up query.
+
+##### Alert stage
+
+Use packed-presence Dense once per public two-second block/epoch. One wallet
+normally registers one routing bucket. At batch 512 it used **0.182 us aggregate
+server/subscriber/epoch**, versus 32.589 us for GPU-DPF and 0.206 us for 100
+visible buckets. At 5K TPS, 10K events are ORed into one bitmap before the one
+answer per subscriber; one million subscribers imply about 182 ms aggregate
+answer work/epoch and about 8.2 GB retained selector state/server. No higher
+live protocol was eliminated: epoch batching is acceptable.
+
+Registration is 16,384 B once and took 33.8 us/client in the batch-512 run; the
+answer is 2 B/epoch. Visible candidates register 400 B and return 1,600 B/epoch.
+Strict server work is 0.88x the visible baseline--about 12% faster--so this case
+does not pay a PIR server slowdown at all.
+
+Register the routing-tag selector once, evaluate it once per committed block,
+and issue a one-block Dense note-page query only after a hit. At the maximum
+block size that hit fetch is approximately 2.50 KB up, 1.61 KB down, 0.05 ms
+aggregate server and below 0.01 ms client CPU. A periodic 32-block snapshot
+costs 1.48 ms once, or about 46.3 us average server work/block; resident packed
+presence costs only 0.182 us/block before hits, about **254x less**. It remains
+cheaper until a wallet matches nearly every block.
+
+Do not evaluate Compact DPF for every event: that restores `events *
+subscribers` work. A foreground/warm wallet should use packed presence plus the
+one-block hit fetch. A sleeping or intermittently connected wallet should issue
+one 32-block catch-up query when it wakes; keeping a two-second network poll
+alive merely to save PIR compute is not worth mobile radio/battery cost.
+
+Fetching only after a hit exposes hit-correlated traffic to a global observer
+even though the PIR target and OHTTP origin remain hidden from non-colluding
+roles. The low-latency mode accepts that timing signal. A maximum-privacy mode
+delays the hit fetch into a fixed scheduled window or sends indistinguishable
+dummy fetches; that traffic policy, not the PIR primitive, decides timing
+privacy.
+
+Poll on a fixed cadence through padded OHTTP. Tor is optional; constant cadence
+is especially important to prevent matching an alert to a later public spend.
 
 #### 2. Mizu active nullifier witness
 
@@ -227,25 +274,7 @@ Use OHTTP by default and Tor for high-risk proof preparation. A high-entropy
 nullifier is hard to guess, but the nullifier plus the wallet IP is still an
 identifier.
 
-#### 3. Mizu routing-tag alert
-
-Use packed-presence Dense once per public two-second block/epoch. One wallet
-normally registers one routing bucket. At batch 512 it used **0.182 us aggregate
-server/subscriber/epoch**, versus 32.589 us for GPU-DPF and 0.206 us for 100
-visible buckets. At 5K TPS, 10K events are ORed into one bitmap before the one
-answer per subscriber; one million subscribers imply about 182 ms aggregate
-answer work/epoch and about 8.2 GB retained selector state/server. No higher
-live protocol was eliminated: epoch batching is acceptable.
-
-Registration is 16,384 B once and took 33.8 us/client in the batch-512 run; the
-answer is 2 B/epoch. Visible candidates register 400 B and return 1,600 B/epoch.
-Strict server work is 0.88x the visible baseline--about 12% faster--so this case
-does not pay a PIR server slowdown at all.
-
-Poll on a fixed cadence through padded OHTTP. Tor is optional; constant cadence
-is especially important to prevent matching an alert to a later public spend.
-
-#### 4. Shinzo historical contract logs
+#### 3. Shinzo historical contract logs
 
 Use replicated Dense XOR over a public 32-block window, with one-block and
 256-block classes and fixed continuation pages. At the maximum load those
@@ -268,7 +297,7 @@ their low-entropy, popularity and intersection leakage must be stated.
 
 Use OHTTP by default, fixed hit/empty pages, and Tor for sensitive research.
 
-#### 5. Shinzo transaction receipt
+#### 4. Shinzo transaction receipt
 
 Use replicated Dense XOR over the public inclusion block. A 5K TPS/two-second
 block has at most 10K receipts, far below the 1 GiB anchor; the tiny 256-row
@@ -291,7 +320,7 @@ directory is the next weaker option, and fresh same-class decoys are last.
 
 Use OHTTP by default and Tor for especially sensitive transaction interest.
 
-#### 6. Shinzo contract event alert
+#### 5. Shinzo contract event alert
 
 Use packed-presence Dense once per committed block. It has the same **0.182
 us/subscriber/epoch** batch-512 evidence as the Mizu alert. A hit triggers a
@@ -308,7 +337,7 @@ subscriber scaling, not the cost of privacy itself.
 
 Use fixed-cadence padded OHTTP, independent replica operators and optional Tor.
 
-#### 7. DefraDB document by ID
+#### 6. DefraDB document by ID
 
 Use replicated Dense XOR for an authorization-equivalent collection/generation
 artifact. The 1 GiB/8.39M-row anchor costs **6.17 ms server** and 2 MiB upload;
@@ -329,7 +358,7 @@ plaintext. Visible decoys remain the final high-entropy-ID fallback, not the
 default. OHTTP is mandatory at the service boundary, and artifacts must be
 separate for ACP-equivalent reader classes.
 
-#### 8. DefraDB secondary-index page
+#### 7. DefraDB secondary-index page
 
 Use exact-MPHF/Fuse Dense XOR inside a public collection plus time/generation
 partition. Inline the fixed encrypted projection and batch continuation pages
@@ -357,7 +386,7 @@ result amplification are accepted.
 Use OHTTP, fixed fanout/page classes and optional Tor. Encryption protects the
 projection at rest but does not reduce Dense traversal.
 
-#### 9. DefraDB private change feed
+#### 8. DefraDB private change feed
 
 Use packed-presence Dense at a declared one-second or one-commit epoch, followed
 by a bounded private snapshot page on a hit. Capacity is 8 KiB selector

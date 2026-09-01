@@ -1,8 +1,9 @@
 # PIR use-case gallery
 
 This document turns the selected PIR primitives into small application-shaped
-POCs. It is a catalog, not a claim that nine separate protocols should be
-maintained. Every snapshot fixture exercises the same `PrivateTable` and
+POCs. It is an executable fixture catalog, not a claim that nine separate
+protocols or nine independent products should be maintained. Every snapshot
+fixture exercises the same `PrivateTable` and
 replicated Dense XOR implementation so correctness is comparable. The 100
 visible-candidate path is a measured last-resort control, not a default. The
 served live fixtures
@@ -10,6 +11,21 @@ use the same immediate two-party Compact-DPF implementation; the measured
 production direction batches alerts into packed-presence Dense epochs. The
 authoritative decision ladder and scale conditions are in
 [`USE_CASES.md`](USE_CASES.md).
+
+The two files deliberately answer different questions:
+
+- [`USE_CASES.md`](USE_CASES.md) is the product/architecture decision record:
+  which user problem is worth protecting, which protocol is selected, expected
+  production scale and wire/compute cost, why alternatives were eliminated,
+  and what would change the decision.
+- `USE_CASE_GALLERY.md` is the runnable test catalog: which small fixture and
+  command prove the selected data shape, correctness, absent-key behavior and
+  strict-versus-decoy accounting. It uses 256-row fixtures and must not be used
+  for production capacity planning.
+
+Consequently, one product use case can have multiple gallery fixtures. Mizu
+**routing-tag alert and retrieval** is one flow represented by a live alert
+fixture and a snapshot retrieval fixture.
 
 The separate [encrypted-search POC](ENCRYPTED_SEARCH.md) evaluates a faster
 one-lookup tier with explicitly weaker search/access-pattern privacy.
@@ -33,9 +49,9 @@ operations and exclude HTTP, OHTTP, queues and artifact building.
 
 | Product | Use case | Why it is useful | POC shape | Selected protocol |
 |---|---|---|---|---|
-| Mizu / Shieldd | Wallet note recovery | A remote wallet retrieves only encrypted actions matching its proof-bound routing prefix instead of downloading every compact block | Public generation/window + private routing prefix -> four-slot encrypted-action page | Dense XOR, 2+ replicas |
+| Mizu / Shieldd | Routing-tag alert and retrieval — retrieval stage | After a private alert, or during catch-up, a wallet retrieves only encrypted actions matching its proof-bound routing prefix | Public generation/window + private routing prefix -> four-slot encrypted-action page | Dense XOR, 2+ replicas |
 | Mizu / Shieldd | Nullifier non-membership witness | A wallet obtains the path needed to prove its note remains unspent without identifying the nullifier to a provider | Stable future leaf index + active-generation checkpoint -> fixed 2,008-byte witness | Dense XOR, 2+ replicas; decoys only after bounded strict paths fail |
-| Mizu / Shieldd | Routing-tag alert | A wallet learns that an encrypted action for its routing tag appeared without registering the tag in plaintext | Routing-prefix event bucket -> private match/miss hint | Packed-presence Dense per public epoch; immediate Compact DPF fallback |
+| Mizu / Shieldd | Routing-tag alert and retrieval — alert stage | A wallet learns that an encrypted action for its routing tag appeared without registering the tag in plaintext | Routing-prefix event bucket -> private match/miss hint | Packed-presence Dense per public epoch; immediate Compact DPF fallback |
 | Shinzo | Historical contract logs | A researcher or wallet hides which contract and event signature it is investigating | Public block window + private address/topic0 -> four-slot log page | Dense XOR, 2+ replicas |
 | Shinzo | Private transaction receipt | A wallet retrieves public transaction/receipt/attestation data without disclosing which transaction matters to it | Public inclusion block + private transaction hash -> fixed receipt and provenance projection | Dense XOR over the inclusion block; decoys only for degraded global lookup |
 | Shinzo | Contract event alert | A wallet privately follows an address or topic in the live DefraDB log stream | Canonical address/topic bucket -> private match/miss hint | Packed-presence Dense per block/epoch; immediate Compact DPF fallback |
@@ -59,7 +75,7 @@ default endpoint rather than assuming pre-shared ordinals.
 
 | Use case | PIR server | Decoy server | PIR server delta | PIR client | Decoy client | Upload PIR / decoy | Download PIR / decoy |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Mizu wallet note recovery | 5.9 us | 28.4 us | 79% faster | 0.8 us | 4.2 us | 64 B / 3,103 B | 1,608 B / 80,400 B |
+| Mizu routing-tag retrieval | 5.9 us | 28.4 us | 79% faster | 0.8 us | 4.2 us | 64 B / 3,103 B | 1,608 B / 80,400 B |
 | Mizu nullifier witness | 13.1 us | 29.1 us | 55% faster | 1.0 us | 3.7 us | 64 B / 4,190 B | 4,064 B / 203,200 B |
 | Shinzo historical logs | 4.3 us | 26.4 us | 84% faster | 1.1 us | 4.2 us | 64 B / 3,614 B | 1,096 B / 54,800 B |
 | Shinzo transaction receipt | 2.3 us | 25.7 us | 91% faster | 0.7 us | 3.9 us | 64 B / 3,794 B | 368 B / 18,400 B |
@@ -128,12 +144,12 @@ Representative stable wire geometry from the strict gallery path:
 
 ## What should become production first
 
-1. **Mizu wallet note recovery** is the strongest new product case. Shieldd
-   already defines routing records and encrypted action payloads. The exporter
-   can create immutable pages per public generation or block window, and the
-   wallet trial-decrypts recovered values. A full routing-prefix domain is worth
-   evaluating because the current compact ordinal directory permits dictionary
-   recovery of populated low-bit prefixes.
+1. **Mizu routing-tag alert and retrieval** is the strongest new product case.
+   Shieldd already defines routing records and encrypted action payloads. A
+   packed block-level presence query alerts an online wallet; the snapshot
+   fixture retrieves a one-block hit page or a bounded offline catch-up window.
+   A full routing-prefix domain is worth evaluating because the current compact
+   ordinal directory permits dictionary recovery of populated low-bit prefixes.
 2. **Shinzo historical logs** complements the live adapter already implemented.
    Public block windows materially bound server work while keeping the address
    and topic private. Deterministic continuation pages are needed for popular
