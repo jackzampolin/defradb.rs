@@ -11,7 +11,7 @@ if [ ${#manifests[@]} -eq 0 ]; then
 fi
 
 has_feature() {
-  case ",${1##*--features }," in
+  case ",$1," in
     *",$2,"*) return 0 ;;
     *) return 1 ;;
   esac

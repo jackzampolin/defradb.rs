@@ -163,49 +163,49 @@ jobs:
             runner: '["ubuntu-latest"]'
             variant: full
             artifact: defra-ffi
-            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
+            features: "native,wasmtime-runtime,sourcehub"
           - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
             variant: full
             artifact: defra-ffi
-            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
+            features: "native,wasmtime-runtime,sourcehub"
           - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             variant: full
             artifact: defra-ffi
-            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
+            features: "native,wasmtime-runtime,sourcehub"
           - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             variant: full
             artifact: defra-ffi
-            features: "--no-default-features --features native,wasmtime-runtime,sourcehub"
+            features: "native,wasmtime-runtime,sourcehub"
           - target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["ubuntu-latest"]'
             variant: lean
             artifact: defra-ffi-lean
-            features: "--no-default-features --features native"
+            features: "native"
           - target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
             variant: lean
             artifact: defra-ffi-lean
-            features: "--no-default-features --features native"
+            features: "native"
           - target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             variant: lean
             artifact: defra-ffi-lean
-            features: "--no-default-features --features native"
+            features: "native"
           - target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             variant: lean
             artifact: defra-ffi-lean
-            features: "--no-default-features --features native"
+            features: "native"
     steps:
       - uses: actions/checkout@v4
 
@@ -260,7 +260,9 @@ jobs:
         run: cargo install cbindgen
 
       - name: Build FFI
-        run: cargo build --release -p ffi --target ${{ matrix.target }} ${{ matrix.features }}
+        run: |
+          cargo build --release -p ffi --target ${{ matrix.target }} \
+            --no-default-features --features ${{ matrix.features }}
 
       - name: Generate header
         run: cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output defra.h
@@ -365,7 +367,7 @@ jobs:
         shell: bash
         run: |
           MANIFEST="${ARCHIVE%.tar.gz}.capabilities"
-          printf '%s|ios_xcframework|--no-default-features --features %s\n' \
+          printf '%s|ios_xcframework|%s\n' \
             "${{ matrix.artifact }}" "${{ matrix.features }}" \
             > "${MANIFEST}"
           echo "MANIFEST=${MANIFEST}" >> "$GITHUB_ENV"
