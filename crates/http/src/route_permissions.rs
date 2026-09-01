@@ -39,6 +39,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // Exempt routes (no auth needed)
         // =====================================================================
         "/health-check" => RoutePermission::Exempt,
+        "/openapi.json" => RoutePermission::Exempt,
         "/api/v0/version" => RoutePermission::Exempt,
         "/api/v0/graphql/ws" => RoutePermission::Exempt,
         "/api/v0/batch/verify" => RoutePermission::Exempt,

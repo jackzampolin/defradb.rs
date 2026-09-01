@@ -25,6 +25,7 @@ pub mod graphql;
 pub mod index;
 pub mod lens;
 pub mod nac;
+pub mod openapi;
 pub mod p2p;
 pub mod schema;
 mod txn_header;

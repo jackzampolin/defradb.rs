@@ -75,7 +75,9 @@ pub(crate) fn create_router_with_state_and_body_limits(
     limits: BodyLimits,
 ) -> Router {
     // Health check at root level (matches Go DefraDB)
-    let root_routes = Router::new().route("/health-check", get(handlers::health_check));
+    let root_routes = Router::new()
+        .route("/health-check", get(handlers::health_check))
+        .route("/openapi.json", get(handlers::openapi::get));
 
     // Transaction routes (Go-compatible)
     // Go DefraDB:

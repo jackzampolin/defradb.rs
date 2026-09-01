@@ -27,6 +27,10 @@ fn exempt_routes() {
         RoutePermission::Exempt
     );
     assert_eq!(
+        route_permission("/openapi.json", &Method::GET),
+        RoutePermission::Exempt
+    );
+    assert_eq!(
         route_permission("/api/v0/version", &Method::GET),
         RoutePermission::Exempt
     );
@@ -223,6 +227,7 @@ fn all_registered_routes_return_expected_permission() {
     let routes: Vec<(&str, Method, RoutePermission)> = vec![
         // Exempt
         ("/health-check", Method::GET, RoutePermission::Exempt),
+        ("/openapi.json", Method::GET, RoutePermission::Exempt),
         ("/api/v0/version", Method::GET, RoutePermission::Exempt),
         ("/api/v0/graphql/ws", Method::GET, RoutePermission::Exempt),
         (
