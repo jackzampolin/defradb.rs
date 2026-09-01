@@ -99,7 +99,7 @@ pub(crate) fn create_router_with_state_and_body_limits(
         );
 
     // Collection routes (REST API)
-    // Static routes must come before parametric `:name` routes
+    // Static routes must come before parametric `{name}` routes.
     let collection_routes = Router::new()
         .route(
             "/",

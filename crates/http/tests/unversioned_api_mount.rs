@@ -7,11 +7,8 @@
 //! but does not fold is enforced as `DocumentRead`, a privilege downgrade
 //! rather than a 404.
 //!
-//! Parameterized routes are deliberately not asserted here. axum 0.8 yields a
-//! brace `MatchedPath` (`/api/collections/{name}`) while the table is keyed
-//! with colons, so those entries never match on any mount, versioned or not.
-//! That defect is #1497 and is not what this change is about; asserting it
-//! here would only certify the `_` arm.
+//! Parameterized templates are exercised through the real router in
+//! `route_permission_matching.rs`; this file focuses on mount equivalence.
 
 mod common;
 use common::*;
