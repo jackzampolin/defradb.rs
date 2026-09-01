@@ -9,7 +9,8 @@
 # CLI's libp2p into every tree.
 set -euo pipefail
 
-# Always `-p defra-node`, `-p cli`, or `-p db`. Workspace trees are forbidden.
+# Always `-p defra-node`, `-p cli`, `-p db`, or `-p ffi`. Workspace trees are
+# forbidden.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 assert_present() {
@@ -127,6 +128,18 @@ assert_p2p_crate_iroh_only() {
   echo "ok: lean Iroh p2p crate line has iroh-transport and no libp2p-transport"
 }
 assert_p2p_crate_iroh_only
+
+# Lean-embedded ffi (#1345): libp2p in, iroh/wasmtime/sourcehub out.
+LEAN_FFI=(--no-default-features --features native)
+assert_present ffi libp2p "${LEAN_FFI[@]}"
+assert_absent  ffi iroh "${LEAN_FFI[@]}"
+assert_absent  ffi wasmtime "${LEAN_FFI[@]}"
+assert_absent  ffi sourcehub "${LEAN_FFI[@]}"
+assert_absent  ffi cosmrs "${LEAN_FFI[@]}"
+
+# Default ffi still carries the full Go-interop capability set.
+assert_present ffi sourcehub
+assert_present ffi wasmtime
 
 # Unique crate names. Log only — not a gate and not binary size. Main may move.
 echo "defra-node default unique crate names: $(unique_crate_names)"

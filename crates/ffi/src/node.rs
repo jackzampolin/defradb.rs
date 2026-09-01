@@ -320,6 +320,37 @@ mod tests {
         unsafe { crate::types::defra_free_string(result.error) };
     }
 
+    #[cfg(not(feature = "sourcehub"))]
+    #[test]
+    fn test_sourcehub_config_rejected_without_feature() {
+        assert!(crate::runtime::init_runtime());
+
+        let grpc = CString::new("127.0.0.1:9090").unwrap();
+        let comet = CString::new("127.0.0.1:26657").unwrap();
+        let chain = CString::new("sourcehub-test").unwrap();
+        let signer_key = [1u8; 32];
+        let result = new_node(NodeInitOptions {
+            sourcehub_grpc_address: grpc.as_ptr(),
+            sourcehub_comet_rpc_address: comet.as_ptr(),
+            sourcehub_chain_id: chain.as_ptr(),
+            sourcehub_signer_key: signer_key.as_ptr(),
+            sourcehub_signer_key_len: signer_key.len(),
+            ..NodeInitOptions::default()
+        });
+
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy().into_owned() };
+        assert!(error.contains("SourceHub"), "unexpected error: {error}");
+        assert!(
+            error.contains("sourcehub feature"),
+            "unexpected error: {error}"
+        );
+
+        unsafe { crate::types::defra_free_string(result.error) };
+    }
+
     #[test]
     fn test_multiple_nodes() {
         assert!(crate::runtime::init_runtime());
