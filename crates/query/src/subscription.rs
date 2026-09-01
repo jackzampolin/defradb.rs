@@ -16,6 +16,15 @@ use crate::{QueryLimits, QueryResponse};
 
 type FragmentMap<'a> = HashMap<String, &'a FragmentDefinition<'static, String>>;
 
+/// How deep a chain of fragment spreads may be at a subscription root.
+///
+/// Expansion recurses, so a chain bounded only by the document is a stack
+/// overflow reachable from a request body. Cycle detection does not help: a
+/// chain of distinct fragments never repeats a name. Legitimate documents nest
+/// a handful deep, so this is far above any real use and far below the depth
+/// that exhausts the stack.
+const MAX_ROOT_FRAGMENT_DEPTH: usize = 32;
+
 /// Check whether the provided request resolves to a subscription operation.
 pub fn is_subscription_operation(
     query: &str,
@@ -242,6 +251,7 @@ fn single_root_field(
         &selection_set.items,
         fragments,
         &mut HashSet::new(),
+        0,
         &mut fields,
     )?;
 
@@ -258,13 +268,26 @@ fn collect_root_fields(
     items: &[Selection<'static, String>],
     fragments: &FragmentMap<'_>,
     visiting: &mut HashSet<String>,
+    depth: usize,
     out: &mut Vec<Field<'static, String>>,
 ) -> Result<()> {
+    if depth > MAX_ROOT_FRAGMENT_DEPTH {
+        return Err(QueryError::parse(format!(
+            "subscription root nests fragments more than {MAX_ROOT_FRAGMENT_DEPTH} deep"
+        )));
+    }
+
     for item in items {
         match item {
             Selection::Field(field) => out.push(field.clone()),
             Selection::InlineFragment(inline) => {
-                collect_root_fields(&inline.selection_set.items, fragments, visiting, out)?;
+                collect_root_fields(
+                    &inline.selection_set.items,
+                    fragments,
+                    visiting,
+                    depth + 1,
+                    out,
+                )?;
             }
             Selection::FragmentSpread(spread) => {
                 if !visiting.insert(spread.fragment_name.clone()) {
@@ -276,7 +299,13 @@ fn collect_root_fields(
                 let fragment = fragments.get(&spread.fragment_name).ok_or_else(|| {
                     QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
                 })?;
-                collect_root_fields(&fragment.selection_set.items, fragments, visiting, out)?;
+                collect_root_fields(
+                    &fragment.selection_set.items,
+                    fragments,
+                    visiting,
+                    depth + 1,
+                    out,
+                )?;
                 visiting.remove(&spread.fragment_name);
             }
         }
@@ -363,6 +392,50 @@ mod tests {
         let error = validate_subscription(query, None).unwrap_err().to_string();
         assert!(error.contains("exactly one root field"), "{error}");
         assert!(subscription_to_scoped_query(query, "bae-1", "cid-1", None).is_err());
+    }
+
+    #[test]
+    fn a_long_fragment_chain_is_refused_rather_than_exhausting_the_stack() {
+        // A chain of distinct fragments never repeats a name, so cycle
+        // detection does not bound it. Only the depth limit does.
+        let mut document = String::from("subscription { ...F0 }");
+        for i in 0..2_000 {
+            if i == 1_999 {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ User {{ name }} }}"
+                ));
+            } else {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ ...F{} }}",
+                    i + 1
+                ));
+            }
+        }
+
+        let error = validate_subscription(&document, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nests fragments more than"), "{error}");
+        assert!(subscription_to_scoped_query(&document, "bae-1", "cid-1", None).is_err());
+    }
+
+    #[test]
+    fn a_chain_within_the_limit_still_resolves() {
+        let mut document = String::from("subscription { ...F0 }");
+        for i in 0..8 {
+            if i == 7 {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ User {{ name }} }}"
+                ));
+            } else {
+                document.push_str(&format!(
+                    " fragment F{i} on Subscription {{ ...F{} }}",
+                    i + 1
+                ));
+            }
+        }
+        validate_subscription(&document, None).unwrap();
+        assert!(subscription_to_scoped_query(&document, "bae-1", "cid-1", None).is_ok());
     }
 
     #[test]
