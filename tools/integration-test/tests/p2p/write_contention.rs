@@ -70,6 +70,19 @@ fn count_docs(cluster: &TestCluster, idx: usize, collection: &str) -> usize {
         .unwrap_or(0)
 }
 
+fn query_record_docs(cluster: &TestCluster, idx: usize) -> Result<Vec<serde_json::Value>, String> {
+    let response = cluster
+        .client(idx)
+        .query("query { Record { _docID origin idx } }")
+        .map_err(|error| format!("{error:#}"))?;
+    let mut docs = response["Record"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| format!("unexpected query response: {response}"))?;
+    docs.sort_by(|left, right| left["_docID"].as_str().cmp(&right["_docID"].as_str()));
+    Ok(docs)
+}
+
 // ─── Test 1: write_after_replication ─────────────────────────────────────────
 
 /// Reproduces the P2P write contention deadlock pattern:
@@ -274,17 +287,26 @@ async fn burst_bidirectional_test(cluster: TestCluster) {
 
     let total = N0_COUNT + N1_COUNT;
 
-    // All documents must converge on both nodes
-    poll_until(
-        || count_docs(&cluster, 0, "Record") >= total && count_docs(&cluster, 1, "Record") >= total,
-        Duration::from_secs(60),
-        Duration::from_millis(500),
-        "burst writes did not converge on both nodes",
-    )
-    .await;
+    // Keep the final document states so a timeout distinguishes lag from divergence.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let node0_docs = query_record_docs(&cluster, 0);
+        let node1_docs = query_record_docs(&cluster, 1);
 
-    assert_eq!(count_docs(&cluster, 0, "Record"), total);
-    assert_eq!(count_docs(&cluster, 1, "Record"), total);
+        if let (Ok(node0_docs), Ok(node1_docs)) = (&node0_docs, &node1_docs) {
+            if node0_docs.len() >= total && node1_docs.len() >= total {
+                assert_eq!(node0_docs.len(), total, "node0 records: {node0_docs:#?}");
+                assert_eq!(node1_docs.len(), total, "node1 records: {node1_docs:#?}");
+                break;
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "burst writes did not converge on both nodes within 60s\nnode0: {node0_docs:#?}\nnode1: {node1_docs:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     // Post-burst health check: both nodes can still write and query
     write_with_conflict_retry(
