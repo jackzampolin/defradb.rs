@@ -471,6 +471,7 @@ jobs:
         run: >-
           cargo test --profile super-dev -p integration-test
           --test basic --test query --test acp --test nac --test backup --test p2p --test identity
+          --test encryption --test sourcehub
           -- --test-threads=1 go_
           --skip go_acp_link_collection_nonexistent_policy_reject
           --skip go_acp_link_collection_nonexistent_resource_reject
