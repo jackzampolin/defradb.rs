@@ -515,7 +515,14 @@ impl SyncShutdownHandle {
             None => return false,
         }
 
-        tasks.insert(root_cid, PendingDagFetchTask::Running(tokio::spawn(future)));
+        let shutdown = self.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = future => {}
+            }
+        });
+        tasks.insert(root_cid, PendingDagFetchTask::Running(task));
         true
     }
 
@@ -1090,7 +1097,10 @@ mod dag_fetch_limiter_tests {
 #[cfg(test)]
 mod shutdown_tests {
     use super::broadcast::tests::TestTransport;
-    use super::{SyncCoordinator, SyncShutdownHandle, NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT};
+    use super::{
+        SyncCoordinator, SyncShutdownHandle, BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+        NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
+    };
     use cid::Cid;
     use multihash_codetable::{Code, MultihashDigest};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1302,6 +1312,22 @@ mod shutdown_tests {
         assert!(shutdown.reserve_pending_dag_fetch(third));
         release.notify_one();
         shutdown.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_signals_pending_fetches_before_the_drain_timeout() {
+        let shutdown = SyncShutdownHandle::new(1);
+        let root = Cid::new_v1(0x55, Code::Sha2_256.digest(b"pending-root"));
+        assert!(shutdown.spawn_pending_dag_fetch(root, std::future::pending()));
+        tokio::task::yield_now().await;
+
+        let started = tokio::time::Instant::now();
+        shutdown.shutdown().await;
+
+        assert!(
+            started.elapsed() < BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+            "pending fetch waited for the abort deadline instead of the shutdown signal"
+        );
     }
 
     #[tokio::test]
