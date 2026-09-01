@@ -12,6 +12,7 @@
 //! Topology (Go's owner-queries-replicator model): node A = OWNER (writes the
 //! doc, sets the replicator, runs the query); node B = REPLICATOR (serves
 //! docIDs from the artifacts A pushed). Both hold the same 32-byte SE key.
+#![cfg(any(feature = "libp2p", feature = "iroh"))]
 
 use anyhow::{bail, Context, Result};
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder, ReplicatorPushOptions};
@@ -27,6 +28,7 @@ const SHARED_SE_KEY: [u8; 32] = [
     0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
 ];
 
+#[cfg(feature = "libp2p")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn embedded_libp2p_se_owner_queries_replicator() -> Result<()> {
     let owner = NodeBuilder::default()
@@ -254,6 +256,7 @@ fn set_se_key(node: &EmbeddedNode<EmbeddedStore>, key: [u8; 32]) -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e))
 }
 
+#[cfg(feature = "libp2p")]
 async fn wait_for_shareable_addr(
     system: &embedded::ManagedP2PSystem,
     peer_id: &str,

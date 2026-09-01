@@ -9,7 +9,7 @@ repository.workspace = true
 description = "FFI bindings for DefraDB Rust implementation"
 
 [package.metadata.cargo-machete]
-ignored = ["cid", "libp2p", "serde_bytes", "serde_ipld_dagcbor", "serde_yaml", "sha2", "thiserror"]
+ignored = ["cid", "serde_bytes", "serde_ipld_dagcbor", "serde_yaml", "sha2", "thiserror"]
 
 [lib]
 bench = false
@@ -19,7 +19,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 default = ["native", "wasmtime-runtime", "sourcehub", "libp2p"]
 native = ["db/native", "embedded/native"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
-libp2p = ["db/p2p", "p2p/libp2p-transport", "embedded/libp2p", "dep:libp2p"]
+libp2p = ["db/p2p", "p2p/libp2p-transport", "embedded/libp2p"]
 sourcehub = ["dep:sourcehub", "embedded/sourcehub"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
@@ -81,9 +81,6 @@ embedded = { path = "../embedded", default-features = false }
 
 # IPLD
 cid.workspace = true
-
-# P2P dependencies
-libp2p = { workspace = true, optional = true }
 
 [build-dependencies]
 cbindgen = "0.28"

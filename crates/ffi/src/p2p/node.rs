@@ -41,9 +41,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "libp2p", feature = "iroh")),
+    allow(unused_variables)
+)]
 fn resolve_transport(
     options: &NodeInitOptions,
-    _listen_addr: &str,
+    listen_addr: &str,
 ) -> Result<embedded::TransportConfig, String> {
     let transport = unsafe { c_str_to_string(options.p2p_transport) }
         .unwrap_or_else(|| "libp2p".to_string())
@@ -53,11 +57,11 @@ fn resolve_transport(
         "" | "libp2p" => {
             #[cfg(feature = "libp2p")]
             {
-                if _listen_addr.is_empty() {
+                if listen_addr.is_empty() {
                     return Err("listen_addr is required for libp2p transport".to_string());
                 }
                 Ok(embedded::TransportConfig::Libp2p(embedded::Libp2pConfig {
-                    listen_addr: _listen_addr.to_string(),
+                    listen_addr: listen_addr.to_string(),
                 }))
             }
             #[cfg(not(feature = "libp2p"))]
@@ -156,10 +160,10 @@ fn resolve_transport(
                     config.bind_port = Some(options.iroh_bind_port);
                 }
 
-                if !_listen_addr.trim().is_empty() {
+                if !listen_addr.trim().is_empty() {
                     let socket_addr: std::net::SocketAddr =
-                        _listen_addr.parse().map_err(|error| {
-                            format!("invalid iroh listen address '{}': {}", _listen_addr, error)
+                        listen_addr.parse().map_err(|error| {
+                            format!("invalid iroh listen address '{}': {}", listen_addr, error)
                         })?;
                     config.bind_addr = Some(socket_addr.ip());
                     config.bind_port = Some(socket_addr.port());
