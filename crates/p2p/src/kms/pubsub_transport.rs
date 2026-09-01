@@ -328,6 +328,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
                 Ok(_) => {}
                 Err(e) => {
                     debug!(error = %e, "topic_peers query failed while awaiting KMS subscriber");
+                    return;
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -355,7 +356,9 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(e) if tokio::time::Instant::now() < deadline => {
+                Err(ref e @ crate::error::Error::GossipSubPublish(ref message))
+                    if message == "InsufficientPeers" && tokio::time::Instant::now() < deadline =>
+                {
                     debug!(topic = %topic, error = %e, "publish not yet ready; retrying");
                     tokio::time::sleep(SUBSCRIBER_POLL_INTERVAL).await;
                 }
@@ -556,7 +559,7 @@ mod tests {
     use crate::{QueryId, ReplicatorInfo};
     use async_trait::async_trait;
     use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     type PublishedRawMessages = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -576,6 +579,7 @@ mod tests {
         subscriber_visible_after: usize,
         publish_attempts: Arc<AtomicUsize>,
         published: PublishedRawMessages,
+        closed: Arc<AtomicBool>,
     }
 
     impl RacyTransport {
@@ -588,11 +592,16 @@ mod tests {
                 subscriber_visible_after,
                 publish_attempts: Arc::new(AtomicUsize::new(0)),
                 published: Arc::new(Mutex::new(Vec::new())),
+                closed: Arc::new(AtomicBool::new(false)),
             }
         }
 
         fn subscriber_known(&self) -> bool {
             self.topic_peers_calls.load(Ordering::SeqCst) >= self.subscriber_visible_after
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::SeqCst);
         }
     }
 
@@ -631,6 +640,9 @@ mod tests {
             Ok(Vec::new())
         }
         async fn topic_peers(&self, _topic: DefraTopic) -> Result<Vec<PeerId>> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(Error::ChannelSend);
+            }
             let n = self.topic_peers_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if n >= self.subscriber_visible_after {
                 Ok(vec![self.peer.clone()])
@@ -649,6 +661,9 @@ mod tests {
         }
         async fn publish_raw(&self, t: String, d: Vec<u8>) -> Result<MessageId> {
             self.publish_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(Error::ChannelSend);
+            }
             if self.subscriber_known() {
                 self.published.lock().push((t, d));
                 Ok(MessageId::new("ok".to_string()))
@@ -783,6 +798,27 @@ mod tests {
         assert_eq!(pubs.len(), 1);
         assert_eq!(pubs[0].0, ENCRYPTION_TOPIC, "request must go on base topic");
         assert_eq!(pubs[0].1, b"fetch");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_request_stops_when_transport_is_closed() {
+        let transport = RacyTransport::new(usize::MAX);
+        let publish_attempts = transport.publish_attempts.clone();
+        let kt = PubsubKeyTransport::new(transport.clone(), Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
+        transport.close();
+
+        let request = EncodedFetchRequest {
+            payload: b"fetch".to_vec(),
+            request_id: "r1".to_string(),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), kt.send_request(request))
+            .await
+            .expect("a closed transport must not consume the subscriber retry window");
+
+        assert!(result.is_err());
+        assert_eq!(publish_attempts.load(Ordering::SeqCst), 1);
     }
 
     /// A response envelope arriving on the local `_response` sub-topic must be
