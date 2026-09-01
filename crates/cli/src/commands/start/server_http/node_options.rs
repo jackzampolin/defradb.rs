@@ -94,11 +94,11 @@ pub(super) fn sanitized_node_options(
             "IdleTimeout": 0,
             "TxnTTL": seconds_as_nanos(config.api.transaction_idle_timeout),
             "TxnTTLTick": seconds_as_nanos(config.api.transaction_cleanup_interval),
-            "TxnTTLBuckets": if config.api.transaction_cleanup_interval == 0 {
-                0
-            } else {
-                config.api.transaction_idle_timeout / config.api.transaction_cleanup_interval
-            },
+            "TxnTTLBuckets": config
+                .api
+                .transaction_idle_timeout
+                .checked_div(config.api.transaction_cleanup_interval)
+                .unwrap_or_default(),
         },
     });
 
