@@ -169,7 +169,11 @@ fn float64_to_json(f: f64) -> Result<JsonValue> {
     }
     // Match Go's json.Marshal behavior: whole-number floats serialize
     // without a decimal point (e.g., float64(21.0) → "21").
-    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+    if f.fract() == 0.0
+        && !(f == 0.0 && f.is_sign_negative())
+        && f >= i64::MIN as f64
+        && f <= i64::MAX as f64
+    {
         return Ok(JsonValue::Number(serde_json::Number::from(f as i64)));
     }
     serde_json::Number::from_f64(f)
@@ -191,7 +195,11 @@ fn float32_to_json(f: f32) -> Result<JsonValue> {
         )));
     }
     // Match Go's json.Marshal behavior for whole-number floats
-    if f64_val.fract() == 0.0 && f64_val >= i64::MIN as f64 && f64_val <= i64::MAX as f64 {
+    if f64_val.fract() == 0.0
+        && !(f64_val == 0.0 && f64_val.is_sign_negative())
+        && f64_val >= i64::MIN as f64
+        && f64_val <= i64::MAX as f64
+    {
         return Ok(JsonValue::Number(serde_json::Number::from(f64_val as i64)));
     }
     serde_json::Number::from_f64(f64_val)
@@ -307,9 +315,15 @@ mod tests {
         assert_eq!(float64_to_json(3.15).unwrap(), serde_json::json!(3.15));
         // Whole-number floats are serialized as integers to match Go's json.Marshal
         assert_eq!(float64_to_json(0.0).unwrap(), serde_json::json!(0));
+        assert_eq!(float64_to_json(-0.0).unwrap().to_string(), "-0.0");
         assert_eq!(float64_to_json(-42.5).unwrap(), serde_json::json!(-42.5));
         assert_eq!(float64_to_json(21.0).unwrap(), serde_json::json!(21));
         assert_eq!(float64_to_json(21.5).unwrap(), serde_json::json!(21.5));
+    }
+
+    #[test]
+    fn test_float32_to_json_preserves_negative_zero() {
+        assert_eq!(float32_to_json(-0.0).unwrap().to_string(), "-0.0");
     }
 
     #[test]

@@ -8,6 +8,7 @@ use defra_core::browser_sync::{BrowserSyncBlock, BrowserSyncDocument, MAX_SYNC_P
 use defra_core::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 use storage::corekv::{IterOptions, Store};
 
+use crate::event::emission::{TxnBroadcastEvent, TxnBroadcaster};
 use crate::merge::merge_handler::DbMergeHandler;
 use crate::merge::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
 
@@ -69,10 +70,21 @@ pub struct BrowserSyncEngine<S: Store + 'static> {
     db: Arc<crate::DB<S>>,
     blockstore: Arc<DefraBlockstore<S>>,
     merge_handler: Arc<DbMergeHandler<S, DefraBlockstore<S>>>,
+    broadcaster: Option<Arc<dyn TxnBroadcaster>>,
 }
 
 impl<S: Store + 'static> BrowserSyncEngine<S> {
     pub fn new(db: Arc<crate::DB<S>>) -> Self {
+        Self::build(db, None)
+    }
+
+    /// Use this when running with the P2P stack, so that a fragment pushed to
+    /// `/sync` reaches peers.
+    pub fn with_broadcaster(db: Arc<crate::DB<S>>, broadcaster: Arc<dyn TxnBroadcaster>) -> Self {
+        Self::build(db, Some(broadcaster))
+    }
+
+    fn build(db: Arc<crate::DB<S>>, broadcaster: Option<Arc<dyn TxnBroadcaster>>) -> Self {
         let blockstore = Arc::new(DefraBlockstore::new(db.store().clone(), true));
         let merge_handler = Arc::new(DbMergeHandler::new(db.clone(), blockstore.clone()));
         if let Some(kms) = db.kms() {
@@ -82,6 +94,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             db,
             blockstore,
             merge_handler,
+            broadcaster,
         }
     }
 
@@ -333,6 +346,96 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
         self.blockstore
             .mark_batch_as_merged(&cids)
             .await
-            .map_err(|error| BrowserSyncError::Storage(error.to_string()))
+            .map_err(|error| BrowserSyncError::Storage(error.to_string()))?;
+
+        self.announce_merged_document(&document).await;
+        Ok(())
+    }
+
+    /// Hand a merged fragment to the P2P stack, the way a committed local
+    /// write is handed over by `SyncTxnBroadcaster`.
+    ///
+    /// `/sync` is an ingress from outside the network, as a GraphQL mutation
+    /// is: this node is where the document entered, so no peer has it and no
+    /// peer will announce it. That is why this is unconditional rather than
+    /// gated on `rebroadcast_on_merge`, which governs *re*-announcing blocks
+    /// that already reached this node through the network.
+    ///
+    /// The creator is the DID verified from the genesis signature, never the
+    /// caller who delivered the push, so a receiving peer registers the owner
+    /// this node proved rather than the one its sender claims.
+    async fn announce_merged_document(&self, document: &ValidatedBrowserSyncDocument) {
+        let Some(broadcaster) = self.broadcaster.as_ref() else {
+            return;
+        };
+
+        // Only used for logging on the broadcast path; an unknown collection
+        // is not a reason to withhold the announcement.
+        let collection_name = self
+            .db
+            .find_collection_by_id(&document.collection_id)
+            .ok()
+            .flatten()
+            .map(|collection| collection.name().to_string())
+            .unwrap_or_default();
+
+        // A replicator with a filter on this collection is skipped unless the
+        // push carries a document to match against, and a fragment is blocks
+        // rather than a document, so the merged state is read back.
+        let document_json = self
+            .merged_document_json(&document.doc_id, &document.collection_id)
+            .await;
+
+        for root in &document.roots {
+            let Some(block) = document
+                .blocks
+                .iter()
+                .find_map(|(cid, data)| (cid == root).then(|| data.clone()))
+            else {
+                continue;
+            };
+
+            broadcaster
+                .broadcast_update(TxnBroadcastEvent {
+                    collection_name: collection_name.clone(),
+                    collection_id: document.collection_id.clone(),
+                    doc_id: document.doc_id.clone(),
+                    doc_cid: *root,
+                    doc_block: block,
+                    document_json: document_json.clone(),
+                    collection_block: None,
+                    creator_did: document.verified_genesis_creator.clone(),
+                })
+                .await;
+        }
+    }
+
+    /// The merged document as JSON, for replicator filters to match against.
+    ///
+    /// A pushed fragment carries blocks rather than a document body, so this
+    /// reads back what the merge produced. Failing to read it is not a reason
+    /// to withhold the announcement: unfiltered replicators and gossip do not
+    /// need it.
+    async fn merged_document_json(
+        &self,
+        doc_id: &str,
+        collection_id: &str,
+    ) -> Option<serde_json::Value> {
+        let txn = self.db.new_txn(true).await.ok()?;
+        let doc_ref = crate::docid::map::get_doc_ref(&txn.systemstore().ok()?, doc_id)
+            .await
+            .ok()
+            .flatten()?;
+
+        let mut key = format!("/d/{collection_id}/").into_bytes();
+        key.extend_from_slice(&storage::keys::doc_id_index::encode_doc_short_id(
+            doc_ref.doc_short_id,
+        ));
+        let encoded = txn.datastore().ok()?.get(&key).await.ok().flatten()?;
+
+        let document = document::Document::from_cbor(&encoded).ok()?;
+        Some(serde_json::Value::Object(
+            document.to_map().ok()?.into_iter().collect(),
+        ))
     }
 }

@@ -87,7 +87,9 @@ mod shared_owner_tests {
     use storage::RegolithStore;
 
     use async_lock::Mutex;
-    use defra_core::{Block, CrdtDelta, LwwDeltaPayload};
+    use defra_core::{
+        Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+    };
     use document::{DocID, NormalValue};
 
     use db::read::commits::{CommitsFetcher, CommitsQueryOptions};
@@ -148,7 +150,7 @@ mod shared_owner_tests {
 
         let version_txn = db.new_txn(true).await.unwrap();
         let documents = VersionedFetcher::new(Arc::new(Mutex::new(Some(version_txn))))
-            .get_documents_at_cid(&cid.to_string(), None)
+            .get_documents_at_cid(&cid.to_string(), None, None)
             .await
             .unwrap();
         let document_owners: HashSet<_> = documents
@@ -156,5 +158,65 @@ mod shared_owner_tests {
             .filter_map(|document| document.id().map(ToString::to_string))
             .collect();
         assert_eq!(document_owners, owners.into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn signature_value_uses_graphql_base64_encoding() {
+        let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+        let signature = Signature::new(
+            SignatureHeader::new(SignatureType::ES256K, b"identity".to_vec()),
+            vec![1, 2, 3, 4],
+        );
+        let signature_cid = signature.generate_cid().unwrap();
+        let mut data = Vec::new();
+        ciborium::into_writer(&NormalValue::String("value".to_string()), &mut data).unwrap();
+        let block = Block::new_with_options(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data,
+            }),
+            vec![],
+            vec![],
+            None,
+            Some(signature_cid),
+        );
+        let cid = block.generate_cid().unwrap();
+        let doc_id = DocID::new_v0(defra_core::block::generate_cid_from_bytes(b"owner").unwrap())
+            .to_string();
+
+        let txn = db.new_txn(false).await.unwrap();
+        {
+            let blockstore = txn.blockstore().unwrap();
+            let systemstore = txn.systemstore().unwrap();
+            blockstore
+                .set(&signature_cid.to_bytes(), &signature.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            blockstore
+                .set(&cid.to_bytes(), &block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            db::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), &doc_id)
+                .await
+                .unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        let commits_txn = db.new_txn(true).await.unwrap();
+        let commits = CommitsFetcher::new(Arc::new(Mutex::new(Some(commits_txn))))
+            .fetch_commits(&CommitsQueryOptions {
+                cid: Some(cid.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let signature = commits[0]
+            .get("signature")
+            .and_then(NormalValue::as_json)
+            .unwrap();
+
+        assert_eq!(signature["value"], "AQIDBA==");
     }
 }

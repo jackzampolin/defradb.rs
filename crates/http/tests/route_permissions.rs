@@ -9,12 +9,6 @@
 //! that catches that, and it is deliberately the only one, so the two copies
 //! cannot drift apart.
 //!
-//! Note the parameterized entries here use colon syntax (`:name`). axum 0.8's
-//! `MatchedPath` yields brace syntax (`{name}`), so those entries never fire in
-//! production and these assertions do not speak for them. That is #1497, not
-//! something this file can fix by itself: the table's keys have to change with
-//! it.
-
 use axum::http::Method;
 
 use defra_http::route_permissions::{route_permission, RoutePermission};
@@ -24,6 +18,10 @@ use defra_http::router::NodePermission;
 fn exempt_routes() {
     assert_eq!(
         route_permission("/health-check", &Method::GET),
+        RoutePermission::Exempt
+    );
+    assert_eq!(
+        route_permission("/openapi.json", &Method::GET),
         RoutePermission::Exempt
     );
     assert_eq!(
@@ -47,17 +45,25 @@ fn identity_only_routes() {
         RoutePermission::IdentityOnly
     );
     assert_eq!(
-        route_permission("/api/v0/tx/:id", &Method::POST),
+        route_permission("/api/v0/tx/{id}", &Method::POST),
         RoutePermission::IdentityOnly
     );
     assert_eq!(
-        route_permission("/api/v0/tx/:id", &Method::DELETE),
+        route_permission("/api/v0/tx/{id}", &Method::DELETE),
         RoutePermission::IdentityOnly
     );
 }
 
 #[test]
 fn dynamic_routes() {
+    assert_eq!(
+        route_permission("/api/v0/ccip", &Method::POST),
+        RoutePermission::Dynamic
+    );
+    assert_eq!(
+        route_permission("/api/v0/ccip/{sender}/{data}", &Method::GET),
+        RoutePermission::Dynamic
+    );
     assert_eq!(
         route_permission("/api/v0/graphql", &Method::POST),
         RoutePermission::Dynamic
@@ -99,11 +105,11 @@ fn collection_routes() {
         RoutePermission::Required(NodePermission::CollectionPatch)
     );
     assert_eq!(
-        route_permission("/api/v0/collections/:name", &Method::POST),
+        route_permission("/api/v0/collections/{name}", &Method::POST),
         RoutePermission::Required(NodePermission::DocumentUpdate)
     );
     assert_eq!(
-        route_permission("/api/v0/collections/:name", &Method::DELETE),
+        route_permission("/api/v0/collections/{name}", &Method::DELETE),
         RoutePermission::Required(NodePermission::DocumentDelete)
     );
 }
@@ -111,15 +117,21 @@ fn collection_routes() {
 #[test]
 fn document_routes() {
     assert_eq!(
-        route_permission("/api/v0/collections/:name/document/:docID", &Method::GET),
+        route_permission("/api/v0/collections/{name}/document/{docID}", &Method::GET),
         RoutePermission::Required(NodePermission::DocumentRead)
     );
     assert_eq!(
-        route_permission("/api/v0/collections/:name/document/:docID", &Method::PATCH),
+        route_permission(
+            "/api/v0/collections/{name}/document/{docID}",
+            &Method::PATCH,
+        ),
         RoutePermission::Required(NodePermission::DocumentUpdate)
     );
     assert_eq!(
-        route_permission("/api/v0/collections/:name/document/:docID", &Method::DELETE),
+        route_permission(
+            "/api/v0/collections/{name}/document/{docID}",
+            &Method::DELETE,
+        ),
         RoutePermission::Required(NodePermission::DocumentDelete)
     );
 }
@@ -215,6 +227,7 @@ fn all_registered_routes_return_expected_permission() {
     let routes: Vec<(&str, Method, RoutePermission)> = vec![
         // Exempt
         ("/health-check", Method::GET, RoutePermission::Exempt),
+        ("/openapi.json", Method::GET, RoutePermission::Exempt),
         ("/api/v0/version", Method::GET, RoutePermission::Exempt),
         ("/api/v0/graphql/ws", Method::GET, RoutePermission::Exempt),
         (
@@ -223,6 +236,12 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Exempt,
         ),
         // GraphQL
+        ("/api/v0/ccip", Method::POST, RoutePermission::Dynamic),
+        (
+            "/api/v0/ccip/:sender/:data",
+            Method::GET,
+            RoutePermission::Dynamic,
+        ),
         (
             "/api/v0/graphql",
             Method::GET,
@@ -249,27 +268,27 @@ fn all_registered_routes_return_expected_permission() {
         // Transactions
         ("/api/v0/tx", Method::POST, RoutePermission::IdentityOnly),
         (
-            "/api/v0/tx/:id",
+            "/api/v0/tx/{id}",
             Method::POST,
             RoutePermission::IdentityOnly,
         ),
         (
-            "/api/v0/tx/:id",
+            "/api/v0/tx/{id}",
             Method::DELETE,
             RoutePermission::IdentityOnly,
         ),
         (
-            "/api/v0/tx/:id/lens",
+            "/api/v0/tx/{id}/lens",
             Method::POST,
             RoutePermission::Required(NodePermission::CollectionPatch),
         ),
         (
-            "/api/v0/tx/:id/collections",
+            "/api/v0/tx/{id}/collections",
             Method::GET,
             RoutePermission::Required(NodePermission::CollectionGet),
         ),
         (
-            "/api/v0/tx/:id/schema",
+            "/api/v0/tx/{id}/schema",
             Method::POST,
             RoutePermission::Required(NodePermission::CollectionPatch),
         ),
@@ -310,38 +329,38 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Required(NodePermission::MigrationSet),
         ),
         (
-            "/api/v0/collections/:name",
+            "/api/v0/collections/{name}",
             Method::POST,
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
         // Go's filtered document operations, not collection ones.
         (
-            "/api/v0/collections/:name",
+            "/api/v0/collections/{name}",
             Method::PATCH,
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
         (
-            "/api/v0/collections/:name",
+            "/api/v0/collections/{name}",
             Method::DELETE,
             RoutePermission::Required(NodePermission::DocumentDelete),
         ),
         (
-            "/api/v0/collections/:name/truncate",
+            "/api/v0/collections/{name}/truncate",
             Method::DELETE,
             RoutePermission::Required(NodePermission::CollectionTruncate),
         ),
         (
-            "/api/v0/collections/:name/document/:docID",
+            "/api/v0/collections/{name}/document/{docID}",
             Method::GET,
             RoutePermission::Required(NodePermission::DocumentRead),
         ),
         (
-            "/api/v0/collections/:name/document/:docID",
+            "/api/v0/collections/{name}/document/{docID}",
             Method::PATCH,
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
         (
-            "/api/v0/collections/:name/document/:docID",
+            "/api/v0/collections/{name}/document/{docID}",
             Method::DELETE,
             RoutePermission::Required(NodePermission::DocumentDelete),
         ),
@@ -555,6 +574,11 @@ fn all_registered_routes_return_expected_permission() {
             RoutePermission::Required(NodePermission::DocumentUpdate),
         ),
         (
+            "/api/v0/node/options",
+            Method::GET,
+            RoutePermission::Required(NodePermission::P2pPeerInfo),
+        ),
+        (
             "/api/v0/node/identity",
             Method::GET,
             RoutePermission::Required(NodePermission::P2pPeerConnect),
@@ -592,7 +616,7 @@ fn every_mount_form_uses_the_same_permission_as_v0() {
     for (v0_path, method) in [
         ("/api/v0/version", Method::GET),
         ("/api/v0/graphql", Method::POST),
-        ("/api/v0/collections/:name", Method::POST),
+        ("/api/v0/collections/{name}", Method::POST),
         ("/api/v0/p2p/replicators", Method::DELETE),
         ("/api/v0/acp/node/disable", Method::POST),
         ("/api/v0/backup/export", Method::POST),

@@ -448,7 +448,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 &policy.id,
                 &policy.resource_name,
                 doc_id,
-                None,
             )
             .await
             .unwrap_or_else(|e| {

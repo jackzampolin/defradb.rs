@@ -131,7 +131,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             use acp::Identity;
 
             let identity = Identity::from(caller_identity.clone());
-            let node_did = self.node_did().cloned();
 
             // Active-version fast path. Historical commits authored under a
             // now-inactive version (after a schema migration) are NOT in this
@@ -186,7 +185,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             let checker = crate::txn::OverlayChecker {
                                 acp: self.acp.as_ref(),
                                 identity: &identity,
-                                node_did: node_did.as_ref(),
                             };
                             acp::read_access::check_doc_read_access(
                                 &checker,

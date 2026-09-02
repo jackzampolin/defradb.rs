@@ -1,8 +1,13 @@
 use axum::body::Body;
+use axum::http::header::{AUTHORIZATION, HOST};
 use axum::http::{Method, Request, StatusCode};
+use identity::{new_token, Identity, RawIdentity};
+use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 
-use crate::mock::{MockBackupOperations, MockQueryExecutor};
+use crate::mock::{MockBackupOperations, MockNodeAcpOperations, MockQueryExecutor};
+use crate::router::{NodeAcpOperations, NodePermission};
 use crate::server::{Server, ServerConfig};
 
 const OVERSIZED: usize = 64;
@@ -11,6 +16,22 @@ const LIMIT: u64 = 8;
 fn server(config: ServerConfig) -> Server {
     Server::with_config(MockQueryExecutor::new(), config)
         .with_backup_arc(std::sync::Arc::new(MockBackupOperations::default()))
+}
+
+async fn get(config: ServerConfig, uri: &str) -> StatusCode {
+    server(config)
+        .router()
+        .expect("router builds")
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
 }
 
 async fn post(config: ServerConfig, uri: &str, body_len: usize) -> StatusCode {
@@ -27,6 +48,82 @@ async fn post(config: ServerConfig, uri: &str, body_len: usize) -> StatusCode {
         .await
         .unwrap()
         .status()
+}
+
+#[tokio::test]
+async fn trailing_slashes_are_normalized_at_every_mount() {
+    for path in [
+        "/health-check",
+        "/api/version",
+        "/api/v0/version",
+        "/api/v1/version",
+    ] {
+        let canonical = get(ServerConfig::default(), path).await;
+        let trailing = get(ServerConfig::default(), &format!("{path}/")).await;
+        assert_ne!(canonical, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(trailing, canonical, "{path}/");
+    }
+}
+
+#[tokio::test]
+async fn trailing_slash_normalization_preserves_the_method() {
+    let canonical = get(ServerConfig::default(), "/api/v0/schema").await;
+    let trailing = get(ServerConfig::default(), "/api/v0/schema/").await;
+    assert_eq!(trailing, canonical);
+
+    let canonical = post(ServerConfig::default(), "/api/v0/schema", 0).await;
+    let trailing = post(ServerConfig::default(), "/api/v0/schema/", 0).await;
+    assert_eq!(trailing, canonical);
+}
+
+fn bearer_identity() -> (identity::Did, String) {
+    let identity = RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap();
+    let did = identity.did().unwrap();
+    let token = new_token(
+        &identity,
+        Duration::from_secs(60),
+        Some("localhost:9181".to_string()),
+        None,
+    )
+    .unwrap();
+    (did, format!("Bearer {}", String::from_utf8(token).unwrap()))
+}
+
+async fn trailing_collection_status(granted: NodePermission) -> StatusCode {
+    let (owner, _) = bearer_identity();
+    let (caller, token) = bearer_identity();
+    let nac =
+        Arc::new(MockNodeAcpOperations::enabled_with_owner(owner).with_grant(caller, granted));
+    let router = server(ServerConfig::default())
+        .with_nac_arc(nac as Arc<dyn NodeAcpOperations>)
+        .router()
+        .unwrap();
+
+    router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v0/collections/Users/")
+                .header(HOST, "localhost:9181")
+                .header(AUTHORIZATION, token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn normalized_parameterized_routes_keep_their_matched_permission() {
+    assert_ne!(
+        trailing_collection_status(NodePermission::CollectionGet).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        trailing_collection_status(NodePermission::DocumentRead).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 fn schema_limited() -> ServerConfig {

@@ -1,10 +1,13 @@
 //! HTTP and PG server initialization helpers for Node startup.
 
+mod node_options;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tracing::info;
 
+use self::node_options::sanitized_node_options;
 use super::node::Node;
 use super::server_acp::DocumentAcpSetup;
 use super::server_query::QueryRunnerSetup;
@@ -20,6 +23,7 @@ pub(super) struct HttpServerArgs<'a> {
     pub(super) p2p_adapter: Option<Arc<dyn defra_http::router::P2POperations>>,
     pub(super) manage_requester: Option<Arc<dyn defra_http::router::ManageRequester>>,
     pub(super) nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
+    pub(super) txn_broadcaster: Option<Arc<dyn db::event::emission::TxnBroadcaster>>,
     pub(super) acp_setup: &'a DocumentAcpSetup,
     pub(super) zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     pub(super) user_did: Option<&'a Did>,
@@ -36,6 +40,7 @@ impl Node {
             p2p_adapter,
             manage_requester,
             nac_adapter,
+            txn_broadcaster,
             acp_setup,
             zanzibar_store,
             user_did,
@@ -76,10 +81,16 @@ impl Node {
                 .with_dev_mode(config.development);
 
         let remote_signer_did = defra_core::signing::find_remote_signer_did();
+        let user_identity_present = user_did.is_some();
         let signing_did = remote_signer_did
             .clone()
             .or_else(|| user_did.map(ToString::to_string))
             .or(node_identity_did);
+        server = server.with_node_options(sanitized_node_options(
+            config,
+            user_identity_present,
+            signing_did.is_some() && !config.datastore.no_signing,
+        ));
         if let Some(did) = signing_did {
             info!(
                 signing_did = %did,
@@ -214,6 +225,7 @@ impl Node {
         let browser_sync_adapter = crate::browser_sync_adapter::BrowserSyncAdapter::new_arc(
             database,
             acp_setup.document_acp.clone(),
+            txn_broadcaster,
         );
         server = server.with_browser_sync_arc(browser_sync_adapter);
         info!("Browser synchronization endpoint enabled");

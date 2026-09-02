@@ -75,7 +75,9 @@ pub(crate) fn create_router_with_state_and_body_limits(
     limits: BodyLimits,
 ) -> Router {
     // Health check at root level (matches Go DefraDB)
-    let root_routes = Router::new().route("/health-check", get(handlers::health_check));
+    let root_routes = Router::new()
+        .route("/health-check", get(handlers::health_check))
+        .route("/openapi.json", get(handlers::openapi::get));
 
     // Transaction routes (Go-compatible)
     // Go DefraDB:
@@ -97,7 +99,7 @@ pub(crate) fn create_router_with_state_and_body_limits(
         );
 
     // Collection routes (REST API)
-    // Static routes must come before parametric `:name` routes
+    // Static routes must come before parametric `{name}` routes.
     let collection_routes = Router::new()
         .route(
             "/",
@@ -289,6 +291,8 @@ pub(crate) fn create_router_with_state_and_body_limits(
 
     // Versioned API routes
     let api_routes = Router::new()
+        .route("/ccip", post(handlers::ccip::post))
+        .route("/ccip/{sender}/{data}", get(handlers::ccip::get))
         // GraphQL endpoints
         .route("/graphql", post(handlers::graphql_transactional))
         .route("/graphql", get(handlers::graphql_get))
@@ -343,6 +347,7 @@ pub(crate) fn create_router_with_state_and_body_limits(
         .route("/debug/dump", get(handlers::utility::dump))
         // Utility endpoints (Go-compatible)
         .route("/purge", post(handlers::utility::purge))
+        .route("/node/options", get(handlers::utility::get_node_options))
         .route("/node/identity", get(handlers::utility::get_node_identity))
         .with_state(state);
 

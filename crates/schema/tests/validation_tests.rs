@@ -5,7 +5,10 @@
 //! - Duplicate collection name detection
 //! - Relation primary side validation
 
-use schema::{validate_schema, CollectionVersion, FieldDescription, FieldKind, SchemaError};
+use schema::{
+    validate_schema, CollectionVersion, FieldDescription, FieldKind, PolicyDescription,
+    QuerySource, SchemaError,
+};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -257,4 +260,29 @@ fn self_relation_must_use_self_kind() {
     assert!(
         error.contains("must specify 'Self' kind for self referencing relations. Field: manager")
     );
+}
+
+#[test]
+fn materialized_collection_can_have_policy() {
+    let collection = user_collection().with_policy(PolicyDescription::new("policy", "users"));
+
+    schema::definition_validation::validate_collection_changes(
+        std::slice::from_ref(&collection),
+        std::slice::from_ref(&collection),
+    )
+    .unwrap();
+}
+
+#[test]
+fn materialized_view_cannot_have_policy() {
+    let mut collection = user_collection().with_policy(PolicyDescription::new("policy", "users"));
+    collection.query = Some(QuerySource::new(serde_json::json!({})));
+
+    let error = schema::definition_validation::validate_collection_changes(
+        std::slice::from_ref(&collection),
+        std::slice::from_ref(&collection),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("materialized views do not support ACP"));
 }

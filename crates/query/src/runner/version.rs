@@ -48,6 +48,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get expected docID from select.doc_ids (optional validation)
         let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
 
+        // Collection schema: scopes the fetch below, then builds the mapping.
+        let collection = self.get_collection(&select.collection_name).await?;
+
         // Fetch document(s) at the specified CIDs.
         // For collection-level CIDs (branchable), this returns multiple documents.
         // For document-level CIDs, this returns a single document.
@@ -60,6 +63,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             match fetcher
                 .get_documents_at_cid(
+                    collection.resolved_root_id(),
                     cid,
                     expected_doc_id.map(|s| s.as_str()),
                     caller_identity.as_ref(),
@@ -81,9 +85,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        // Get collection schema for building the mapping
-        let collection = self.get_collection(&select.collection_name).await?;
-
         // Apply ACP filtering: check read permission for each reconstructed document.
         // CID-based time-travel queries must enforce the same ACP rules as regular queries.
         // Documents the caller lacks read permission for are silently excluded (Go behavior).
@@ -102,7 +103,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     &policy.id,
                     &policy.resource_name,
                     &doc_id,
-                    None,
                 )
                 .await
                 {

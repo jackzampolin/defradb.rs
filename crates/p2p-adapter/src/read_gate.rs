@@ -92,19 +92,15 @@ impl<S: Store + 'static> BlockClassifier for DbBlockClassifier<S> {
 
 pub struct DbBlockReadGate {
     acp: Arc<dyn acp::DocumentACP>,
-    node_did: Option<identity::Did>,
 }
 
 impl DbBlockReadGate {
-    pub fn new(acp: Arc<dyn acp::DocumentACP>, node_did: Option<identity::Did>) -> Self {
-        Self { acp, node_did }
+    pub fn new(acp: Arc<dyn acp::DocumentACP>) -> Self {
+        Self { acp }
     }
 
-    pub fn new_arc(
-        acp: Arc<dyn acp::DocumentACP>,
-        node_did: Option<identity::Did>,
-    ) -> Arc<dyn BlockReadGate> {
-        Arc::new(Self::new(acp, node_did))
+    pub fn new_arc(acp: Arc<dyn acp::DocumentACP>) -> Arc<dyn BlockReadGate> {
+        Arc::new(Self::new(acp))
     }
 }
 
@@ -118,7 +114,6 @@ impl BlockReadGate for DbBlockReadGate {
         let checker = acp::read_access::DirectChecker {
             acp: self.acp.as_ref(),
             identity,
-            node_did: self.node_did.as_ref(),
         };
 
         if meta.doc_ids.is_empty() {
@@ -158,10 +153,12 @@ impl BlockReadGate for DbBlockReadGate {
 mod tests {
     use std::sync::Arc;
 
-    use super::DbBlockClassifier;
-    use p2p::bitswap::{BlockClass, BlockClassifier};
+    use acp::{DocumentACP, Identity, LocalDocumentACP, MemoryAcpStore};
+    use p2p::bitswap::{BlockAcpMeta, BlockClass, BlockClassifier, BlockReadGate};
     use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
     use storage::RegolithStore;
+
+    use super::{DbBlockClassifier, DbBlockReadGate};
 
     fn test_collection() -> CollectionVersion {
         CollectionVersion::new(
@@ -238,5 +235,29 @@ mod tests {
         let classifier = DbBlockClassifier::new(db);
 
         assert_eq!(classifier.classify(&cid, &bytes).await, BlockClass::Deny);
+    }
+
+    #[tokio::test]
+    async fn node_identity_without_a_grant_cannot_read_a_protected_block() {
+        let owner =
+            identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+        let node =
+            identity::Did::new("did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR").unwrap();
+        let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+        let gate = DbBlockReadGate::new(acp);
+        let meta = BlockAcpMeta {
+            collection_id: "collection1".to_string(),
+            is_branchable: false,
+            policy: Some(("policy1".to_string(), "users".to_string())),
+            doc_ids: vec!["doc1".to_string()],
+        };
+
+        assert!(
+            !gate.may_read(&Identity::Authenticated(node), &meta).await,
+            "the process owner must satisfy document ACP when serving blocks"
+        );
     }
 }

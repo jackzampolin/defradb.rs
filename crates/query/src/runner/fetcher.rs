@@ -242,12 +242,13 @@ impl DocFetcher for FetcherWrapper {
 
     async fn get_documents_at_cid(
         &self,
+        collection_short_id: u32,
         cid: &str,
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> Result<Vec<Document>> {
         self.get_fetcher()
-            .get_documents_at_cid(cid, expected_doc_id, caller_identity)
+            .get_documents_at_cid(collection_short_id, cid, expected_doc_id, caller_identity)
             .await
     }
 

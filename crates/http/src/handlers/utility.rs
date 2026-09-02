@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
@@ -25,6 +26,19 @@ pub struct NodeIdentityResponse {
     /// DID used by the node to sign database mutations, when configured.
     #[serde(rename = "DID", skip_serializing_if = "Option::is_none")]
     pub did: Option<String>,
+}
+
+/// GET /api/v0/node/options
+pub async fn get_node_options(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Map<String, Value>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
+    let options = state
+        .node_options
+        .as_ref()
+        .ok_or_else(|| HttpError::NotFound("node options not available".into()))?;
+    Ok(Json((**options).clone()))
 }
 
 /// GET /api/v0/node/identity
@@ -106,6 +120,13 @@ pub async fn purge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use crate::mock::MockQueryExecutor;
+    use crate::Server;
 
     #[test]
     fn test_node_identity_response_serialize() {
@@ -130,5 +151,56 @@ mod tests {
         // PeerID should be omitted when None
         assert!(!json.contains("PeerID"));
         assert!(!json.contains("DID"));
+    }
+
+    #[tokio::test]
+    async fn node_options_returns_configured_sanitized_object() {
+        let options = serde_json::from_value(json!({
+            "DisableP2P": true,
+            "Store": {"Path": "<redacted>"},
+        }))
+        .unwrap();
+        let app = Server::new(MockQueryExecutor::new())
+            .with_node_options(options)
+            .router()
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/node/options")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["DisableP2P"], true);
+        assert_eq!(body["Store"]["Path"], "<redacted>");
+    }
+
+    #[tokio::test]
+    async fn node_options_returns_not_found_when_host_does_not_supply_them() {
+        let response = Server::new(MockQueryExecutor::new())
+            .router()
+            .unwrap()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/node/options")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"], "node options not available");
     }
 }

@@ -313,6 +313,7 @@ impl Node {
             p2p_adapter: p2p_setup.http_adapter.clone(),
             manage_requester: p2p_setup.manage_requester.clone(),
             nac_adapter,
+            txn_broadcaster: p2p_setup.txn_broadcaster.clone(),
             acp_setup: &acp_setup,
             zanzibar_store,
             user_did: user_did.as_ref(),

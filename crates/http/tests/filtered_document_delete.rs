@@ -183,7 +183,7 @@ async fn dropping_a_collection_still_has_its_own_route() {
 #[tokio::test]
 async fn the_route_is_gated_as_a_document_delete() {
     assert_eq!(
-        route_permission("/api/v0/collections/:name", &Method::DELETE),
+        route_permission("/api/v0/collections/{name}", &Method::DELETE),
         RoutePermission::Required(NodePermission::DocumentDelete)
     );
     assert_eq!(

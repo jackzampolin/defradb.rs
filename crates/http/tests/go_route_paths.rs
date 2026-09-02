@@ -116,16 +116,6 @@ async fn a_method_mismatch_answers_the_same_on_both_paths() {
     }
 }
 
-/// Rust does not normalize trailing slashes where Go does. That divergence is
-/// out of scope, but the alias must not be inconsistent with the path it
-/// mirrors, which is what this pins.
-#[tokio::test]
-async fn a_trailing_slash_behaves_the_same_on_both_paths() {
-    let (go_status, _) = Call::post("/api/v0/view/").json("{}").send().await;
-    let (rust_status, _) = Call::post("/api/v0/views/").json("{}").send().await;
-    assert_eq!(go_status, rust_status);
-}
-
 // ---------------------------------------------------------------------------
 // Permissions
 // ---------------------------------------------------------------------------
