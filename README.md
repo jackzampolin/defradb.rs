@@ -65,6 +65,20 @@ just gate              # fmt + lint + docs + tests, before asking for a review
 just ci                # Reproduce the CI pipeline locally
 ```
 
+### FFI release variants
+
+Every release ships three FFI families: **full** (`defra-ffi_*`), carrying the
+libp2p transport, Lens migrations, and SourceHub ACP; **iroh**
+(`defra-ffi-iroh_*`), an iOS XCFramework that adds the iroh transport on top of
+libp2p; and **lean** (`defra-ffi-lean_*`), libp2p-only with no Lens migrations
+and no SourceHub ACP. Iroh ships in that XCFramework alone, so no single
+artifact carries every capability. All of them expose the same `defra.h`
+and the same mobile JSON schema, so the choice is a size tradeoff and not an API
+one: configuring a capability the build does not carry fails with an explicit
+error naming the missing feature. The per-release capability matrix is in the
+release notes on the
+[releases page](https://github.com/sourcenetwork/defradb.rs/releases).
+
 ## Configuration
 
 The CLI exposes GraphQL query guardrails on `defradb start`:
