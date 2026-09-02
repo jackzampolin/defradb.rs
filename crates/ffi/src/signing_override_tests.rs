@@ -1,7 +1,8 @@
 //! Per-operation signing override tests (#1600).
 //!
 //! `exec_request_with_signing` takes `-1` (node default), `0` (disable) and
-//! `1` (enable). These tests run both branches against a signing-enabled
+//! `1` (enable); `exec_request_in_txn_with_signing` takes the same values
+//! inside a transaction. These tests run both branches against a signing-enabled
 //! in-memory node and assert the resulting blocks carry — or do not carry — a
 //! signature.
 
@@ -15,6 +16,7 @@ mod tests {
     use crate::node::{new_node, node_close};
     use crate::query::exec_request_with_signing;
     use crate::schema::add_schema;
+    use crate::txn::{begin_txn, commit_txn, exec_request_in_txn_with_signing};
     use crate::types::{defra_free_string, NodeInitOptions};
 
     /// A signing-enabled in-memory node with a `Widget` collection.
@@ -134,6 +136,57 @@ mod tests {
         assert!(
             signatures.iter().all(Value::is_null),
             "signing_override=0 must leave every block unsigned, got: {signatures:?}"
+        );
+
+        node_close(node);
+    }
+
+    /// `0` disables signing inside a transaction too (#1600).
+    #[test]
+    fn signing_override_disabled_in_txn_leaves_blocks_unsigned() {
+        let node = signing_node();
+
+        let txn = begin_txn(node, 0);
+        assert_eq!(txn.status, 0, "begin_txn must succeed");
+        let txn_id = unsafe { CStr::from_ptr(txn.txn_id).to_string_lossy().into_owned() };
+        unsafe { defra_free_string(txn.txn_id) };
+        let txn_id = CString::new(txn_id).unwrap();
+
+        let query =
+            CString::new(r#"mutation { add_Widget(input: {name: "unsigned-txn"}) { _docID } }"#)
+                .unwrap();
+        let result = unsafe {
+            exec_request_in_txn_with_signing(
+                node,
+                txn_id.as_ptr(),
+                ptr::null(),
+                query.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(
+            result.status, 0,
+            "exec_request_in_txn_with_signing must succeed"
+        );
+        let json = unsafe { CStr::from_ptr(result.value).to_string_lossy().into_owned() };
+        unsafe { defra_free_string(result.value) };
+        let response: Value = serde_json::from_str(&json).expect("response must be JSON");
+        let doc_id = response
+            .pointer("/data/add_Widget/0/_docID")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("created document id missing from {response}"))
+            .to_string();
+
+        let result = unsafe { commit_txn(node, txn_id.as_ptr()) };
+        assert_eq!(result.status, 0, "commit_txn must succeed");
+
+        let signatures = commit_signatures(node, &doc_id);
+        assert!(
+            signatures.iter().all(Value::is_null),
+            "signing_override=0 in a transaction must leave every block unsigned, got: {signatures:?}"
         );
 
         node_close(node);
