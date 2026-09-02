@@ -57,7 +57,7 @@ fn escaped_conflict_surface(response: &QueryResponse) -> Option<&'static str> {
 ///
 /// Parses the query into an AST to avoid false positives from `encrypted_`
 /// appearing inside string literals (e.g. filter values).
-fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError> {
+pub(crate) fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError> {
     if state.p2p.is_some() {
         return Ok(());
     }
@@ -112,7 +112,7 @@ fn wants_sse(headers: &HeaderMap) -> bool {
 /// - Other mutations → `DocumentUpdate`
 /// - Subscriptions → `DocumentRead`
 /// - Introspection → `DocumentRead`
-fn graphql_required_permission(query: &str, limits: QueryLimits) -> NodePermission {
+pub(crate) fn graphql_required_permission(query: &str, limits: QueryLimits) -> NodePermission {
     match parse_request_with_limits(query, None, None, limits) {
         Ok(ParsedOperation::Mutation { mutations, .. }) => {
             if mutations

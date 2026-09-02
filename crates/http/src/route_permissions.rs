@@ -27,7 +27,8 @@ pub enum RoutePermission {
 /// Look up the permission requirement for a route.
 ///
 /// The `path` parameter is the Axum `MatchedPath` template string
-/// (e.g., `/api/v0/collections/:name/:docID`). The `method` is the HTTP method.
+/// (e.g., `/api/v0/collections/{name}/document/{docID}`). The `method` is the
+/// HTTP method.
 ///
 /// Unknown routes return `Required(DocumentRead)` as a safe default:
 /// when NAC is enabled, this blocks unauthenticated access.
@@ -39,6 +40,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // Exempt routes (no auth needed)
         // =====================================================================
         "/health-check" => RoutePermission::Exempt,
+        "/openapi.json" => RoutePermission::Exempt,
         "/api/v0/version" => RoutePermission::Exempt,
         "/api/v0/graphql/ws" => RoutePermission::Exempt,
         "/api/v0/batch/verify" => RoutePermission::Exempt,
@@ -53,6 +55,9 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::POST => RoutePermission::Dynamic,
             _ => RoutePermission::Required(NodePermission::DocumentRead),
         },
+        "/api/v0/ccip" | "/api/v0/ccip/:sender/:data" | "/api/v0/ccip/{sender}/{data}" => {
+            RoutePermission::Dynamic
+        }
         "/api/v0/events" => RoutePermission::Dynamic,
         "/api/v0/sync" => RoutePermission::Dynamic,
         "/api/v0/actions" => RoutePermission::Required(NodePermission::ActionList),
@@ -66,10 +71,10 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // Transactions (permissions enforced per-operation within tx)
         // =====================================================================
         "/api/v0/tx" => RoutePermission::IdentityOnly,
-        "/api/v0/tx/:id" => RoutePermission::IdentityOnly,
-        "/api/v0/tx/:id/lens" => RoutePermission::Required(NodePermission::CollectionPatch),
-        "/api/v0/tx/:id/collections" => RoutePermission::Required(NodePermission::CollectionGet),
-        "/api/v0/tx/:id/schema" => RoutePermission::Required(NodePermission::CollectionPatch),
+        "/api/v0/tx/{id}" => RoutePermission::IdentityOnly,
+        "/api/v0/tx/{id}/lens" => RoutePermission::Required(NodePermission::CollectionPatch),
+        "/api/v0/tx/{id}/collections" => RoutePermission::Required(NodePermission::CollectionGet),
+        "/api/v0/tx/{id}/schema" => RoutePermission::Required(NodePermission::CollectionPatch),
 
         // =====================================================================
         // Collections
@@ -91,8 +96,10 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },
         "/api/v0/collections/migrations" => RoutePermission::Required(NodePermission::MigrationSet),
-        "/api/v0/collections/by-id/:id" => RoutePermission::Required(NodePermission::CollectionGet),
-        "/api/v0/collections/by-version/:id" => {
+        "/api/v0/collections/by-id/{id}" => {
+            RoutePermission::Required(NodePermission::CollectionGet)
+        }
+        "/api/v0/collections/by-version/{id}" => {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
         "/api/v0/collections/indexes" => RoutePermission::Required(NodePermission::IndexList),
@@ -100,42 +107,42 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // collection ones, so they are document permissions. Dropping a
         // collection is `DELETE /collections?name=...`, which keeps
         // `CollectionPatch`.
-        "/api/v0/collections/:name" => match *method {
+        "/api/v0/collections/{name}" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::DocumentUpdate),
             Method::PATCH => RoutePermission::Required(NodePermission::DocumentUpdate),
             Method::DELETE => RoutePermission::Required(NodePermission::DocumentDelete),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },
-        "/api/v0/collections/:name/describe" => {
+        "/api/v0/collections/{name}/describe" => {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
-        "/api/v0/collections/:name/exists" => {
+        "/api/v0/collections/{name}/exists" => {
             RoutePermission::Required(NodePermission::CollectionGet)
         }
-        "/api/v0/collections/:name/truncate" => {
+        "/api/v0/collections/{name}/truncate" => {
             RoutePermission::Required(NodePermission::CollectionTruncate)
         }
-        "/api/v0/collections/:name/document/:docID" => match *method {
+        "/api/v0/collections/{name}/document/{docID}" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::DocumentRead),
             Method::PATCH => RoutePermission::Required(NodePermission::DocumentUpdate),
             Method::DELETE => RoutePermission::Required(NodePermission::DocumentDelete),
             _ => RoutePermission::Required(NodePermission::DocumentRead),
         },
-        "/api/v0/collections/:name/indexes" => match *method {
+        "/api/v0/collections/{name}/indexes" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::IndexList),
             Method::POST => RoutePermission::Required(NodePermission::IndexCreate),
             _ => RoutePermission::Required(NodePermission::IndexList),
         },
-        "/api/v0/collections/:name/indexes/:index" => {
+        "/api/v0/collections/{name}/indexes/{index}" => {
             RoutePermission::Required(NodePermission::IndexDelete)
         }
-        "/api/v0/collections/:name/encrypted-indexes" => match *method {
+        "/api/v0/collections/{name}/encrypted-indexes" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::EncryptedIndexList),
             Method::POST => RoutePermission::Required(NodePermission::EncryptedIndexAdd),
             _ => RoutePermission::Required(NodePermission::EncryptedIndexList),
         },
-        "/api/v0/collections/:name/encrypted-indexes/:field" => {
+        "/api/v0/collections/{name}/encrypted-indexes/{field}" => {
             RoutePermission::Required(NodePermission::EncryptedIndexDelete)
         }
 
@@ -200,7 +207,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::GET => RoutePermission::Required(NodePermission::DacStatus),
             _ => RoutePermission::Required(NodePermission::DacStatus),
         },
-        "/api/v0/acp/policy/:id" => RoutePermission::Required(NodePermission::DacStatus),
+        "/api/v0/acp/policy/{id}" => RoutePermission::Required(NodePermission::DacStatus),
         "/api/v0/acp/document/decide" => RoutePermission::Required(NodePermission::DacStatus),
         "/api/v0/acp/document/relationship" => match *method {
             Method::POST => RoutePermission::Required(NodePermission::DacRelationAdd),
@@ -299,6 +306,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         "/api/v0/debug/dump" => RoutePermission::Required(NodePermission::DocumentRead),
         "/api/v0/purge" => RoutePermission::Required(NodePermission::DocumentUpdate),
+        "/api/v0/node/options" => RoutePermission::Required(NodePermission::P2pPeerInfo),
         "/api/v0/node/identity" => RoutePermission::Required(NodePermission::P2pPeerConnect),
 
         // =====================================================================

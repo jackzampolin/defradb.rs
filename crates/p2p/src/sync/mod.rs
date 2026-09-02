@@ -53,7 +53,10 @@ pub use manager::{
     DEFAULT_PUSH_SEND_TIMEOUT, DEFAULT_RATE_LIMIT_BACKOFF_SECS, DEFAULT_RATE_LIMIT_BURST,
     DEFAULT_RATE_LIMIT_RATE,
 };
-pub use merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
+pub use merge::{
+    BlockMetadata, MergeBlock, MergeErrorDisposition, MergeHandler, MergeOutcome,
+    RecoveredBlockMetadata,
+};
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use pending_store::{
     PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,

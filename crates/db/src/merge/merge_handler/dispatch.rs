@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::merge::{
-    BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeHandler, MergeOutcome,
-    RecoveredBlockMetadata,
+    BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeErrorDisposition, MergeHandler,
+    MergeOutcome, RecoveredBlockMetadata,
 };
 use storage::corekv::Store;
 
@@ -15,6 +15,10 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeHandler
     for DbMergeHandler<S, B>
 {
     type Error = MergeError;
+
+    fn error_disposition(&self, error: &Self::Error) -> MergeErrorDisposition {
+        error.disposition()
+    }
 
     async fn validate_authorization(
         &self,
@@ -80,14 +84,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeHandler
             }
         }
         match result {
-            // Signature verification is a property of the block bytes. It
-            // cannot become valid on a later retry, so route it through the
-            // existing terminal-rejection outcome and pending-DAG quarantine
-            // instead of returning `Err` to the receiver retry clock (#1159).
-            Err(error @ MergeError::SignatureVerificationFailed { .. }) => {
-                Ok(MergeOutcome::Rejected {
-                    reason: error.to_string(),
-                })
+            Err(error) if error.disposition() == MergeErrorDisposition::Terminal => {
+                Ok(MergeOutcome::rejected(error.to_string()))
             }
             other => other,
         }

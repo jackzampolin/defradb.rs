@@ -104,6 +104,33 @@ async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_p2p_setup_releases_persistent_store() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("data.regolith");
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    let config = EmbeddedNodeConfig {
+        persistence: Persistence::Persistent,
+        transport: TransportConfig::Libp2p(Libp2pConfig {
+            listen_addr: format!("/ip4/127.0.0.1/tcp/{port}"),
+        }),
+        ..Default::default()
+    };
+
+    let result =
+        embedded::build_with_store(Arc::new(storage::RegolithStore::open(&path)?), config).await;
+    assert!(
+        result.is_err(),
+        "P2P setup should fail when the port is busy"
+    );
+
+    let reopened = storage::RegolithStore::open(&path)?;
+    storage::Store::close(&reopened).await?;
+
+    Ok(())
+}
+
 #[derive(Clone)]
 struct SlowCloseStore {
     inner: storage::RegolithStore,

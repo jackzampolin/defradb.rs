@@ -411,6 +411,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
 
     pub(super) async fn get_documents_at_cid_impl(
         &self,
+        collection_short_id: u32,
         cid: &str,
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
@@ -425,7 +426,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let versioned_fetcher =
             VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
         let result = versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id)
+            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()));
 

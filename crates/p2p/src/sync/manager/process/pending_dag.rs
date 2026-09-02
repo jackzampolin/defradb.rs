@@ -16,6 +16,14 @@ use crate::sync::pending_store::{PersistedPendingDag, PersistedQuarantinedDag};
 
 use super::SyncManager;
 
+struct PendingResyncInFlight<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for PendingResyncInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingDagLease {
     root_cid: Cid,
@@ -628,10 +636,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         {
             return 0;
         }
-        let resynced = self.resync_persisted_pending_dags_inner(store).await;
-        self.pending_resync_in_flight
-            .store(false, std::sync::atomic::Ordering::Release);
-        resynced
+        let _in_flight = PendingResyncInFlight(&self.pending_resync_in_flight);
+        self.resync_persisted_pending_dags_inner(store).await
     }
 
     async fn resync_persisted_pending_dags_inner(

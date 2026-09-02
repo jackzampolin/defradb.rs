@@ -569,13 +569,14 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
 
     async fn get_documents_at_cid(
         &self,
+        collection_short_id: u32,
         cid: &str,
         expected_doc_id: Option<&str>,
         _caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
         let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
         versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id)
+            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }

@@ -6,6 +6,9 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use tracing::warn;
 
+const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/api";
+const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
+
 #[cfg(not(target_arch = "wasm32"))]
 type EmbeddingError = Box<dyn std::error::Error + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
@@ -56,14 +59,6 @@ pub async fn set_embedding(
             }
         }
 
-        if !embedding.provider.is_empty() && embedding.provider != "openai" {
-            warn!(
-                provider = %embedding.provider,
-                field = %embedding.field_name,
-                "embedding provider is not recognized, using OpenAI-compatible API"
-            );
-        }
-
         let resolved_config = match resolve_embedding_config(embedding, embedding_config) {
             Ok(config) => config,
             // Missing runtime config is non-fatal by design: collection schemas may
@@ -95,6 +90,7 @@ pub async fn set_embedding(
         }
 
         let vec = call_embedding(
+            &embedding.provider,
             resolved_config.url,
             resolved_config.model,
             &embedding_config.api_key,
@@ -132,9 +128,15 @@ pub async fn embed_text(
         })
         .ok_or_else(|| anyhow!("embedding model is empty"))?;
 
-    let vector = call_embedding(url, resolved_model, &embedding_config.api_key, text)
-        .await
-        .map_err(|err| anyhow!(err.to_string()))?;
+    let vector = call_embedding(
+        "openai",
+        url,
+        resolved_model,
+        &embedding_config.api_key,
+        text,
+    )
+    .await
+    .map_err(|err| anyhow!(err.to_string()))?;
     Ok(vector)
 }
 
@@ -165,14 +167,17 @@ pub fn resolve_embedding_config<'a>(
     embedding: &'a VectorEmbeddingDescription,
     embedding_config: &'a EmbeddingClientConfig,
 ) -> Result<ResolvedEmbeddingConfig<'a>, MissingEmbeddingConfig> {
-    let url = if embedding.url.is_empty() {
+    let url = if !embedding.url.is_empty() {
+        embedding.url.as_str()
+    } else if !embedding_config.url.is_empty() {
         embedding_config.url.as_str()
     } else {
-        embedding.url.as_str()
+        match embedding.provider.as_str() {
+            "ollama" => DEFAULT_OLLAMA_URL,
+            "openai" => DEFAULT_OPENAI_URL,
+            _ => return Err(MissingEmbeddingConfig::Url),
+        }
     };
-    if url.is_empty() {
-        return Err(MissingEmbeddingConfig::Url);
-    }
 
     let model = if embedding.model.is_empty() {
         embedding_config.model.as_str()
@@ -187,19 +192,27 @@ pub fn resolve_embedding_config<'a>(
 }
 
 async fn call_embedding(
+    provider: &str,
     url: &str,
     model: &str,
     api_key: &str,
     text: &str,
 ) -> Result<Vec<f64>, EmbeddingError> {
     let endpoint = format!("{}/embeddings", url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": model,
-        "input": text,
-    });
+    let (body, response_pointer) = match provider {
+        "ollama" => (
+            serde_json::json!({ "model": model, "prompt": text }),
+            "/embedding",
+        ),
+        "openai" => (
+            serde_json::json!({ "model": model, "input": text }),
+            "/data/0/embedding",
+        ),
+        _ => return Err(format!("unsupported embedding provider: {provider}").into()),
+    };
 
     let mut request = embedding_client().post(&endpoint);
-    if !api_key.is_empty() {
+    if provider == "openai" && !api_key.is_empty() {
         request = request.bearer_auth(api_key);
     }
 
@@ -213,13 +226,34 @@ async fn call_embedding(
 
     let result: serde_json::Value = resp.json().await?;
     let embedding = result
-        .pointer("/data/0/embedding")
+        .pointer(response_pointer)
         .and_then(|v| v.as_array())
-        .ok_or("embedding response missing data[0].embedding")?;
+        .ok_or_else(|| format!("embedding response missing {response_pointer}"))?;
 
-    let vec = parse_embedding_vector(embedding).map_err(|err| -> EmbeddingError { err.into() })?;
+    let mut vec =
+        parse_embedding_vector(embedding).map_err(|err| -> EmbeddingError { err.into() })?;
+    if provider == "ollama" {
+        normalize_embedding(&mut vec)?;
+    }
 
     Ok(vec)
+}
+
+fn normalize_embedding(embedding: &mut [f64]) -> Result<(), EmbeddingError> {
+    let magnitude = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if magnitude == 0.0 {
+        return Err("embedding response contains a zero vector".into());
+    }
+    if (magnitude - 1.0).abs() >= 1e-6 {
+        for value in embedding {
+            *value /= magnitude;
+        }
+    }
+    Ok(())
 }
 
 fn embedding_client() -> &'static reqwest::Client {

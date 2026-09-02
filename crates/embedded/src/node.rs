@@ -520,31 +520,39 @@ where
         ..Default::default()
     };
 
-    let mut p2p_setup: Option<crate::node_p2p::P2PSetup<S>> = match &config.transport {
-        TransportConfig::None => None,
+    let p2p_setup: Result<Option<crate::node_p2p::P2PSetup<S>>> = match &config.transport {
+        TransportConfig::None => Ok(None),
         #[cfg(feature = "libp2p")]
-        TransportConfig::Libp2p(libp2p) => Some(
-            crate::node_p2p::setup_libp2p(
-                store.clone(),
-                database.clone(),
-                event_bus.clone(),
-                libp2p,
-                sync_config.clone(),
-            )
-            .await?,
-        ),
+        TransportConfig::Libp2p(libp2p) => crate::node_p2p::setup_libp2p(
+            store.clone(),
+            database.clone(),
+            event_bus.clone(),
+            libp2p,
+            sync_config.clone(),
+        )
+        .await
+        .map(Some),
         #[cfg(feature = "iroh")]
-        TransportConfig::Iroh(iroh) => Some(
-            crate::node_p2p::setup_iroh(
-                store.clone(),
-                database.clone(),
-                event_bus.clone(),
-                iroh,
-                sync_config.clone(),
-                raw_identity.clone(),
-            )
-            .await?,
-        ),
+        TransportConfig::Iroh(iroh) => crate::node_p2p::setup_iroh(
+            store.clone(),
+            database.clone(),
+            event_bus.clone(),
+            iroh,
+            sync_config.clone(),
+            raw_identity.clone(),
+        )
+        .await
+        .map(Some),
+    };
+    let mut p2p_setup = match p2p_setup {
+        Ok(setup) => setup,
+        Err(error) => {
+            background_tasks.shutdown().await;
+            if let Err(close_error) = database.close().await {
+                tracing::warn!(%close_error, "failed to close database after P2P setup error");
+            }
+            return Err(error);
+        }
     };
 
     let acp_setup =
