@@ -640,7 +640,7 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Every clippy invocation CI's Lint job runs, in the same order.
+# Every lint and feature check CI runs, in the same order.
 [group('check')]
 lint:
     cargo clippy --all -- -D warnings
@@ -654,6 +654,10 @@ lint:
     cargo clippy -p db --features p2p --all-targets -- -D warnings
     cargo clippy -p defra-node --no-default-features --features regolith,redb,native --all-targets -- -D warnings
     cargo clippy -p defra-node --no-default-features --features regolith,redb,native,p2p --all-targets -- -D warnings
+    cargo clippy -p ffi --no-default-features --features native,libp2p --all-targets -- -D warnings
+    cargo clippy -p ffi --no-default-features --features native --all-targets -- -D warnings
+    cargo check -p ffi --no-default-features --features native,iroh
+    cargo test -p ffi --no-default-features --features native --lib
     cargo check -p p2p --no-default-features --features iroh-transport
     cargo check -p db --no-default-features --features native
     just check-node-graph

@@ -4278,7 +4278,6 @@ dependencies = [
  "hex",
  "identity",
  "lens",
- "libp2p",
  "p2p",
  "parking_lot 0.12.5",
  "query",

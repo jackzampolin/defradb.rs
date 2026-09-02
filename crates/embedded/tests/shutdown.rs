@@ -9,7 +9,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use embedded::{EmbeddedNodeConfig, Libp2pConfig, NodeBuilder, Persistence, TransportConfig};
+use embedded::{EmbeddedNodeConfig, NodeBuilder};
+#[cfg(feature = "libp2p")]
+use embedded::{Libp2pConfig, Persistence, TransportConfig};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,6 +80,7 @@ async fn shutdown_concurrent_calls_are_safe() -> Result<()> {
 
     Ok(())
 }
+#[cfg(feature = "libp2p")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;

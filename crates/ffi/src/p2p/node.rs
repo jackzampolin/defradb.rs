@@ -41,6 +41,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "libp2p", feature = "iroh")),
+    allow(unused_variables)
+)]
 fn resolve_transport(
     options: &NodeInitOptions,
     listen_addr: &str,
@@ -51,12 +55,22 @@ fn resolve_transport(
 
     match transport.as_str() {
         "" | "libp2p" => {
-            if listen_addr.is_empty() {
-                return Err("listen_addr is required for libp2p transport".to_string());
+            #[cfg(feature = "libp2p")]
+            {
+                if listen_addr.is_empty() {
+                    return Err("listen_addr is required for libp2p transport".to_string());
+                }
+                Ok(embedded::TransportConfig::Libp2p(embedded::Libp2pConfig {
+                    listen_addr: listen_addr.to_string(),
+                }))
             }
-            Ok(embedded::TransportConfig::Libp2p(embedded::Libp2pConfig {
-                listen_addr: listen_addr.to_string(),
-            }))
+            #[cfg(not(feature = "libp2p"))]
+            {
+                Err(
+                    "this build does not include the libp2p transport; rebuild with the libp2p feature"
+                        .to_string(),
+                )
+            }
         }
         "iroh" => {
             #[cfg(feature = "iroh")]

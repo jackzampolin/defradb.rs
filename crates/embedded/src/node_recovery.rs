@@ -1,5 +1,7 @@
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use p2p::topics::DefraTopic;
 
+#[cfg(feature = "libp2p")]
 pub(crate) async fn restore_libp2p_replicators<S: storage::corekv::Store + 'static>(
     handle: &p2p::P2PHostHandle,
     peerstore: &storage::stores::Peerstore<S>,
@@ -38,6 +40,7 @@ pub(crate) async fn restore_libp2p_replicators<S: storage::corekv::Store + 'stat
     }
 }
 
+#[cfg(feature = "libp2p")]
 pub(crate) async fn restore_libp2p_documents<S: storage::corekv::Store + 'static>(
     handle: &p2p::P2PHostHandle,
     peerstore: &storage::stores::Peerstore<S>,

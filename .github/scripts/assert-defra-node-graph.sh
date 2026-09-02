@@ -130,12 +130,19 @@ assert_p2p_crate_iroh_only() {
 assert_p2p_crate_iroh_only
 
 # Lean-embedded ffi (#1345): libp2p in, iroh/wasmtime/sourcehub out.
-LEAN_FFI=(--no-default-features --features native)
+LEAN_FFI=(--no-default-features --features native,libp2p)
 assert_present ffi libp2p "${LEAN_FFI[@]}"
 assert_absent  ffi iroh "${LEAN_FFI[@]}"
 assert_absent  ffi wasmtime "${LEAN_FFI[@]}"
 assert_absent  ffi sourcehub "${LEAN_FFI[@]}"
 assert_absent  ffi cosmrs "${LEAN_FFI[@]}"
+
+# No-transport ffi (#1653): no libp2p / libp2p-* anywhere in the graph.
+NO_TRANSPORT_FFI=(--no-default-features --features native)
+assert_no_libp2p ffi "${NO_TRANSPORT_FFI[@]}"
+assert_absent ffi iroh "${NO_TRANSPORT_FFI[@]}"
+# Default ffi keeps libp2p.
+assert_present ffi libp2p
 
 # Default ffi still carries the full Go-interop capability set.
 assert_present ffi sourcehub

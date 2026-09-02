@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use zeroize::Zeroizing;
 
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
 mod doc_sync;
 #[cfg(feature = "iroh")]
 mod iroh;
@@ -85,6 +86,7 @@ pub fn collections_requiring_replay(
         .collect()
 }
 
+#[cfg_attr(not(any(feature = "iroh", feature = "libp2p")), allow(dead_code))]
 fn collections_with_changed_capabilities(
     collection_cids: &[String],
     validated_capabilities: &[(String, String)],
@@ -107,6 +109,7 @@ fn collections_with_changed_capabilities(
         .collect()
 }
 
+#[cfg_attr(not(any(feature = "iroh", feature = "libp2p")), allow(dead_code))]
 fn validate_explicit_replay_capabilities(
     capabilities: Vec<ExplicitReplayCapabilityInput>,
     expected_authorizer_did: Option<&str>,
@@ -463,6 +466,7 @@ impl ReplicatorPushOptionsState {
     }
 }
 
+#[cfg_attr(not(any(feature = "iroh", feature = "libp2p")), allow(dead_code))]
 pub(crate) trait P2PErrorExt {
     fn invalid_input(message: impl Into<String>) -> Self;
     fn not_found(message: impl Into<String>) -> Self;
@@ -498,6 +502,7 @@ impl P2PErrorExt for P2PError {
     }
 }
 
+#[cfg_attr(not(any(feature = "iroh", feature = "libp2p")), allow(dead_code))]
 fn map_nac_error(error: db::Error) -> P2PError {
     match error {
         db::Error::NotAuthorized { .. } => P2PError::unauthorized(error.to_string()),

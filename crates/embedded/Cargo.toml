@@ -21,13 +21,13 @@ crypto = { path = "../crypto" }
 db = { path = "../db", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
-defra-p2p-adapter = { workspace = true, default-features = false, features = ["libp2p"] }
+defra-p2p-adapter = { workspace = true, default-features = false }
 document = { path = "../document" }
 events = { path = "../events" }
 identity = { path = "../identity" }
 kms = { path = "../kms" }
 lens = { path = "../lens", default-features = false }
-p2p = { path = "../p2p", features = ["libp2p-transport"] }
+p2p = { path = "../p2p" }
 query = { path = "../query" }
 replication-filter = { path = "../replication-filter" }
 schema = { path = "../schema" }
@@ -39,7 +39,7 @@ bytes.workspace = true
 async-trait.workspace = true
 cid.workspace = true
 hex.workspace = true
-libp2p.workspace = true
+libp2p = { workspace = true, optional = true }
 serde.workspace = true
 serde_bytes.workspace = true
 serde_ipld_dagcbor.workspace = true
@@ -49,8 +49,8 @@ tokio = { workspace = true, features = ["rt", "macros", "fs", "sync", "time"] }
 tracing.workspace = true
 
 [features]
-default = ["native", "wasmtime-runtime"]
-native = ["db/native", "db/p2p", "defra-p2p-adapter/native"]
+default = ["native", "wasmtime-runtime", "libp2p"]
+native = ["db/native", "defra-p2p-adapter/native"]
 wasmtime-runtime = [
     "db/wasmtime-runtime",
     
@@ -59,7 +59,14 @@ wasmtime-runtime = [
 ]
 # SourceHub on-chain document ACP.
 sourcehub = ["dep:sourcehub"]
-iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
+# libp2p transport. Default-on; omit for an iroh-only or transportless node.
+libp2p = [
+    "db/p2p",
+    "p2p/libp2p-transport",
+    "defra-p2p-adapter/libp2p",
+    "dep:libp2p",
+]
+iroh = ["p2p/iroh-transport", "p2p/kms", "defra-p2p-adapter/iroh"]
 
 [dev-dependencies]
 base64 = { workspace = true }

@@ -7,13 +7,16 @@ use crate::node_identity::create_node_identity;
 use crate::node_tasks::BackgroundTasks;
 #[cfg(feature = "iroh")]
 use crate::IrohConfig;
+#[cfg(feature = "libp2p")]
+use crate::Libp2pConfig;
 #[cfg(feature = "sourcehub")]
 use crate::{DocumentAcpConfig, SourceHubConfig};
 use crate::{
-    EmbeddedNodeConfig, EmbeddedStore, Libp2pConfig, ManagedP2PSystem, Persistence, SigningConfig,
-    SigningKey, TransportConfig,
+    EmbeddedNodeConfig, EmbeddedStore, ManagedP2PSystem, Persistence, SigningConfig, SigningKey,
+    TransportConfig,
 };
 use anyhow::{anyhow, Context, Result};
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use p2p::sync::SyncConfig;
 #[cfg(feature = "iroh")]
 use p2p::P2PTransport;
@@ -271,6 +274,7 @@ impl NodeBuilder {
         self
     }
 
+    #[cfg(feature = "libp2p")]
     pub fn with_libp2p(mut self, listen_addr: impl Into<String>) -> Self {
         self.config.transport = TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: listen_addr.into(),
@@ -376,10 +380,13 @@ impl NodeBuilder {
 }
 
 pub struct ShutdownHandle {
+    #[cfg(any(feature = "libp2p", feature = "iroh"))]
     inner: ShutdownKind,
 }
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 enum ShutdownKind {
+    #[cfg(feature = "libp2p")]
     Libp2p {
         handle: Box<p2p::P2PHostHandle>,
         coordinator: p2p::sync::SyncShutdownHandle,
@@ -394,6 +401,7 @@ enum ShutdownKind {
 }
 
 impl ShutdownHandle {
+    #[cfg(feature = "libp2p")]
     pub(crate) fn libp2p(
         handle: p2p::P2PHostHandle,
         coordinator: p2p::sync::SyncShutdownHandle,
@@ -424,7 +432,9 @@ impl ShutdownHandle {
     }
 
     pub async fn shutdown(&self) {
+        #[cfg(any(feature = "libp2p", feature = "iroh"))]
         match &self.inner {
+            #[cfg(feature = "libp2p")]
             ShutdownKind::Libp2p {
                 handle,
                 coordinator,
@@ -450,6 +460,7 @@ impl ShutdownHandle {
     }
 }
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 async fn abort_and_join(tasks: &std::sync::Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>) {
     let tasks = tasks
         .lock()
@@ -489,6 +500,7 @@ where
         database.clone().start_downsample_task(),
     )));
 
+    #[cfg(any(feature = "libp2p", feature = "iroh"))]
     let sync_config = SyncConfig {
         max_concurrent_dag_fetches: config
             .max_concurrent_dag_fetches
@@ -508,8 +520,9 @@ where
         ..Default::default()
     };
 
-    let p2p_setup = match &config.transport {
+    let p2p_setup: Result<Option<crate::node_p2p::P2PSetup<S>>> = match &config.transport {
         TransportConfig::None => Ok(None),
+        #[cfg(feature = "libp2p")]
         TransportConfig::Libp2p(libp2p) => crate::node_p2p::setup_libp2p(
             store.clone(),
             database.clone(),

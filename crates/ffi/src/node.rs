@@ -363,6 +363,32 @@ mod tests {
         unsafe { crate::types::defra_free_string(result.error) };
     }
 
+    #[cfg(not(feature = "libp2p"))]
+    #[test]
+    fn test_libp2p_transport_rejected_without_feature() {
+        assert!(crate::runtime::init_runtime());
+
+        let listen_addr = CString::new("/ip4/127.0.0.1/tcp/0").unwrap();
+        let result = unsafe {
+            crate::p2p::new_node_with_p2p(NodeInitOptions::default(), listen_addr.as_ptr())
+        };
+
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy().into_owned() };
+        assert!(
+            error.contains("libp2p transport"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("libp2p feature"),
+            "unexpected error: {error}"
+        );
+
+        unsafe { crate::types::defra_free_string(result.error) };
+    }
+
     #[test]
     fn test_multiple_nodes() {
         assert!(crate::runtime::init_runtime());
@@ -424,6 +450,7 @@ mod tests {
         assert_eq!(second.status, 0);
         assert_eq!(node_close(second.node_ptr).status, 0);
     }
+    #[cfg(feature = "libp2p")]
     #[test]
     fn test_persistent_p2p_nodes_reopen_after_pending_broadcasts() {
         assert!(crate::runtime::init_runtime());

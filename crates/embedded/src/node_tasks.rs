@@ -1,9 +1,12 @@
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use std::sync::Arc;
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult};
 #[cfg(feature = "iroh")]
 use p2p::P2PTransport;
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 use crate::node::EmbeddedMergeHandler;
 
 pub struct BackgroundTasks {
@@ -48,6 +51,7 @@ impl Drop for BackgroundTasks {
     }
 }
 
+#[cfg(feature = "libp2p")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
     events: tokio::sync::mpsc::Receiver<p2p::HostEvent>,
@@ -339,6 +343,7 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
     })
 }
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 async fn handle_se_artifacts_received<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
     event_bus: Arc<dyn events::Bus>,
@@ -381,6 +386,7 @@ async fn handle_se_artifacts_received<S: storage::corekv::Store + 'static>(
     }
 }
 
+#[cfg(any(feature = "libp2p", feature = "iroh"))]
 pub(crate) fn spawn_replication_loop<B, T, S>(
     coordinator: Arc<p2p::sync::SyncCoordinator<B, T>>,
     sync_events_rx: tokio::sync::mpsc::Receiver<p2p::sync::SyncEvent>,
