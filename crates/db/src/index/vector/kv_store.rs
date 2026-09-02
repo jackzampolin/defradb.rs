@@ -7,7 +7,7 @@
 use bytes::Bytes;
 use defra_core::thread_bounds::MaybeSend;
 use storage::corekv::{IterOptions, Key, Reader, Writer};
-use storage::keys::datastore::{VectorAuxKey, VectorIndexKey};
+use storage::keys::datastore::{vector_epoch_prefix, VectorAuxKey, VectorIndexKey};
 
 use super::codec::{decode_meta, decode_node, encode_meta, encode_node};
 use super::store::{Meta, Node, NodeId, VectorNodeStore};
@@ -59,18 +59,34 @@ impl<'txn, T> KvNodeStore<'txn, T> {
     fn node_prefix(&self) -> Vec<u8> {
         VectorIndexKey::node_prefix(self.collection_short_id, self.index_id, self.epoch).bytes()
     }
+
+    /// Every key of this build: nodes, meta, and every aux kind beside them.
+    fn epoch_prefix(&self) -> Vec<u8> {
+        vector_epoch_prefix(self.collection_short_id, self.index_id, self.epoch)
+    }
 }
 
 impl<T: Reader + Writer + MaybeSend> KvNodeStore<'_, T> {
     /// Removes every key of this epoch, in batches, so the memory held is
     /// bounded by the batch size rather than by the number of nodes.
+    ///
+    /// The scan is over the whole epoch prefix rather than the node prefix,
+    /// which is what makes "every key" true: the aux space holds a partitioned
+    /// kind's centroids, codebooks and inverted lists, and a graph kind's
+    /// adjacency, and none of it is under the node prefix. Leaving it behind
+    /// corrupts a reindex, because a surviving trained-state marker makes the
+    /// engine append to lists built from centroids that are gone, and leaks the
+    /// whole aux keyspace on a drop, because nothing else ever removes it.
+    ///
+    /// Prefix rather than a per-kind sweep so a kind added later is covered
+    /// without anyone remembering to add it here.
     pub async fn clear(&mut self) -> Result<()> {
         loop {
             let mut batch = Vec::new();
             {
                 let mut iter = self
                     .txn
-                    .iterator(IterOptions::default().with_prefix(self.node_prefix()))
+                    .iterator(IterOptions::default().with_prefix(self.epoch_prefix()))
                     .await?;
                 while let Some(pair) = iter.next().await? {
                     batch.push(pair.key);
@@ -86,7 +102,6 @@ impl<T: Reader + Writer + MaybeSend> KvNodeStore<'_, T> {
                 self.txn.delete(&key).await?;
             }
         }
-        self.txn.delete(&self.meta_key()).await?;
         Ok(())
     }
 }
