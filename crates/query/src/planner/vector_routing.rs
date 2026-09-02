@@ -10,8 +10,10 @@
 //! `exclude_doc_ids` into a filter on essentially every call, and under Go's
 //! rule it could never be routed at all.
 
+use crate::executor::{GqlWarning, WARNING_CODE_VECTOR_INDEX_UNUSED};
 use crate::mapper::{OrderDirection, Requestable, Select};
 use schema::{DistanceMetric, IndexDescription, VectorIndexDescription};
+use serde_json::Value as JsonValue;
 
 /// What a routable query resolved to.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +49,22 @@ pub enum NotRouted {
     /// The query vector's length does not match the index's declared
     /// dimensions. Scoring it would silently use the shared prefix only.
     DimensionMismatch { expected: u32, actual: usize },
+}
+
+impl NotRouted {
+    /// The `reason` detail of a `VECTOR_INDEX_UNUSED` warning. Clients match on
+    /// these, so they do not change once released. The first four are the
+    /// reference's spellings; the last two are ours, for shapes it does not check.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            NotRouted::NoLimit => "noLimit",
+            NotRouted::NotOneSimilarity => "multipleSimilarityFields",
+            NotRouted::NotOrderedBySimilarity => "notOrderedBySimilarityDesc",
+            NotRouted::NoVectorIndex => "noVectorIndex",
+            NotRouted::ShowDeleted => "showDeleted",
+            NotRouted::DimensionMismatch { .. } => "dimensionMismatch",
+        }
+    }
 }
 
 /// The query shape the decision is made from.
@@ -182,6 +200,63 @@ pub fn route(
         query_vector: similarity.vector.clone(),
         k: limit.saturating_add(query.offset),
     })
+}
+
+/// The warning a declined routing raises, or `None` when there is nothing worth
+/// saying.
+///
+/// `NoVectorIndex` produces nothing: a query scoring an unindexed field has no
+/// index to miss, so warning about it would be noise on every ordinary
+/// similarity query. That precision condition is the whole design; steady-state
+/// noise has to be zero or the channel gets ignored.
+pub fn vector_index_unused_warning(reason: &NotRouted, field: &str) -> Option<GqlWarning> {
+    if matches!(reason, NotRouted::NoVectorIndex) {
+        return None;
+    }
+    Some(build_warning(reason.reason(), field))
+}
+
+/// The `VECTOR_INDEX_UNUSED` warning for a query whose filter the vector index
+/// path cannot serve, which keeps it from ever reaching `route()`. Go's own
+/// planner calls this shape `filter`.
+pub fn vector_index_unused_warning_for_filter(field: &str) -> GqlWarning {
+    build_warning("filter", field)
+}
+
+/// The `VECTOR_INDEX_UNUSED` warning for a fetcher that does not support
+/// vector search, which keeps the query from ever reaching `route()`. Ours:
+/// the reference has no fetcher abstraction to decline through.
+pub fn vector_index_unused_warning_for_unsupported_fetcher(field: &str) -> GqlWarning {
+    build_warning("unsupportedFetcher", field)
+}
+
+fn build_warning(reason: &str, field: &str) -> GqlWarning {
+    let mut detail = serde_json::Map::new();
+    detail.insert("field".to_string(), JsonValue::String(field.to_string()));
+    detail.insert("reason".to_string(), JsonValue::String(reason.to_string()));
+    GqlWarning {
+        code: WARNING_CODE_VECTOR_INDEX_UNUSED.to_string(),
+        message: format!(
+            "similarity query on field '{field}' did not use the vector index and read the whole collection"
+        ),
+        detail: Some(detail),
+    }
+}
+
+/// The first entry in `similarities` whose field has a vector index, or `None`
+/// when none do (including when `similarities` is empty).
+///
+/// This is the field a `VECTOR_INDEX_UNUSED` warning names: a field without an
+/// index has no index to have missed, so nothing about it is worth reporting,
+/// however the rest of the query is shaped.
+pub fn first_indexed_similarity<'a>(
+    similarities: &'a [SimilarityField],
+    indexes: &[IndexDescription],
+) -> Option<&'a str> {
+    similarities
+        .iter()
+        .find(|field| vector_index_on(indexes, &field.target_field).is_some())
+        .map(|field| field.target_field.as_str())
 }
 
 /// The metric a `SIMILARITY` on `field_name` is scored by.

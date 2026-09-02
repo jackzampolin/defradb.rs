@@ -256,6 +256,7 @@ impl Planner {
             index_scan: None,
             ordering_only_fields: Vec::new(),
             aggregate_internal_keys: HashMap::new(),
+            warnings: source_plan_result.warnings,
         })
     }
 }

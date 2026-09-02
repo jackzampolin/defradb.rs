@@ -10,7 +10,7 @@ use acp::nac::NodePermission;
 use identity::Did;
 
 use crate::error::{Result, TransactionError};
-use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
+use crate::executor::{GqlWarning, QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
@@ -131,6 +131,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         locations: None,
                         extensions: None,
                     }],
+                    extensions: None,
                 };
             }
         };
@@ -180,6 +181,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     locations: None,
                     extensions: None,
                 }],
+                extensions: None,
             };
         }
 
@@ -195,6 +197,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let acting_identity = creator_did
             .clone()
             .or_else(defra_core::current_identity::get_effective_identity);
+
+        let mut warnings: Vec<GqlWarning> = Vec::new();
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
@@ -219,8 +223,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         )
                         .await
                     } else {
-                        self.execute_selects_internal(selects, self.fetcher.as_ref(), identity)
-                            .await
+                        self.execute_selects_internal(
+                            selects,
+                            self.fetcher.as_ref(),
+                            identity,
+                            &mut warnings,
+                        )
+                        .await
                     }
                 }
                 ParsedOperation::Mutation {
@@ -280,7 +289,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             Ok(data) => QueryResponse {
                 data: Some(data),
                 errors: vec![],
-            },
+                extensions: None,
+            }
+            .with_warnings(warnings),
             Err(e) => {
                 tracing::error!(
                     query = %request.query,
@@ -290,7 +301,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 QueryResponse {
                     data: None,
                     errors: vec![QueryResponseError::from_query_error(e)],
+                    extensions: None,
                 }
+                .with_warnings(warnings)
             }
         }
     }
@@ -346,6 +359,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         locations: None,
                         extensions: None,
                     }],
+                    extensions: None,
                 };
             }
         };
@@ -371,6 +385,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         locations: None,
                         extensions: None,
                     }],
+                    extensions: None,
                 };
             }
         }
@@ -382,6 +397,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
+
+        let mut warnings: Vec<GqlWarning> = Vec::new();
 
         // Route to appropriate handler based on operation type
         let execution = async {
@@ -406,8 +423,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         )
                         .await
                     } else {
-                        self.execute_selects_internal(selects, fetcher.as_ref(), identity)
-                            .await
+                        self.execute_selects_internal(
+                            selects,
+                            fetcher.as_ref(),
+                            identity,
+                            &mut warnings,
+                        )
+                        .await
                     }
                 }
                 ParsedOperation::Mutation { explain, .. } => {
@@ -493,7 +515,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             Ok(data) => QueryResponse {
                 data: Some(data),
                 errors: vec![],
-            },
+                extensions: None,
+            }
+            .with_warnings(warnings),
             Err(e) => {
                 tracing::error!(
                     query = %request.query,
@@ -504,7 +528,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 QueryResponse {
                     data: None,
                     errors: vec![QueryResponseError::from_query_error(e)],
+                    extensions: None,
                 }
+                .with_warnings(warnings)
             }
         }
     }

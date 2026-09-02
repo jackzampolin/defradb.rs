@@ -13,6 +13,7 @@ use serde_json::{Map, Value as JsonValue};
 use tracing::instrument;
 
 use crate::error::Result;
+use crate::executor::GqlWarning;
 use crate::mapper::Select;
 use crate::query_parse::parse_query_with_limits;
 use crate::txn::TransactionRegistry;
@@ -77,10 +78,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let selects = parse_query_with_limits(query, variables, self.query_limits)?;
 
         let mut results = Map::new();
+        let mut warnings = Vec::new();
 
         for select in selects {
             let result = self
-                .execute_select_internal(&select, fetcher, caller_identity.clone())
+                .execute_select_internal(&select, fetcher, caller_identity.clone(), &mut warnings)
                 .await?;
             let key = if select.is_cursor {
                 select
@@ -101,7 +103,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute already-parsed Select operations with a specific fetcher and identity.
     #[instrument(
         name = "query.execute",
-        skip(self, selects, fetcher, caller_identity),
+        skip(self, selects, fetcher, caller_identity, warnings),
         fields(select_count = selects.len())
     )]
     pub(crate) async fn execute_selects_internal(
@@ -109,12 +111,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         selects: Vec<Select>,
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
+        warnings: &mut Vec<GqlWarning>,
     ) -> Result<JsonValue> {
         let mut results = Map::new();
 
         for select in selects {
             let result = self
-                .execute_select_internal(&select, fetcher, caller_identity.clone())
+                .execute_select_internal(&select, fetcher, caller_identity.clone(), warnings)
                 .await?;
             let key = if select.is_cursor {
                 select

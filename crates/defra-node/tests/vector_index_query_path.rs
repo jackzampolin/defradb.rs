@@ -713,3 +713,121 @@ async fn the_fallback_does_not_duplicate_indexed_documents() {
     );
     assert_eq!(titles.len(), 4, "every document exactly once: {titles:?}");
 }
+
+/// A routed similarity query stays silent: `extensions` must be entirely
+/// absent, not merely an empty warnings list. Explain already says the index
+/// was used; nothing here needs a second channel to repeat that.
+#[tokio::test]
+async fn a_routed_similarity_query_has_no_extensions() {
+    let node = node_with("").await;
+    seed(&node).await;
+
+    let query = similarity_query(&vector_for(3), 5, None);
+    let response = node.execute(&query).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    assert!(
+        response.extensions.is_none(),
+        "a routed query must not carry extensions: {:?}",
+        response.extensions
+    );
+}
+
+/// Without a limit, `route()` never gets far enough to ask for an index, so
+/// the scan falls back to scoring everything. The results are still correct;
+/// only the cost changed, which is exactly what the warning is for.
+#[tokio::test]
+async fn dropping_the_limit_warns_vector_index_unused() {
+    let node = node_with("").await;
+    seed(&node).await;
+
+    let query = format!(
+        r#"{{ Note(order: {{ _alias: {{ sim: DESC }} }}) {{ title tag sim: SIMILARITY(embedding: {{vector: [{}]}}) }} }}"#,
+        render(&vector_for(3))
+    );
+    let response = node.execute(&query).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+
+    let extensions = response
+        .extensions
+        .as_ref()
+        .expect("dropping the limit must warn");
+    assert_eq!(extensions.warnings.len(), 1);
+    let warning = &extensions.warnings[0];
+    assert_eq!(warning.code, "VECTOR_INDEX_UNUSED");
+    let detail = warning.detail.as_ref().expect("detail");
+    assert_eq!(detail["reason"], "noLimit");
+    assert_eq!(detail["field"], "embedding");
+
+    let rows = response.data.as_ref().unwrap()["Note"]
+        .as_array()
+        .expect("Note array")
+        .clone();
+    assert_eq!(rows.len(), CORPUS, "no limit means every document");
+    let scores: Vec<f64> = rows
+        .iter()
+        .map(|row| row["sim"].as_f64().expect("sim"))
+        .collect();
+    assert!(
+        scores.windows(2).all(|pair| pair[0] >= pair[1]),
+        "rows are not ordered by similarity: {scores:?}"
+    );
+}
+
+/// Same shape as `dropping_the_limit_warns_vector_index_unused`, but the
+/// defect is the order direction instead of the missing limit.
+#[tokio::test]
+async fn ascending_order_warns_vector_index_unused() {
+    let node = node_with("").await;
+    seed(&node).await;
+
+    let query = format!(
+        r#"{{ Note(order: {{ _alias: {{ sim: ASC }} }}, limit: 5) {{ title tag sim: SIMILARITY(embedding: {{vector: [{}]}}) }} }}"#,
+        render(&vector_for(3))
+    );
+    let response = node.execute(&query).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+
+    let extensions = response
+        .extensions
+        .as_ref()
+        .expect("ascending order must warn");
+    let warning = &extensions.warnings[0];
+    assert_eq!(warning.code, "VECTOR_INDEX_UNUSED");
+    let detail = warning.detail.as_ref().expect("detail");
+    assert_eq!(detail["reason"], "notOrderedBySimilarityDesc");
+    assert_eq!(detail["field"], "embedding");
+}
+
+/// The precision condition: a field with no vector index never warns, however
+/// the query is shaped. Written with the limit removed, the one shape that
+/// *would* warn if this field had an index (see
+/// `dropping_the_limit_warns_vector_index_unused`).
+#[tokio::test]
+async fn a_field_without_a_vector_index_never_warns() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema(&format!(
+        "type Note {{ title: String  tag: String  embedding: [Float32!] @index(vector: {{dimensions: {DIMENSIONS}}})  plainEmbedding: [Float32!] }}"
+    ))
+    .await
+    .expect("add schema with an unindexed vector field");
+
+    for index in 0..3 {
+        let mutation = format!(
+            r#"mutation {{ create_Note(input: {{ title: "note-{index}", tag: "even", plainEmbedding: [{}] }}) {{ _docID }} }}"#,
+            render(&vector_for(index))
+        );
+        query_data(&node, &mutation, "seed").await;
+    }
+
+    let query = format!(
+        r#"{{ Note(order: {{ _alias: {{ sim: DESC }} }}) {{ title sim: SIMILARITY(plainEmbedding: {{vector: [{}]}}) }} }}"#,
+        render(&vector_for(0))
+    );
+    let response = node.execute(&query).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    assert!(
+        response.extensions.is_none(),
+        "a similarity query on an unindexed field must never warn: {:?}",
+        response.extensions
+    );
+}

@@ -31,8 +31,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select.document_mapping = mapping;
         select.show_deleted = show_deleted;
 
+        let mut warnings = Vec::new();
         let result = self
-            .execute_select_internal(&select, self.fetcher.as_ref(), None)
+            .execute_select_internal(&select, self.fetcher.as_ref(), None, &mut warnings)
             .await?;
         let items = result.as_array().ok_or_else(|| {
             crate::error::QueryError::internal("filtered document selection returned a non-list")

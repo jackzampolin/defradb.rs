@@ -9,6 +9,7 @@ use tracing::{debug, instrument};
 use web_time::Instant;
 
 use crate::error::Result;
+use crate::executor::GqlWarning;
 use crate::mapper::{Requestable, Select};
 use crate::planner::Planner;
 use crate::txn::TransactionRegistry;
@@ -35,6 +36,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         fetcher: &dyn DocFetcher,
         identity: Option<Did>,
+        warnings: &mut Vec<GqlWarning>,
     ) -> Result<JsonValue> {
         let mut profile = NestedQueryProfile::default();
 
@@ -75,6 +77,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
         let plan_result = planner.plan_with_index_info(select)?;
         profile.plan_build_elapsed = plan_build_start.elapsed();
+        warnings.extend(plan_result.warnings);
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;
         let aggregate_internal_keys = plan_result.aggregate_internal_keys;
