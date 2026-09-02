@@ -33,7 +33,7 @@
 
 use std::time::{Duration, Instant};
 
-use integration_test::TestCluster;
+use integration_test::{poll_until, TestCluster};
 
 /// A fixed 32-byte AES-256 searchable-encryption key shared across nodes.
 /// Distinct value per byte so a wrong key (e.g. a freshly generated one)
@@ -255,4 +255,132 @@ async fn go_to_rust_se_cross_node() {
     // (node 0) -- this exercises the Rust SE serve loop.
     let deadline = Instant::now() + Duration::from_secs(45);
     wait_for_se_query(&go, "User", r#"{name: {_eq: "John"}}"#, &doc_id, deadline).await;
+}
+
+fn peer_id_from_addr(addr: &str) -> String {
+    addr.rsplit_once("/p2p/")
+        .map_or(addr, |(_, peer_id)| peer_id)
+        .to_string()
+}
+
+/// Issue #1601: the replicator is killed, the OWNER writes while it is down
+/// (live push fails, leaving durable retry markers), the replicator restarts
+/// on the same rootdir + ports, and the owner reconnects. The retry pass must
+/// re-push the documents AND their SE artifacts: the documents arriving on the
+/// replicator (step 1) separates "retry never ran" from the SE symptom, then
+/// `encrypted_User` on the owner must resolve John via the replicator.
+/// Mirrors Go's `TestSEReplicator_IfDocAddedWhileReplicatorIsOffline_ShouldRetry`.
+#[tokio::test]
+async fn rust_rust_se_replicator_restart_retries_artifacts() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_encryption()
+        .with_shared_searchable_encryption_key(SHARED_SE_KEY)
+        .with_store("regolith")
+        .health_timeout(Duration::from_secs(60))
+        .build()
+        .await
+        .expect("build rust 2-node regolith cluster with shared SE key");
+
+    let owner = cluster.client(0);
+    let replicator = cluster.client(1);
+
+    owner.schema_add(USER_SCHEMA).expect("add schema owner");
+    replicator
+        .schema_add(USER_SCHEMA)
+        .expect("add schema replicator");
+    owner
+        .encrypted_index_add("User", "name")
+        .expect("encrypted index owner");
+    replicator
+        .encrypted_index_add("User", "name")
+        .expect("encrypted index replicator");
+
+    connect_and_replicate(&cluster, 0, 1, "User").await;
+
+    let replicator_addr_before = replicator.p2p_info().expect("replicator p2p info")[0]
+        .as_str()
+        .expect("replicator has no P2P address")
+        .to_string();
+    let replicator_peer_id = peer_id_from_addr(&replicator_addr_before);
+
+    cluster.nodes[1].process.kill();
+    let owner_ref = &owner;
+    poll_until(
+        || {
+            owner_ref
+                .p2p_active_peers()
+                .unwrap_or_default()
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(250),
+        "owner still lists the killed replicator as an active peer",
+    )
+    .await;
+
+    let created = owner
+        .query(r#"mutation { add_User(input: {name: "John", age: 21, city: "NYC"}) { _docID } }"#)
+        .expect("create John on owner");
+    let john_doc_id = created["add_User"][0]["_docID"]
+        .as_str()
+        .or_else(|| created["add_User"]["_docID"].as_str())
+        .expect("missing _docID")
+        .to_string();
+    owner
+        .query(r#"mutation { add_User(input: {name: "Fred", age: 22, city: "LA"}) { _docID } }"#)
+        .expect("create Fred on owner");
+
+    cluster
+        .restart_node(1, Duration::from_secs(60))
+        .await
+        .expect("restart replicator after kill");
+    cluster
+        .wait_for_log(1, "p2p_listening", Duration::from_secs(30))
+        .await
+        .expect("restarted replicator P2P listener did not start");
+
+    let owner = cluster.client(0);
+    let replicator = cluster.client(1);
+    let replicator_addr_after = replicator.p2p_info().expect("replicator p2p info")[0]
+        .as_str()
+        .expect("restarted replicator has no P2P address")
+        .to_string();
+    assert_eq!(
+        peer_id_from_addr(&replicator_addr_after),
+        replicator_peer_id,
+        "replicator peer id changed across restart; the owner's replicator entry is keyed by it"
+    );
+    owner
+        .p2p_connect(&[&replicator_addr_after])
+        .expect("reconnect owner -> restarted replicator");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let result = replicator
+            .query("query { User { _docID } }")
+            .expect("query User on replicator");
+        if result["User"]
+            .as_array()
+            .is_some_and(|docs| docs.len() == 2)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retry did not deliver both documents to the replicator; last result: {result}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    wait_for_se_query(
+        &owner,
+        "User",
+        r#"{name: {_eq: "John"}}"#,
+        &john_doc_id,
+        Instant::now() + Duration::from_secs(30),
+    )
+    .await;
 }
