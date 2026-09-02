@@ -76,8 +76,19 @@ impl IvfPqParams {
             .unwrap_or(1)
     }
 
-    /// Vectors needed before training fires.
-    pub fn train_threshold(&self, corpus: u64) -> u64 {
-        u64::from(self.resolved_nlist(corpus)) * u64::from(TRAIN_PER_LIST)
+    /// Vectors needed before training fires, with no dependency on the count
+    /// being asked about.
+    ///
+    /// An explicit `nlist` already makes [`resolved_nlist`](Self::resolved_nlist)
+    /// a constant, so the threshold is just `nlist * TRAIN_PER_LIST`. A derived
+    /// `nlist` (`nlist == 0`) makes it `4*sqrt(corpus)*TRAIN_PER_LIST`, so the
+    /// point it crosses solves `corpus == 4*sqrt(corpus)*TRAIN_PER_LIST`, whose
+    /// positive root is the fixed `16*TRAIN_PER_LIST^2`, independent of corpus.
+    pub fn resolved_train_threshold(&self) -> u64 {
+        if self.nlist > 0 {
+            u64::from(self.nlist.min(MAX_NLIST)) * u64::from(TRAIN_PER_LIST)
+        } else {
+            16 * u64::from(TRAIN_PER_LIST) * u64::from(TRAIN_PER_LIST)
+        }
     }
 }

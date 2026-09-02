@@ -179,6 +179,14 @@ impl<S: VectorNodeStore> VectorIndexEngine for IvfPq<S> {
         self.staging.delete(id).await
     }
 
+    async fn should_build(&self) -> Result<bool> {
+        self.should_build().await
+    }
+
+    async fn build(&mut self) -> Result<()> {
+        self.build().await.map(|_| ())
+    }
+
     async fn search_where<E: Element, A: Admit>(
         &self,
         query: &[E],

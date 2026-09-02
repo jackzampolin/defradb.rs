@@ -47,6 +47,18 @@ impl<S: VectorNodeStore> VectorIndexEngine for Engine<S> {
         dispatch!(self, e => e.delete(id).await)
     }
 
+    async fn should_build(&self) -> Result<bool> {
+        dispatch!(self, e => e.should_build().await)
+    }
+
+    async fn build(&mut self) -> Result<()> {
+        // Method resolution prefers IvfPq's and Ssg's own inherent `build`,
+        // which return their kind's report, over this trait method; `map`
+        // discards it uniformly across every arm rather than the macro having
+        // to special-case the two kinds that build something.
+        dispatch!(self, e => e.build().await.map(|_| ()))
+    }
+
     async fn search_where<E: Element, A: Admit>(
         &self,
         query: &[E],
