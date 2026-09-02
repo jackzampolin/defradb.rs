@@ -4,7 +4,9 @@
 //! - `parse_field_directives()`, `check_directive_arguments()`
 //! - `get_bool_with_warning()`, `get_string_with_warning()`, `get_int_with_warning()`
 //! - `parse_type_directives()`, `parse_crdt_directive()`
-//! - `parse_index_directive()`, `parse_includes_argument()`, `parse_default_directive()`
+//! - `parse_index_directive()`, `parse_vector_index_config()`, `parse_default_directive()`
+
+use std::collections::BTreeMap;
 
 use graphql_parser::schema::{Directive, Field};
 use schema::CType;
@@ -48,15 +50,20 @@ impl<'a> SdlParser<'a> {
         for directive in directives {
             let name = directive.name.as_str();
 
-            // Check arguments for all known directives upfront
-            if KNOWN_FIELD_DIRECTIVES.contains(&name) {
+            // Check arguments for all known directives upfront. `@index` is
+            // excluded: it validates its own, and refuses an unknown one
+            // outright, so a warning here would only precede the error.
+            if name != "index" && KNOWN_FIELD_DIRECTIVES.contains(&name) {
                 self.check_directive_arguments(directive, &type_name, Some(field_name));
             }
 
             match name {
                 "primary" => result.is_primary = true,
                 "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
-                "index" => result.index = Some(self.parse_index_directive(directive, field_name)?),
+                "index" => match self.parse_index_directive(directive, Some(field_name))? {
+                    ParsedIndex::Ordered(config) => result.index = Some(config),
+                    ParsedIndex::Vector(config) => result.vector_index = Some(config),
+                },
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
                 "default" => {
                     result.default_value =
@@ -91,9 +98,6 @@ impl<'a> SdlParser<'a> {
                     let b =
                         self.get_float_with_warning(directive, "b", &type_name, Some(field_name));
                     result.fulltext = Some(super::directives::FullTextConfig { language, k1, b });
-                }
-                "vectorIndex" => {
-                    result.vector_index = Some(self.parse_vector_index_directive(directive)?);
                 }
                 "immutable" => result.immutable = true,
                 "embedding" => {
@@ -294,43 +298,32 @@ impl<'a> SdlParser<'a> {
         for directive in directives {
             let name = directive.name.as_str();
 
-            // Check arguments for all known directives upfront
-            if KNOWN_TYPE_DIRECTIVES.contains(&name) {
+            // Check arguments for all known directives upfront. `@index` is
+            // excluded for the same reason as at field level: it validates its
+            // own and refuses an unknown one.
+            if name != "index" && KNOWN_TYPE_DIRECTIVES.contains(&name) {
                 self.check_directive_arguments(directive, &type_name, None);
             }
 
             match name {
                 "index" => {
-                    // Parse top-level direction argument (default for all fields)
-                    let default_descending = self
-                        .get_string_with_warning(directive, "direction", &type_name, None)
-                        .as_deref()
-                        .map(|d| matches!(d, "DESC" | "desc" | "Descending"))
-                        .unwrap_or(false);
-
-                    // Try "fields" argument first (simple format: ["name", "age"])
-                    let simple_fields = get_directive_string_list(directive, "fields");
-                    let fields: Vec<(String, bool)> = if !simple_fields.is_empty() {
-                        // Apply default direction to all fields from simple format
-                        simple_fields
-                            .into_iter()
-                            .map(|f| (f, default_descending))
-                            .collect()
-                    } else {
-                        // Try "includes" argument (Go format: [{field: "name", direction: DESC}, ...])
-                        self.parse_includes_argument(directive, default_descending)
+                    // One parser for both levels, as the reference has. A
+                    // type-level index names its fields rather than sitting on
+                    // one, which is the only difference, and `None` here is
+                    // what makes a vector configuration invalid.
+                    let ParsedIndex::Ordered(config) =
+                        self.parse_index_directive(directive, None)?
+                    else {
+                        return Err(QueryError::parse(
+                            "@index vector is only valid on a field definition",
+                        ));
                     };
 
-                    let idx_name = get_directive_string(directive, "name");
-                    let unique = self
-                        .get_bool_with_warning(directive, "unique", &type_name, None)
-                        .unwrap_or(false);
-
-                    if !fields.is_empty() {
+                    if !config.includes.is_empty() {
                         result.indexes.push(CompositeIndex {
-                            fields,
-                            name: idx_name,
-                            unique,
+                            fields: config.includes,
+                            name: config.name,
+                            unique: config.unique,
                         });
                     }
                 }
@@ -426,229 +419,293 @@ impl<'a> SdlParser<'a> {
         }
     }
 
+    /// Reads a field-level `@index`, which carries every index kind.
+    ///
+    /// The kind is selected by which configuration argument is present, exactly
+    /// as the wire's `Kind`/`KindDescription` envelope does: `vector:` means
+    /// vector, `ordered:` or any of the legacy top-level ordered arguments
+    /// means ordered, and `kind:` names one directly. Two selectors that
+    /// disagree are an error rather than a precedence rule, because a
+    /// precedence rule would silently build the index the author did not ask
+    /// for.
     pub(super) fn parse_index_directive(
         &mut self,
         directive: &Directive<'_, String>,
-        field_name: &str,
-    ) -> Result<IndexConfig> {
+        field_name: Option<&str>,
+    ) -> Result<ParsedIndex> {
         let type_name = self.current_type.clone().unwrap_or_default();
-        let name = get_directive_string(directive, "name");
-        let unique = self
-            .get_bool_with_warning(directive, "unique", &type_name, Some(field_name))
-            .unwrap_or(false);
-        let direction = match self
-            .get_string_with_warning(directive, "direction", &type_name, Some(field_name))
-            .as_deref()
-        {
-            Some("DESC") | Some("desc") | Some("Descending") => IndexDirection::Desc,
-            _ => IndexDirection::Asc,
-        };
+        let mut kind: Option<IndexKindSelector> = None;
+        let mut name: Option<String> = None;
+        let mut ordered = OrderedIndexArgs::default();
+        let mut vector: Option<&SchemaValue<'_>> = None;
 
-        // Parse includes for composite indexes
-        // The default direction for included fields is inherited from the top-level direction
-        let default_descending = matches!(direction, IndexDirection::Desc);
-        let includes = self.parse_includes_argument(directive, default_descending);
-
-        Ok(IndexConfig {
-            name,
-            unique,
-            direction,
-            includes,
-        })
-    }
-
-    /// Parse the `includes` argument for composite indexes.
-    ///
-    /// Go format: `@index(includes: [{field: "name"}, {field: "age", direction: DESC}])`
-    /// Returns (field_name, descending) tuples extracted from the objects.
-    ///
-    /// The `default_descending` parameter is used when a field in the includes array
-    /// doesn't specify its own direction. This comes from the top-level `direction`
-    /// argument on the @index directive.
-    pub(super) fn parse_includes_argument(
-        &self,
-        directive: &Directive<'_, String>,
-        default_descending: bool,
-    ) -> Vec<(String, bool)> {
-        let Some(value) = get_directive_arg(directive, "includes") else {
-            return Vec::new();
-        };
-
-        let graphql_parser::schema::Value::List(items) = value else {
-            return Vec::new();
-        };
-
-        items
-            .iter()
-            .filter_map(|item| {
-                // Each item should be an object like {field: "name", direction: DESC}
-                let graphql_parser::schema::Value::Object(obj) = item else {
-                    return None;
-                };
-
-                // Extract field name
-                let field_name = obj.get("field").and_then(|v| match v {
-                    graphql_parser::schema::Value::String(s)
-                    | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                    _ => None,
-                })?;
-
-                // Extract direction (defaults to the top-level direction or ASC)
-                let descending = obj
-                    .get("direction")
-                    .map(|v| match v {
-                        graphql_parser::schema::Value::String(s)
-                        | graphql_parser::schema::Value::Enum(s) => {
-                            matches!(s.as_str(), "DESC" | "desc" | "Descending")
+        for (arg_name, value) in &directive.arguments {
+            match arg_name.as_str() {
+                "name" => {
+                    let (SchemaValue::String(text) | SchemaValue::Enum(text)) = value else {
+                        return Err(QueryError::parse("@index name must be a string"));
+                    };
+                    name = Some(text.clone());
+                }
+                "kind" => {
+                    let (SchemaValue::String(text) | SchemaValue::Enum(text)) = value else {
+                        return Err(QueryError::parse("@index kind must be an index kind"));
+                    };
+                    // `vector` is deliberately not accepted here: a vector index
+                    // needs at least its dimensions, so there is no default
+                    // configuration for `kind:` to select. Refusing it names the
+                    // problem, where accepting it would fail later on a missing
+                    // dimension.
+                    match text.as_str() {
+                        "ordered" => select_index_kind(&mut kind, IndexKindSelector::Ordered)?,
+                        other => {
+                            return Err(QueryError::parse(format!(
+                                "@index has no kind named '{other}'"
+                            )))
                         }
-                        _ => default_descending,
-                    })
-                    .unwrap_or(default_descending);
+                    }
+                }
+                "ordered" => {
+                    select_index_kind(&mut kind, IndexKindSelector::Ordered)?;
+                    let SchemaValue::Object(members) = value else {
+                        return Err(QueryError::parse(
+                            "@index ordered must be an object of parameters",
+                        ));
+                    };
+                    for (member, member_value) in members {
+                        self.read_ordered_index_property(
+                            member,
+                            member_value,
+                            &mut ordered,
+                            &mut kind,
+                            &type_name,
+                            field_name,
+                        )?;
+                    }
+                }
+                "vector" => {
+                    select_index_kind(&mut kind, IndexKindSelector::Vector)?;
+                    vector = Some(value);
+                }
+                other => {
+                    self.read_ordered_index_property(
+                        other,
+                        value,
+                        &mut ordered,
+                        &mut kind,
+                        &type_name,
+                        field_name,
+                    )?;
+                }
+            }
+        }
 
-                Some((field_name, descending))
-            })
-            .collect()
+        if let Some(value) = vector {
+            // A vector index covers exactly one field, so it has no type-level
+            // form. `field_name` being absent is exactly that case.
+            if field_name.is_none() {
+                return Err(QueryError::parse(
+                    "@index vector is only valid on a field definition",
+                ));
+            }
+            let mut config = self.parse_vector_index_config(value)?;
+            config.name = name;
+            return Ok(ParsedIndex::Vector(config));
+        }
+
+        // Resolved here rather than as each argument is read, because an
+        // included field with no direction of its own inherits the directive's,
+        // and `direction:` may be written after `includes:`.
+        let default_descending = matches!(ordered.direction, IndexDirection::Desc);
+        Ok(ParsedIndex::Ordered(IndexConfig {
+            name,
+            unique: ordered.unique,
+            direction: ordered.direction,
+            includes: ordered
+                .includes
+                .into_iter()
+                .map(|(name, descending)| (name, descending.unwrap_or(default_descending)))
+                .collect(),
+        }))
     }
 
-    /// Reads `@vectorIndex(dimensions: Int, HNSW: { ... })`.
+    /// Reads one ordered-index property, from either the nested `ordered:`
+    /// block or a legacy top-level argument.
+    ///
+    /// The name is recognised before the kind is selected, so an unknown
+    /// argument is reported as an unknown argument rather than as a kind
+    /// conflict it only causes incidentally.
+    ///
+    /// Writing the same property from both places is refused: the two forms
+    /// merge, and a merge that silently drops one of two explicit values is
+    /// worse than a parse error.
+    fn read_ordered_index_property(
+        &mut self,
+        name: &str,
+        value: &SchemaValue<'_>,
+        config: &mut OrderedIndexArgs,
+        kind: &mut Option<IndexKindSelector>,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Result<()> {
+        let (written, expected_type) = match name {
+            "unique" => (&mut config.has_unique, "Boolean"),
+            "direction" => (&mut config.has_direction, "Ordering"),
+            "includes" | "fields" => (&mut config.has_includes, "[IndexField]"),
+            other => {
+                return Err(QueryError::parse(format!(
+                    "@index has no argument named '{other}'"
+                )))
+            }
+        };
+        if *written {
+            return Err(QueryError::parse(format!("@index sets '{name}' twice")));
+        }
+        *written = true;
+        select_index_kind(kind, IndexKindSelector::Ordered)?;
+
+        match name {
+            "unique" => match value {
+                SchemaValue::Boolean(unique) => config.unique = *unique,
+                _ => self.warn_index_argument_type(name, expected_type, type_name, field_name),
+            },
+            "direction" => match value {
+                SchemaValue::String(text) | SchemaValue::Enum(text) => {
+                    config.direction = match text.as_str() {
+                        "DESC" | "desc" | "Descending" => IndexDirection::Desc,
+                        _ => IndexDirection::Asc,
+                    };
+                }
+                _ => self.warn_index_argument_type(name, expected_type, type_name, field_name),
+            },
+            _ => config.includes = read_includes_value(value),
+        }
+        Ok(())
+    }
+
+    fn warn_index_argument_type(
+        &mut self,
+        argument_name: &str,
+        expected_type: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) {
+        self.warnings.push(ParseWarning::InvalidArgumentType {
+            directive_name: "index".to_string(),
+            argument_name: argument_name.to_string(),
+            expected_type: expected_type.to_string(),
+            type_name: type_name.to_string(),
+            field_name: field_name.map(str::to_string),
+        });
+    }
+
+    /// Reads the `vector: { ... }` configuration of `@index`.
     ///
     /// An unrecognised member is an error rather than an ignored typo: a
     /// silently dropped `efSearch` would build a differently-shaped index than
     /// the schema asks for, and nothing downstream could tell.
-    pub(super) fn parse_vector_index_directive(
+    ///
+    /// `metric` sits inside each algorithm block rather than beside
+    /// `dimensions`, matching the reference: `dimensions` describes the field,
+    /// while the metric is one of the algorithm's own knobs and an algorithm
+    /// may not rank by every metric.
+    pub(super) fn parse_vector_index_config(
         &self,
-        directive: &graphql_parser::schema::Directive<'_, String>,
+        value: &SchemaValue<'_>,
     ) -> Result<super::directives::VectorIndexConfig> {
-        use super::directives::{directive_u32, get_directive_arg, get_directive_u32, HnswConfig};
+        use super::directives::{directive_u32, FlatConfig, HnswConfig, IvfPqConfig, SsgConfig};
 
-        let dimensions = match get_directive_u32(directive, "dimensions") {
-            Some(Ok(value)) => Some(value),
-            Some(Err(message)) => return Err(QueryError::parse(format!("@vectorIndex {message}"))),
-            None => None,
+        let SchemaValue::Object(members) = value else {
+            return Err(QueryError::parse(
+                "@index vector must be an object of parameters",
+            ));
         };
 
-        let algorithm = match get_directive_arg(directive, "algorithm") {
-            None => None,
-            Some(graphql_parser::schema::Value::String(text))
-            | Some(graphql_parser::schema::Value::Enum(text)) => Some(text.clone()),
-            Some(_) => return Err(QueryError::parse("@vectorIndex algorithm must be a string")),
-        };
-
-        let metric = match get_directive_arg(directive, "metric") {
-            None => None,
-            Some(graphql_parser::schema::Value::String(text))
-            | Some(graphql_parser::schema::Value::Enum(text)) => Some(text.clone()),
-            Some(_) => return Err(QueryError::parse("@vectorIndex metric must be a string")),
-        };
-
-        let hnsw = match get_directive_arg(directive, "HNSW") {
-            None => None,
-            Some(graphql_parser::schema::Value::Object(members)) => {
-                let mut config = HnswConfig::default();
-                for (name, value) in members {
-                    let slot = match name.as_str() {
-                        "metric" => {
-                            config.metric = match value {
-                                graphql_parser::schema::Value::String(text)
-                                | graphql_parser::schema::Value::Enum(text) => Some(text.clone()),
-                                _ => {
-                                    return Err(QueryError::parse(
-                                        "@vectorIndex HNSW metric must be a string",
-                                    ))
-                                }
-                            };
-                            continue;
-                        }
-                        "M" => &mut config.m,
-                        "efConstruction" => &mut config.ef_construction,
-                        "efSearch" => &mut config.ef_search,
-                        other => {
-                            return Err(QueryError::parse(format!(
-                                "@vectorIndex HNSW has no argument named '{other}'"
-                            )))
-                        }
-                    };
-                    *slot =
-                        Some(directive_u32(name, value).map_err(|message| {
-                            QueryError::parse(format!("@vectorIndex {message}"))
-                        })?);
+        let mut config = super::directives::VectorIndexConfig::default();
+        for (member, member_value) in members {
+            match member.as_str() {
+                "dimensions" => {
+                    config.dimensions = Some(
+                        directive_u32("dimensions", member_value)
+                            .map_err(|message| QueryError::parse(format!("@index {message}")))?,
+                    );
                 }
-                Some(config)
-            }
-            Some(_) => {
-                return Err(QueryError::parse(
-                    "@vectorIndex HNSW must be an object of parameters",
-                ))
-            }
-        };
-
-        let ivfpq = match get_directive_arg(directive, "IVFPQ") {
-            None => None,
-            Some(graphql_parser::schema::Value::Object(members)) => {
-                let mut config = super::directives::IvfPqConfig::default();
-                for (name, value) in members {
-                    let slot = match name.as_str() {
-                        "nlist" => &mut config.nlist,
-                        "nprobe" => &mut config.nprobe,
-                        "m" => &mut config.m,
-                        "sampleBytes" => &mut config.sample_bytes,
-                        other => {
-                            return Err(QueryError::parse(format!(
-                                "@vectorIndex IVFPQ has no argument named '{other}'"
-                            )))
-                        }
+                "alg" => {
+                    let (SchemaValue::String(text) | SchemaValue::Enum(text)) = member_value else {
+                        return Err(QueryError::parse("@index vector alg must be an algorithm"));
                     };
-                    *slot =
-                        Some(directive_u32(name, value).map_err(|message| {
-                            QueryError::parse(format!("@vectorIndex {message}"))
-                        })?);
+                    config.algorithm = Some(text.clone());
                 }
-                Some(config)
-            }
-            Some(_) => {
-                return Err(QueryError::parse(
-                    "@vectorIndex IVFPQ must be an object of parameters",
-                ))
-            }
-        };
-
-        let ssg = match get_directive_arg(directive, "SSG") {
-            None => None,
-            Some(graphql_parser::schema::Value::Object(members)) => {
-                let mut config = super::directives::SsgConfig::default();
-                for (name, value) in members {
-                    let slot = match name.as_str() {
-                        "R" => &mut config.r,
-                        "angle" => &mut config.angle,
-                        "pool" => &mut config.pool,
-                        other => {
-                            return Err(QueryError::parse(format!(
-                                "@vectorIndex SSG has no argument named '{other}'"
-                            )))
+                block if block == schema::VectorAlgorithm::Flat.sdl_block() => {
+                    let mut block = FlatConfig::default();
+                    for (name, value) in vector_block(member, member_value)? {
+                        match name.as_str() {
+                            "metric" => block.metric = Some(read_metric(member, value)?),
+                            other => return Err(unknown_vector_member(member, other)),
                         }
-                    };
-                    *slot =
-                        Some(directive_u32(name, value).map_err(|message| {
-                            QueryError::parse(format!("@vectorIndex {message}"))
-                        })?);
+                    }
+                    config.flat = Some(block);
                 }
-                Some(config)
+                block if block == schema::VectorAlgorithm::Hnsw.sdl_block() => {
+                    let mut block = HnswConfig::default();
+                    for (name, value) in vector_block(member, member_value)? {
+                        let slot = match name.as_str() {
+                            "metric" => {
+                                block.metric = Some(read_metric(member, value)?);
+                                continue;
+                            }
+                            "M" => &mut block.m,
+                            "efConstruction" => &mut block.ef_construction,
+                            "efSearch" => &mut block.ef_search,
+                            other => return Err(unknown_vector_member(member, other)),
+                        };
+                        *slot = Some(read_block_u32(name, value)?);
+                    }
+                    config.hnsw = Some(block);
+                }
+                block if block == schema::VectorAlgorithm::IvfPq.sdl_block() => {
+                    let mut block = IvfPqConfig::default();
+                    for (name, value) in vector_block(member, member_value)? {
+                        let slot = match name.as_str() {
+                            "metric" => {
+                                block.metric = Some(read_metric(member, value)?);
+                                continue;
+                            }
+                            "nlist" => &mut block.nlist,
+                            "nprobe" => &mut block.nprobe,
+                            "m" => &mut block.m,
+                            "sampleBytes" => &mut block.sample_bytes,
+                            other => return Err(unknown_vector_member(member, other)),
+                        };
+                        *slot = Some(read_block_u32(name, value)?);
+                    }
+                    config.ivfpq = Some(block);
+                }
+                block if block == schema::VectorAlgorithm::Ssg.sdl_block() => {
+                    let mut block = SsgConfig::default();
+                    for (name, value) in vector_block(member, member_value)? {
+                        let slot = match name.as_str() {
+                            "metric" => {
+                                block.metric = Some(read_metric(member, value)?);
+                                continue;
+                            }
+                            "R" => &mut block.r,
+                            "angle" => &mut block.angle,
+                            "pool" => &mut block.pool,
+                            other => return Err(unknown_vector_member(member, other)),
+                        };
+                        *slot = Some(read_block_u32(name, value)?);
+                    }
+                    config.ssg = Some(block);
+                }
+                other => {
+                    return Err(QueryError::parse(format!(
+                        "@index vector has no argument named '{other}'"
+                    )))
+                }
             }
-            Some(_) => {
-                return Err(QueryError::parse(
-                    "@vectorIndex SSG must be an object of parameters",
-                ))
-            }
-        };
-
-        Ok(super::directives::VectorIndexConfig {
-            dimensions,
-            algorithm,
-            metric,
-            hnsw,
-            ivfpq,
-            ssg,
-        })
+        }
+        Ok(config)
     }
 
     pub(super) fn parse_default_directive(
@@ -823,4 +880,136 @@ impl<'a> SdlParser<'a> {
             ))),
         }
     }
+}
+
+/// A `@index` argument value, aliased because the parser names it constantly.
+type SchemaValue<'a> = graphql_parser::schema::Value<'a, String>;
+
+/// What a `@index` invocation resolves to. One variant per index kind, mirroring
+/// the wire's `Kind` discriminator, so a kind can never be inferred twice from
+/// two different places.
+pub(super) enum ParsedIndex {
+    Ordered(IndexConfig),
+    Vector(super::directives::VectorIndexConfig),
+}
+
+/// The kind an argument selects. Distinct from `schema::IndexKind` because the
+/// selection is a parse-time fact about the directive, not a described index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexKindSelector {
+    Ordered,
+    Vector,
+}
+
+impl IndexKindSelector {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ordered => "ordered",
+            Self::Vector => "vector",
+        }
+    }
+}
+
+/// Ordered-index arguments as written, before defaults are resolved.
+///
+/// `has_*` record whether a property was *written*, not what it resolved to.
+/// The nested `ordered:` block and the legacy top-level arguments merge, so
+/// setting one property from both places has to be an error rather than a
+/// silent last-writer-wins. `includes` stays unparsed until the directive's
+/// `direction:` is known, since an entry without its own direction inherits it.
+#[derive(Default)]
+struct OrderedIndexArgs {
+    unique: bool,
+    direction: IndexDirection,
+    /// `None` on an entry means it named no direction and inherits the
+    /// directive's, which may be written after `includes:`.
+    includes: Vec<(String, Option<bool>)>,
+    has_unique: bool,
+    has_direction: bool,
+    has_includes: bool,
+}
+
+/// Records the kind an argument selects, refusing a second, different one.
+fn select_index_kind(
+    current: &mut Option<IndexKindSelector>,
+    selected: IndexKindSelector,
+) -> Result<()> {
+    match current {
+        Some(existing) if *existing != selected => Err(QueryError::parse(format!(
+            "@index cannot be both {} and {}",
+            existing.as_str(),
+            selected.as_str()
+        ))),
+        _ => {
+            *current = Some(selected);
+            Ok(())
+        }
+    }
+}
+
+/// The members of one algorithm block, or an error naming the block.
+fn vector_block<'v, 'a>(
+    block: &str,
+    value: &'v SchemaValue<'a>,
+) -> Result<&'v BTreeMap<String, SchemaValue<'a>>> {
+    match value {
+        SchemaValue::Object(members) => Ok(members),
+        _ => Err(QueryError::parse(format!(
+            "@index vector {block} must be an object of parameters"
+        ))),
+    }
+}
+
+fn read_metric(block: &str, value: &SchemaValue<'_>) -> Result<String> {
+    match value {
+        SchemaValue::String(text) | SchemaValue::Enum(text) => Ok(text.clone()),
+        _ => Err(QueryError::parse(format!(
+            "@index vector {block} metric must be a metric"
+        ))),
+    }
+}
+
+fn read_block_u32(name: &str, value: &SchemaValue<'_>) -> Result<u32> {
+    super::directives::directive_u32(name, value)
+        .map_err(|message| QueryError::parse(format!("@index vector {message}")))
+}
+
+fn unknown_vector_member(block: &str, member: &str) -> QueryError {
+    QueryError::parse(format!(
+        "@index vector {block} has no argument named '{member}'"
+    ))
+}
+
+/// Reads an `includes` or `fields` list into (field_name, descending) pairs.
+///
+/// An entry is either the reference's object form, `{field: "name", direction:
+/// DESC}`, or our bare string, which names the field and no direction.
+///
+/// `None` for an entry that named no direction: it inherits the directive's,
+/// which the caller resolves once every argument has been read.
+fn read_includes_value(value: &SchemaValue<'_>) -> Vec<(String, Option<bool>)> {
+    let SchemaValue::List(items) = value else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| match item {
+            SchemaValue::String(name) | SchemaValue::Enum(name) => Some((name.clone(), None)),
+            SchemaValue::Object(obj) => {
+                let field_name = obj.get("field").and_then(|v| match v {
+                    SchemaValue::String(s) | SchemaValue::Enum(s) => Some(s.clone()),
+                    _ => None,
+                })?;
+                let descending = obj.get("direction").and_then(|v| match v {
+                    SchemaValue::String(s) | SchemaValue::Enum(s) => {
+                        Some(matches!(s.as_str(), "DESC" | "desc" | "Descending"))
+                    }
+                    _ => None,
+                });
+                Some((field_name, descending))
+            }
+            _ => None,
+        })
+        .collect()
 }

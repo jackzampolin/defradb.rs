@@ -1105,31 +1105,20 @@ fn test_unknown_type_directive_emits_warning() {
     }
 }
 
+/// `@index` is deliberately stricter than every other directive: its arguments
+/// decide what gets built, so a dropped one silently builds a different index
+/// than the schema asks for. An unknown argument on `@embedding` or `@policy`
+/// is inert by comparison, and those keep warning.
 #[test]
-fn test_unknown_directive_argument_emits_warning() {
-    let sdl = r#"
-        type User {
-            email: String @index(unique: true, unknownArg: "value")
-        }
-    "#;
-
-    let output = parse_sdl_with_warnings(sdl).unwrap();
-    assert_eq!(output.collections.len(), 1);
-    assert_eq!(output.warnings.len(), 1);
-
-    match &output.warnings[0] {
-        ParseWarning::UnknownDirectiveArgument {
-            directive_name,
-            argument_name,
-            type_name,
-            field_name,
-        } => {
-            assert_eq!(directive_name, "index");
-            assert_eq!(argument_name, "unknownArg");
-            assert_eq!(type_name, "User");
-            assert_eq!(field_name.as_deref(), Some("email"));
-        }
-        other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+fn test_unknown_index_argument_is_refused() {
+    for sdl in [
+        r#"type User { email: String @index(unique: true, unknownArg: "value") }"#,
+        r#"type User @index(includes: [{field: "email"}], unknownArg: "value") { email: String }"#,
+    ] {
+        let error = parse_sdl_with_warnings(sdl)
+            .expect_err("an unknown @index argument must not parse")
+            .to_string();
+        assert!(error.contains("unknownArg"), "{sdl}: {error}");
     }
 }
 
@@ -1615,33 +1604,6 @@ fn test_default_directive_value_rejects_unsupported_field_type() {
     );
 }
 
-#[test]
-fn test_type_level_index_unknown_argument_emits_warning() {
-    let sdl = r#"
-        type User @index(fields: ["name"], unknownArg: "value") {
-            name: String
-        }
-    "#;
-
-    let output = parse_sdl_with_warnings(sdl).unwrap();
-    assert_eq!(output.collections.len(), 1);
-    assert_eq!(output.warnings.len(), 1);
-
-    match &output.warnings[0] {
-        ParseWarning::UnknownDirectiveArgument {
-            directive_name,
-            argument_name,
-            field_name,
-            ..
-        } => {
-            assert_eq!(directive_name, "index");
-            assert_eq!(argument_name, "unknownArg");
-            assert!(field_name.is_none()); // type-level
-        }
-        other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
-    }
-}
-
 // =========================================================================
 // InvalidArgumentType Warning Tests
 // =========================================================================
@@ -1760,22 +1722,61 @@ fn test_field_policy_directive_emits_unimplemented_warning() {
     }
 }
 
+/// `fields` is our shorter spelling of `includes`; both name the same set. Each
+/// parses on its own, and giving both is refused rather than resolved by
+/// precedence, which is what the directive used to do: `fields` won and
+/// `includes` was silently dropped.
 #[test]
-fn test_index_with_includes_argument_no_warning() {
+fn test_fields_and_includes_are_one_argument() {
+    for sdl in [
+        r#"type User @index(fields: ["name", "email"]) { name: String  email: String }"#,
+        r#"type User @index(includes: [{field: "name"}, {field: "email"}]) { name: String  email: String }"#,
+    ] {
+        let output = parse_sdl_with_warnings(sdl).unwrap_or_else(|e| panic!("{sdl}: {e}"));
+        assert!(output.warnings.is_empty(), "{sdl}: {:?}", output.warnings);
+        let fields: Vec<&str> = output.collections[0].indexes[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(fields, vec!["name", "email"], "{sdl}");
+    }
+
+    let error = parse_sdl_with_warnings(
+        r#"type User @index(fields: ["name"], includes: ["email"]) { name: String  email: String }"#,
+    )
+    .expect_err("one slot written twice must not parse")
+    .to_string();
+    assert!(error.contains("includes"), "got: {error}");
+}
+
+/// The nested block works at type level too, which is where the reference's own
+/// shared parser puts it.
+#[test]
+fn test_type_level_nested_ordered_configuration() {
     let sdl = r#"
-        type User @index(fields: ["name"], includes: ["email"]) {
+        type User @index(name: "userIndex", ordered: {
+            unique: true,
+            direction: DESC,
+            includes: [{field: "name"}, {field: "age", direction: ASC}]
+        }) {
             name: String
-            email: String
+            age: Int
         }
     "#;
 
-    let output = parse_sdl_with_warnings(sdl).unwrap();
-    assert_eq!(output.collections.len(), 1);
-    // includes is a known argument, should not trigger warning
-    assert!(
-        output.warnings.is_empty(),
-        "includes is a known argument but got warnings: {:?}",
-        output.warnings
+    let collections = parse_sdl(sdl).unwrap();
+    let index = &collections[0].indexes[0];
+    assert_eq!(index.name, "userIndex");
+    assert!(index.resolved_unique());
+    assert_eq!(
+        index
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.descending))
+            .collect::<Vec<_>>(),
+        vec![("name", true), ("age", false)],
+        "an entry without its own direction inherits the directive's"
     );
 }
 
