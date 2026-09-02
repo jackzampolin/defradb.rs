@@ -18,7 +18,7 @@ mod common;
 
 use common::sift::{skip_notice, SiftSmall};
 use common::vector::{Index, ALL_KINDS};
-use db::index::vector::core::Metric;
+use defra_core::vector::Metric;
 
 /// SIFT's ground truth is Euclidean.
 const METRIC: Metric = Metric::Euclidean;

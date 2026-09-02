@@ -12,13 +12,13 @@
 //! can rank a scanned code wrongly. At `nprobe = nlist` only the second remains,
 //! which is the row that isolates the codec.
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::ivfpq::IvfPq;
 use db::index::vector::engine::ivfpq::IvfPqParams;
 use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::NodeId;
+use defra_core::vector::Metric;
 
 const SEED: u64 = 0x01F4_9C0D;
 const K: usize = 10;

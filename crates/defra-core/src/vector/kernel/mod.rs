@@ -18,7 +18,7 @@
 //! [`dot`] returns the true dot product, never negated. "Smaller is closer"
 //! belongs in [`super::metric`], where a distance is defined.
 
-use defra_core::thread_bounds::MaybeSendSync;
+use crate::thread_bounds::MaybeSendSync;
 
 /// Compiled only where a SIMD tier exists to use it.
 #[cfg(any(
@@ -57,7 +57,7 @@ pub trait Element: Copy + MaybeSendSync + sealed::Sealed {
     ///
     /// An integral element cannot represent a scaled unit vector: normalizing
     /// `[3, 4]` would truncate to `[0, 0]` and destroy the direction it was
-    /// meant to preserve. [`normalize`](crate::index::vector::core::normalize) checks
+    /// meant to preserve. [`normalize`](crate::vector::metric::normalize) checks
     /// this and refuses rather than silently doing that.
     const IS_INTEGRAL: bool;
 

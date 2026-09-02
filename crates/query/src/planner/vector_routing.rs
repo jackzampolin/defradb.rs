@@ -47,9 +47,6 @@ pub enum NotRouted {
     /// The query vector's length does not match the index's declared
     /// dimensions. Scoring it would silently use the shared prefix only.
     DimensionMismatch { expected: u32, actual: usize },
-    /// The index ranks by a different measure than `SIMILARITY` does, so its
-    /// nearest neighbours are not the query's highest scorers.
-    MetricMismatch { index_metric: DistanceMetric },
 }
 
 /// The query shape the decision is made from.
@@ -173,22 +170,30 @@ pub fn route(
         });
     }
 
-    // `SIMILARITY` ranks by dot product (`SimilarityNode`), so only a dot-product
-    // index holds the same order. A cosine index normalizes away magnitude: its
-    // nearest neighbours are not the highest dot scorers, so routing to one
-    // returns the wrong documents rather than merely approximate ones. Declining
-    // costs a scan and keeps the answer right.
-    if vector.metric != DistanceMetric::Dot {
-        return Err(NotRouted::MetricMismatch {
-            index_metric: vector.metric,
-        });
-    }
+    // No metric check: `SimilarityNode` scores by whatever metric this index
+    // was built with (see `scoring_metric`), so the index's nearest neighbours
+    // are the query's highest scorers whichever metric that is. A collection
+    // cannot carry two vector indexes on one field with different metrics, so
+    // the metric the scan would use and the metric the index ranks by are the
+    // same one by construction.
 
     Ok(VectorRoute {
         index_id,
         query_vector: similarity.vector.clone(),
         k: limit.saturating_add(query.offset),
     })
+}
+
+/// The metric a `SIMILARITY` on `field_name` is scored by.
+///
+/// The field's vector index metric, or cosine when it has no vector index,
+/// matching the reference. Routing and the unrouted scan both resolve through
+/// here, so the ranking a query gets does not depend on whether the index was
+/// used.
+pub fn scoring_metric(indexes: &[IndexDescription], field_name: &str) -> DistanceMetric {
+    vector_index_on(indexes, field_name)
+        .map(|(_, vector)| vector.metric)
+        .unwrap_or_default()
 }
 
 /// The vector index over `field_name`, if a collection has one.

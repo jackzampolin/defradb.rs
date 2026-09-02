@@ -14,9 +14,9 @@
 //! near-equidistant cluster members as a full miss, so it understates quality
 //! on clustered data; the ratio of returned to ideal total distance does not.
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::store::NodeId;
+use defra_core::vector::Metric;
 
 const SEED: u64 = 0x9E37_79B9;
 const QUERIES: usize = 30;

@@ -6,12 +6,10 @@
 
 use async_trait::async_trait;
 use document::NormalValue;
-use schema::{DistanceMetric, IndexDescription, VectorAlgorithm, VectorIndexDescription};
+use schema::{IndexDescription, VectorAlgorithm, VectorIndexDescription};
 use storage::corekv::{MaybeSend, Reader, Writer};
 use storage::index::CollectionIndex;
 
-use super::core::Element;
-use super::core::Metric;
 use super::engine::ann::{Admit, Neighbor, VectorIndexEngine};
 use super::engine::dispatch::Engine;
 use super::engine::flat::Flat;
@@ -22,6 +20,8 @@ use super::kv_store::KvNodeStore;
 use super::params::Params;
 use super::store::NodeId;
 use crate::index::error::{Error, Result};
+use defra_core::vector::Element;
+use defra_core::vector::Metric;
 
 /// The only epoch until something triggers a rebuild. The key layout carries
 /// the component so that day does not require migrating every entry.
@@ -76,11 +76,7 @@ impl VectorIndex {
             ssg.validate()?;
         }
 
-        let metric = match vector.metric {
-            DistanceMetric::Cosine => Metric::Cosine,
-            DistanceMetric::Euclidean => Metric::Euclidean,
-            DistanceMetric::Dot => Metric::NegativeDot,
-        };
+        let metric = vector.metric.engine_metric();
 
         // Refused here rather than at query time, so a description that can
         // never answer is rejected where it is created.
@@ -235,11 +231,11 @@ impl Indexable<'_> {
             return true;
         }
         let squared = match self {
-            Indexable::Narrow(v) => super::core::squared_norm(v),
-            Indexable::Wide(v) => super::core::squared_norm(v),
-            Indexable::Integral(v) => super::core::squared_norm(v),
+            Indexable::Narrow(v) => defra_core::vector::squared_norm(v),
+            Indexable::Wide(v) => defra_core::vector::squared_norm(v),
+            Indexable::Integral(v) => defra_core::vector::squared_norm(v),
         };
-        squared.is_finite() && squared >= super::core::NORM_THRESHOLD
+        squared.is_finite() && squared >= defra_core::vector::NORM_THRESHOLD
     }
 }
 

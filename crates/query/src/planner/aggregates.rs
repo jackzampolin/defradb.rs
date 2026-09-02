@@ -17,13 +17,17 @@ use super::builder::Planner;
 impl Planner {
     /// Add SimilarityNode(s) to the plan for each _similarity field in the select.
     ///
-    /// Each _similarity computes a dot product between the document's vector field
-    /// and the query vector, storing the result at the designated index.
+    /// Each one scores the document's vector field against the query vector
+    /// under the metric that field's vector index was built with, so a query
+    /// that misses the routed shape still ranks the collection the way the
+    /// index would have. `indexes` is the collection's, which is where that
+    /// metric comes from.
     pub(super) fn add_similarity_nodes(
         &self,
         mut plan: Box<dyn PlanNode>,
         select: &Select,
         mapping: &DocumentMapping,
+        indexes: &[schema::IndexDescription],
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::Similarity(sim) = field {
@@ -52,6 +56,8 @@ impl Planner {
                     field_index,
                     similarity_index,
                     sim.vector.clone(),
+                    crate::planner::vector_routing::scoring_metric(indexes, &sim.target_field)
+                        .engine_metric(),
                 ));
             }
         }

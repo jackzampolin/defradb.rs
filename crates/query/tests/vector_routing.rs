@@ -242,40 +242,12 @@ fn the_index_on_the_target_field_is_chosen() {
     assert_eq!(route(&routable(), &indexes).unwrap().index_id, 9);
 }
 
-/// A cosine index ranks by a different measure than `SIMILARITY`, so its
-/// nearest neighbours are not the query's top scorers. Routing to it would
-/// return the wrong documents, so it must be refused.
+/// The scan scores by whatever metric the field's index carries, so every
+/// combination routes: there is no pair for which the index ranks one way and
+/// the query scores another. Before this, only a `DOT` index routed, because
+/// the scan always computed a raw dot product regardless of the index.
 #[test]
-fn a_cosine_index_is_refused() {
-    let index = IndexDescription {
-        name: "by_embedding".to_string(),
-        id: 1,
-        fields: vec![IndexedFieldDescription {
-            name: "embedding".to_string(),
-            descending: false,
-        }],
-        unique: false,
-        kind: None,
-        auto_generated: false,
-    }
-    .as_vector(VectorIndexDescription::with_defaults(
-        VectorAlgorithm::Hnsw,
-        DistanceMetric::Cosine,
-        DIMENSIONS,
-    ));
-
-    assert_eq!(
-        route(&routable(), &[index]),
-        Err(NotRouted::MetricMismatch {
-            index_metric: DistanceMetric::Cosine
-        })
-    );
-}
-
-/// Every algorithm can be built with either metric, so the refusal must be
-/// about the metric and never about which engine was chosen.
-#[test]
-fn the_metric_decides_regardless_of_algorithm() {
+fn every_algorithm_and_metric_routes() {
     for algorithm in VectorAlgorithm::ALL {
         for metric in DistanceMetric::ALL {
             // The schema refuses a pair the algorithm cannot rank by, so such an
@@ -298,14 +270,42 @@ fn the_metric_decides_regardless_of_algorithm() {
                 *algorithm, *metric, DIMENSIONS,
             ));
 
-            let routed = route(&routable(), &[index]).is_ok();
-            assert_eq!(
-                routed,
-                *metric == DistanceMetric::Dot,
-                "{} with {}",
+            assert!(
+                route(&routable(), &[index]).is_ok(),
+                "{} with {} must route",
                 algorithm.as_str(),
                 metric.as_str()
             );
         }
     }
+}
+
+/// The metric the scan scores by is the one the field's index declares, and
+/// cosine when it declares none. A disagreement here is a ranking that changes
+/// with whether the index happened to be used.
+#[test]
+fn the_scoring_metric_follows_the_field_index() {
+    use query::planner::vector_routing::scoring_metric;
+
+    let indexes = [
+        ordered_index(1, "title"),
+        vector_index(9, "embedding", DIMENSIONS),
+    ];
+
+    assert_eq!(scoring_metric(&indexes, "embedding"), DistanceMetric::Dot);
+    assert_eq!(
+        scoring_metric(&indexes, "title"),
+        DistanceMetric::Cosine,
+        "an ordered index is not a vector index"
+    );
+    assert_eq!(
+        scoring_metric(&indexes, "unindexed"),
+        DistanceMetric::Cosine,
+        "an unindexed field scores as cosine"
+    );
+    assert_eq!(
+        scoring_metric(&[], "embedding"),
+        DistanceMetric::Cosine,
+        "a collection with no indexes at all scores as cosine"
+    );
 }

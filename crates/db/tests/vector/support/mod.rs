@@ -5,7 +5,6 @@
 
 #![allow(dead_code)]
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::hnsw::Hnsw;
@@ -13,6 +12,7 @@ use db::index::vector::params::Params;
 use db::index::vector::params::DEFAULT_M;
 use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::NodeId;
+use defra_core::vector::Metric;
 
 /// A fixed corpus needs a generator that produces the same vectors on every
 /// machine and every release. SplitMix64 over a named seed does; a

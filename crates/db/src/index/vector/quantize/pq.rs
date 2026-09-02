@@ -1,8 +1,8 @@
 //! Product quantization: a vector as `m` bytes.
 
 use crate::index::error::{Error, Result};
-use crate::index::vector::core::squared_euclidean;
 use crate::index::vector::engine::ann::{Centroids, Clusterer, Quantizer};
+use defra_core::vector::squared_euclidean;
 
 /// Codebook entries per subquantizer. `nbits = 8`, so a code component is a
 /// `u8` and a list scan is a byte lookup; that is the whole reason the scan is

@@ -17,7 +17,6 @@ use crate::support::GRAPH_SEED;
 use crate::support::QUERY_SEED;
 use db::index::error::Error;
 use db::index::error::Result;
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::AdmitAll;
 use db::index::vector::engine::ann::EngineKind;
 use db::index::vector::engine::ann::VectorIndexEngine;
@@ -37,6 +36,7 @@ use db::index::vector::store::Node;
 use db::index::vector::store::NodeId;
 use db::index::vector::store::VectorNodeStore;
 use defra_core::thread_bounds::MaybeSend;
+use defra_core::vector::Metric;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 

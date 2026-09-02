@@ -1,21 +1,29 @@
-//! SimilarityNode for computing dot product similarity between document vectors and query vectors
+//! `SimilarityNode`, which scores a document's vector field against the query
+//! vector without an index.
 
 use async_trait::async_trait;
+use defra_core::vector::Metric;
 use serde_json::Value as JsonValue;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 
-/// SimilarityNode computes the dot product between a document's vector field
-/// and a query vector, storing the result as a Float in the document.
+/// Scores a document's vector field against the query vector, storing the
+/// result as a Float in the document.
 ///
 /// For each document from the source, it:
 /// 1. Reads the target field (a numeric array like `[Int!]` or `[Float64!]`)
-/// 2. Computes the dot product with the query vector
+/// 2. Scores it against the query vector under the target index's metric
 /// 3. Stores the result at the designated similarity index
 ///
 /// Errors if vectors have different lengths.
+///
+/// The score is a similarity, so larger is nearer, and the metric is the one
+/// the target field's vector index was built with. That is what lets a query
+/// return the same documents in the same order whether or not the index
+/// answered it: this node and the index resolve the same
+/// [`schema::DistanceMetric`] through the same maths.
 pub struct SimilarityNode {
     source: Box<dyn PlanNode>,
     document_mapping: DocumentMapping,
@@ -23,8 +31,12 @@ pub struct SimilarityNode {
     field_index: usize,
     /// Index where the similarity result should be stored
     similarity_index: usize,
-    /// The query vector to compute dot product against
+    /// The query vector to score against
     vector: Vec<f64>,
+    /// How the target field's index ranks, so an unrouted scan orders the
+    /// collection the way a routed one would. Cosine when the field has no
+    /// vector index, matching the reference.
+    metric: Metric,
     /// Current document with similarity result
     current_doc: Doc,
     /// Execution statistics
@@ -38,6 +50,7 @@ impl SimilarityNode {
         field_index: usize,
         similarity_index: usize,
         vector: Vec<f64>,
+        metric: Metric,
     ) -> Self {
         Self {
             source,
@@ -45,14 +58,10 @@ impl SimilarityNode {
             field_index,
             similarity_index,
             vector,
+            metric,
             current_doc: Doc::default(),
             exec_info: ExecInfo::default(),
         }
-    }
-
-    /// Compute dot product of two f64 slices.
-    fn dot_product(a: &[f64], b: &[f64]) -> f64 {
-        a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
     }
 
     /// Extract a numeric vector from a JSON array value.
@@ -109,8 +118,7 @@ impl PlanNode for SimilarityNode {
                     )));
                 }
 
-                // Compute dot product
-                let result = Self::dot_product(&doc_vector, &self.vector);
+                let result = self.metric.similarity(&doc_vector, &self.vector);
 
                 // Store as Float (f64)
                 let json_result = serde_json::Number::from_f64(result)

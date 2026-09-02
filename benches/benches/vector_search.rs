@@ -5,7 +5,7 @@
 //! ```
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use db::index::vector::core::{dot, squared_euclidean, Metric, Tier};
+use defra_core::vector::{dot, squared_euclidean, Metric, Tier};
 use std::hint::black_box;
 
 mod common;
@@ -125,7 +125,7 @@ fn kernel_tiers(c: &mut Criterion) {
     let mut group = c.benchmark_group("kernel_tiers[768]");
     group.throughput(Throughput::Elements(768));
 
-    for tier in db::index::vector::core::ALL_TIERS.iter().copied() {
+    for tier in defra_core::vector::ALL_TIERS.iter().copied() {
         if !tier.is_available() {
             continue;
         }

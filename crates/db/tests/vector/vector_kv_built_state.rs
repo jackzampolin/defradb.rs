@@ -4,7 +4,6 @@
 //! through `KvNodeStore`, commits, and reopens, so what is asserted is that the
 //! trained structures actually persist rather than that the algorithm works.
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::ivfpq::IvfPq;
 use db::index::vector::engine::ivfpq::IvfPqParams;
@@ -14,6 +13,7 @@ use db::index::vector::kv_store::KvNodeStore;
 use db::index::vector::params::Params;
 use db::index::vector::params::DEFAULT_M;
 use db::index::vector::store::NodeId;
+use defra_core::vector::Metric;
 use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::RegolithStore;

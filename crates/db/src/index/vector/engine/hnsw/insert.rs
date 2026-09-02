@@ -2,9 +2,9 @@
 
 use super::Hnsw;
 use crate::index::error::{Error, Result};
-use crate::index::vector::core::Element;
 use crate::index::vector::engine::ann::AdmitAll;
 use crate::index::vector::store::{Meta, Node, NodeId, VectorNodeStore};
+use defra_core::vector::Element;
 
 impl<S: VectorNodeStore> Hnsw<S> {
     /// Adds `vector` under `id`, replacing any node already stored there.

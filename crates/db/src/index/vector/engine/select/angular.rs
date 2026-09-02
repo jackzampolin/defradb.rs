@@ -1,7 +1,7 @@
 //! SSG's angular pruning (Fu, Wang, Cai 2019, arXiv:1907.06146).
 
-use crate::index::vector::core::{dot, Metric};
 use crate::index::vector::engine::ann::{Candidate, EdgeSelector};
+use defra_core::vector::{dot, Metric};
 
 /// Minimum angle between two kept edges, in degrees. The paper's value.
 pub const DEFAULT_ANGLE_DEGREES: f32 = 60.0;

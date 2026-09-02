@@ -1,7 +1,7 @@
 //! HNSW's SELECT-NEIGHBORS-HEURISTIC (paper Algorithm 4).
 
-use crate::index::vector::core::Metric;
 use crate::index::vector::engine::ann::{Candidate, EdgeSelector};
+use defra_core::vector::Metric;
 
 /// Keeps a candidate only when it is closer to the query than to every
 /// neighbour already kept. `extendCandidates` and `keepPrunedConnections` are

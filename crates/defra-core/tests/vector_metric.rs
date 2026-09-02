@@ -1,13 +1,13 @@
 //! Metrics must be distances (smaller is closer), total (no error, no panic,
 //! for any input) and orderable (never NaN), at both element widths.
 
-use db::index::vector::core::norm;
-use db::index::vector::core::normalize;
-use db::index::vector::core::squared_norm;
-use db::index::vector::core::Element;
-use db::index::vector::core::Metric;
-use db::index::vector::core::MAX_COSINE_DISTANCE;
-use db::index::vector::core::NORM_THRESHOLD;
+use defra_core::vector::norm;
+use defra_core::vector::normalize;
+use defra_core::vector::squared_norm;
+use defra_core::vector::Element;
+use defra_core::vector::Metric;
+use defra_core::vector::MAX_COSINE_DISTANCE;
+use defra_core::vector::NORM_THRESHOLD;
 
 const METRICS: [Metric; 3] = [Metric::Cosine, Metric::Euclidean, Metric::NegativeDot];
 
@@ -371,4 +371,103 @@ fn empty_vectors_are_handled() {
         "no direction sorts last"
     );
     assert_eq!(Metric::Euclidean.distance::<f64>(&[], &[]), 0.0);
+}
+
+/// `similarity` publishes the inverse convention to the rest of the module:
+/// larger is nearer. It is what the `SIMILARITY` field returns, so its formulas
+/// are pinned against the reference's rather than left to follow whatever
+/// `distance` happens to compute.
+mod similarity {
+    use defra_core::vector::Metric;
+
+    /// `dot / (|a| |b|)`, deliberately unclamped so an exact match reports the
+    /// raw quotient the reference reports.
+    #[test]
+    fn cosine_is_the_true_cosine() {
+        // [3, 4] and [6, 8] are collinear: the cosine is 1 whatever the lengths.
+        let score = Metric::Cosine.similarity(&[3.0f64, 4.0], &[6.0, 8.0]);
+        assert!((score - 1.0).abs() <= 4.0 * f64::EPSILON, "{score}");
+
+        // Orthogonal.
+        assert_eq!(Metric::Cosine.similarity(&[1.0f64, 0.0], &[0.0, 1.0]), 0.0);
+
+        // Opposed.
+        let score = Metric::Cosine.similarity(&[1.0f64, 0.0], &[-2.0, 0.0]);
+        assert!((score + 1.0).abs() <= 4.0 * f64::EPSILON, "{score}");
+    }
+
+    /// A vector with no length has no direction, so its similarity to anything
+    /// is zero rather than a division by zero.
+    #[test]
+    fn cosine_of_a_zero_vector_is_zero() {
+        assert_eq!(Metric::Cosine.similarity(&[0.0f64, 0.0], &[1.0, 1.0]), 0.0);
+        assert_eq!(Metric::Cosine.similarity(&[1.0f64, 1.0], &[0.0, 0.0]), 0.0);
+        assert_eq!(Metric::Cosine.similarity(&[0.0f64, 0.0], &[0.0, 0.0]), 0.0);
+    }
+
+    /// Negated *squared* distance: the root is monotonic, so dropping it changes
+    /// every value and no ordering, and the reference drops it too.
+    #[test]
+    fn euclidean_is_the_negated_squared_distance() {
+        assert_eq!(
+            Metric::Euclidean.similarity(&[1.0f64, 2.0], &[4.0, 6.0]),
+            -25.0
+        );
+        assert_eq!(Metric::Euclidean.similarity(&[1.0f64], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn dot_is_the_plain_product() {
+        assert_eq!(
+            Metric::NegativeDot.similarity(&[1.0f64, 2.0], &[3.0, 4.0]),
+            11.0
+        );
+    }
+
+    /// Larger is nearer for every metric, which is what lets one `ORDER BY
+    /// SIMILARITY DESC` serve all three.
+    #[test]
+    fn every_metric_scores_a_nearer_vector_higher() {
+        let query = [1.0f64, 0.0];
+        for metric in [Metric::Cosine, Metric::Euclidean, Metric::NegativeDot] {
+            let near = metric.similarity(&query, &[1.0, 0.05]);
+            let far = metric.similarity(&query, &[-1.0, 0.0]);
+            assert!(near > far, "{metric:?}: near {near}, far {far}");
+        }
+    }
+
+    /// A similarity ranks the reverse of the distance it comes from, or a
+    /// routed query and a scanned one would disagree about which document is
+    /// nearest.
+    #[test]
+    fn similarity_orders_inversely_to_distance() {
+        let query = [1.0f64, 0.0, 0.5];
+        let corpus = [
+            [1.0f64, 0.0, 0.5],
+            [0.9, 0.1, 0.4],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, -0.5],
+            [3.0, 0.0, 1.5],
+        ];
+
+        for metric in [Metric::Cosine, Metric::Euclidean, Metric::NegativeDot] {
+            let mut by_similarity: Vec<usize> = (0..corpus.len()).collect();
+            by_similarity.sort_by(|a, b| {
+                metric
+                    .similarity(&query, &corpus[*b])
+                    .partial_cmp(&metric.similarity(&query, &corpus[*a]))
+                    .expect("scores are finite")
+            });
+
+            let mut by_distance: Vec<usize> = (0..corpus.len()).collect();
+            by_distance.sort_by(|a, b| {
+                metric
+                    .distance(&query, &corpus[*a])
+                    .partial_cmp(&metric.distance(&query, &corpus[*b]))
+                    .expect("distances are finite")
+            });
+
+            assert_eq!(by_similarity, by_distance, "{metric:?}");
+        }
+    }
 }

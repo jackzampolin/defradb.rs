@@ -5,9 +5,9 @@ use std::collections::{BinaryHeap, HashSet};
 
 use super::{Candidate, Hnsw};
 use crate::index::error::{Error, Result};
-use crate::index::vector::core::Element;
 use crate::index::vector::engine::ann::{Admit, AdmitAll, Neighbor};
 use crate::index::vector::store::{NodeId, VectorNodeStore};
+use defra_core::vector::Element;
 
 impl<S: VectorNodeStore> Hnsw<S> {
     /// Up to `k` nearest live nodes to `query`, nearest first.

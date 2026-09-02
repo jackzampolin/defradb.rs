@@ -2,6 +2,7 @@
 //!
 //! Matches Go's client/index.go and client/encrypted_index.go
 
+use defra_core::vector::Metric;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Describes a field within an index.
@@ -465,6 +466,20 @@ impl DistanceMetric {
     pub fn is_go_compatible(self) -> bool {
         match self {
             Self::Cosine | Self::Euclidean | Self::Dot => true,
+        }
+    }
+
+    /// The maths this metric names.
+    ///
+    /// The single mapping from the described metric to the computed one. Both
+    /// the index engines and the query planner resolve through here, so a
+    /// selection scored by a full scan cannot rank a collection differently
+    /// from the index that would have answered it.
+    pub fn engine_metric(self) -> Metric {
+        match self {
+            Self::Cosine => Metric::Cosine,
+            Self::Euclidean => Metric::Euclidean,
+            Self::Dot => Metric::NegativeDot,
         }
     }
 }

@@ -8,13 +8,13 @@
 //! Sized to run in the ordinary suite; the full curves live in
 //! `ivfpq_recall_baseline.rs`, which is `#[ignore]`d.
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::ivfpq::IvfPq;
 use db::index::vector::engine::ivfpq::IvfPqParams;
 use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::NodeId;
+use defra_core::vector::Metric;
 
 const SEED: u64 = 0x09C0_D1F4;
 const K: usize = 10;

@@ -1,7 +1,7 @@
 //! Lloyd's k-means with k-means++ seeding, over a resident sample.
 
-use crate::index::vector::core::squared_euclidean;
 use crate::index::vector::engine::ann::{Centroids, Clusterer, Fit};
+use defra_core::vector::squared_euclidean;
 
 /// Lloyd's algorithm with k-means++ seeding.
 #[derive(Debug, Clone, Copy)]

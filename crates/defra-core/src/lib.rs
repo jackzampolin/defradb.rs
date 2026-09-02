@@ -25,6 +25,7 @@ pub mod store;
 pub mod thread_bounds;
 pub mod transaction;
 pub mod types;
+pub mod vector;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod wasm_task_local;
 

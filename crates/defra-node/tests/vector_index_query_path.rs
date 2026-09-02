@@ -14,7 +14,8 @@ use serde_json::Value;
 const DIMENSIONS: usize = 8;
 const CORPUS: usize = 40;
 
-/// `SIMILARITY` ranks by dot product, so the index must too or routing declines.
+/// No metric argument: `SIMILARITY` scores by whichever metric the index
+/// declares, so the default has to route like any other.
 fn schema(algorithm: &str) -> String {
     let args = if algorithm.is_empty() {
         format!("dimensions: {DIMENSIONS}")
@@ -22,7 +23,7 @@ fn schema(algorithm: &str) -> String {
         format!("dimensions: {DIMENSIONS}, algorithm: \"{algorithm}\"")
     };
     format!(
-        "type Note {{ title: String  tag: String  embedding: [Float32!] @vectorIndex({args}, metric: \"DOT\") }}"
+        "type Note {{ title: String  tag: String  embedding: [Float32!] @vectorIndex({args}) }}"
     )
 }
 
@@ -168,11 +169,10 @@ async fn similarity_reaches_the_index_inside_a_transaction() {
 #[tokio::test]
 async fn similarity_reaches_the_index_for_every_algorithm() {
     for algorithm in schema::VectorAlgorithm::ALL {
-        // SIMILARITY ranks by dot product, so an algorithm that cannot order one
-        // is covered by `an_unsupported_metric_is_refused_when_the_schema_is_written`.
-        if !algorithm.supports_metric(schema::DistanceMetric::Dot) {
-            continue;
-        }
+        // Every algorithm supports the default metric, so none is skipped here;
+        // the pairs an algorithm refuses are covered by
+        // `an_unsupported_metric_is_refused_when_the_schema_is_written`.
+        assert!(algorithm.supports_metric(schema::DistanceMetric::default()));
         let node = node_with(algorithm.as_str()).await;
         seed(&node).await;
 
@@ -215,11 +215,17 @@ async fn a_filtered_similarity_query_returns_a_full_page() {
     );
 }
 
-/// A cosine index ranks by a different measure than `SIMILARITY` does, so
-/// routing to it would return the wrong documents. It must decline and scan,
-/// and the answer must still be right.
+/// A cosine index serves a `SIMILARITY` ranking, and serves the same answer the
+/// exhaustive scan gives.
+///
+/// This is the whole point of scoring by the index's metric. `SIMILARITY` used
+/// to compute a raw dot product no matter what the index was built with, so a
+/// cosine index ranked one way while the scan scored another; routing to it
+/// would have returned different documents, and the planner declined for that
+/// reason. Now both resolve one metric, so the routed page and the exhaustive
+/// page must be the same page.
 #[tokio::test]
-async fn a_mismatched_metric_declines_to_route_and_stays_correct() {
+async fn a_cosine_index_routes_and_agrees_with_the_exhaustive_scan() {
     let node = EmbeddedNode::builder().build().await.unwrap();
     node.add_schema(&format!(
         "type Note {{ title: String  tag: String  embedding: [Float32!] @vectorIndex(dimensions: {DIMENSIONS}, metric: \"COSINE\") }}"
@@ -229,42 +235,62 @@ async fn a_mismatched_metric_declines_to_route_and_stays_correct() {
     seed(&node).await;
 
     let query = similarity_query(&vector_for(3), 5, None);
-    let explain = query_data(
-        &node,
-        &format!("query @explain(type: execute) {query}"),
-        "cosine explain",
-    )
-    .await;
-    assert_eq!(
-        vector_index(&explain),
-        None,
-        "a cosine index must not serve a dot-product ranking\n{explain:#}"
-    );
+    assert_routes(&node, &query, "cosine").await;
 
     let routed = query_data(&node, &query, "cosine similarity").await;
     let rows = routed["Note"].as_array().expect("Note array");
     assert_eq!(rows.len(), 5);
 
-    // The scan is exhaustive, so its top score is the true maximum.
-    let best = rows[0]["sim"].as_f64().expect("sim");
+    let routed_titles: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["title"].as_str())
+        .collect();
+    let routed_scores: Vec<f64> = rows.iter().filter_map(|row| row["sim"].as_f64()).collect();
+
+    // Unlimited, so nothing can narrow it: this is every document scored by the
+    // scan, which is the answer the routed page has to reproduce.
     let all = query_data(
         &node,
         &format!(
-            r#"{{ Note(limit: {CORPUS}) {{ sim: SIMILARITY(embedding: {{vector: [{}]}}) }} }}"#,
+            r#"{{ Note(order: {{_alias: {{sim: DESC}}}}, limit: {CORPUS}) {{ title sim: SIMILARITY(embedding: {{vector: [{}]}}) }} }}"#,
             render(&vector_for(3))
         ),
         "exhaustive scores",
     )
     .await;
-    let true_best = all["Note"]
-        .as_array()
-        .expect("Note array")
+    let exhaustive = all["Note"].as_array().expect("Note array");
+    let expected_titles: Vec<&str> = exhaustive
+        .iter()
+        .filter_map(|row| row["title"].as_str())
+        .take(5)
+        .collect();
+    let expected_scores: Vec<f64> = exhaustive
         .iter()
         .filter_map(|row| row["sim"].as_f64())
-        .fold(f64::MIN, f64::max);
+        .take(5)
+        .collect();
+
+    assert_eq!(
+        routed_titles, expected_titles,
+        "the routed page must be the exhaustive page"
+    );
+    assert_eq!(
+        routed_scores, expected_scores,
+        "the routed scores must be the exhaustive scores"
+    );
+
+    // A cosine score is a true cosine, so it stays within [-1, 1] up to
+    // rounding: the quotient is deliberately not clamped, matching the
+    // reference, so an exact match can land a ULP past 1. A raw dot product
+    // over this corpus runs to the hundreds, which is what the old scoring
+    // produced here, so the bound separates the two by three orders of
+    // magnitude even with the slop.
+    const SLOP: f64 = 4.0 * f64::EPSILON;
     assert!(
-        (best - true_best).abs() <= true_best.abs() * 1e-9,
-        "declining to route must still return the true nearest: got {best}, best is {true_best}"
+        routed_scores
+            .iter()
+            .all(|score| (-1.0 - SLOP..=1.0 + SLOP).contains(score)),
+        "cosine scores must be cosines: {routed_scores:?}"
     );
 }
 
@@ -307,7 +333,11 @@ async fn a_scalar_index_on_the_filter_does_not_displace_the_vector_index() {
 
 /// Every combination that reaches the read path, checked against one invariant:
 /// the answer must be the same one an exhaustive scan gives, and the index must
-/// be used exactly when the metric allows it.
+/// be used whatever the metric.
+///
+/// The scan scores by the index's own metric, so the two rank identically by
+/// construction. Before that, only a `DOT` index routed and the other metrics
+/// silently full-scanned.
 ///
 /// Axes: algorithm x metric x filter shape x fetcher. A new engine or metric
 /// enters the matrix by appearing in `ALL`, so coverage cannot fall behind the
@@ -351,18 +381,15 @@ async fn every_combination_agrees_with_an_exhaustive_scan() {
                     let probe = vector_for(3);
                     let query = similarity_query(&probe, LIMIT, filter);
 
-                    // Only a dot-product index ranks the way SIMILARITY does.
                     let explain = query_data(
                         &node,
                         &format!("query @explain(type: execute) {query}"),
                         &case,
                     )
                     .await;
-                    let routed = vector_index(&explain).is_some();
-                    assert_eq!(
-                        routed,
-                        *metric == schema::DistanceMetric::Dot,
-                        "{case}: routing must follow the metric\n{explain:#}"
+                    assert!(
+                        vector_index(&explain).is_some(),
+                        "{case}: every metric must route\n{explain:#}"
                     );
 
                     let data = if in_transaction {
