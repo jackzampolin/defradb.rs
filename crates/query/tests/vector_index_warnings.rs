@@ -3,8 +3,9 @@
 
 use query::executor::QueryResponse;
 use query::planner::vector_routing::{vector_index_unused_warning, NotRouted};
+use schema::DistanceMetric;
 
-fn all_not_routed_variants() -> [NotRouted; 6] {
+fn all_not_routed_variants() -> [NotRouted; 8] {
     [
         NotRouted::NoLimit,
         NotRouted::NotOneSimilarity,
@@ -14,6 +15,10 @@ fn all_not_routed_variants() -> [NotRouted; 6] {
         NotRouted::DimensionMismatch {
             expected: 4,
             actual: 2,
+        },
+        NotRouted::AmbiguousMetric,
+        NotRouted::MetricMismatch {
+            requested: DistanceMetric::Dot,
         },
     ]
 }
@@ -30,6 +35,8 @@ fn every_not_routed_variant_maps_to_its_reason_string() {
             NotRouted::NoVectorIndex => "noVectorIndex",
             NotRouted::ShowDeleted => "showDeleted",
             NotRouted::DimensionMismatch { .. } => "dimensionMismatch",
+            NotRouted::AmbiguousMetric => "ambiguousMetric",
+            NotRouted::MetricMismatch { .. } => "metricMismatch",
         };
         assert_eq!(variant.reason(), expected);
     }

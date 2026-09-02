@@ -552,8 +552,9 @@ impl<'a> SdlParser<'a> {
                 }
             }
 
-            // Handle field-level @index directive
-            if let Some(ref idx_config) = parsed_field.directives.index {
+            // Handle field-level @index directives, of which a field may carry
+            // several.
+            for idx_config in &parsed_field.directives.index {
                 // Build fields list based on includes
                 // For relation fields (non-array), Go DefraDB stores indexes on the FK field
                 // (_fieldID) rather than the relation field name.
@@ -768,135 +769,136 @@ impl<'a> SdlParser<'a> {
         // so a collection definition carries one list whichever runtime wrote
         // it.
         for field in &type_def.fields {
-            let Some(config) = field.directives.vector_index.as_ref() else {
-                continue;
-            };
-            let name = config.name.clone().unwrap_or_else(|| {
-                generate_index_name(&type_def.name, &field.name, &existing_index_names)
-            });
-            existing_index_names.push(name.clone());
-            index_id_counter += 1;
+            for config in &field.directives.vector_index {
+                let name = config.name.clone().unwrap_or_else(|| {
+                    generate_index_name(&type_def.name, &field.name, &existing_index_names)
+                });
+                existing_index_names.push(name.clone());
+                index_id_counter += 1;
 
-            // The algorithm is chosen by which block is set, which is also
-            // what the wire envelope does. `alg:` names one directly, for the
-            // default configuration; giving both is fine as long as they agree,
-            // and a disagreement is refused rather than resolved by precedence.
-            let mut algorithm: Option<schema::VectorAlgorithm> = None;
-            for (present, selected) in [
-                (config.flat.is_some(), schema::VectorAlgorithm::Flat),
-                (config.hnsw.is_some(), schema::VectorAlgorithm::Hnsw),
-                (config.ivfpq.is_some(), schema::VectorAlgorithm::IvfPq),
-                (config.ssg.is_some(), schema::VectorAlgorithm::Ssg),
-            ] {
-                if !present {
-                    continue;
+                // The algorithm is chosen by which block is set, which is also
+                // what the wire envelope does. `alg:` names one directly, for the
+                // default configuration; giving both is fine as long as they agree,
+                // and a disagreement is refused rather than resolved by precedence.
+                let mut algorithm: Option<schema::VectorAlgorithm> = None;
+                for (present, selected) in [
+                    (config.flat.is_some(), schema::VectorAlgorithm::Flat),
+                    (config.hnsw.is_some(), schema::VectorAlgorithm::Hnsw),
+                    (config.ivfpq.is_some(), schema::VectorAlgorithm::IvfPq),
+                    (config.ssg.is_some(), schema::VectorAlgorithm::Ssg),
+                ] {
+                    if !present {
+                        continue;
+                    }
+                    if let Some(existing) = algorithm.filter(|existing| *existing != selected) {
+                        return Err(QueryError::parse(format!(
+                            "@index vector configures both {} and {}",
+                            existing.as_str(),
+                            selected.as_str()
+                        )));
+                    }
+                    algorithm = Some(selected);
                 }
-                if let Some(existing) = algorithm.filter(|existing| *existing != selected) {
-                    return Err(QueryError::parse(format!(
-                        "@index vector configures both {} and {}",
-                        existing.as_str(),
-                        selected.as_str()
-                    )));
+                if let Some(named) = config.algorithm.as_deref() {
+                    let named = schema::VectorAlgorithm::from_sdl_name(named).ok_or_else(|| {
+                        QueryError::parse(format!("@index vector has no algorithm named '{named}'"))
+                    })?;
+                    if let Some(existing) = algorithm.filter(|existing| *existing != named) {
+                        return Err(QueryError::parse(format!(
+                            "@index vector alg is {} but the {} block is configured",
+                            named.as_str(),
+                            existing.as_str()
+                        )));
+                    }
+                    algorithm = Some(named);
                 }
-                algorithm = Some(selected);
+                let algorithm = algorithm.unwrap_or_default();
+
+                // The metric belongs to the algorithm, so it is read from that
+                // algorithm's own block and nowhere else.
+                let hnsw = config.hnsw.clone().unwrap_or_default();
+                let named_metric = match algorithm {
+                    schema::VectorAlgorithm::Flat => {
+                        config.flat.as_ref().and_then(|f| f.metric.clone())
+                    }
+                    schema::VectorAlgorithm::Hnsw => hnsw.metric.clone(),
+                    schema::VectorAlgorithm::IvfPq => {
+                        config.ivfpq.as_ref().and_then(|b| b.metric.clone())
+                    }
+                    schema::VectorAlgorithm::Ssg => {
+                        config.ssg.as_ref().and_then(|b| b.metric.clone())
+                    }
+                };
+                let metric = match named_metric.as_deref() {
+                    None => schema::DistanceMetric::default(),
+                    Some(name) => schema::DistanceMetric::from_sdl_name(name).ok_or_else(|| {
+                        QueryError::parse(format!("@index vector has no metric named '{name}'"))
+                    })?,
+                };
+
+                let defaults = schema::HnswParams::default();
+
+                indexes.push(
+                    IndexDescription {
+                        name,
+                        id: index_id_counter,
+                        fields: vec![IndexedFieldDescription {
+                            name: field.name.clone(),
+                            descending: false,
+                        }],
+                        unique: false,
+                        kind: None,
+                        auto_generated: false,
+                    }
+                    .as_vector(schema::VectorIndexDescription {
+                        algorithm,
+                        metric,
+                        // Absent leaves this zero, which definition validation
+                        // rejects. Go stopped inferring it from an `@embedding` in
+                        // sourcenetwork/defradb#5188.
+                        dimensions: config.dimensions.unwrap_or(0),
+                        hnsw: match algorithm {
+                            schema::VectorAlgorithm::Hnsw => Some(schema::HnswParams {
+                                m: hnsw.m.unwrap_or(defaults.m),
+                                ef_construction: hnsw
+                                    .ef_construction
+                                    .unwrap_or(defaults.ef_construction),
+                                ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
+                            }),
+                            schema::VectorAlgorithm::Flat
+                            | schema::VectorAlgorithm::IvfPq
+                            | schema::VectorAlgorithm::Ssg => None,
+                        },
+                        ivfpq: match algorithm {
+                            schema::VectorAlgorithm::IvfPq => {
+                                let ivfpq = config.ivfpq.clone().unwrap_or_default();
+                                let defaults = schema::IvfPqParams::default();
+                                Some(schema::IvfPqParams {
+                                    nlist: ivfpq.nlist.unwrap_or(defaults.nlist),
+                                    nprobe: ivfpq.nprobe.unwrap_or(defaults.nprobe),
+                                    m: ivfpq.m.unwrap_or(defaults.m),
+                                    sample_bytes: ivfpq
+                                        .sample_bytes
+                                        .map_or(defaults.sample_bytes, u64::from),
+                                })
+                            }
+                            _ => None,
+                        },
+                        ssg: match algorithm {
+                            schema::VectorAlgorithm::Ssg => {
+                                let ssg = config.ssg.clone().unwrap_or_default();
+                                let defaults = schema::SsgParams::default();
+                                Some(schema::SsgParams {
+                                    r: ssg.r.unwrap_or(defaults.r),
+                                    angle: ssg.angle.unwrap_or(defaults.angle),
+                                    pool: ssg.pool.unwrap_or(defaults.pool),
+                                })
+                            }
+                            _ => None,
+                        },
+                    }),
+                );
             }
-            if let Some(named) = config.algorithm.as_deref() {
-                let named = schema::VectorAlgorithm::from_sdl_name(named).ok_or_else(|| {
-                    QueryError::parse(format!("@index vector has no algorithm named '{named}'"))
-                })?;
-                if let Some(existing) = algorithm.filter(|existing| *existing != named) {
-                    return Err(QueryError::parse(format!(
-                        "@index vector alg is {} but the {} block is configured",
-                        named.as_str(),
-                        existing.as_str()
-                    )));
-                }
-                algorithm = Some(named);
-            }
-            let algorithm = algorithm.unwrap_or_default();
-
-            // The metric belongs to the algorithm, so it is read from that
-            // algorithm's own block and nowhere else.
-            let hnsw = config.hnsw.clone().unwrap_or_default();
-            let named_metric = match algorithm {
-                schema::VectorAlgorithm::Flat => {
-                    config.flat.as_ref().and_then(|f| f.metric.clone())
-                }
-                schema::VectorAlgorithm::Hnsw => hnsw.metric.clone(),
-                schema::VectorAlgorithm::IvfPq => {
-                    config.ivfpq.as_ref().and_then(|b| b.metric.clone())
-                }
-                schema::VectorAlgorithm::Ssg => config.ssg.as_ref().and_then(|b| b.metric.clone()),
-            };
-            let metric = match named_metric.as_deref() {
-                None => schema::DistanceMetric::default(),
-                Some(name) => schema::DistanceMetric::from_sdl_name(name).ok_or_else(|| {
-                    QueryError::parse(format!("@index vector has no metric named '{name}'"))
-                })?,
-            };
-
-            let defaults = schema::HnswParams::default();
-
-            indexes.push(
-                IndexDescription {
-                    name,
-                    id: index_id_counter,
-                    fields: vec![IndexedFieldDescription {
-                        name: field.name.clone(),
-                        descending: false,
-                    }],
-                    unique: false,
-                    kind: None,
-                    auto_generated: false,
-                }
-                .as_vector(schema::VectorIndexDescription {
-                    algorithm,
-                    metric,
-                    // Absent leaves this zero, which definition validation
-                    // rejects. Go stopped inferring it from an `@embedding` in
-                    // sourcenetwork/defradb#5188.
-                    dimensions: config.dimensions.unwrap_or(0),
-                    hnsw: match algorithm {
-                        schema::VectorAlgorithm::Hnsw => Some(schema::HnswParams {
-                            m: hnsw.m.unwrap_or(defaults.m),
-                            ef_construction: hnsw
-                                .ef_construction
-                                .unwrap_or(defaults.ef_construction),
-                            ef_search: hnsw.ef_search.unwrap_or(defaults.ef_search),
-                        }),
-                        schema::VectorAlgorithm::Flat
-                        | schema::VectorAlgorithm::IvfPq
-                        | schema::VectorAlgorithm::Ssg => None,
-                    },
-                    ivfpq: match algorithm {
-                        schema::VectorAlgorithm::IvfPq => {
-                            let ivfpq = config.ivfpq.clone().unwrap_or_default();
-                            let defaults = schema::IvfPqParams::default();
-                            Some(schema::IvfPqParams {
-                                nlist: ivfpq.nlist.unwrap_or(defaults.nlist),
-                                nprobe: ivfpq.nprobe.unwrap_or(defaults.nprobe),
-                                m: ivfpq.m.unwrap_or(defaults.m),
-                                sample_bytes: ivfpq
-                                    .sample_bytes
-                                    .map_or(defaults.sample_bytes, u64::from),
-                            })
-                        }
-                        _ => None,
-                    },
-                    ssg: match algorithm {
-                        schema::VectorAlgorithm::Ssg => {
-                            let ssg = config.ssg.clone().unwrap_or_default();
-                            let defaults = schema::SsgParams::default();
-                            Some(schema::SsgParams {
-                                r: ssg.r.unwrap_or(defaults.r),
-                                angle: ssg.angle.unwrap_or(defaults.angle),
-                                pool: ssg.pool.unwrap_or(defaults.pool),
-                            })
-                        }
-                        _ => None,
-                    },
-                }),
-            );
         }
 
         // Build full-text indexes from @fulltext directives

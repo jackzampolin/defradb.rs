@@ -432,9 +432,11 @@ pub(super) fn parse_bm25_field(
 
 /// Parse a _similarity field from a GraphQL query.
 ///
-/// Format: `_similarity(fieldName: {vector: [1, 2, 3]})`
+/// Format: `_similarity(fieldName: {vector: [1, 2, 3], metric: COSINE})`
 /// The argument name is the target field containing the document's vector.
-/// The value is an object with a `vector` key containing the query vector.
+/// The value is an object with a `vector` key containing the query vector, and
+/// an optional `metric` key selecting among several vector indexes on that
+/// field.
 pub(super) fn parse_similarity_field(
     field: &Field<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
@@ -445,13 +447,15 @@ pub(super) fn parse_similarity_field(
 
     let (target_field, value) = &field.arguments[0];
 
-    // Parse the value: {vector: [1, 2, 3]}
-    let vector = match value {
+    // Parse the value: {vector: [1, 2, 3], metric: COSINE}
+    let (vector, metric) = match value {
         Value::Object(obj) => {
             let vec_value = obj.get("vector").ok_or_else(|| {
                 QueryError::parse("_similarity argument must contain a 'vector' key")
             })?;
-            parse_vector_value(vec_value, variables)?
+            let vector = parse_vector_value(vec_value, variables)?;
+            let metric = obj.get("metric").map(parse_metric_value).transpose()?;
+            (vector, metric)
         }
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
@@ -464,7 +468,9 @@ pub(super) fn parse_similarity_field(
                 let vec_val = obj.get("vector").ok_or_else(|| {
                     QueryError::parse("_similarity variable must contain a 'vector' key")
                 })?;
-                parse_json_vector(vec_val)?
+                let vector = parse_json_vector(vec_val)?;
+                let metric = obj.get("metric").map(parse_json_metric).transpose()?;
+                (vector, metric)
             } else {
                 return Err(QueryError::parse("_similarity variable must be an object"));
             }
@@ -476,7 +482,35 @@ pub(super) fn parse_similarity_field(
         }
     };
 
-    Ok(Similarity::new(target_field.clone(), vector))
+    let mut similarity = Similarity::new(target_field.clone(), vector);
+    if let Some(metric) = metric {
+        similarity = similarity.with_metric(metric);
+    }
+    Ok(similarity)
+}
+
+/// Resolve a `metric` name to the `DistanceMetric` it names.
+fn resolve_metric(name: &str) -> Result<schema::DistanceMetric> {
+    schema::DistanceMetric::from_sdl_name(name)
+        .ok_or_else(|| QueryError::parse(format!("_similarity has no metric named '{name}'")))
+}
+
+/// Parse a `metric` value from a GraphQL argument literal.
+fn parse_metric_value(value: &Value<'_, String>) -> Result<schema::DistanceMetric> {
+    match value {
+        Value::String(name) | Value::Enum(name) => resolve_metric(name),
+        _ => Err(QueryError::parse(
+            "_similarity 'metric' must be a string or enum value",
+        )),
+    }
+}
+
+/// Parse a `metric` value from a JSON variable.
+fn parse_json_metric(value: &JsonValue) -> Result<schema::DistanceMetric> {
+    match value {
+        JsonValue::String(name) => resolve_metric(name),
+        _ => Err(QueryError::parse("_similarity 'metric' must be a string")),
+    }
 }
 
 /// Parse a vector value from a GraphQL list literal.

@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 use super::DefinitionState;
-use crate::{DistanceMetric, FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
+use crate::{FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
 
 fn format_relation_kind(kind: &FieldKind) -> String {
     let (name, is_array) = match kind {
@@ -368,27 +368,24 @@ pub(super) fn validate_embedding_and_kind_compatible(
     errs
 }
 
-/// A vector index must declare its dimensions, be built with a metric its
-/// algorithm can rank by, and not share a field with another vector index that
-/// disagrees about the metric.
+/// A vector index must declare its dimensions and be built with a metric its
+/// algorithm can rank by.
 ///
-/// Without the first the definition is accepted and the failure surfaces on the
+/// Without this the definition is accepted and the failure surfaces on the
 /// first document write, as an index-manager construction error naming an
 /// engine the schema author never mentioned.
 ///
-/// The second is what makes "the field's metric" a single value. A `SIMILARITY`
-/// selection scores by the metric the field's index declares, and the planner
-/// takes the first vector index it finds, so two metrics on one field would
-/// make the ranking depend on index order rather than on the query. Changing a
-/// metric means dropping the index and creating it again, because a graph is
-/// not merely searched by its metric, it is built by it.
+/// A field may carry several vector indexes, including several with the same
+/// metric: this used to be refused because the planner took the first vector
+/// index it found on a field, so two metrics there would make the ranking
+/// depend on index order rather than on the query. A query can now name the
+/// metric it means (sourcenetwork/defradb#5072), which is what unblocks this.
 pub(super) fn validate_vector_index_metrics(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
-        let mut metric_by_field: Vec<(&str, DistanceMetric, &str)> = Vec::new();
         for index in &col.indexes {
             let Some(vector) = index.vector() else {
                 continue;
@@ -411,29 +408,6 @@ pub(super) fn validate_vector_index_metrics(
                     vector.metric.as_str(),
                     vector.algorithm.as_str()
                 ));
-            }
-
-            let Some(field) = index.fields.first() else {
-                continue;
-            };
-            match metric_by_field
-                .iter()
-                .find(|(name, _, _)| *name == field.name)
-            {
-                Some((_, existing, existing_index)) if *existing != vector.metric => {
-                    errs.push(format!(
-                        "field '{}' already has a vector index '{}' with distance metric {}; \
-                         drop it and create it again to index with {}",
-                        field.name,
-                        existing_index,
-                        existing.as_str(),
-                        vector.metric.as_str()
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    metric_by_field.push((&field.name, vector.metric, &index.name));
-                }
             }
         }
     }

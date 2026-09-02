@@ -7,7 +7,7 @@ use std::collections::HashMap;
 pub(super) fn build_aggregate_types_for_collection(
     collection: &CollectionVersion,
     id_to_name: &HashMap<String, String>,
-) -> Vec<InputObject> {
+) -> Vec<Type> {
     let coll_name = &collection.name;
     let mut types = Vec::new();
 
@@ -23,14 +23,14 @@ pub(super) fn build_aggregate_types_for_collection(
         ))
         .field(InputValue::new("limit", TypeRef::named("Int")))
         .field(InputValue::new("offset", TypeRef::named("Int")));
-    types.push(count_selector);
+    types.push(count_selector.into());
 
     // {Collection}___version__CountSelector: limit, offset
     let version_count_selector =
         InputObject::new(format!("{}___version__CountSelector", coll_name))
             .field(InputValue::new("limit", TypeRef::named("Int")))
             .field(InputValue::new("offset", TypeRef::named("Int")));
-    types.push(version_count_selector);
+    types.push(version_count_selector.into());
 
     // {Collection}__NumericSelector: field, filter, limit, offset, order
     // Build numeric fields enum
@@ -52,7 +52,7 @@ pub(super) fn build_aggregate_types_for_collection(
             "order",
             TypeRef::named_list(format!("{}OrderArg", coll_name)),
         ));
-    types.push(numeric_selector);
+    types.push(numeric_selector.into());
 
     // Per-field selectors for inline arrays
     for field in &collection.fields {
@@ -81,7 +81,7 @@ pub(super) fn build_aggregate_types_for_collection(
                     .field(InputValue::new("filter", TypeRef::named(filter_type)))
                     .field(InputValue::new("limit", TypeRef::named("Int")))
                     .field(InputValue::new("offset", TypeRef::named("Int")));
-            types.push(inline_count);
+            types.push(inline_count.into());
 
             // Numeric arrays also get NumericSelector
             let is_numeric = matches!(
@@ -100,7 +100,7 @@ pub(super) fn build_aggregate_types_for_collection(
                         .field(InputValue::new("limit", TypeRef::named("Int")))
                         .field(InputValue::new("offset", TypeRef::named("Int")))
                         .field(InputValue::new("order", TypeRef::named("Ordering")));
-                types.push(inline_numeric);
+                types.push(inline_numeric.into());
             }
         }
     }
@@ -127,13 +127,14 @@ pub(super) fn build_aggregate_types_for_collection(
                         ))
                         .field(InputValue::new("limit", TypeRef::named("Int")))
                         .field(InputValue::new("offset", TypeRef::named("Int")));
-                types.push(rel_count);
+                types.push(rel_count.into());
             }
             _ => {}
         }
     }
 
     // Similarity selectors for numeric array fields
+    let mut metric_enum_registered = false;
     for field in &collection.fields {
         if let FieldKind::ScalarArray(arr) = &field.kind {
             let is_numeric = matches!(
@@ -161,13 +162,35 @@ pub(super) fn build_aggregate_types_for_collection(
                         .field(InputValue::new(
                             "vector",
                             TypeRef::named_nn_list_nn(vector_type),
+                        ))
+                        .field(InputValue::new(
+                            "metric",
+                            TypeRef::named("VectorDistanceMetric"),
                         ));
-                types.push(similarity_selector);
+                types.push(similarity_selector.into());
+
+                if !metric_enum_registered {
+                    types.push(vector_distance_metric_enum().into());
+                    metric_enum_registered = true;
+                }
             }
         }
     }
 
     types
+}
+
+/// The `VectorDistanceMetric` enum backing `metric` on every `SimilaritySelector`.
+///
+/// Go's name, so a query written against either runtime introspects the same
+/// type. Built from `DistanceMetric::ALL`, so a new metric appears here without
+/// another edit.
+fn vector_distance_metric_enum() -> Enum {
+    let mut enum_type = Enum::new("VectorDistanceMetric");
+    for metric in schema::DistanceMetric::ALL {
+        enum_type = enum_type.item(EnumItem::new(metric.as_str()));
+    }
+    enum_type
 }
 
 /// Build the numeric fields enum for a collection (used by NumericSelector).

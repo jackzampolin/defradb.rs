@@ -202,6 +202,10 @@ pub struct Similarity {
     pub vector: Vec<f64>,
     /// Optional alias for output
     pub alias: Option<String>,
+    /// The metric named by the query, selecting among several vector indexes on
+    /// the field. `None` means the field's only index, or cosine when it has
+    /// none.
+    pub metric: Option<schema::DistanceMetric>,
 }
 
 impl Similarity {
@@ -210,11 +214,17 @@ impl Similarity {
             target_field: target_field.into(),
             vector,
             alias: None,
+            metric: None,
         }
     }
 
     pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
         self.alias = Some(alias.into());
+        self
+    }
+
+    pub fn with_metric(mut self, metric: schema::DistanceMetric) -> Self {
+        self.metric = Some(metric);
         self
     }
 
