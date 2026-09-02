@@ -1,11 +1,14 @@
-//! `index new --vector` must produce the same descriptor SDL does.
+//! `index new --vector` takes the index config as JSON, which is Go's flag.
 //!
-//! The CLI could create only ordinary indexes, so a vector index was reachable
-//! from SDL and the HTTP API but not from the command line.
+//! Go's `client index new` grew `--vector '{"Metric":"COSINE","Dimensions":3,
+//! "HNSW":{}}'` in sourcenetwork/defradb#5096. Ours spelled the same request as
+//! bespoke flags, so a script written against Go did not run here. The JSON goes
+//! through the same `schema::VectorIndexDescription` serde the wire uses, so
+//! there is one codec and nothing to keep in sync.
 
 use clap::Parser;
 use cli::commands::client::index::IndexNewArgs;
-use schema::{DistanceMetric, VectorAlgorithm};
+use schema::{DistanceMetric, HnswParams, IvfPqParams, VectorAlgorithm};
 
 #[derive(Parser, Debug)]
 struct Wrapper {
@@ -19,92 +22,124 @@ fn parse(extra: &[&str]) -> IndexNewArgs {
     Wrapper::parse_from(argv).args
 }
 
+fn vector(json: &str) -> schema::VectorIndexDescription {
+    parse(&["--vector", json])
+        .vector_description()
+        .unwrap_or_else(|e| panic!("{json}: {e}"))
+        .expect("--vector means a vector index")
+}
+
 #[test]
 fn without_the_flag_there_is_no_vector_config() {
     assert!(parse(&[]).vector_description().unwrap().is_none());
 }
 
-/// Every algorithm and metric the engine supports must be reachable from the
-/// command line, and the per-algorithm parameter block must be filled for it.
+/// The example from Go's own `--vector` help text has to work verbatim.
 #[test]
-fn every_supported_pair_is_selectable() {
-    for algorithm in VectorAlgorithm::ALL {
-        for metric in DistanceMetric::ALL {
-            if !algorithm.supports_metric(*metric) {
-                continue;
-            }
-            let args = parse(&[
-                "--vector",
-                "--vector-dimensions",
-                "8",
-                "--vector-algorithm",
-                algorithm.as_str(),
-                "--vector-metric",
-                metric.as_str(),
-            ]);
-            let vector = args
-                .vector_description()
-                .expect("a supported pair must build")
-                .expect("--vector means a vector index");
+fn gos_documented_example_parses() {
+    let config = vector(r#"{"Metric":"COSINE","Dimensions":3,"HNSW":{}}"#);
+    assert_eq!(config.algorithm, VectorAlgorithm::Hnsw);
+    assert_eq!(config.metric, DistanceMetric::Cosine);
+    assert_eq!(config.dimensions, 3);
+    assert_eq!(config.hnsw, Some(HnswParams::default()));
+}
 
-            assert_eq!(vector.algorithm, *algorithm);
-            assert_eq!(vector.metric, *metric);
-            assert_eq!(vector.dimensions, 8);
-            assert_eq!(
-                vector.hnsw.is_some(),
-                *algorithm == VectorAlgorithm::Hnsw,
-                "the HNSW block belongs to HNSW alone"
-            );
-        }
+/// Omitted tuning params default rather than zeroing, which is what makes the
+/// terse `"HNSW":{}` in Go's example a usable index.
+#[test]
+fn omitted_hnsw_params_default() {
+    let config = vector(r#"{"Dimensions":8,"HNSW":{"M":32}}"#);
+    let hnsw = config.hnsw.expect("HNSW params");
+    let defaults = HnswParams::default();
+    assert_eq!(hnsw.m, 32);
+    assert_eq!(hnsw.ef_construction, defaults.ef_construction);
+    assert_eq!(hnsw.ef_search, defaults.ef_search);
+}
+
+/// An omitted algorithm and metric take their defaults, so the shortest config
+/// that says anything is just the length.
+#[test]
+fn the_shortest_config_is_the_dimensions() {
+    let config = vector(r#"{"Dimensions":4}"#);
+    assert_eq!(config.algorithm, VectorAlgorithm::default());
+    assert_eq!(config.metric, DistanceMetric::default());
+    assert_eq!(config.dimensions, 4);
+}
+
+/// Every metric is reachable by name, and they are the reference's spellings.
+#[test]
+fn every_metric_is_reachable() {
+    for metric in DistanceMetric::ALL {
+        let config = vector(&format!(
+            r#"{{"Metric":"{}","Dimensions":8}}"#,
+            metric.as_str()
+        ));
+        assert_eq!(config.metric, *metric);
     }
 }
 
-/// Omitted dimensions mean an `@embedding` on the field fixes the length.
+/// Our extra algorithms ride the same JSON rather than a separate flag, so a
+/// Rust-only description is a documented divergence in one field, not a
+/// different command line.
 #[test]
-fn dimensions_may_be_omitted() {
-    let args = parse(&["--vector"]);
-    let vector = args.vector_description().unwrap().unwrap();
-    assert_eq!(vector.dimensions, 0);
-    assert_eq!(vector.algorithm, VectorAlgorithm::default());
+fn every_algorithm_is_reachable() {
+    for algorithm in VectorAlgorithm::ALL {
+        let config = vector(&format!(
+            r#"{{"Algorithm":"{}","Dimensions":8}}"#,
+            algorithm.as_str()
+        ));
+        assert_eq!(config.algorithm, *algorithm, "{}", algorithm.as_str());
+    }
 }
 
-/// The accepted values come from the enums, so an unknown one is refused by the
-/// parser with the valid choices rather than reaching the server.
 #[test]
-fn an_unknown_algorithm_is_refused_by_the_parser() {
-    let error = Wrapper::try_parse_from([
-        "index-new",
-        "--collection",
-        "Note",
-        "--fields",
-        "embedding",
-        "--vector",
-        "--vector-algorithm",
-        "NOT_AN_ENGINE",
-    ])
-    .expect_err("an unknown algorithm must not parse");
-
-    let rendered = error.to_string();
-    assert!(
-        VectorAlgorithm::ALL
-            .iter()
-            .all(|algorithm| rendered.contains(algorithm.as_str())),
-        "the error must list every valid algorithm, got: {rendered}"
+fn a_divergent_algorithm_carries_its_own_params() {
+    let config = vector(r#"{"Algorithm":"IVF_PQ","Dimensions":768,"IVFPQ":{"NList":256,"M":16}}"#);
+    assert_eq!(config.algorithm, VectorAlgorithm::IvfPq);
+    let ivfpq = config.ivfpq.expect("IVF-PQ params");
+    let defaults = IvfPqParams::default();
+    assert_eq!((ivfpq.nlist, ivfpq.m), (256, 16));
+    assert_eq!(
+        ivfpq.nprobe, defaults.nprobe,
+        "an omitted param keeps its default"
     );
 }
 
-/// The tuning flags are meaningless without `--vector`, so asking for one alone
-/// is a usage error rather than a silently ignored argument.
+/// Malformed JSON is a named error rather than a silently ignored flag: a
+/// dropped config would build an ordered index over the vector field.
 #[test]
-fn the_tuning_flags_require_the_vector_flag() {
-    Wrapper::try_parse_from([
-        "index-new",
-        "--collection",
-        "Note",
-        "--fields",
-        "embedding",
-        "--vector-dimensions",
-        "8",
-    ])
-    .expect_err("--vector-dimensions alone must not parse");
+fn malformed_json_is_refused() {
+    for json in [
+        "not json",
+        r#"{"Dimensions":"three"}"#,
+        r#"{"Metric":"MANHATTAN","Dimensions":3}"#,
+        r#"{"Algorithm":"IVFFLAT","Dimensions":3}"#,
+        "[]",
+    ] {
+        let error = parse(&["--vector", json])
+            .vector_description()
+            .expect_err(&format!("must be refused: {json}"))
+            .to_string();
+        assert!(
+            error.contains("invalid vector index config"),
+            "{json}: {error}"
+        );
+    }
+}
+
+/// The flag now takes a value, so it can no longer be given bare. The bespoke
+/// `--vector-algorithm` and friends are gone: one construction path, and one
+/// command line that works on either runtime.
+#[test]
+fn the_flag_requires_its_json_and_the_old_flags_are_gone() {
+    for extra in [
+        vec!["--vector"],
+        vec!["--vector-dimensions", "8"],
+        vec!["--vector-algorithm", "HNSW"],
+        vec!["--vector-metric", "COSINE"],
+    ] {
+        let mut argv = vec!["index-new", "--collection", "Note", "--fields", "embedding"];
+        argv.extend_from_slice(&extra);
+        Wrapper::try_parse_from(argv).expect_err(&format!("{extra:?} must not parse"));
+    }
 }

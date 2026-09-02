@@ -69,10 +69,8 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         let (index_desc, updated_schema) = {
             let systemstore = txn.systemstore().map_err(|e| format!("{}", e))?;
 
-            let kind = match vector {
-                Some(vector) => schema::IndexKind::Vector(vector),
-                None => schema::IndexKind::Ordered(schema::OrderedIndexDescription { unique }),
-            };
+            let kind = IndexManager::requested_kind(&indexed_fields, unique, vector)
+                .map_err(|e| format!("{}", e))?;
             let index_desc = index_manager
                 .create_index_of_kind(
                     &systemstore,

@@ -12,7 +12,7 @@ use datastore::NamespaceView;
 use document::Document;
 use schema::{
     CollectionVersion, FieldDescription, IndexDescription, IndexKind, IndexedFieldDescription,
-    OrderedIndexDescription,
+    OrderedIndexDescription, VectorIndexDescription,
 };
 use std::collections::HashMap;
 use storage::corekv::Key;
@@ -260,6 +260,38 @@ impl IndexManager {
             schema_fields,
         )
         .await
+    }
+
+    /// The index kind a create-index request asks for.
+    ///
+    /// A vector index covers exactly one field and is never unique, which is
+    /// why [`IndexKind::Vector`] has no `unique` to carry. A request that pairs
+    /// a vector config with `unique`, or with several fields, is therefore
+    /// refused here rather than having one of the two quietly dropped: the
+    /// first would build an index that does not enforce what was asked for, the
+    /// second would index a different column than the request named.
+    ///
+    /// Static because every entry point (the CLI, the HTTP API, and any
+    /// embedder) has to make the same call, and a second copy of this decision
+    /// is a divergence waiting to ship.
+    pub fn requested_kind(
+        fields: &[IndexedFieldDescription],
+        unique: bool,
+        vector: Option<VectorIndexDescription>,
+    ) -> Result<IndexKind> {
+        let Some(vector) = vector else {
+            return Ok(IndexKind::Ordered(OrderedIndexDescription { unique }));
+        };
+        if unique {
+            return Err(Error::Other("vector index cannot be unique".to_string()));
+        }
+        if fields.len() != 1 {
+            return Err(Error::Other(format!(
+                "vector index must be on exactly one field, got {}",
+                fields.len()
+            )));
+        }
+        Ok(IndexKind::Vector(vector))
     }
 
     /// Creates an index of any kind.

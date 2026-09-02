@@ -44,32 +44,17 @@ pub struct IndexNewArgs {
     #[arg(long)]
     pub unique: bool,
 
-    /// Make a vector index, searchable by SIMILARITY
-    #[arg(long)]
-    pub vector: bool,
-
-    /// Vector length. Omit on an `@embedding` field, where the model fixes it.
-    #[arg(long, requires = "vector")]
-    pub vector_dimensions: Option<u32>,
-
-    /// Vector index algorithm
-    #[arg(
-        long,
-        requires = "vector",
-        default_value = "HNSW",
-        value_parser = algorithm_names()
-    )]
-    pub vector_algorithm: String,
-
-    /// How the index ranks. SIMILARITY ranks by dot product, so only a DOT
-    /// index can serve it; a COSINE index is built but never routed to.
-    #[arg(
-        long,
-        requires = "vector",
-        default_value = "COSINE",
-        value_parser = metric_names()
-    )]
-    pub vector_metric: String,
+    /// Make a vector index (on a single field, never unique). The value is the
+    /// index config as JSON, e.g. '{"Metric":"COSINE","Dimensions":3,"HNSW":{}}'.
+    ///
+    /// Dimensions is the vector length and must be greater than zero. Metric is
+    /// the distance metric, one of COSINE, EUCLIDEAN or DOT, and cannot be
+    /// changed later without dropping and recreating the index. The algorithm
+    /// is chosen by which config block is given, or by "Algorithm"; HNSW is the
+    /// default, and its tuning params (M, EfConstruction, EfSearch) default
+    /// when omitted.
+    #[arg(long, value_name = "JSON")]
+    pub vector: Option<String>,
 }
 
 /// Arguments for index list command
@@ -103,44 +88,33 @@ impl IndexArgs {
     }
 }
 
-/// Accepted `--vector-algorithm` values, taken from the enum so a new engine
-/// becomes selectable without touching the CLI.
-fn algorithm_names() -> clap::builder::PossibleValuesParser {
-    clap::builder::PossibleValuesParser::new(
-        schema::VectorAlgorithm::ALL
-            .iter()
-            .map(|algorithm| algorithm.as_str())
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// Accepted `--vector-metric` values, from the enum for the same reason.
-fn metric_names() -> clap::builder::PossibleValuesParser {
-    clap::builder::PossibleValuesParser::new(
-        schema::DistanceMetric::ALL
-            .iter()
-            .map(|metric| metric.as_str())
-            .collect::<Vec<_>>(),
-    )
-}
-
 impl IndexNewArgs {
     /// The vector configuration this request carries, if any.
+    ///
+    /// Deserialized through the same `schema::VectorIndexDescription` serde the
+    /// wire uses, so the flag cannot accept a shape the API would reject, nor
+    /// drift from it. That is also why the JSON is the reference's spelling
+    /// rather than a friendlier one of our own: a script written against either
+    /// runtime runs on both.
     pub fn vector_description(&self) -> Result<Option<schema::VectorIndexDescription>> {
-        if !self.vector {
+        let Some(json) = self.vector.as_deref() else {
             return Ok(None);
+        };
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|err| Error::InvalidVectorIndexConfig(err.to_string()))?;
+        // Serde will happily read a struct from a JSON sequence, taking fields
+        // positionally, so `[]` would otherwise become an all-default config
+        // rather than an error. The reference unmarshals into a struct, which
+        // rejects anything but an object, and this is the trust boundary where
+        // that difference is visible.
+        if !value.is_object() {
+            return Err(Error::InvalidVectorIndexConfig(
+                "expected a JSON object".to_string(),
+            ));
         }
-
-        let algorithm = schema::VectorAlgorithm::from_sdl_name(&self.vector_algorithm)
-            .ok_or_else(|| Error::InvalidIdentifier(self.vector_algorithm.clone()))?;
-        let metric = schema::DistanceMetric::from_sdl_name(&self.vector_metric)
-            .ok_or_else(|| Error::InvalidIdentifier(self.vector_metric.clone()))?;
-
-        Ok(Some(schema::VectorIndexDescription::with_defaults(
-            algorithm,
-            metric,
-            self.vector_dimensions.unwrap_or(0),
-        )))
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|err| Error::InvalidVectorIndexConfig(err.to_string()))
     }
 
     /// Execute the index new command
@@ -205,67 +179,5 @@ impl IndexDeleteArgs {
             self.name, self.collection
         );
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_index_new_args() {
-        let args = IndexNewArgs {
-            collection: "Users".to_string(),
-            fields: vec!["name".to_string(), "email".to_string()],
-            name: Some("idx_name_email".to_string()),
-            unique: true,
-            vector: false,
-            vector_dimensions: None,
-            vector_algorithm: "HNSW".to_string(),
-            vector_metric: "COSINE".to_string(),
-        };
-        assert_eq!(args.collection, "Users");
-        assert_eq!(args.fields.len(), 2);
-        assert!(args.unique);
-    }
-
-    #[test]
-    fn test_index_new_args_minimal() {
-        let args = IndexNewArgs {
-            collection: "Users".to_string(),
-            fields: vec!["name".to_string()],
-            name: None,
-            unique: false,
-            vector: false,
-            vector_dimensions: None,
-            vector_algorithm: "HNSW".to_string(),
-            vector_metric: "COSINE".to_string(),
-        };
-        assert!(args.name.is_none());
-        assert!(!args.unique);
-    }
-
-    #[test]
-    fn test_index_list_args_all() {
-        let args = IndexListArgs { collection: None };
-        assert!(args.collection.is_none());
-    }
-
-    #[test]
-    fn test_index_list_args_filtered() {
-        let args = IndexListArgs {
-            collection: Some("Users".to_string()),
-        };
-        assert_eq!(args.collection.as_deref(), Some("Users"));
-    }
-
-    #[test]
-    fn test_index_delete_args() {
-        let args = IndexDeleteArgs {
-            collection: "Users".to_string(),
-            name: "idx_name".to_string(),
-        };
-        assert_eq!(args.collection, "Users");
-        assert_eq!(args.name, "idx_name");
     }
 }

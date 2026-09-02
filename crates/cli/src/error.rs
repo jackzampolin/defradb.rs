@@ -127,6 +127,9 @@ pub enum Error {
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
 
+    #[error("invalid vector index config: {0}")]
+    InvalidVectorIndexConfig(String),
+
     #[error("operation not permitted whilst development mode is disabled")]
     OperationRequiresDeveloperMode,
 
