@@ -13,7 +13,7 @@ mod support;
 mod vector_aux_store;
 mod vector_collection_index;
 mod vector_dimensions;
-mod vector_dot_metric;
+mod vector_distance_metrics;
 mod vector_engine;
 mod vector_filtered_search;
 mod vector_flat_algorithm;

@@ -22,9 +22,9 @@ use super::kernel::{self, Element};
 
 /// How two vectors are compared.
 ///
-/// `Cosine` is the only metric the query surface exposes today, matching Go's
-/// `DistanceMetricCosine`. The others exist because the index substrate is
-/// meant to carry future index kinds.
+/// One per [`schema::DistanceMetric`], which is Go's set: `Cosine`,
+/// `Euclidean`, and `NegativeDot` for Go's `DOT`. The negation is ours; a dot
+/// product is a similarity, and everything here is a distance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Metric {
     /// `1 - cos(a, b)`, in `[0, 2]`.
@@ -88,11 +88,36 @@ impl Metric {
 
     /// Distance between two vectors already in the form the index stored them.
     pub fn distance_stored<T: Element>(self, a: &[T], b: &[T]) -> f64 {
-        if self == Metric::Cosine {
+        if self.requires_normalized() {
             self.distance_normalized(a, b)
         } else {
             self.distance(a, b)
         }
+    }
+
+    /// Whether the metric reads direction alone, so vectors must be scaled to
+    /// unit length before it compares them.
+    ///
+    /// Only cosine does. The other two read magnitude, so scaling would change
+    /// the answer rather than merely the values.
+    pub fn requires_normalized(self) -> bool {
+        match self {
+            Metric::Cosine => true,
+            Metric::Euclidean | Metric::NegativeDot => false,
+        }
+    }
+
+    /// A vector in the form this metric compares: narrowed to the width the
+    /// engines store, and scaled to unit length when the metric needs it.
+    ///
+    /// Every engine converts through here, so an engine cannot disagree with
+    /// another about whether its metric normalizes.
+    pub fn prepare<T: Element>(self, vector: &[T]) -> Vec<f32> {
+        let mut out: Vec<f32> = vector.iter().map(|x| f32::narrow(x.widen())).collect();
+        if self.requires_normalized() {
+            normalize(&mut out);
+        }
+        out
     }
 }
 

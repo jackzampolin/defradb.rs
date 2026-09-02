@@ -78,6 +78,7 @@ impl VectorIndex {
 
         let metric = match vector.metric {
             DistanceMetric::Cosine => Metric::Cosine,
+            DistanceMetric::Euclidean => Metric::Euclidean,
             DistanceMetric::Dot => Metric::NegativeDot,
         };
 

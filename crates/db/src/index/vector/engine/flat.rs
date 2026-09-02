@@ -44,10 +44,7 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
 
     /// No graph to maintain, so a node is stored with no layers at all.
     async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
-        let mut vector: Vec<f32> = vector.iter().map(|x| f32::narrow(x.widen())).collect();
-        if self.metric == Metric::Cosine {
-            crate::index::vector::core::normalize(&mut vector);
-        }
+        let vector = self.metric.prepare(vector);
         self.store
             .put_node(Node {
                 id,
@@ -82,10 +79,7 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
         if k == 0 {
             return Ok(Vec::new());
         }
-        let mut query: Vec<f32> = query.iter().map(|x| f32::narrow(x.widen())).collect();
-        if self.metric == Metric::Cosine {
-            crate::index::vector::core::normalize(&mut query);
-        }
+        let query = self.metric.prepare(query);
 
         // A max-heap of size k: the worst of the current best is on top, so a
         // new candidate is one comparison and at most one pop.
@@ -97,11 +91,7 @@ impl<S: VectorNodeStore> VectorIndexEngine for Flat<S> {
                 if !admit.admits(node.id) {
                     return Ok(());
                 }
-                let distance = if metric == Metric::Cosine {
-                    metric.distance_normalized(&query, &node.vector)
-                } else {
-                    metric.distance(&query, &node.vector)
-                };
+                let distance = metric.distance_stored(&query, &node.vector);
                 best.push(Ranked {
                     id: node.id,
                     distance,

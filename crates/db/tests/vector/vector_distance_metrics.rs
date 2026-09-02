@@ -1,5 +1,12 @@
-//! The `DOT` metric. A wire divergence from Go, so it has to earn that by
-//! being magnitude-sensitive rather than an alias for cosine.
+//! The three distance metrics, which are Go's set as of
+//! sourcenetwork/defradb#5169.
+//!
+//! Each has to earn its place by ordering a corpus differently from the other
+//! two, so the shared fixture is built to separate them: documents 1 and 2 are
+//! collinear with 2 four times longer, and 3 points elsewhere. Against the
+//! query `[1, 0]` cosine cannot tell 1 from 2, dot puts 2 first, and euclidean
+//! puts 1 first and 2 last. A metric that quietly aliased another would fail
+//! here rather than on a corpus where the difference does not show.
 
 use db::index::vector::index::VectorIndex;
 use db::index::vector::kv_store::KvNodeStore;
@@ -111,21 +118,61 @@ async fn dot_prefers_the_longer_vector() {
     assert_eq!(hits[1], 1, "then the shorter one: {hits:?}");
 }
 
+/// `[1, 0]` is nearest 1 exactly, `sqrt(2)` from 3, and 3 from 2, so the
+/// magnitude that dot rewards is the one euclidean penalises. The two
+/// magnitude-sensitive metrics therefore produce opposite orders, which is the
+/// only way to show neither is an alias for the other.
 #[tokio::test]
-async fn dot_stores_vectors_unnormalized() {
-    let dot = stored(DistanceMetric::Dot, vec![3.0, 4.0]).await.unwrap();
-    assert!((dot[0] - 3.0).abs() < 1e-6, "dot stored {dot:?}");
+async fn euclidean_ranks_by_straight_line_distance() {
+    let hits = ranked(DistanceMetric::Euclidean, &[1.0, 0.0]).await;
+    assert_eq!(
+        hits,
+        vec![1, 3, 2],
+        "nearest, then the orthogonal unit vector, then the distant collinear one: {hits:?}"
+    );
+}
 
+/// Normalizing is cosine's alone: it is what makes magnitude unreadable, so a
+/// metric that reads magnitude must not have it applied. Storing `[3, 4]` shows
+/// it directly, since cosine scales it to `[0.6, 0.8]`.
+#[tokio::test]
+async fn only_cosine_normalizes_what_it_stores() {
     let cosine = stored(DistanceMetric::Cosine, vec![3.0, 4.0])
         .await
         .unwrap();
     assert!((cosine[0] - 0.6).abs() < 1e-6, "cosine stored {cosine:?}");
+
+    for metric in [DistanceMetric::Euclidean, DistanceMetric::Dot] {
+        let kept = stored(metric, vec![3.0, 4.0]).await.unwrap();
+        assert!(
+            (kept[0] - 3.0).abs() < 1e-6,
+            "{metric:?} stored {kept:?}, which is normalized"
+        );
+    }
 }
 
+/// A zero vector has no direction, so cosine cannot rank it and the index
+/// refuses to store one. The other two rank it fine, so they must.
 #[tokio::test]
-async fn dot_indexes_a_zero_vector_and_cosine_does_not() {
-    assert!(stored(DistanceMetric::Dot, vec![0.0, 0.0]).await.is_some());
+async fn a_zero_vector_is_indexed_by_every_metric_but_cosine() {
     assert!(stored(DistanceMetric::Cosine, vec![0.0, 0.0])
         .await
         .is_none());
+
+    for metric in [DistanceMetric::Euclidean, DistanceMetric::Dot] {
+        assert!(
+            stored(metric, vec![0.0, 0.0]).await.is_some(),
+            "{metric:?} must index a zero vector"
+        );
+    }
+}
+
+/// Every metric in the enum has to be constructible as an index, or an
+/// algorithm that claims to support it would still fail at description time.
+#[tokio::test]
+async fn every_metric_builds_a_searchable_index() {
+    for metric in DistanceMetric::ALL {
+        let hits = ranked(*metric, &[1.0, 0.0]).await;
+        assert_eq!(hits.len(), 3, "{metric:?} returned {hits:?}");
+    }
 }

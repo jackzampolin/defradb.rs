@@ -113,10 +113,24 @@ fn unknown_or_mistyped_arguments_are_refused() {
         r#"type Doc { e: [Float!] @vectorIndex(dimensions: 4, HNSW: { efSarch: 10 }) }"#,
         r#"type Doc { e: [Float!] @vectorIndex(dimensions: 4, HNSW: { M: "big" }) }"#,
         r#"type Doc { e: [Float!] @vectorIndex(dimensions: "many") }"#,
-        r#"type Doc { e: [Float!] @vectorIndex(dimensions: 4, HNSW: { metric: "EUCLIDEAN" }) }"#,
+        r#"type Doc { e: [Float!] @vectorIndex(dimensions: 4, HNSW: { metric: "MANHATTAN" }) }"#,
         r#"type Doc { e: [Float!] @vectorIndex(dimensions: 4, HNSW: 5) }"#,
     ] {
         assert!(parse_sdl(sdl).is_err(), "should have been refused: {sdl}");
+    }
+}
+
+/// Every metric the enum carries is spellable in SDL. `EUCLIDEAN` in
+/// particular used to be refused, back when the metric set was smaller than
+/// Go's.
+#[test]
+fn every_metric_is_spellable() {
+    for metric in DistanceMetric::ALL {
+        let sdl = format!(
+            r#"type Doc {{ e: [Float!] @vectorIndex(dimensions: 4, HNSW: {{ metric: "{}" }}) }}"#,
+            metric.as_str()
+        );
+        assert_eq!(only_vector(&sdl).metric, *metric, "{sdl}");
     }
 }
 

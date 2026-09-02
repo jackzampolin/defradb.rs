@@ -34,7 +34,7 @@ pub use level::LevelSampler;
 use super::ann::{Admit, Candidate, EdgeSelector, EngineKind, Neighbor, VectorIndexEngine};
 use super::select::Heuristic;
 use crate::index::error::Result;
-use crate::index::vector::core::{metric::normalize, Element, Metric};
+use crate::index::vector::core::{Element, Metric};
 use crate::index::vector::params::Params;
 use crate::index::vector::store::{Node, NodeId, VectorNodeStore};
 
@@ -89,20 +89,12 @@ impl<S> Hnsw<S> {
     /// the reference; rejecting it belongs at the index boundary, where there
     /// is a document to name.
     fn prepared<E: Element>(&self, vector: &[E]) -> Vec<f32> {
-        let mut out: Vec<f32> = vector.iter().map(|x| f32::narrow(x.widen())).collect();
-        if self.metric == Metric::Cosine {
-            normalize(&mut out);
-        }
-        out
+        self.metric.prepare(vector)
     }
 
     /// Distance between two vectors already in stored form.
     fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
-        if self.metric == Metric::Cosine {
-            self.metric.distance_normalized(a, b)
-        } else {
-            self.metric.distance(a, b)
-        }
+        self.metric.distance_stored(a, b)
     }
 }
 

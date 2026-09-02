@@ -404,9 +404,15 @@ impl VectorAlgorithm {
 
     /// Whether this algorithm can rank by `metric`.
     ///
-    /// IVF-PQ scores through its codebooks by squared distance, which does not
-    /// order a dot product, so the pair is refused when the definition is
-    /// written rather than when the first document is indexed.
+    /// IVF-PQ scores through its codebooks by squared distance. Under cosine
+    /// the vectors are unit length, so that squared distance orders them the
+    /// way the cosine does; a dot product it cannot order at all. `EUCLIDEAN`
+    /// is the metric that squared distance *is*, so the restriction is not
+    /// inherent there, but the quantized path has no measured recall for it, so
+    /// it stays refused rather than shipped unmeasured.
+    ///
+    /// Refused when the definition is written rather than when the first
+    /// document is indexed.
     pub fn supports_metric(self, metric: DistanceMetric) -> bool {
         match self {
             Self::IvfPq => metric == DistanceMetric::Cosine,
@@ -417,23 +423,31 @@ impl VectorAlgorithm {
 
 /// How a vector index compares two vectors.
 ///
-/// Go defines only `COSINE`. `DOT` is a deliberate wire divergence: a
-/// definition carrying it is not parseable by a Go node.
+/// The three Go defines, spelled its way, so a description carrying any of them
+/// crosses runtimes unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DistanceMetric {
+    /// Direction only: magnitude is normalized away before anything is
+    /// compared.
     #[default]
     #[serde(rename = "COSINE")]
     Cosine,
+    /// Straight-line (L2) distance. Compares direction and magnitude.
+    #[serde(rename = "EUCLIDEAN")]
+    Euclidean,
+    /// Dot product, which grows with magnitude, so a longer vector pointing the
+    /// same way is nearer.
     #[serde(rename = "DOT")]
     Dot,
 }
 
 impl DistanceMetric {
-    pub const ALL: &'static [Self] = &[Self::Cosine, Self::Dot];
+    pub const ALL: &'static [Self] = &[Self::Cosine, Self::Euclidean, Self::Dot];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cosine => "COSINE",
+            Self::Euclidean => "EUCLIDEAN",
             Self::Dot => "DOT",
         }
     }
@@ -445,8 +459,13 @@ impl DistanceMetric {
             .find(|metric| metric.as_str() == name)
     }
 
+    /// Every metric here is one Go defines, so a description carrying any of
+    /// them parses on either runtime. Exhaustive rather than `true` so a
+    /// Rust-only metric cannot be added without answering the question.
     pub fn is_go_compatible(self) -> bool {
-        matches!(self, Self::Cosine)
+        match self {
+            Self::Cosine | Self::Euclidean | Self::Dot => true,
+        }
     }
 }
 
