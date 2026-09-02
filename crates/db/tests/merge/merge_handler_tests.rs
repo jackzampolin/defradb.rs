@@ -16,6 +16,7 @@ use db::merge::merge_handler::hook::CompositeMergeHook;
 use db::merge::merge_handler::hook::CompositePostCommitAction;
 use db::merge::merge_handler::*;
 use db::DbTransactionRegistry;
+use db::IndexManager;
 use defra_core::block::Block;
 use defra_core::block::CollectionDefinitionDeltaPayload;
 use defra_core::block::CollectionDeltaPayload;
@@ -50,6 +51,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use storage::corekv::Key;
+use storage::index::IndexIterator;
 use storage::keys::systemstore::CollectionID;
 use storage::RegolithStore;
 use tokio::time::timeout;
@@ -3050,6 +3052,36 @@ async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canon
         "a live twin unique conflict on a replicated merge must converge via \
              #1126's canonical pick, not classify as Rejected: {:?}",
         outcome_b
+    );
+
+    handler
+        .db()
+        .materialize_collection("Sessions")
+        .await
+        .expect("reindexing must preserve the merge-time canonical unique winner");
+
+    let txn = handler.db().new_txn(true).await.unwrap();
+    let datastore = txn.datastore().unwrap();
+    let systemstore = txn.systemstore().unwrap();
+    let index_manager =
+        IndexManager::from_collection(collection.resolved_root_id(), collection.schema()).unwrap();
+    let mut entries = index_manager
+        .get_index("idx_session_id_unique")
+        .unwrap()
+        .get(
+            &datastore,
+            &[NormalValue::String("dup-session".to_string())],
+        )
+        .await
+        .unwrap();
+    let entries = entries.collect_all().await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let indexed_doc_id = db::docid::map::get_doc_id(&systemstore, entries[0].doc_short_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        indexed_doc_id,
+        Some(std::cmp::min(doc_a_id.to_string(), doc_b_id.to_string()))
     );
 
     // Both documents persist — the CRDT merge never drops data, even

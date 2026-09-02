@@ -243,8 +243,9 @@ impl<S: Store> DB<S> {
                     }
 
                     index_manager
-                        .bulk_index(
+                        .bulk_index_resolving_unique_conflicts(
                             &datastore,
+                            &txn_systemstore,
                             &index_desc.name,
                             &migrated_docs,
                             collection.schema(),

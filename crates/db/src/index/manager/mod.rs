@@ -25,7 +25,7 @@ use storage::keys::IndexIDSequenceKey;
 pub mod doc_source;
 pub use doc_source::{DocumentSource, SliceSource};
 
-/// How a live unique conflict was resolved during merge (#1111).
+/// How a live unique conflict was resolved during merge or index rebuild (#1111/#1308).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeConflictOutcome {
     /// No conflict, or the stale-entry heal handled it.
@@ -498,6 +498,47 @@ impl IndexManager {
         })
     }
 
+    /// Rebuild an index using the same deterministic unique-conflict rule as replication.
+    pub(crate) async fn bulk_index_resolving_unique_conflicts(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        index_name: &str,
+        documents: &[(u64, Document)],
+        schema: &CollectionVersion,
+    ) -> Result<()> {
+        let index = self
+            .indexes
+            .get(index_name)
+            .ok_or_else(|| Error::Other(format!("index '{}' not found", index_name)))?;
+        let mut mutable_datastore = datastore.clone();
+
+        for (doc_short_id, doc) in documents {
+            if *doc_short_id == 0 {
+                continue;
+            }
+            let doc_id = doc
+                .id()
+                .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
+                .to_string();
+            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            for values in &value_sets {
+                self.save_resolving_unique_conflict(
+                    &mut mutable_datastore,
+                    systemstore,
+                    index,
+                    *doc_short_id,
+                    &doc_id,
+                    values,
+                )
+                .await
+                .map_err(Error::Storage)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Save an index entry, healing stale unique conflicts (#1111/#700).
     ///
     /// A unique violation whose existing entry points at a **deleted or
@@ -550,8 +591,7 @@ impl IndexManager {
         }
     }
 
-    /// Save an index entry on the MERGE path, resolving live unique conflicts
-    /// deterministically instead of failing the merge (#1111).
+    /// Save an index entry while resolving live unique conflicts deterministically (#1111/#1308).
     ///
     /// A CRDT merge cannot preserve cross-replica uniqueness: two nodes that
     /// each locally accepted the same unique value must still converge when
@@ -604,7 +644,7 @@ impl IndexManager {
                         index = %index.description().name,
                         winner_doc_id = %doc_id,
                         unindexed_doc_id = %holder_doc_id,
-                        "unique index conflict during merge: incoming document wins the \
+                        "unique index conflict: incoming document wins the \
                          deterministic pick; the previous holder is no longer indexed"
                     );
                     Ok(MergeConflictOutcome::IncomingIndexed)
@@ -614,7 +654,7 @@ impl IndexManager {
                         index = %index.description().name,
                         winner_doc_id = %holder_doc_id,
                         unindexed_doc_id = %doc_id,
-                        "unique index conflict during merge: existing holder wins the \
+                        "unique index conflict: existing holder wins the \
                          deterministic pick; the incoming document is persisted unindexed"
                     );
                     Ok(MergeConflictOutcome::IncomingUnindexed)
