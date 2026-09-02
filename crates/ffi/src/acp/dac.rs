@@ -129,11 +129,13 @@ pub unsafe extern "C" fn add_dac_policy(
         }
 
         // Step 5: Store policy - route through SourceHub when configured, else local
+        #[cfg(feature = "sourcehub")]
         let sh_acp = match NODES.get(node_ptr, |state| state.sourcehub_acp.clone()) {
             Some(opt) => opt,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
+        #[cfg(feature = "sourcehub")]
         if let Some(sh_acp) = sh_acp {
             // SourceHub mode: submit MsgCreatePolicy transaction
             let result = rt.block_on(async {
@@ -143,7 +145,7 @@ pub unsafe extern "C" fn add_dac_policy(
                     .map_err(|e| format!("SourceHub create policy failed: {}", e))?;
                 Ok::<String, String>(policy_id)
             });
-            match result {
+            return match result {
                 Ok(policy_id) => {
                     // Cache policy on all live FFI nodes so multi-node SourceHub tests
                     // can validate schemas that reference a policy created by another node.
@@ -153,8 +155,10 @@ pub unsafe extern "C" fn add_dac_policy(
                     FfiResult::success(serde_json::json!({ "PolicyID": policy_id }).to_string())
                 }
                 Err(e) => FfiResult::error(e),
-            }
-        } else {
+            };
+        }
+
+        {
             // Local mode: persist the parsed policy into the same Zanzibar store
             // used by document ACP so custom relations and permissions are enforced.
             let (policy_store, local_zanzibar_store) = match NODES.get(node_ptr, |state| {

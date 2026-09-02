@@ -59,6 +59,7 @@ pub(crate) async fn build_node_state(
             .map(|system| Arc::new(P2PState::new(system))),
         node_identity_did: node.node_identity_did.clone(),
         signing_enabled: options.enable_signing != 0,
+        #[cfg(feature = "sourcehub")]
         sourcehub_acp: node.sourcehub_acp.clone(),
         query_limits: node.query_limits,
         se_encryption_key: None,
@@ -151,6 +152,17 @@ fn resolve_embedded_config(
         embedded::SigningConfig::Disabled
     };
 
+    #[cfg(not(feature = "sourcehub"))]
+    if !options.sourcehub_grpc_address.is_null() {
+        return Err(
+            "this build does not include SourceHub ACP; rebuild with the sourcehub feature"
+                .to_string(),
+        );
+    }
+    #[cfg(not(feature = "sourcehub"))]
+    let document_acp = embedded::DocumentAcpConfig::Local;
+
+    #[cfg(feature = "sourcehub")]
     let document_acp = if !options.sourcehub_grpc_address.is_null() {
         let grpc_address = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
             .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;
@@ -316,6 +328,37 @@ mod tests {
 
         let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
         assert!(error.contains("invalid"));
+
+        unsafe { crate::types::defra_free_string(result.error) };
+    }
+
+    #[cfg(not(feature = "sourcehub"))]
+    #[test]
+    fn test_sourcehub_config_rejected_without_feature() {
+        assert!(crate::runtime::init_runtime());
+
+        let grpc = CString::new("127.0.0.1:9090").unwrap();
+        let comet = CString::new("127.0.0.1:26657").unwrap();
+        let chain = CString::new("sourcehub-test").unwrap();
+        let signer_key = [1u8; 32];
+        let result = new_node(NodeInitOptions {
+            sourcehub_grpc_address: grpc.as_ptr(),
+            sourcehub_comet_rpc_address: comet.as_ptr(),
+            sourcehub_chain_id: chain.as_ptr(),
+            sourcehub_signer_key: signer_key.as_ptr(),
+            sourcehub_signer_key_len: signer_key.len(),
+            ..NodeInitOptions::default()
+        });
+
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy().into_owned() };
+        assert!(error.contains("SourceHub"), "unexpected error: {error}");
+        assert!(
+            error.contains("sourcehub feature"),
+            "unexpected error: {error}"
+        );
 
         unsafe { crate::types::defra_free_string(result.error) };
     }

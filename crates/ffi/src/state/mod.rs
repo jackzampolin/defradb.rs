@@ -104,6 +104,7 @@ pub struct NodeState {
     pub signing_enabled: bool,
     /// SourceHub ACP (optional - only set when using SourceHub for document ACP).
     /// Used by add_dac_policy to route policy creation through SourceHub transactions.
+    #[cfg(feature = "sourcehub")]
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
     /// Query parsing and filter evaluation limits configured for this node.
     pub query_limits: query::QueryLimits,
