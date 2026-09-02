@@ -511,6 +511,13 @@ impl IndexManager {
             .indexes
             .get(index_name)
             .ok_or_else(|| Error::Other(format!("index '{}' not found", index_name)))?;
+
+        if !matches!(index, IndexType::Unique(_)) {
+            self.bulk_index(datastore, index_name, documents, schema)
+                .await?;
+            return Ok(());
+        }
+
         let mut mutable_datastore = datastore.clone();
 
         for (doc_short_id, doc) in documents {
