@@ -282,3 +282,68 @@ async fn k_zero_returns_nothing() {
         .unwrap()
         .is_empty());
 }
+
+/// Updating a vector moves it between inverted lists, and the entry under its
+/// previous list has to go with it.
+///
+/// A list holds the code of whatever vector was assigned to it, so a stale
+/// entry is not merely a duplicate: probing both lists pushes the same id twice
+/// with two different distances, and one of them ranks the document by an
+/// embedding it no longer has. The liveness check filters tombstones only, so
+/// nothing downstream catches it.
+#[tokio::test]
+async fn updating_a_vector_leaves_no_entry_in_its_previous_list() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0x444);
+    let vectors = corpus.clustered(400, DIMENSIONS, 8, 0.1);
+    let mut index = filled(8, 8, &vectors).await;
+    index.build().await.unwrap();
+
+    // Move document 1 onto a far-away cluster's vector, which is what puts it
+    // in a different list from the one it was built into. Probing everything,
+    // so a surviving stale entry has nowhere to hide.
+    let moved_to = vectors[399].clone();
+    index.insert(NodeId(1), &moved_to).await.unwrap();
+
+    let hits = index.search(moved_to.as_slice(), 400, None).await.unwrap();
+    let appearances = hits.iter().filter(|n| n.id == NodeId(1)).count();
+    assert_eq!(
+        appearances,
+        1,
+        "document 1 appears {appearances} times after moving lists: {:?}",
+        hits.iter().map(|n| n.id.0).collect::<Vec<_>>()
+    );
+
+    // And it must rank by where it moved to, not by where it was. It now holds
+    // document 400's vector exactly, so the two tie for nearest; which of a tie
+    // comes first is IVF-PQ's tie-break, not this fix's business.
+    let best_distance = hits.first().expect("a non-empty result").distance;
+    let moved = hits
+        .iter()
+        .find(|n| n.id == NodeId(1))
+        .expect("the updated document must still rank");
+    assert!(
+        (moved.distance - best_distance).abs() <= f64::EPSILON,
+        "the updated document ranks at {} rather than its new vector's {best_distance}",
+        moved.distance
+    );
+}
+
+/// The same, when the vector is replaced by one that lands in the *same* list.
+/// Nothing should be removed, and the document must still appear exactly once.
+#[tokio::test]
+async fn updating_within_one_list_keeps_the_document() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0x555);
+    let vectors = corpus.clustered(400, DIMENSIONS, 8, 0.1);
+    let mut index = filled(8, 8, &vectors).await;
+    index.build().await.unwrap();
+
+    let nudged: Vec<f32> = vectors[0].iter().map(|value| value + 0.001).collect();
+    index.insert(NodeId(1), &nudged).await.unwrap();
+
+    let hits = index.search(nudged.as_slice(), 400, None).await.unwrap();
+    assert_eq!(
+        hits.iter().filter(|n| n.id == NodeId(1)).count(),
+        1,
+        "document 1 must appear exactly once"
+    );
+}

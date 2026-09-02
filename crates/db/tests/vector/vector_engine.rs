@@ -96,6 +96,10 @@ impl<S: VectorNodeStore> VectorNodeStore for Counting<S> {
         self.inner.put_aux(kind, key, value).await
     }
 
+    async fn delete_aux(&mut self, kind: u8, key: &[u8]) -> Result<()> {
+        self.inner.delete_aux(kind, key).await
+    }
+
     async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], visit: F) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<()> + MaybeSend,
