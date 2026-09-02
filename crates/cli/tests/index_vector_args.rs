@@ -143,3 +143,64 @@ fn the_flag_requires_its_json_and_the_old_flags_are_gone() {
         Wrapper::try_parse_from(argv).expect_err(&format!("{extra:?} must not parse"));
     }
 }
+
+/// `index list` has to show a vector index as one.
+///
+/// The client parses the server's response into its own struct, and that struct
+/// had nowhere to put the kind, so a vector index printed as an ordinary one:
+/// the same silent downgrade the wire envelope exists to prevent, one layer
+/// above the wire. The reference prints the `Vector` block, so a script reading
+/// either runtime's output saw a different index here.
+#[test]
+fn index_list_keeps_the_vector_configuration() {
+    let served = serde_json::json!({
+        "name": "Note_embedding_ASC",
+        "collection": "Note",
+        "fields": [{"name": "embedding", "direction": "ASC"}],
+        "unique": false,
+        "kind": {
+            "Kind": 1,
+            "KindDescription": {
+                "Algorithm": "HNSW",
+                "Metric": "COSINE",
+                "Dimensions": 8,
+                "HNSW": {"M": 16, "EfConstruction": 128, "EfSearch": 64}
+            }
+        }
+    });
+
+    let parsed: cli::commands::client::http_client::IndexInfo =
+        serde_json::from_value(served).expect("the client must parse the served shape");
+
+    let kind = parsed
+        .kind
+        .expect("the vector configuration must survive the parse");
+    let schema::IndexKind::Vector(vector) = kind else {
+        panic!("a vector index parsed as {kind:?}");
+    };
+    assert_eq!(vector.algorithm, VectorAlgorithm::Hnsw);
+    assert_eq!(vector.metric, DistanceMetric::Cosine);
+    assert_eq!(vector.dimensions, 8);
+
+    // And it must survive being printed again, which is what the command does.
+    let printed = serde_json::to_value(&parsed).expect("re-serialize");
+    assert_eq!(printed["kind"]["Kind"], 1, "the envelope did not survive");
+}
+
+/// An ordinary index has no kind to carry, and must not grow an empty one.
+#[test]
+fn index_list_omits_the_kind_for_an_ordered_index() {
+    let served = serde_json::json!({
+        "name": "Note_title_ASC",
+        "collection": "Note",
+        "fields": [{"name": "title", "direction": "ASC"}],
+        "unique": true
+    });
+    let parsed: cli::commands::client::http_client::IndexInfo =
+        serde_json::from_value(served).expect("parse");
+    assert!(parsed.kind.is_none());
+    assert!(parsed.unique);
+
+    let printed = serde_json::to_value(&parsed).expect("re-serialize");
+    assert!(printed.get("kind").is_none(), "an empty kind was emitted");
+}

@@ -6,11 +6,11 @@
 //! marshals through the `indexDescription` mirror: `Name`, `ID`, `Fields`,
 //! `Kind`, `KindDescription`, `Unique`.
 //!
-//! **This is read from source, not from a running Go node.** No Go toolchain is
-//! available here, and PR 5096 is not in `GO_COMPAT_COMMIT`, so nothing in CI
-//! exchanges a vector index with Go yet. What this pins is that our shape
-//! matches the shape that source produces; the executed check has to wait for
-//! the baseline bump.
+//! **This is read from source, not from a running Go node.** What it pins is
+//! that our shape matches the shape that source produces. `GO_COMPAT_COMMIT`
+//! now reaches past PR 5096, so CI's go-compat suite can exchange a vector
+//! index with a real Go node; this file stays the cheap unit-level fence that
+//! fails before that suite has to run.
 //!
 //! The key-set assertions are the point: a field Go emits and we do not, or one
 //! we add, fails here rather than at a peer.

@@ -37,6 +37,20 @@ pub struct IndexInfo {
     /// Whether the index is unique
     #[serde(rename = "unique", alias = "Unique", default)]
     pub unique: bool,
+
+    /// Kind-specific configuration, absent for an ordinary index.
+    ///
+    /// Without this the client parsed the server's response into a struct that
+    /// had nowhere to put it, so `index list` printed a vector index as an
+    /// ordinary one: the same silent downgrade the wire envelope exists to
+    /// prevent, one layer above the wire.
+    #[serde(
+        rename = "kind",
+        alias = "Kind",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kind: Option<schema::IndexKind>,
 }
 
 /// Index field info
