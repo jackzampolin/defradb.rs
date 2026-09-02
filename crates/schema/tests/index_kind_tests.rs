@@ -3,8 +3,8 @@
 
 use proptest::prelude::*;
 use schema::{
-    DistanceMetric, HnswParams, IndexDescription, IndexKind, IvfPqParams, OrderedIndexDescription,
-    SsgParams, VectorAlgorithm, VectorIndexDescription,
+    DistanceMetric, HnswParams, IndexDescription, IndexKind, IvfFlatParams, IvfPqParams,
+    OrderedIndexDescription, SsgParams, VectorAlgorithm, VectorIndexDescription,
 };
 
 fn vector_description() -> VectorIndexDescription {
@@ -14,6 +14,7 @@ fn vector_description() -> VectorIndexDescription {
         dimensions: 768,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     }
 }
@@ -148,6 +149,7 @@ fn index_kinds() -> impl Strategy<Value = IndexKind> {
         Just(VectorAlgorithm::Hnsw),
         Just(VectorAlgorithm::Flat),
         Just(VectorAlgorithm::IvfPq),
+        Just(VectorAlgorithm::IvfFlat),
         Just(VectorAlgorithm::Ssg),
     ];
     let metrics = prop_oneof![Just(DistanceMetric::Cosine), Just(DistanceMetric::Dot)];
@@ -168,6 +170,13 @@ fn index_kinds() -> impl Strategy<Value = IndexKind> {
             },
         ),
     );
+    let ivfflat = prop::option::of((any::<u32>(), any::<u32>(), any::<u64>()).prop_map(
+        |(nlist, nprobe, sample_bytes)| IvfFlatParams {
+            nlist,
+            nprobe,
+            sample_bytes,
+        },
+    ));
     let ssg = prop::option::of(
         (any::<u32>(), any::<u32>(), any::<u32>()).prop_map(|(r, angle, pool)| SsgParams {
             r,
@@ -178,14 +187,15 @@ fn index_kinds() -> impl Strategy<Value = IndexKind> {
 
     prop_oneof![
         any::<bool>().prop_map(|unique| IndexKind::Ordered(OrderedIndexDescription { unique })),
-        (algorithms, metrics, any::<u32>(), hnsw, ivfpq, ssg).prop_map(
-            |(algorithm, metric, dimensions, hnsw, ivfpq, ssg)| {
+        (algorithms, metrics, any::<u32>(), hnsw, ivfpq, ivfflat, ssg).prop_map(
+            |(algorithm, metric, dimensions, hnsw, ivfpq, ivfflat, ssg)| {
                 IndexKind::Vector(VectorIndexDescription {
                     algorithm,
                     metric,
                     dimensions,
                     hnsw,
                     ivfpq,
+                    ivfflat,
                     ssg,
                 })
             }

@@ -1,6 +1,7 @@
 //! The vector index seen through `CollectionIndex`: what a document write does
 //! to the graph.
 
+use db::index::vector::engine::ivf;
 use db::index::vector::index::VectorIndex;
 use db::index::vector::kv_store::KvNodeStore;
 use db::index::vector::store::NodeId;
@@ -10,6 +11,7 @@ use schema::DistanceMetric;
 use schema::HnswParams;
 use schema::IndexDescription;
 use schema::IndexedFieldDescription;
+use schema::IvfFlatParams;
 use schema::VectorAlgorithm;
 use schema::VectorIndexDescription;
 use storage::corekv::Store;
@@ -27,6 +29,7 @@ fn vector_config(dimensions: u32) -> VectorIndexDescription {
         dimensions,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     }
 }
@@ -321,6 +324,95 @@ async fn dropping_the_index_removes_every_key() {
         kv.get_meta().await.unwrap(),
         None,
         "the meta key must go too"
+    );
+}
+
+/// IVF_FLAT's aux keyspace is a second full copy of the corpus, since a list
+/// entry holds the vector rather than a small code, so leaking it on drop
+/// would leak the whole corpus again rather than a handful of centroids.
+/// `remove_all` must clear it completely once trained, not only while the
+/// index is still a staging `Flat`.
+#[tokio::test]
+async fn dropping_a_trained_ivfflat_index_removes_every_key() {
+    let store = RegolithStore::in_memory().unwrap();
+    let desc = IndexDescription {
+        name: "by_embedding".to_string(),
+        id: 9,
+        fields: vec![IndexedFieldDescription {
+            name: "embedding".to_string(),
+            descending: false,
+        }],
+        unique: false,
+        kind: None,
+        auto_generated: false,
+    }
+    .as_vector(VectorIndexDescription {
+        algorithm: VectorAlgorithm::IvfFlat,
+        metric: DistanceMetric::Cosine,
+        dimensions: DIMENSIONS,
+        hnsw: None,
+        ivfpq: None,
+        ivfflat: Some(IvfFlatParams {
+            nlist: 4,
+            nprobe: 4,
+            ..IvfFlatParams::default()
+        }),
+        ssg: None,
+    });
+    let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid IVF_FLAT description");
+
+    let mut corpus = crate::support::Corpus::new(0x1F_1A7);
+    let vectors = corpus.vectors(200, DIMENSIONS as usize);
+
+    let mut write = txn(&store).await;
+    for (i, vector) in vectors.iter().enumerate() {
+        let widened: Vec<f64> = vector.iter().map(|x| *x as f64).collect();
+        index
+            .save(&mut write, i as u64 + 1, &wide(&widened))
+            .await
+            .unwrap();
+    }
+    write.commit().await.unwrap();
+    assert_eq!(live_ids(&store, &index).await.len(), 200);
+
+    // The index must actually have trained, or this test proves nothing about
+    // the trained aux keyspace at all.
+    let mut read = txn(&store).await;
+    let kv = KvNodeStore::new(&mut read, COLLECTION, 9, 0);
+    assert!(
+        kv.get_aux(ivf::STATE, b"").await.unwrap().is_some(),
+        "test setup: 200 documents must be enough to cross the training threshold"
+    );
+
+    let mut write = txn(&store).await;
+    index.remove_all(&mut write).await.unwrap();
+    write.commit().await.unwrap();
+
+    assert!(live_ids(&store, &index).await.is_empty());
+    let mut read = txn(&store).await;
+    let kv = KvNodeStore::new(&mut read, COLLECTION, 9, 0);
+    assert_eq!(kv.get_meta().await.unwrap(), None);
+    assert!(
+        kv.get_aux(ivf::STATE, b"").await.unwrap().is_none(),
+        "the trained-state marker must go"
+    );
+    assert!(
+        kv.get_aux(ivf::CENTROID, &0u32.to_be_bytes())
+            .await
+            .unwrap()
+            .is_none(),
+        "a centroid must go"
+    );
+    let mut list_entries = 0;
+    kv.iterate_aux(ivf::LIST, b"", |_, _| {
+        list_entries += 1;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        list_entries, 0,
+        "the inverted lists, the full-vector copy, must go"
     );
 }
 

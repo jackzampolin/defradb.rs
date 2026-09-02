@@ -7,6 +7,7 @@
 use super::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use super::flat::Flat;
 use super::hnsw::Hnsw;
+use super::ivfflat::IvfFlat;
 use super::ivfpq::IvfPq;
 use super::ssg::Ssg;
 use crate::index::error::Result;
@@ -18,6 +19,7 @@ pub enum Engine<S> {
     Hnsw(Hnsw<S>),
     Flat(Flat<S>),
     IvfPq(IvfPq<S>),
+    IvfFlat(IvfFlat<S>),
     Ssg(Ssg<S>),
 }
 
@@ -27,6 +29,7 @@ macro_rules! dispatch {
             Engine::Hnsw($engine) => $call,
             Engine::Flat($engine) => $call,
             Engine::IvfPq($engine) => $call,
+            Engine::IvfFlat($engine) => $call,
             Engine::Ssg($engine) => $call,
         }
     };
@@ -52,10 +55,10 @@ impl<S: VectorNodeStore> VectorIndexEngine for Engine<S> {
     }
 
     async fn build(&mut self) -> Result<()> {
-        // Method resolution prefers IvfPq's and Ssg's own inherent `build`,
-        // which return their kind's report, over this trait method; `map`
-        // discards it uniformly across every arm rather than the macro having
-        // to special-case the two kinds that build something.
+        // Method resolution prefers IvfPq's, IvfFlat's and Ssg's own inherent
+        // `build`, which return their kind's report, over this trait method;
+        // `map` discards it uniformly across every arm rather than the macro
+        // having to special-case the kinds that build something.
         dispatch!(self, e => e.build().await.map(|_| ()))
     }
 

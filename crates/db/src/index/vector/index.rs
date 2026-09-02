@@ -14,6 +14,7 @@ use super::engine::ann::{Admit, Neighbor, VectorIndexEngine};
 use super::engine::dispatch::Engine;
 use super::engine::flat::Flat;
 use super::engine::hnsw::Hnsw;
+use super::engine::ivfflat::{IvfFlat, IvfFlatParams};
 use super::engine::ivfpq::{IvfPq, IvfPqParams};
 use super::engine::ssg::{Ssg, SsgParams};
 use super::kv_store::KvNodeStore;
@@ -35,6 +36,7 @@ pub struct VectorIndex {
     vector: VectorIndexDescription,
     params: Params,
     ivfpq: IvfPqParams,
+    ivfflat: IvfFlatParams,
     ssg: SsgParams,
     metric: Metric,
     seed: u64,
@@ -66,6 +68,13 @@ impl VectorIndex {
             sample_bytes: configured.sample_bytes,
         };
 
+        let configured = vector.ivfflat.unwrap_or_default();
+        let ivfflat = IvfFlatParams {
+            nlist: configured.nlist,
+            nprobe: configured.nprobe,
+            sample_bytes: configured.sample_bytes,
+        };
+
         let configured = vector.ssg.unwrap_or_default();
         let ssg = SsgParams {
             r: configured.r,
@@ -83,6 +92,9 @@ impl VectorIndex {
         if vector.algorithm == VectorAlgorithm::IvfPq {
             IvfPq::try_new(super::store::MemoryNodeStore::new(), metric, ivfpq, 0)?;
         }
+        if vector.algorithm == VectorAlgorithm::IvfFlat {
+            IvfFlat::try_new(super::store::MemoryNodeStore::new(), metric, ivfflat, 0)?;
+        }
 
         Ok(Self {
             collection_short_id,
@@ -93,6 +105,7 @@ impl VectorIndex {
             vector,
             params,
             ivfpq,
+            ivfflat,
             ssg,
             metric,
         })
@@ -143,6 +156,12 @@ impl VectorIndex {
             VectorAlgorithm::IvfPq => {
                 Engine::IvfPq(IvfPq::try_new(store, self.metric, self.ivfpq, self.seed)?)
             }
+            VectorAlgorithm::IvfFlat => Engine::IvfFlat(IvfFlat::try_new(
+                store,
+                self.metric,
+                self.ivfflat,
+                self.seed,
+            )?),
             VectorAlgorithm::Ssg => Engine::Ssg(Ssg::try_new(
                 store,
                 self.metric,

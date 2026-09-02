@@ -1,6 +1,9 @@
 //! Vector index engines, quantization and recall gates.
 
 mod edge_selection;
+mod ivfflat_engine;
+mod ivfflat_exactness;
+mod ivfflat_recall_gate;
 mod ivfpq_engine;
 mod ivfpq_recall_baseline;
 mod ivfpq_recall_gate;

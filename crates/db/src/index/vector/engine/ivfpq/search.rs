@@ -6,8 +6,9 @@ use super::codec::{self, TrainedState};
 use super::IvfPq;
 use crate::index::error::Result;
 use crate::index::vector::engine::ann::{Admit, Neighbor, Quantizer};
+use crate::index::vector::engine::ivf;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
-use defra_core::vector::{Element, Metric};
+use defra_core::vector::Element;
 
 impl<S: VectorNodeStore> IvfPq<S> {
     pub(super) async fn search_lists<E: Element, A: Admit>(
@@ -27,27 +28,17 @@ impl<S: VectorNodeStore> IvfPq<S> {
         let (coarse, quantizer) = self.trained_parts(state).await?;
 
         // `effort` overrides nprobe the way ef_search does for a graph.
-        let nprobe = effort
-            .map(|e| e.max(1))
-            .unwrap_or(self.params().nprobe as usize)
-            .min(coarse.k)
-            .max(1);
-
-        let mut lists: Vec<(usize, f64)> = (0..coarse.k)
-            .map(|index| {
-                (
-                    index,
-                    Metric::Euclidean.distance(query.as_slice(), coarse.get(index)),
-                )
-            })
-            .collect();
-        lists.sort_by(|a, b| a.1.total_cmp(&b.1));
-        lists.truncate(nprobe);
+        let lists = ivf::probe_lists(
+            query.as_slice(),
+            coarse,
+            self.params().nprobe as usize,
+            effort,
+        );
 
         let mut best: BinaryHeap<Ranked> = BinaryHeap::with_capacity(k + 1);
         let mut residual = vec![0.0f32; state.dimensions as usize];
 
-        for (list, _) in lists {
+        for list in lists {
             for (slot, (q, c)) in residual.iter_mut().zip(query.iter().zip(coarse.get(list))) {
                 *slot = q - c;
             }

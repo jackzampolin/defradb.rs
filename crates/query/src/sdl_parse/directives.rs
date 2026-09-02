@@ -231,6 +231,8 @@ pub struct VectorIndexConfig {
     pub flat: Option<FlatConfig>,
     /// Present when the `ivfpq` argument was given.
     pub ivfpq: Option<IvfPqConfig>,
+    /// Present when the `ivfflat` argument was given.
+    pub ivfflat: Option<IvfFlatConfig>,
     /// Present when the `ssg` argument was given.
     pub ssg: Option<SsgConfig>,
     /// Present when the `hnsw` argument was given. Its absence still means
@@ -279,6 +281,17 @@ pub struct IvfPqConfig {
     pub nlist: Option<u32>,
     pub nprobe: Option<u32>,
     pub m: Option<u32>,
+    pub sample_bytes: Option<u32>,
+}
+
+/// The `ivfflat` block. Every member is optional; an omitted one keeps its
+/// default, and a zero is derived from the corpus. No `m`: a list holds the
+/// full vector, so there is nothing to quantize.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IvfFlatConfig {
+    pub metric: Option<String>,
+    pub nlist: Option<u32>,
+    pub nprobe: Option<u32>,
     pub sample_bytes: Option<u32>,
 }
 

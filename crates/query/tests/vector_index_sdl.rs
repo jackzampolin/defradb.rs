@@ -489,6 +489,34 @@ fn ivfpq_defaults_are_kept() {
 }
 
 #[test]
+fn ivfflat_parameters_are_read() {
+    let vector = only_vector(
+        r#"type Doc {
+            e: [Float!] @index(vector: {
+                dimensions: 128,
+                ivfflat: {nlist: 256, nprobe: 16, sampleBytes: 1048576}
+            })
+        }"#,
+    );
+    assert_eq!(vector.algorithm, VectorAlgorithm::IvfFlat);
+    assert!(vector.hnsw.is_none(), "IVF_FLAT carries no HNSW block");
+    let ivfflat = vector.ivfflat.expect("IVF_FLAT params");
+    assert_eq!(
+        (ivfflat.nlist, ivfflat.nprobe, ivfflat.sample_bytes),
+        (256, 16, 1_048_576)
+    );
+}
+
+#[test]
+fn ivfflat_defaults_are_kept() {
+    let vector =
+        only_vector(r#"type Doc { e: [Float!] @index(vector: {dimensions: 8, alg: IVF_FLAT}) }"#);
+    let ivfflat = vector.ivfflat.expect("IVF_FLAT params");
+    assert_eq!(ivfflat.nprobe, 8);
+    assert_eq!(ivfflat.nlist, 0, "zero derives nlist from the corpus");
+}
+
+#[test]
 fn ssg_parameters_are_read() {
     let vector = only_vector(
         r#"type Doc {
@@ -515,6 +543,7 @@ fn flat_carries_no_build_parameters() {
     assert_eq!(vector.algorithm, VectorAlgorithm::Flat);
     assert!(vector.hnsw.is_none());
     assert!(vector.ivfpq.is_none());
+    assert!(vector.ivfflat.is_none());
     assert!(vector.ssg.is_none());
 }
 
@@ -532,6 +561,10 @@ fn an_unknown_block_argument_is_refused() {
         (
             r#"type Doc { e: [Float!] @index(vector: {dimensions: 8, flat: {nlist: 4}}) }"#,
             "nlist",
+        ),
+        (
+            r#"type Doc { e: [Float!] @index(vector: {dimensions: 8, ivfflat: {m: 4}}) }"#,
+            "m",
         ),
     ] {
         let err = parse_sdl(sdl).expect_err("a misspelled argument must not parse");

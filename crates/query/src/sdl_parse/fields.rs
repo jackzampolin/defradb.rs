@@ -62,7 +62,7 @@ impl<'a> SdlParser<'a> {
                 "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
                 "index" => match self.parse_index_directive(directive, Some(field_name))? {
                     ParsedIndex::Ordered(config) => result.index.push(config),
-                    ParsedIndex::Vector(config) => result.vector_index.push(config),
+                    ParsedIndex::Vector(config) => result.vector_index.push(*config),
                 },
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
                 "default" => {
@@ -510,7 +510,7 @@ impl<'a> SdlParser<'a> {
             }
             let mut config = self.parse_vector_index_config(value)?;
             config.name = name;
-            return Ok(ParsedIndex::Vector(config));
+            return Ok(ParsedIndex::Vector(Box::new(config)));
         }
 
         // Resolved here rather than as each argument is read, because an
@@ -613,7 +613,9 @@ impl<'a> SdlParser<'a> {
         &self,
         value: &SchemaValue<'_>,
     ) -> Result<super::directives::VectorIndexConfig> {
-        use super::directives::{directive_u32, FlatConfig, HnswConfig, IvfPqConfig, SsgConfig};
+        use super::directives::{
+            directive_u32, FlatConfig, HnswConfig, IvfFlatConfig, IvfPqConfig, SsgConfig,
+        };
 
         let SchemaValue::Object(members) = value else {
             return Err(QueryError::parse(
@@ -680,6 +682,23 @@ impl<'a> SdlParser<'a> {
                         *slot = Some(read_block_u32(name, value)?);
                     }
                     config.ivfpq = Some(block);
+                }
+                block if block == schema::VectorAlgorithm::IvfFlat.sdl_block() => {
+                    let mut block = IvfFlatConfig::default();
+                    for (name, value) in vector_block(member, member_value)? {
+                        let slot = match name.as_str() {
+                            "metric" => {
+                                block.metric = Some(read_metric(member, value)?);
+                                continue;
+                            }
+                            "nlist" => &mut block.nlist,
+                            "nprobe" => &mut block.nprobe,
+                            "sampleBytes" => &mut block.sample_bytes,
+                            other => return Err(unknown_vector_member(member, other)),
+                        };
+                        *slot = Some(read_block_u32(name, value)?);
+                    }
+                    config.ivfflat = Some(block);
                 }
                 block if block == schema::VectorAlgorithm::Ssg.sdl_block() => {
                     let mut block = SsgConfig::default();
@@ -890,7 +909,10 @@ type SchemaValue<'a> = graphql_parser::schema::Value<'a, String>;
 /// two different places.
 pub(super) enum ParsedIndex {
     Ordered(IndexConfig),
-    Vector(super::directives::VectorIndexConfig),
+    // Boxed: `VectorIndexConfig` carries one optional config block per
+    // algorithm, and `IvfFlatConfig` pushed it past clippy's size-difference
+    // threshold against `IndexConfig`, the enum's other, much smaller variant.
+    Vector(Box<super::directives::VectorIndexConfig>),
 }
 
 /// The kind an argument selects. Distinct from `schema::IndexKind` because the

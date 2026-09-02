@@ -43,6 +43,7 @@ fn vector() -> VectorIndexDescription {
             ef_search: 64,
         }),
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     }
 }
@@ -416,4 +417,71 @@ fn ssg_is_an_algorithm_go_cannot_parse() {
 
     let back: IndexDescription = serde_json::from_value(json).unwrap();
     assert_eq!(back.vector().and_then(|v| v.ssg).map(|p| p.r), Some(32));
+}
+
+/// `IVF_FLAT` is the fifth divergence, and its parameter block has no `M`:
+/// a list holds the full vector, so there is nothing to quantize.
+#[test]
+fn ivfflat_is_an_algorithm_go_cannot_parse() {
+    use schema::IvfFlatParams;
+
+    assert!(!VectorAlgorithm::IvfFlat.is_go_compatible());
+    assert_eq!(
+        serde_json::to_value(VectorAlgorithm::IvfFlat).unwrap(),
+        json!("IVF_FLAT")
+    );
+
+    let desc = IndexDescription::new("i")
+        .as_vector(VectorIndexDescription {
+            algorithm: VectorAlgorithm::IvfFlat,
+            hnsw: None,
+            ivfflat: Some(IvfFlatParams {
+                nlist: 64,
+                nprobe: 12,
+                sample_bytes: 1 << 20,
+            }),
+            ..vector()
+        })
+        .normalized();
+
+    let json = serde_json::to_value(&desc).unwrap();
+    assert_eq!(json["KindDescription"]["Algorithm"], json!("IVF_FLAT"));
+    assert_eq!(
+        json["KindDescription"]["IVFFLAT"],
+        json!({"NList": 64, "NProbe": 12, "SampleBytes": 1_048_576})
+    );
+    assert!(!json["KindDescription"]
+        .as_object()
+        .unwrap()
+        .contains_key("HNSW"));
+    assert!(
+        !json["KindDescription"]
+            .as_object()
+            .unwrap()
+            .contains_key("M"),
+        "IVF_FLAT has no M to quantize with"
+    );
+
+    let back: IndexDescription = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        back.vector().map(|v| v.algorithm),
+        Some(VectorAlgorithm::IvfFlat)
+    );
+    assert_eq!(
+        back.vector().and_then(|v| v.ivfflat).map(|p| p.nlist),
+        Some(64)
+    );
+}
+
+/// An HNSW description must not grow an IVFFLAT key either, mirroring the
+/// existing IVFPQ check: every Go-compatible definition stays free of every
+/// Rust-only algorithm's block.
+#[test]
+fn an_hnsw_description_carries_no_ivfflat_key() {
+    let json =
+        serde_json::to_value(IndexDescription::new("i").as_vector(vector()).normalized()).unwrap();
+    assert_eq!(
+        keys(&json["KindDescription"]),
+        ["Algorithm", "Dimensions", "HNSW", "Metric"]
+    );
 }

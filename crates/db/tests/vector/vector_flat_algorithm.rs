@@ -39,6 +39,7 @@ fn description(algorithm: VectorAlgorithm, hnsw: Option<HnswParams>) -> IndexDes
         dimensions: DIMENSIONS,
         hnsw,
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     })
 }
@@ -216,6 +217,7 @@ async fn the_ivfpq_algorithm_is_selectable() {
             m: 4,
             ..schema::IvfPqParams::default()
         }),
+        ivfflat: None,
         ssg: None,
     });
     let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid IVF-PQ description");
@@ -262,6 +264,7 @@ fn an_ivfpq_index_with_an_unrankable_metric_is_refused() {
             dimensions: DIMENSIONS,
             hnsw: None,
             ivfpq: Some(schema::IvfPqParams::default()),
+            ivfflat: None,
             ssg: None,
         });
     let err = VectorIndex::try_new(COLLECTION, desc).unwrap_err();
@@ -280,6 +283,7 @@ async fn the_ssg_algorithm_is_selectable() {
         dimensions: DIMENSIONS,
         hnsw: None,
         ivfpq: None,
+        ivfflat: None,
         ssg: Some(schema::SsgParams::default()),
     });
     let index = VectorIndex::try_new(COLLECTION, desc).expect("a valid SSG description");
@@ -314,6 +318,7 @@ fn out_of_range_ssg_parameters_are_refused() {
         dimensions: DIMENSIONS,
         hnsw: None,
         ivfpq: None,
+        ivfflat: None,
         ssg: Some(schema::SsgParams {
             angle: 200,
             ..schema::SsgParams::default()

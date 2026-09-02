@@ -409,6 +409,10 @@ vector_algorithms! {
     /// Coarse lists of product-quantized codes. Approximate and lossy, in
     /// exchange for a code far smaller than the vector it stands for.
     IvfPq => "IVF_PQ" / "ivfpq",
+    /// Coarse lists of full-precision vectors: the same partitioning as
+    /// `IvfPq`, with nothing compressed, so inside a probed list the ranking
+    /// is exact.
+    IvfFlat => "IVF_FLAT" / "ivfflat",
     /// Satellite System Graph: one flat layer, edges pruned by angle.
     Ssg => "SSG" / "ssg",
 }
@@ -434,11 +438,18 @@ impl VectorAlgorithm {
     /// inherent there, but the quantized path has no measured recall for it, so
     /// it stays refused rather than shipped unmeasured.
     ///
+    /// IVF_FLAT has no ADC: it ranks a probed list at full precision, in
+    /// whatever metric was asked for. What is restricted is the *coarse*
+    /// step, which partitions by centroid distance and is sound only when
+    /// vectors are normalized, as cosine does on insert. `DOT` would silently
+    /// cost recall in a way no cosine-corpus test would catch, so it stays
+    /// refused for the same reason IVF-PQ's `EUCLIDEAN` does: unmeasured.
+    ///
     /// Refused when the definition is written rather than when the first
     /// document is indexed.
     pub fn supports_metric(self, metric: DistanceMetric) -> bool {
         match self {
-            Self::IvfPq => metric == DistanceMetric::Cosine,
+            Self::IvfPq | Self::IvfFlat => metric == DistanceMetric::Cosine,
             Self::Hnsw | Self::Flat | Self::Ssg => true,
         }
     }
@@ -563,6 +574,9 @@ pub struct VectorIndexDescription {
     /// Present when `algorithm` is IVF_PQ.
     #[serde(rename = "IVFPQ", default, skip_serializing_if = "Option::is_none")]
     pub ivfpq: Option<IvfPqParams>,
+    /// Present when `algorithm` is IVF_FLAT.
+    #[serde(rename = "IVFFLAT", default, skip_serializing_if = "Option::is_none")]
+    pub ivfflat: Option<IvfFlatParams>,
     /// Present when `algorithm` is SSG.
     #[serde(rename = "SSG", default, skip_serializing_if = "Option::is_none")]
     pub ssg: Option<SsgParams>,
@@ -643,6 +657,42 @@ impl Default for IvfPqParams {
     }
 }
 
+/// IVF_FLAT build and search parameters.
+///
+/// `0` means derive `nlist` from the corpus, matching [`IvfPqParams`]. There
+/// is no `m`: a list holds the full vector rather than a quantized code, so
+/// there is nothing to quantize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IvfFlatParams {
+    /// Coarse centroids, and therefore inverted lists.
+    #[serde(rename = "NList", default)]
+    pub nlist: u32,
+    /// Lists probed per query.
+    #[serde(rename = "NProbe", default = "default_ivfflat_nprobe")]
+    pub nprobe: u32,
+    /// Cap on the resident training sample.
+    #[serde(rename = "SampleBytes", default = "default_ivfflat_sample_bytes")]
+    pub sample_bytes: u64,
+}
+
+fn default_ivfflat_nprobe() -> u32 {
+    8
+}
+
+fn default_ivfflat_sample_bytes() -> u64 {
+    128 << 20
+}
+
+impl Default for IvfFlatParams {
+    fn default() -> Self {
+        Self {
+            nlist: 0,
+            nprobe: default_ivfflat_nprobe(),
+            sample_bytes: default_ivfflat_sample_bytes(),
+        }
+    }
+}
+
 impl VectorIndexDescription {
     /// A description carrying the chosen algorithm's default parameters.
     ///
@@ -660,6 +710,7 @@ impl VectorIndexDescription {
             dimensions,
             hnsw: matches!(algorithm, VectorAlgorithm::Hnsw).then(HnswParams::default),
             ivfpq: matches!(algorithm, VectorAlgorithm::IvfPq).then(IvfPqParams::default),
+            ivfflat: matches!(algorithm, VectorAlgorithm::IvfFlat).then(IvfFlatParams::default),
             ssg: matches!(algorithm, VectorAlgorithm::Ssg).then(SsgParams::default),
         }
     }

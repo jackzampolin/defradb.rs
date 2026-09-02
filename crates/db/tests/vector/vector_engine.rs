@@ -23,6 +23,8 @@ use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::hnsw::Hnsw;
 use db::index::vector::engine::hnsw::LevelSampler;
+use db::index::vector::engine::ivfflat::IvfFlat;
+use db::index::vector::engine::ivfflat::IvfFlatParams;
 use db::index::vector::params::Params;
 use db::index::vector::params::DEFAULT_EF_CONSTRUCTION;
 use db::index::vector::params::DEFAULT_EF_SEARCH;
@@ -261,11 +263,11 @@ async fn recall_against_an_exact_scan_is_recorded() {
     );
 }
 
-/// Both kinds must be usable through the trait alone, with no knowledge of
-/// which one is behind it. A trait one type implements is a guess; this is what
-/// makes it an abstraction.
+/// Every kind exercised here must be usable through the trait alone, with no
+/// knowledge of which one is behind it. A trait one type implements is a
+/// guess; this is what makes it an abstraction.
 #[tokio::test]
-async fn both_kinds_satisfy_the_engine_trait() {
+async fn every_exercised_kind_satisfies_the_engine_trait() {
     async fn exercise<E: VectorIndexEngine>(
         engine: &mut E,
         vectors: &[Vec<f32>],
@@ -339,6 +341,21 @@ async fn both_kinds_satisfy_the_engine_trait() {
         &mut Flat::new(MemoryNodeStore::new(), Metric::Cosine),
         &vectors,
         EngineKind::Flat,
+    )
+    .await;
+    // Below the train threshold, so this exercises the staging path: an
+    // IvfFlat that never builds must behave exactly like Flat, which is the
+    // same contract IvfPq and Ssg's own staging paths carry.
+    exercise(
+        &mut IvfFlat::try_new(
+            MemoryNodeStore::new(),
+            Metric::Cosine,
+            IvfFlatParams::default(),
+            GRAPH_SEED,
+        )
+        .expect("cosine partitions soundly"),
+        &vectors,
+        EngineKind::IvfFlat,
     )
     .await;
 }
