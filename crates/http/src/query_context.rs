@@ -46,10 +46,7 @@ async fn execute_once_with_context(
     let dac_bypass = resolve_dac_bypass(state, identity).await;
 
     // Fast path: when there is nothing to put on the thread-locals, skip
-    // spawn_blocking entirely. `dac_bypass` must be part of the condition --
-    // the node-owner shortcut is keyed on identity alone, independent of
-    // signing (Go: `internal/db/collection_acp.go:86`), so a node started with
-    // --no-signing would otherwise silently lose full DAC access.
+    // spawn_blocking entirely.
     if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
         return state.executor.execute(request).await;
     }
@@ -138,8 +135,7 @@ pub async fn execute_in_txn_with_context(
 
     let dac_bypass = resolve_dac_bypass(state, identity).await;
 
-    // Fast path: see the note in `execute_once_with_context`. `dac_bypass`
-    // belongs in the condition for the same reason.
+    // Fast path: see the note in `execute_once_with_context`.
     if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
         return state.executor.execute_in_txn(request, &txn_handle).await;
     }
@@ -210,19 +206,9 @@ pub(crate) fn resolve_signing_config(
 
 /// Resolve whether DAC bypass should be enabled for this request.
 ///
-/// - If the request identity equals the configured node identity, bypass.
-///   (Matches Go's `internal/db/collection_acp.go:60-62` — the process owner
-///   gets full access to all documents regardless of DAC.)
 /// - If NAC is configured and the identity has `DacBypass` permission, bypass.
 /// - Otherwise, no bypass.
 pub(crate) async fn resolve_dac_bypass(state: &AppState, identity: &ExtractIdentity) -> bool {
-    // Node-identity full-access shortcut.
-    if let (Some(node_did), Some(req_did)) = (&state.node_identity_did, identity.did()) {
-        if node_did.as_str() == req_did.as_str() {
-            return true;
-        }
-    }
-
     let Some(nac) = &state.nac else {
         return false;
     };
@@ -393,11 +379,8 @@ mod tests {
         ExtractIdentity::from_did(Some(identity::Did::new_unchecked(OWNER_DID.to_string())))
     }
 
-    /// Go gates the node-owner full-access shortcut on identity alone
-    /// (`internal/db/collection_acp.go:86`), with no reference to signing
-    /// anywhere in that file. Disabling signing must not take DAC access with it.
     #[tokio::test]
-    async fn node_owner_keeps_dac_bypass_when_signing_is_disabled() {
+    async fn node_owner_is_not_promoted_to_nac_dac_bypass() {
         let executor = Arc::new(DacBypassRecorder::default());
         let state = AppStateBuilder::new(executor.clone())
             .with_node_identity_did(OWNER_DID.to_string())
@@ -411,10 +394,7 @@ mod tests {
         )
         .await;
 
-        assert!(
-            executor.observed.load(Ordering::SeqCst),
-            "the node owner lost DAC bypass because --no-signing sent the request down the fast path"
-        );
+        assert!(!executor.observed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

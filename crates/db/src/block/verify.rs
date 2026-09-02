@@ -298,11 +298,9 @@ async fn load_authorized_block_signature<S: Store>(
                         .map_err(|e| format!("failed to resolve block owners: {}", e))?
                         .ok_or_else(|| "missing permission".to_string())?;
 
-                let node_did = database.node_did();
                 let checker = acp::read_access::DirectChecker {
                     acp: document_acp,
                     identity: caller_identity,
-                    node_did: node_did.as_ref(),
                 };
 
                 let candidates = if owning_doc_ids.is_empty() {

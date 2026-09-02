@@ -3,14 +3,12 @@
 use acp::read_access::{DocAccess, ObjectAccessChecker};
 use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
-use identity::Did;
 
 use super::context::{check_doc_access_with_overlay, is_doc_registered_with_overlay};
 
 pub struct OverlayChecker<'a> {
     pub acp: &'a dyn DocumentACP,
     pub identity: &'a Identity,
-    pub node_did: Option<&'a Did>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -31,15 +29,6 @@ impl ObjectAccessChecker for OverlayChecker<'_> {
             });
         }
 
-        if let (Some(node), Identity::Authenticated(requester)) = (self.node_did, self.identity) {
-            if node == requester {
-                return Ok(DocAccess {
-                    has_access: true,
-                    explicit: true,
-                });
-            }
-        }
-
         if !is_doc_registered_with_overlay(self.acp, policy_id, resource_name, object_id).await? {
             return Ok(DocAccess {
                 has_access: true,
@@ -54,7 +43,6 @@ impl ObjectAccessChecker for OverlayChecker<'_> {
             policy_id,
             resource_name,
             object_id,
-            self.node_did,
         )
         .await?;
 
