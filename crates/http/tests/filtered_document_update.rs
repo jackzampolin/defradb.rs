@@ -189,7 +189,7 @@ async fn an_unknown_collection_is_not_a_success() {
 #[tokio::test]
 async fn the_route_is_gated_as_a_document_update() {
     assert_eq!(
-        route_permission("/api/v0/collections/:name", &Method::PATCH),
+        route_permission("/api/v0/collections/{name}", &Method::PATCH),
         RoutePermission::Required(NodePermission::DocumentUpdate)
     );
 }

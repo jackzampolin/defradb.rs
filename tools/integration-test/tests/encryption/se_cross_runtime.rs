@@ -33,11 +33,7 @@
 
 use std::time::{Duration, Instant};
 
-use integration_test::{BinarySource, TestCluster};
-
-/// Path to the Go `defradb` binary built with KMS + searchable encryption.
-const GO_KMS_BINARY: &str =
-    "/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb/build/defradb";
+use integration_test::TestCluster;
 
 /// A fixed 32-byte AES-256 searchable-encryption key shared across nodes.
 /// Distinct value per byte so a wrong key (e.g. a freshly generated one)
@@ -187,7 +183,6 @@ async fn go_rust_se_cross_node_rust_owner() {
         .with_p2p()
         .with_encryption()
         .with_shared_searchable_encryption_key(SHARED_SE_KEY)
-        .with_go_binary(BinarySource::Path(GO_KMS_BINARY.into()))
         .build()
         .await
         .expect("build mixed go/rust cluster with shared SE key");
@@ -230,7 +225,6 @@ async fn go_to_rust_se_cross_node() {
         .with_p2p()
         .with_encryption()
         .with_shared_searchable_encryption_key(SHARED_SE_KEY)
-        .with_go_binary(BinarySource::Path(GO_KMS_BINARY.into()))
         .build()
         .await
         .expect("build mixed go/rust cluster with shared SE key");

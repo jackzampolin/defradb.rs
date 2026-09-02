@@ -1,7 +1,6 @@
 //! Shared document/collection read-access rule.
 
 use async_trait::async_trait;
-use identity::Did;
 use storage::corekv::MaybeSendSync;
 
 use crate::{DocumentACP, DocumentPermission, Identity, Result};
@@ -26,7 +25,6 @@ pub trait ObjectAccessChecker: MaybeSendSync {
 pub struct DirectChecker<'a> {
     pub acp: &'a dyn DocumentACP,
     pub identity: &'a Identity,
-    pub node_did: Option<&'a Did>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -43,15 +41,6 @@ impl ObjectAccessChecker for DirectChecker<'_> {
                 has_access: true,
                 explicit: true,
             });
-        }
-
-        if let (Some(node), Identity::Authenticated(requester)) = (self.node_did, self.identity) {
-            if node == requester {
-                return Ok(DocAccess {
-                    has_access: true,
-                    explicit: true,
-                });
-            }
         }
 
         if !self

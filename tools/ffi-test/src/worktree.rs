@@ -467,16 +467,13 @@ mod tests {
     }
 
     #[test]
-    fn the_missing_go_worktree_hint_names_the_client_branch() {
+    fn the_missing_go_worktree_hint_names_the_required_client() {
         let hint = FfiTestError::GoWorktreeNotFound {
             path: "/r/defradb-ffi-port".to_string(),
         }
         .to_string();
 
-        assert!(
-            hint.contains("edjroz/ffi-rust-compat"),
-            "names the branch carrying the client: {hint}"
-        );
+        assert!(hint.contains("rustffi client"), "names the client: {hint}");
         // the path may have come from --go-path or DEFRADB_GO_REPO, where
         // `git worktree add` is the wrong mechanism entirely
         assert!(

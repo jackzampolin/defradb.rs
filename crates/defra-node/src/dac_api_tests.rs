@@ -291,6 +291,80 @@ async fn document_acp_handle_registers_and_checks_a_document() {
 }
 
 #[tokio::test]
+async fn node_identity_does_not_bypass_protected_history_reads() {
+    let _serial = SIGNING_STORE_GUARD.lock().await;
+    defra_core::signing::clear_identity_store();
+    let node_did = register_local_node_identity();
+    let node_identity = identity::Did::new(&node_did).unwrap();
+    let owner = identity::Did::new(DID_A).unwrap();
+
+    let node = EmbeddedNode::builder()
+        .with_node_identity_did(&node_did)
+        .build()
+        .await
+        .unwrap();
+    let policy_id = node.add_dac_policy(DID_A, POLICY_YAML).await.unwrap();
+    node.add_schema(&format!(
+        "type Users @policy(id: \"{policy_id}\", resource: \"users\") {{ name: String }}"
+    ))
+    .await
+    .unwrap();
+
+    let create = node
+        .execute_request_with_retry(
+            query::QueryRequest::new(
+                "mutation { add_Users(input: {name: \"secret\"}) { _docID } }",
+            )
+            .with_identity(Some(owner.clone())),
+            Default::default(),
+        )
+        .await;
+    assert!(!create.has_errors(), "{:?}", create.errors);
+    let doc_id = create.data.as_ref().unwrap()["add_Users"][0]["_docID"]
+        .as_str()
+        .unwrap();
+
+    assert_eq!(visible_users(&node, Some(node_identity.clone())).await, 0);
+
+    let commits_query = format!(
+        r#"query {{ _commits(docID: "{doc_id}", filter: {{fieldName: {{_eq: "_C"}}}}) {{ cid }} }}"#
+    );
+    let node_commits = node
+        .execute_request_with_retry(
+            query::QueryRequest::new(&commits_query).with_identity(Some(node_identity.clone())),
+            Default::default(),
+        )
+        .await;
+    assert!(!node_commits.has_errors(), "{:?}", node_commits.errors);
+    assert!(node_commits.data.unwrap()["_commits"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let owner_commits = node
+        .execute_request_with_retry(
+            query::QueryRequest::new(&commits_query).with_identity(Some(owner)),
+            Default::default(),
+        )
+        .await;
+    assert!(!owner_commits.has_errors(), "{:?}", owner_commits.errors);
+    let cid = owner_commits.data.unwrap()["_commits"][0]["cid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    node.authorized_signed_block_bytes(&cid, Some(&node_did))
+        .await
+        .expect_err("the process owner must satisfy document ACP when reading signed blocks");
+    node.authorized_signed_block_bytes(&cid, Some(DID_A))
+        .await
+        .expect("the document owner may read signed block material");
+
+    node.shutdown().await;
+    defra_core::signing::clear_identity_store();
+}
+
+#[tokio::test]
 async fn add_dac_policy_is_gated_by_node_access_control() {
     let _serial = SIGNING_STORE_GUARD.lock().await;
     defra_core::signing::clear_identity_store();

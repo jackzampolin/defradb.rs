@@ -54,6 +54,30 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub manage_query_correlator: p2p::ManageQueryCorrelator,
 }
 
+async fn shutdown_libp2p_host(handle: &p2p::P2PHostHandle, host_task: tokio::task::JoinHandle<()>) {
+    if let Err(error) = handle.shutdown().await {
+        tracing::debug!(%error, "failed to signal P2P host during setup rollback");
+    }
+    if let Err(error) = host_task.await {
+        tracing::debug!(%error, "P2P host task failed during setup rollback");
+    }
+}
+
+#[cfg(feature = "iroh")]
+async fn shutdown_iroh_endpoint(
+    transport: &p2p::iroh::IrohTransport,
+    endpoint_task: tokio::task::JoinHandle<()>,
+) {
+    use p2p::transport::P2PTransport;
+
+    if let Err(error) = transport.shutdown().await {
+        tracing::debug!(%error, "failed to signal Iroh endpoint during setup rollback");
+    }
+    if let Err(error) = endpoint_task.await {
+        tracing::debug!(%error, "Iroh endpoint task failed during setup rollback");
+    }
+}
+
 pub(crate) async fn setup_libp2p<S>(
     store: Arc<S>,
     database: Arc<db::DB<S>>,
@@ -68,6 +92,10 @@ where
     use p2p::sync::DocumentHeadProvider;
     use storage::stores::Peerstore;
 
+    let listen_addr = config
+        .listen_addr
+        .parse()
+        .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
     let blockstore = Arc::new(EmbeddedBlockstore::new(store.clone(), true));
     let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
@@ -112,14 +140,10 @@ where
         host.run().await;
     });
 
-    let listen_addr = config
-        .listen_addr
-        .parse()
-        .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
-    handle
-        .listen(listen_addr)
-        .await
-        .map_err(|error| anyhow!("failed to start listening: {error}"))?;
+    if let Err(error) = handle.listen(listen_addr).await {
+        shutdown_libp2p_host(&handle, host_task).await;
+        return Err(anyhow!("failed to start listening: {error}"));
+    }
 
     for topic in [
         DefraTopic::DocSync,
@@ -136,7 +160,7 @@ where
     let head_provider: Arc<dyn DocumentHeadProvider> =
         Arc::new(db::merge::create_head_provider(database.clone()));
     let (mut coordinator, sync_events_rx) =
-        p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
+        match p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
             p2p::Libp2pTransport::new(handle.clone()),
             blockstore.clone(),
             sync_config,
@@ -149,13 +173,46 @@ where
             serve_acp.clone(),
         )
         .await
-        .map_err(|error| anyhow!("failed to create sync coordinator: {error}"))?;
+        {
+            Ok(coordinator) => coordinator,
+            Err(error) => {
+                shutdown_libp2p_host(&handle, host_task).await;
+                return Err(anyhow!("failed to create sync coordinator: {error}"));
+            }
+        };
 
     let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
     coordinator
         .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
         .await;
+    let replication = db::merge::create_replication_stack(
+        database.clone(),
+        blockstore.clone(),
+        coordinator.clone(),
+    );
+
+    let kms_libp2p_transport = p2p::Libp2pTransport::new(handle.clone());
+    let local_peer_id = {
+        use p2p::transport::P2PTransport;
+        kms_libp2p_transport.local_peer_id().to_string()
+    };
+    let kms_transport = match p2p::kms::PubsubKeyTransport::new(
+        kms_libp2p_transport,
+        Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
+    )
+    .await
+    {
+        Ok(transport) => transport,
+        Err(error) => {
+            coordinator.shutdown().await;
+            shutdown_libp2p_host(&handle, host_task).await;
+            return Err(anyhow!("failed to create KMS transport: {error}"));
+        }
+    };
+    coordinator.install_kms_transport(kms_transport.clone());
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
+
     let coordinator_for_restore = coordinator.clone();
     let pending_dag_resync_task = tokio::spawn(async move {
         coordinator_for_restore
@@ -171,25 +228,6 @@ where
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
     });
-    let replication = db::merge::create_replication_stack(
-        database.clone(),
-        blockstore.clone(),
-        coordinator.clone(),
-    );
-
-    let kms_libp2p_transport = p2p::Libp2pTransport::new(handle.clone());
-    let local_peer_id = {
-        use p2p::transport::P2PTransport;
-        kms_libp2p_transport.local_peer_id().to_string()
-    };
-    let kms_transport = p2p::kms::PubsubKeyTransport::new(
-        kms_libp2p_transport,
-        Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
-    )
-    .await
-    .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
-    coordinator.install_kms_transport(kms_transport.clone());
-    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
     match db::merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -275,7 +313,6 @@ where
     let coordinator_for_acp = coordinator.clone();
     let serve_acp_for_acp = serve_acp.clone();
     let handle_for_acp = handle.clone();
-    let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     // Lazy SE-key handle: teed by the callback below (runtime provisioning),
@@ -357,10 +394,7 @@ where
         wire_document_acp: Some(Box::new(move |acp| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
                 resolver: Arc::new(p2p::HandlePeerIdentityResolver::new(handle_for_acp)),
-                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
-                    acp.clone(),
-                    database_for_acp.node_did(),
-                ),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(acp.clone()),
             });
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
@@ -443,7 +477,7 @@ where
     let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
         Arc::new(db::merge::create_head_provider(database.clone()));
     let (mut coordinator, sync_events_rx) =
-        p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
+        match p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
             transport.clone(),
             blockstore.clone(),
             sync_config,
@@ -456,13 +490,44 @@ where
             serve_acp.clone(),
         )
         .await
-        .map_err(|error| anyhow!("failed to create iroh sync coordinator: {error}"))?;
+        {
+            Ok(coordinator) => coordinator,
+            Err(error) => {
+                shutdown_iroh_endpoint(&transport, endpoint_task).await;
+                return Err(anyhow!("failed to create iroh sync coordinator: {error}"));
+            }
+        };
 
     let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
     coordinator
         .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
         .await;
+    let local_peer_id = {
+        use p2p::transport::P2PTransport;
+        transport.local_peer_id().to_string()
+    };
+    let kms_transport = match p2p::kms::PubsubKeyTransport::new(
+        transport.clone(),
+        Arc::new(p2p::AnonymousResolver),
+    )
+    .await
+    {
+        Ok(transport) => transport,
+        Err(error) => {
+            coordinator.shutdown().await;
+            shutdown_iroh_endpoint(&transport, endpoint_task).await;
+            return Err(anyhow!("failed to create KMS transport: {error}"));
+        }
+    };
+    coordinator.install_kms_transport(kms_transport.clone());
+    let replication = db::merge::create_replication_stack(
+        database.clone(),
+        blockstore.clone(),
+        coordinator.clone(),
+    );
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
+
     let coordinator_for_restore = coordinator.clone();
     let pending_dag_resync_task = tokio::spawn(async move {
         coordinator_for_restore
@@ -478,22 +543,6 @@ where
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
     });
-    let replication = db::merge::create_replication_stack(
-        database.clone(),
-        blockstore.clone(),
-        coordinator.clone(),
-    );
-
-    let local_peer_id = {
-        use p2p::transport::P2PTransport;
-        transport.local_peer_id().to_string()
-    };
-    let kms_transport =
-        p2p::kms::PubsubKeyTransport::new(transport.clone(), Arc::new(p2p::AnonymousResolver))
-            .await
-            .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
-    coordinator.install_kms_transport(kms_transport.clone());
-    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
     match db::merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -568,7 +617,6 @@ where
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let serve_acp_for_acp = serve_acp.clone();
-    let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     let se_key_handle = db::merge::empty_se_key_handle();
@@ -648,10 +696,7 @@ where
         wire_document_acp: Some(Box::new(move |acp| {
             serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
                 resolver: Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
-                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
-                    acp.clone(),
-                    database_for_acp.node_did(),
-                ),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(acp.clone()),
             });
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());

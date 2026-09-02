@@ -9,7 +9,8 @@ use crate::message::{
 use crate::replicator::EqOnlyFilterMatcher;
 use crate::sync::manager::SyncEvent;
 use crate::sync::merge::{
-    BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata,
+    BlockMetadata, MergeBlock, MergeErrorDisposition, MergeHandler, MergeOutcome,
+    RecoveredBlockMetadata,
 };
 use crate::topics::DefraTopic;
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
@@ -782,6 +783,20 @@ struct RetryThenMergeHandler {
     call_count: AtomicUsize,
 }
 
+struct ErrorThenMergeHandler {
+    call_count: AtomicUsize,
+    disposition: MergeErrorDisposition,
+}
+
+impl ErrorThenMergeHandler {
+    fn new(disposition: MergeErrorDisposition) -> Self {
+        Self {
+            call_count: AtomicUsize::new(0),
+            disposition,
+        }
+    }
+}
+
 impl RetryThenMergeHandler {
     fn new() -> Self {
         Self {
@@ -830,6 +845,28 @@ impl MergeHandler for RetryThenMergeHandler {
         let attempt = self.call_count.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
             Ok(MergeOutcome::retryable_skip("pending ACP"))
+        } else {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+}
+
+#[async_trait]
+impl MergeHandler for ErrorThenMergeHandler {
+    type Error = TestError;
+
+    fn error_disposition(&self, _error: &Self::Error) -> MergeErrorDisposition {
+        self.disposition
+    }
+
+    async fn handle_block(
+        &self,
+        _cid: &Cid,
+        _block_data: &[u8],
+        _metadata: BlockMetadata<'_>,
+    ) -> Result<MergeOutcome, Self::Error> {
+        if self.call_count.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(TestError("classified merge failure".to_string()))
         } else {
             Ok(MergeOutcome::Merged)
         }
@@ -1323,6 +1360,11 @@ async fn test_rejected_merge_quarantines_and_leaves_block_unmerged() {
 
     let (coordinator, pending_store) =
         coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+    assert_eq!(
+        coordinator.manager().resync_persisted_pending_dags().await,
+        1
+    );
+    assert_eq!(coordinator.pending_dag_count(), 1);
 
     let handler = RejectingMergeHandler::new("unique constraint violation");
     let result = handle_block_received(
@@ -1358,6 +1400,116 @@ async fn test_rejected_merge_quarantines_and_leaves_block_unmerged() {
         pending_store.load_all().await.unwrap().is_empty(),
         "live durable record must be removed after quarantine"
     );
+}
+
+#[tokio::test]
+async fn terminal_merge_error_quarantines_and_releases_pending_slot() {
+    use crate::sync::pending_store::PendingDagStorage;
+
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = test_cid();
+    blockstore.put(&cid, b"test data").await.unwrap();
+    let (coordinator, pending_store) =
+        coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+    assert_eq!(
+        coordinator.manager().resync_persisted_pending_dags().await,
+        1
+    );
+    assert_eq!(coordinator.pending_dag_count(), 1);
+
+    let result = handle_block_received(
+        &coordinator,
+        &ErrorThenMergeHandler::new(MergeErrorDisposition::Terminal),
+        &ReplicationConfig::default(),
+        cid,
+        BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+    )
+    .await;
+
+    assert!(
+        matches!(result, ReplicationResult::Quarantined { cid: result_cid, .. } if result_cid == cid)
+    );
+    assert!(pending_store.load_all().await.unwrap().is_empty());
+    assert!(pending_store.is_quarantined(&cid).await.unwrap());
+    let status = coordinator.sync_status();
+    assert_eq!(status.pending_dags, 0);
+    assert_eq!(status.persisted_pending_dags, 0);
+    assert_eq!(status.pending_dag_terminal_quarantined, 1);
+    assert_eq!(status.quarantined_pending_dags, 1);
+}
+
+#[tokio::test]
+async fn batched_terminal_merge_error_quarantines_and_releases_pending_slot() {
+    use crate::sync::pending_store::PendingDagStorage;
+
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = test_cid();
+    blockstore.put(&cid, b"test data").await.unwrap();
+    let (coordinator, pending_store) =
+        coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+    assert_eq!(
+        coordinator.manager().resync_persisted_pending_dags().await,
+        1
+    );
+
+    let results = process_merge_batch(
+        &coordinator,
+        vec![dag_ready_event(cid)],
+        &ErrorThenMergeHandler::new(MergeErrorDisposition::Terminal),
+        &ReplicationConfig::default(),
+    )
+    .await;
+
+    assert!(matches!(
+        results.as_slice(),
+        [ReplicationResult::Quarantined { cid: result_cid, .. }] if *result_cid == cid
+    ));
+    assert_eq!(coordinator.pending_dag_count(), 0);
+    assert!(pending_store.load_all().await.unwrap().is_empty());
+    assert!(pending_store.is_quarantined(&cid).await.unwrap());
+}
+
+#[tokio::test]
+async fn retryable_merge_error_retains_pending_slot_and_can_converge() {
+    use crate::sync::pending_store::PendingDagStorage;
+
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = test_cid();
+    blockstore.put(&cid, b"test data").await.unwrap();
+    let (coordinator, pending_store) =
+        coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+    assert_eq!(
+        coordinator.manager().resync_persisted_pending_dags().await,
+        1
+    );
+    let handler = ErrorThenMergeHandler::new(MergeErrorDisposition::Retryable);
+    let metadata = || BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true);
+
+    let first = handle_block_received(
+        &coordinator,
+        &handler,
+        &ReplicationConfig::default(),
+        cid,
+        metadata(),
+    )
+    .await;
+    assert!(matches!(first, ReplicationResult::Failed { .. }));
+    assert_eq!(pending_store.load_all().await.unwrap().len(), 1);
+    assert!(!pending_store.is_quarantined(&cid).await.unwrap());
+
+    let second = handle_block_received(
+        &coordinator,
+        &handler,
+        &ReplicationConfig::default(),
+        cid,
+        metadata(),
+    )
+    .await;
+    assert!(matches!(second, ReplicationResult::Merged { .. }));
+    assert!(pending_store.load_all().await.unwrap().is_empty());
 }
 
 #[tokio::test]

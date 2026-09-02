@@ -1512,7 +1512,6 @@ impl NodeBuilder {
                 .with_mutator(mutator)
                 .with_collection_truncator(db::DbCollectionTruncator::new_arc(database.clone()))
                 .with_acp(document_acp.clone())
-                .with_node_did(database.node_did())
                 .with_lens_store(database.lens_store().clone())
                 .with_query_limits(query_limits);
         let query_runner = if let Some(timeout) = query_timeout {

@@ -87,11 +87,9 @@ impl Drop for EmbeddingFixture {
 }
 
 async fn embeddings(Json(_request): Json<Value>) -> Json<Value> {
-    Json(json!({
-        "data": [{
-            "embedding": vec![0.0; EMBEDDING_DIMENSIONS],
-        }],
-    }))
+    let mut embedding = vec![0.0; EMBEDDING_DIMENSIONS];
+    embedding[0] = 1.0;
+    Json(json!({ "embedding": embedding }))
 }
 
 #[cfg(test)]
@@ -102,9 +100,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn serves_openai_compatible_embedding() {
+    async fn serves_ollama_embedding() {
         let (_fixture, address) = EmbeddingFixture::start_on("127.0.0.1:0").await.unwrap();
-        let body = r#"{"model":"nomic-embed-text","input":"hello"}"#;
+        let body = r#"{"model":"nomic-embed-text","prompt":"hello"}"#;
         let request = format!(
             "POST /api/embeddings HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -119,7 +117,7 @@ mod tests {
         let (_, body) = response.split_once("\r\n\r\n").unwrap();
         let json: Value = serde_json::from_str(body).unwrap();
         assert_eq!(
-            json.pointer("/data/0/embedding")
+            json.pointer("/embedding")
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(EMBEDDING_DIMENSIONS)

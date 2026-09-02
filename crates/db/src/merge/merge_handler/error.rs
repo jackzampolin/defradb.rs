@@ -1,6 +1,7 @@
 //! Error types for database merge operations.
 
 use cid::Cid;
+use defra_core::merge::MergeErrorDisposition;
 use document::NormalValue;
 
 /// Error type for database merge operations.
@@ -17,6 +18,10 @@ pub enum MergeError {
     /// Missing metadata during non-recovery operation.
     #[error("missing metadata: {0}")]
     MissingMetadata(String),
+
+    /// Explicit replay authorization does not apply to the supplied block.
+    #[error("invalid explicit replay authorization: {0}")]
+    InvalidReplayAuthorization(String),
 
     /// CRDT merge failed.
     #[error("merge failed: {0}")]
@@ -87,6 +92,25 @@ impl MergeError {
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    /// Classify failures that cannot change while replaying the same block.
+    pub(crate) fn disposition(&self) -> MergeErrorDisposition {
+        match self {
+            Self::BlockDecode(_)
+            | Self::UnsupportedDelta(_)
+            | Self::InvalidReplayAuthorization(_)
+            | Self::ImmutableFieldChanged(_)
+            | Self::UniqueConstraintViolation(_)
+            | Self::SignatureVerificationFailed { .. }
+            | Self::DepthExceeded { .. } => MergeErrorDisposition::Terminal,
+            Self::MissingMetadata(_)
+            | Self::MergeFailed(_)
+            | Self::Database(_)
+            | Self::Storage(_)
+            | Self::Kms(_)
+            | Self::GateContended => MergeErrorDisposition::Retryable,
         }
     }
 }
