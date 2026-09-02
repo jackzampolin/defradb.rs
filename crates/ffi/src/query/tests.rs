@@ -3,9 +3,37 @@ use std::ptr;
 
 use crate::node::{new_node, node_close};
 use crate::schema::add_schema;
+use crate::state::NODES;
 use crate::types::NodeInitOptions;
 
-use super::exec_request;
+use super::{check_and_set_dac_bypass, exec_request};
+
+#[test]
+fn node_identity_is_not_promoted_to_nac_dac_bypass() {
+    assert!(crate::runtime::init_runtime());
+
+    let options = NodeInitOptions {
+        enable_signing: 1,
+        ..Default::default()
+    };
+    let result = new_node(options);
+    assert_eq!(result.status, 0);
+    let node = result.node_ptr;
+    let node_did = NODES
+        .get(node, |state| state.node_identity_did.clone())
+        .flatten()
+        .unwrap();
+    let node_did = CString::new(node_did).unwrap();
+
+    check_and_set_dac_bypass(
+        crate::runtime::runtime_handle().unwrap(),
+        node,
+        node_did.as_ptr(),
+    );
+
+    assert!(!defra_core::dac_bypass::get_dac_bypass());
+    node_close(node);
+}
 
 #[test]
 fn test_exec_request() {

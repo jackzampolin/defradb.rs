@@ -68,7 +68,6 @@ async fn gate_allows(
         policy_id,
         resource,
         doc,
-        None,
     )
     .await
     .unwrap()
@@ -147,7 +146,6 @@ async fn overlay_checker_applies_branchable_collection_fallback() {
     let checker = OverlayChecker {
         acp: &acp,
         identity: &identity,
-        node_did: None,
     };
 
     let public_doc_allowed =

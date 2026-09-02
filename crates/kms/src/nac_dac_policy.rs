@@ -74,7 +74,6 @@ impl NacDacPolicy {
         let checker = acp::read_access::DirectChecker {
             acp: self.doc_acp.as_ref(),
             identity: &actor_id,
-            node_did: None,
         };
         let allowed = acp::read_access::check_doc_read_access(
             &checker,
