@@ -455,6 +455,15 @@ jobs:
           while IFS= read -r H; do
             grep -qR --include='*.rs' -F "$H" crates/p2p/
           done <<< "$HEXES"
+      - name: Verify the pinned rustffi client resolves
+        if: matrix.suite == 'go-compat'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pin=$(sed -nE 's/^pub const GO_FFI_CLIENT_COMMIT: &str = "([0-9a-f]+)";/\1/p' crates/defra-version/src/lib.rs)
+          test -n "$pin" || { echo "GO_FFI_CLIENT_COMMIT not found in crates/defra-version/src/lib.rs"; exit 1; }
+          gh api "repos/sourcenetwork/defradb/commits/$pin" --jq .sha > /dev/null \
+            || { echo "GO_FFI_CLIENT_COMMIT=$pin does not resolve on sourcenetwork/defradb"; exit 1; }
       - name: Run rust integration tests (basic)
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
