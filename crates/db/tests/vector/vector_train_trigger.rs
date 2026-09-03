@@ -49,6 +49,7 @@ fn ivfpq_vector_description() -> VectorIndexDescription {
             m: 4,
             ..schema::IvfPqParams::default()
         }),
+        ivfflat: None,
         ssg: None,
     }
 }
@@ -60,6 +61,7 @@ fn hnsw_vector_description() -> VectorIndexDescription {
         dimensions: DIMENSIONS,
         hnsw: Some(schema::HnswParams::default()),
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     }
 }

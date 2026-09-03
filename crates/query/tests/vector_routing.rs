@@ -30,6 +30,7 @@ fn vector_index(id: u32, field: &str, dimensions: u32) -> IndexDescription {
         dimensions,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     })
 }
@@ -69,6 +70,7 @@ fn vector_index_with_metric(id: u32, field: &str, metric: DistanceMetric) -> Ind
         dimensions: DIMENSIONS,
         hnsw: Some(HnswParams::default()),
         ivfpq: None,
+        ivfflat: None,
         ssg: None,
     })
 }

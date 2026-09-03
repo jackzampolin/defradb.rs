@@ -5,6 +5,8 @@
 //! trained structures actually persist rather than that the algorithm works.
 
 use db::index::vector::engine::ann::VectorIndexEngine;
+use db::index::vector::engine::ivfflat::IvfFlat;
+use db::index::vector::engine::ivfflat::IvfFlatParams;
 use db::index::vector::engine::ivfpq::IvfPq;
 use db::index::vector::engine::ivfpq::IvfPqParams;
 use db::index::vector::engine::ssg::Ssg;
@@ -76,6 +78,57 @@ async fn ivfpq_training_survives_a_commit() {
         .unwrap();
     assert_eq!(hits.len(), 5);
     assert_eq!(hits[0].id, NodeId(4), "a vector is nearest itself");
+}
+
+/// The same, for IVF_FLAT: trained state, centroids and list entries (full
+/// vectors, not codes) must survive a commit, or a reopened index silently
+/// answers from its staging path forever.
+#[tokio::test]
+async fn ivfflat_training_survives_a_commit() {
+    let backing = RegolithStore::in_memory().unwrap();
+    let vectors = corpus(400);
+    let params = IvfFlatParams {
+        nlist: 8,
+        nprobe: 8,
+        ..IvfFlatParams::default()
+    };
+
+    let mut write = txn(&backing).await;
+    {
+        let store = KvNodeStore::new(&mut write, COLLECTION, INDEX + 3, 0);
+        let mut index = IvfFlat::try_new(store, Metric::Cosine, params, SEED).unwrap();
+        for (i, vector) in vectors.iter().enumerate() {
+            index.insert(NodeId(i as u64 + 1), vector).await.unwrap();
+        }
+        assert!(!index.is_trained().await.unwrap());
+        let report = index.build().await.unwrap();
+        assert_eq!(report.indexed, 400);
+    }
+    write.commit().await.unwrap();
+
+    let mut read = txn(&backing).await;
+    let store = KvNodeStore::new(&mut read, COLLECTION, INDEX + 3, 0);
+    let reopened = IvfFlat::try_new(store, Metric::Cosine, params, SEED).unwrap();
+
+    let state = reopened
+        .trained()
+        .await
+        .unwrap()
+        .expect("the trained state must have been persisted");
+    assert_eq!(state.nlist, 8);
+    assert_eq!(state.dimensions, DIMENSIONS as u32);
+
+    let hits = reopened
+        .search(vectors[3].as_slice(), 5, None)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 5);
+    assert_eq!(hits[0].id, NodeId(4), "a vector is nearest itself");
+    assert!(
+        hits[0].distance < 1e-6,
+        "a reopened index must still rank a vector against itself at ~0, got {}",
+        hits[0].distance
+    );
 }
 
 #[tokio::test]

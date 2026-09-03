@@ -1,11 +1,10 @@
 //! Training and the build that follows it.
 
-use super::codec::{self, TrainedState};
-use super::IvfPq;
+use super::IvfFlat;
 use crate::index::error::{Error, Result};
-use crate::index::vector::engine::ann::{Centroids, Quantizer, Sampler};
-use crate::index::vector::engine::ivf;
-use crate::index::vector::quantize::{KMeans, ProductQuantizer, Reservoir};
+use crate::index::vector::engine::ann::Sampler;
+use crate::index::vector::engine::ivf::{self, TrainedState};
+use crate::index::vector::quantize::Reservoir;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 
 /// What a build did, so a caller can report it rather than guess.
@@ -17,7 +16,7 @@ pub struct BuildReport {
     pub state: TrainedState,
 }
 
-impl<S: VectorNodeStore> IvfPq<S> {
+impl<S: VectorNodeStore> IvfFlat<S> {
     /// Vectors held, tombstones excluded.
     pub async fn live_count(&self) -> Result<u64> {
         let mut count = 0u64;
@@ -32,12 +31,9 @@ impl<S: VectorNodeStore> IvfPq<S> {
 
     /// Whether at least `wanted` live vectors are stored, counting no further.
     ///
-    /// The count is bounded by what the question needs rather than by the
-    /// corpus, so asking it on every write costs a constant rather than a scan.
-    /// `iterate_nodes` stops as soon as the visitor returns an error, so the
-    /// visitor becomes that stop signal itself once `wanted` is reached; `count`
-    /// having reached `wanted` is what distinguishes the signal from a real
-    /// failure the store raised on its own.
+    /// See [`IvfPq::live_count_at_least`](super::super::ivfpq::IvfPq::live_count_at_least)
+    /// for why returning an error from the visitor is what stops the walk
+    /// early.
     pub async fn live_count_at_least(&self, wanted: u64) -> Result<bool> {
         if wanted == 0 {
             return Ok(true);
@@ -72,23 +68,28 @@ impl<S: VectorNodeStore> IvfPq<S> {
             .await
     }
 
-    /// Trains from a byte-bounded sample and writes centroids, codebooks and
-    /// inverted lists.
+    /// Trains from a byte-bounded sample and writes centroids and inverted
+    /// lists. Cheaper to build than IVF-PQ: one k-means fit, no residual
+    /// pass, no codebook training, no quantizer round trip.
     ///
-    /// Two streaming passes over the nodes and nothing else resident: the
-    /// sample, the centroids and the codebooks, each bounded by configuration
-    /// rather than by the corpus.
+    /// Only the list assignment travels between the read pass that computes
+    /// it and the write pass that stores it, never the vector: at
+    /// `dimensions` in the hundreds that is the difference between a few
+    /// bytes per document and a second corpus resident in memory. The vector
+    /// itself is re-read from the node it is already durable in, the same
+    /// read `insert` does on an update; reading and writing the store cannot
+    /// interleave in one pass in any case, since a write needs `&mut` access
+    /// the read's borrow is still holding.
     pub async fn build(&mut self) -> Result<BuildReport> {
         let live = self.live_count().await?;
         if live == 0 {
             return Err(Error::Other(
-                "vector index: nothing to train an IVF-PQ build on".into(),
+                "vector index: nothing to train an IVF_FLAT build on".into(),
             ));
         }
 
         let dimensions = self.first_width().await?;
         let nlist = self.params().resolved_nlist(live);
-        let m = self.params().resolved_m(dimensions);
 
         let mut reservoir =
             Reservoir::new(dimensions, self.params().sample_bytes as usize, self.seed());
@@ -103,53 +104,46 @@ impl<S: VectorNodeStore> IvfPq<S> {
         let sample_bytes = reservoir.resident_bytes();
         let coarse =
             ivf::fit_centroids(reservoir.as_flat(), dimensions, nlist as usize, self.seed())?;
-
-        let residuals = residuals_of(reservoir.as_flat(), dimensions, &coarse);
-        let clusterer = KMeans::new(self.seed());
-        let quantizer = ProductQuantizer::train(&clusterer, &residuals, dimensions, m)?;
-        drop(residuals);
+        drop(reservoir);
 
         for index in 0..coarse.k {
-            let bytes = codec::encode_vector(coarse.get(index));
+            let bytes = ivf::encode_vector(coarse.get(index));
             self.store_mut()
-                .put_aux(codec::CENTROID, &(index as u32).to_be_bytes(), &bytes)
-                .await?;
-        }
-        for (sub, book) in quantizer.books().iter().enumerate() {
-            let bytes = codec::encode_centroids(book);
-            self.store_mut()
-                .put_aux(codec::CODEBOOK, &(sub as u32).to_be_bytes(), &bytes)
+                .put_aux(ivf::CENTROID, &(index as u32).to_be_bytes(), &bytes)
                 .await?;
         }
 
         let state = TrainedState {
             nlist: coarse.k as u32,
-            m: quantizer.m() as u32,
             dimensions: dimensions as u32,
         };
 
-        let mut assignments: Vec<(u32, NodeId, Vec<u8>)> = Vec::new();
-        let mut code = vec![0u8; quantizer.code_len()];
-        let mut residual = vec![0.0f32; dimensions];
+        let mut assignments: Vec<(u32, NodeId)> = Vec::new();
         self.store()
             .iterate_nodes(|node| {
                 let (list, _) = coarse.nearest(&node.vector);
-                subtract_into(&node.vector, coarse.get(list), &mut residual);
-                quantizer.encode(&residual, &mut code);
-                assignments.push((list as u32, node.id, code.clone()));
+                assignments.push((list as u32, node.id));
                 Ok(())
             })
             .await?;
 
         let indexed = assignments.len() as u64;
-        for (list, id, code) in assignments {
+        for (list, id) in assignments {
+            let node =
+                self.store().get_node(id).await?.ok_or_else(|| {
+                    Error::Other("vector index: a just-sampled node is gone".into())
+                })?;
             self.store_mut()
-                .put_aux(codec::LIST, &codec::list_key(list, id), &code)
+                .put_aux(
+                    ivf::LIST,
+                    &ivf::list_key(list, id),
+                    &ivf::encode_vector(&node.vector),
+                )
                 .await?;
         }
 
         self.store_mut()
-            .put_aux(codec::STATE, b"", &codec::encode_state(&state))
+            .put_aux(ivf::STATE, b"", &ivf::encode_state(&state))
             .await?;
 
         Ok(BuildReport {
@@ -160,23 +154,11 @@ impl<S: VectorNodeStore> IvfPq<S> {
         })
     }
 
-    /// The list a vector belongs to, and its code.
-    pub(super) async fn assign(
-        &self,
-        state: &TrainedState,
-        vector: &[f32],
-    ) -> Result<(u32, Vec<u8>)> {
-        let (coarse, quantizer) = self.trained_parts(state).await?;
-        let (list, _) = coarse.nearest(vector);
-        let mut residual = vec![0.0f32; state.dimensions as usize];
-        subtract_into(vector, coarse.get(list), &mut residual);
-        let mut code = vec![0u8; quantizer.code_len()];
-        quantizer.encode(&residual, &mut code);
-        Ok((list as u32, code))
-    }
-
-    pub(super) async fn load_coarse_centroids(&self, state: &TrainedState) -> Result<Centroids> {
-        ivf::load_centroids(self.store(), state.nlist, state.dimensions).await
+    /// The list a vector belongs to.
+    pub(super) async fn assign(&self, state: &TrainedState, vector: &[f32]) -> Result<u32> {
+        let centroids = self.trained_centroids(state).await?;
+        let (list, _) = centroids.nearest(vector);
+        Ok(list as u32)
     }
 
     async fn first_width(&self) -> Result<usize> {
@@ -196,22 +178,4 @@ impl<S: VectorNodeStore> IvfPq<S> {
         }
         Ok(width)
     }
-}
-
-fn subtract_into(vector: &[f32], centroid: &[f32], out: &mut [f32]) {
-    for (slot, (v, c)) in out.iter_mut().zip(vector.iter().zip(centroid)) {
-        *slot = v - c;
-    }
-}
-
-fn residuals_of(sample: &[f32], dimensions: usize, coarse: &Centroids) -> Vec<f32> {
-    let mut residuals = vec![0.0f32; sample.len()];
-    for (point, slot) in sample
-        .chunks_exact(dimensions)
-        .zip(residuals.chunks_exact_mut(dimensions))
-    {
-        let (nearest, _) = coarse.nearest(point);
-        subtract_into(point, coarse.get(nearest), slot);
-    }
-    residuals
 }

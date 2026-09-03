@@ -5,6 +5,7 @@
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::hnsw::Hnsw;
+use db::index::vector::engine::ivfflat::{IvfFlat, IvfFlatParams};
 use db::index::vector::engine::ivfpq::{IvfPq, IvfPqParams};
 use db::index::vector::engine::ssg::{Ssg, SsgParams};
 use db::index::vector::params::{Params, DEFAULT_M};
@@ -78,6 +79,7 @@ pub enum Kind {
     Flat,
     Hnsw,
     IvfPq,
+    IvfFlat,
     Ssg,
 }
 
@@ -87,6 +89,7 @@ impl Kind {
             Kind::Flat => "flat",
             Kind::Hnsw => "hnsw",
             Kind::IvfPq => "ivfpq",
+            Kind::IvfFlat => "ivfflat",
             Kind::Ssg => "ssg",
         }
     }
@@ -94,17 +97,24 @@ impl Kind {
     /// The kinds that build a structure after the fact, and therefore have a
     /// second state to measure.
     pub fn is_batch_built(self) -> bool {
-        matches!(self, Kind::IvfPq | Kind::Ssg)
+        matches!(self, Kind::IvfPq | Kind::IvfFlat | Kind::Ssg)
     }
 }
 
-pub const ALL_KINDS: [Kind; 4] = [Kind::Flat, Kind::Hnsw, Kind::IvfPq, Kind::Ssg];
+pub const ALL_KINDS: [Kind; 5] = [
+    Kind::Flat,
+    Kind::Hnsw,
+    Kind::IvfPq,
+    Kind::IvfFlat,
+    Kind::Ssg,
+];
 
 #[derive(Clone)]
 pub enum Index {
     Flat(Flat<MemoryNodeStore>),
     Hnsw(Hnsw<MemoryNodeStore>),
     IvfPq(IvfPq<MemoryNodeStore>),
+    IvfFlat(IvfFlat<MemoryNodeStore>),
     Ssg(Ssg<MemoryNodeStore>),
 }
 
@@ -114,6 +124,7 @@ macro_rules! on_index {
             Index::Flat($index) => $call,
             Index::Hnsw($index) => $call,
             Index::IvfPq($index) => $call,
+            Index::IvfFlat($index) => $call,
             Index::Ssg($index) => $call,
         }
     };
@@ -142,6 +153,10 @@ impl Index {
                     SEED,
                 )
                 .expect("cosine is rankable by squared distance"),
+            ),
+            Kind::IvfFlat => Index::IvfFlat(
+                IvfFlat::try_new(store, metric, IvfFlatParams::default(), SEED)
+                    .expect("cosine or euclidean partitions soundly"),
             ),
             Kind::Ssg => Index::Ssg(
                 Ssg::try_new(
@@ -184,6 +199,9 @@ impl Index {
         match self {
             Index::IvfPq(index) => {
                 index.build().await.expect("ivf-pq build");
+            }
+            Index::IvfFlat(index) => {
+                index.build().await.expect("ivf_flat build");
             }
             Index::Ssg(index) => {
                 index.build().await.expect("ssg build");

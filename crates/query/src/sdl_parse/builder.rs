@@ -785,6 +785,7 @@ impl<'a> SdlParser<'a> {
                     (config.flat.is_some(), schema::VectorAlgorithm::Flat),
                     (config.hnsw.is_some(), schema::VectorAlgorithm::Hnsw),
                     (config.ivfpq.is_some(), schema::VectorAlgorithm::IvfPq),
+                    (config.ivfflat.is_some(), schema::VectorAlgorithm::IvfFlat),
                     (config.ssg.is_some(), schema::VectorAlgorithm::Ssg),
                 ] {
                     if !present {
@@ -824,6 +825,9 @@ impl<'a> SdlParser<'a> {
                     schema::VectorAlgorithm::Hnsw => hnsw.metric.clone(),
                     schema::VectorAlgorithm::IvfPq => {
                         config.ivfpq.as_ref().and_then(|b| b.metric.clone())
+                    }
+                    schema::VectorAlgorithm::IvfFlat => {
+                        config.ivfflat.as_ref().and_then(|b| b.metric.clone())
                     }
                     schema::VectorAlgorithm::Ssg => {
                         config.ssg.as_ref().and_then(|b| b.metric.clone())
@@ -867,6 +871,7 @@ impl<'a> SdlParser<'a> {
                             }),
                             schema::VectorAlgorithm::Flat
                             | schema::VectorAlgorithm::IvfPq
+                            | schema::VectorAlgorithm::IvfFlat
                             | schema::VectorAlgorithm::Ssg => None,
                         },
                         ivfpq: match algorithm {
@@ -878,6 +883,20 @@ impl<'a> SdlParser<'a> {
                                     nprobe: ivfpq.nprobe.unwrap_or(defaults.nprobe),
                                     m: ivfpq.m.unwrap_or(defaults.m),
                                     sample_bytes: ivfpq
+                                        .sample_bytes
+                                        .map_or(defaults.sample_bytes, u64::from),
+                                })
+                            }
+                            _ => None,
+                        },
+                        ivfflat: match algorithm {
+                            schema::VectorAlgorithm::IvfFlat => {
+                                let ivfflat = config.ivfflat.clone().unwrap_or_default();
+                                let defaults = schema::IvfFlatParams::default();
+                                Some(schema::IvfFlatParams {
+                                    nlist: ivfflat.nlist.unwrap_or(defaults.nlist),
+                                    nprobe: ivfflat.nprobe.unwrap_or(defaults.nprobe),
+                                    sample_bytes: ivfflat
                                         .sample_bytes
                                         .map_or(defaults.sample_bytes, u64::from),
                                 })

@@ -8,7 +8,7 @@
 
 use clap::Parser;
 use cli::commands::client::index::IndexNewArgs;
-use schema::{DistanceMetric, HnswParams, IvfPqParams, VectorAlgorithm};
+use schema::{DistanceMetric, HnswParams, IvfFlatParams, IvfPqParams, VectorAlgorithm};
 
 #[derive(Parser, Debug)]
 struct Wrapper {
@@ -101,6 +101,22 @@ fn a_divergent_algorithm_carries_its_own_params() {
     assert_eq!((ivfpq.nlist, ivfpq.m), (256, 16));
     assert_eq!(
         ivfpq.nprobe, defaults.nprobe,
+        "an omitted param keeps its default"
+    );
+}
+
+/// IVF_FLAT is a second divergent algorithm, and its block has no `M`: a list
+/// holds the full vector, so there is nothing to quantize.
+#[test]
+fn ivfflat_carries_its_own_params() {
+    let config =
+        vector(r#"{"Algorithm":"IVF_FLAT","Dimensions":768,"IVFFLAT":{"NList":128,"NProbe":16}}"#);
+    assert_eq!(config.algorithm, VectorAlgorithm::IvfFlat);
+    let ivfflat = config.ivfflat.expect("IVF_FLAT params");
+    let defaults = IvfFlatParams::default();
+    assert_eq!((ivfflat.nlist, ivfflat.nprobe), (128, 16));
+    assert_eq!(
+        ivfflat.sample_bytes, defaults.sample_bytes,
         "an omitted param keeps its default"
     );
 }
