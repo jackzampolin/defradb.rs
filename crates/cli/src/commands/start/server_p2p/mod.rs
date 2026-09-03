@@ -107,7 +107,16 @@ impl Node {
             }
         }
 
-        Self::setup_libp2p_p2p(store, database, event_bus, config, peer_keypair, se_key).await
+        Self::setup_libp2p_p2p(
+            store,
+            database,
+            event_bus,
+            config,
+            peer_keypair,
+            node_identity,
+            se_key,
+        )
+        .await
     }
 
     fn p2p_disabled(database: Arc<db::DB<storage::DynStore>>) -> P2PSetup {

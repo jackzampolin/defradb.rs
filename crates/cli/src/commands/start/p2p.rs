@@ -92,6 +92,7 @@ impl Node {
         config: &Config,
         bitswap_store: p2p::BitswapStoreAdapter<blockstore::DefraBlockstore<storage::DynStore>>,
         keypair: Option<p2p::Keypair>,
+        node_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         enable_pubsub: bool,
         classifier: std::sync::Arc<dyn p2p::bitswap::BlockClassifier>,
         serve_acp: std::sync::Arc<p2p::bitswap::LateBoundServeAcp>,
@@ -127,7 +128,7 @@ impl Node {
                 keypair,
                 bitswap_store,
                 p2p_config,
-                None,
+                node_identity,
                 classifier,
                 serve_acp,
             )
