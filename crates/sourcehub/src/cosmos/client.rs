@@ -34,7 +34,7 @@ impl SourceHubClient {
         policy_id: &str,
     ) -> Result<Option<PolicyInfo>, ClientError> {
         let url = format!(
-            "{}/sourcenetwork/sourcehub/acp/policy/{}",
+            "{}/sourcenetwork/vera/acp/policy/{}",
             self.rest_base_url(),
             policy_id
         );
@@ -71,7 +71,7 @@ impl SourceHubClient {
         object_id: &str,
     ) -> Result<(bool, String), ClientError> {
         let url = format!(
-            "{}/sourcenetwork/sourcehub/acp/object_owner/{}/{}/{}",
+            "{}/sourcenetwork/vera/acp/object_owner/{}/{}/{}",
             self.rest_base_url(),
             policy_id,
             resource,
@@ -112,7 +112,7 @@ impl SourceHubClient {
         let request_hex = hex::encode(&request_bytes);
 
         let url = format!(
-            "{}/abci_query?path=\"/sourcehub.acp.Query/VerifyAccessRequest\"&data=0x{}",
+            "{}/abci_query?path=\"/vera.acp.Query/VerifyAccessRequest\"&data=0x{}",
             self.comet_rpc_base_url(),
             request_hex
         );
