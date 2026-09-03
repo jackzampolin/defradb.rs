@@ -402,7 +402,9 @@ jobs:
         if: matrix.suite == 'go-compat'
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          # The pinned GO_COMPAT_COMMIT declares `go 1.26.7`, so an older
+          # toolchain cannot build it.
+          go-version: '1.26'
       - name: Cache Go DefraDB
         if: matrix.suite == 'go-compat'
         uses: actions/cache@v4

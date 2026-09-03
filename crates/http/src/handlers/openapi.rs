@@ -1,7 +1,7 @@
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 
-const OPENAPI_JSON: &str = include_str!("openapi-go-13c46ec9.json");
+const OPENAPI_JSON: &str = include_str!("openapi-go-53f0e76a3.json");
 
 /// GET /openapi.json
 pub async fn get() -> impl IntoResponse {
@@ -88,7 +88,7 @@ mod tests {
     fn document_tracks_the_pinned_go_baseline() {
         assert_eq!(
             defra_version::GO_COMPAT_COMMIT,
-            "13c46ec9",
+            "53f0e76a3",
             "refresh the OpenAPI snapshot when the Go compatibility baseline changes"
         );
     }
