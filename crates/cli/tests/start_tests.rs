@@ -3,6 +3,7 @@
 use cli::commands::StartArgs;
 use cli::config::{Config, DatastoreType};
 use cli::error::Error;
+#[cfg(feature = "orbis")]
 use identity::Identity as _;
 
 fn default_start_args() -> StartArgs {

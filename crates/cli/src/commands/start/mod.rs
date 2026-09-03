@@ -404,14 +404,9 @@ impl StartArgs {
         Ok(())
     }
 
-    /// Parse the user identity from the --identity flag.
-    ///
-    /// The identity flag should contain a hex-encoded private key.
-    /// Key type is auto-detected from byte length:
-    /// - 64 bytes -> Ed25519
-    /// - 32 bytes -> secp256k1
     /// Parse `--signer-orbis-identity`, the key used only to authenticate to
-    /// the Orbis ring.
+    /// the Orbis ring. It is separate from `--identity` because the ring
+    /// accepts an EdDSA token while the chain needs a secp256k1 signer.
     #[cfg(feature = "orbis")]
     pub fn parse_orbis_service_identity(
         &self,
@@ -424,6 +419,12 @@ impl StartArgs {
         Ok(Some(std::sync::Arc::new(identity)))
     }
 
+    /// Parse the user identity from the --identity flag.
+    ///
+    /// The identity flag should contain a hex-encoded private key.
+    /// Key type is auto-detected from byte length:
+    /// - 64 bytes -> Ed25519
+    /// - 32 bytes -> secp256k1
     pub fn parse_user_identity(&self) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
         let hex_key = match &self.identity {
             Some(key) => key,
