@@ -15,7 +15,7 @@ pub const GO_COMPAT_TAG: &str = "";
 /// comparable across baseline bumps. It lives on a dedicated compatibility
 /// branch upstream does not merge, and moves only when we retarget the parity
 /// claim or fix the client.
-pub const GO_FFI_CLIENT_COMMIT: &str = "e7cd3a8de";
+pub const GO_FFI_CLIENT_COMMIT: &str = "2c3f7ded0cedbd7a0e70b92e5a382e1db67b6162";
 
 /// Go compatibility metadata.
 #[derive(Debug, Clone, Serialize)]
