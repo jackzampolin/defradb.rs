@@ -1,9 +1,9 @@
 //! Product quantization: codes, reconstruction, and distances from codes.
 
-use db::index::vector::core::squared_euclidean;
 use db::index::vector::engine::ann::Quantizer;
 use db::index::vector::quantize::KMeans;
 use db::index::vector::quantize::ProductQuantizer;
+use defra_core::vector::squared_euclidean;
 
 const DIMENSIONS: usize = 16;
 const M: usize = 4;

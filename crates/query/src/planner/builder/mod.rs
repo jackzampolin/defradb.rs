@@ -580,8 +580,8 @@ impl Planner {
         }
 
         // 4c. Add SimilarityNodes for _similarity fields.
-        // These compute per-document dot product before filters/ordering can reference results.
-        plan = self.add_similarity_nodes(plan, select, &scan_mapping)?;
+        // These score each document before filters/ordering can reference the result.
+        plan = self.add_similarity_nodes(plan, select, &scan_mapping, &collection.indexes)?;
 
         // 4c2. Add BM25Nodes for BM25 full-text search fields.
         plan = self.add_bm25_nodes(

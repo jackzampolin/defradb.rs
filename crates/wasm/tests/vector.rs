@@ -2,11 +2,11 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use db::index::vector::core::{dot, squared_euclidean, Metric, Tier};
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::hnsw::Hnsw;
 use db::index::vector::params::{Params, DEFAULT_M};
 use db::index::vector::store::{MemoryNodeStore, NodeId};
+use defra_core::vector::{dot, squared_euclidean, Metric, Tier};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);

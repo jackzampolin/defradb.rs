@@ -34,9 +34,9 @@ pub use level::LevelSampler;
 use super::ann::{Admit, Candidate, EdgeSelector, EngineKind, Neighbor, VectorIndexEngine};
 use super::select::Heuristic;
 use crate::index::error::Result;
-use crate::index::vector::core::{Element, Metric};
 use crate::index::vector::params::Params;
 use crate::index::vector::store::{Node, NodeId, VectorNodeStore};
+use defra_core::vector::{Element, Metric};
 
 /// An approximate-nearest-neighbor graph over a [`VectorNodeStore`].
 #[derive(Debug, Clone)]

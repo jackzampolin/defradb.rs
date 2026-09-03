@@ -7,8 +7,8 @@
 
 use super::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::error::Result;
-use crate::index::vector::core::{Element, Metric};
 use crate::index::vector::store::{Node, NodeId, VectorNodeStore};
+use defra_core::vector::{Element, Metric};
 
 /// Every live node, scored and ranked.
 #[derive(Debug, Clone)]

@@ -4,8 +4,8 @@ use defra_core::thread_bounds::MaybeSendSync;
 
 use super::{EngineKind, Neighbor};
 use crate::index::error::Result;
-use crate::index::vector::core::Element;
 use crate::index::vector::store::NodeId;
+use defra_core::vector::Element;
 
 /// Decides which nodes a search may *return*. A rejected node is still walked
 /// through, exactly as a tombstone is: excluding it from the walk would strand

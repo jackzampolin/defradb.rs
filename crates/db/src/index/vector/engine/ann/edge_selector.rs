@@ -1,7 +1,7 @@
 //! Choosing which candidate neighbours become edges.
 
 use super::Candidate;
-use crate::index::vector::core::Metric;
+use defra_core::vector::Metric;
 
 /// Taking the nearest `max` loses the long edges a walk needs, so every graph
 /// kind prunes for direction and differs only in how it measures it.

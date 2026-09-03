@@ -1,8 +1,8 @@
 //! Fitting centroids.
 
-use db::index::vector::core::squared_euclidean;
 use db::index::vector::engine::ann::Clusterer;
 use db::index::vector::quantize::KMeans;
+use defra_core::vector::squared_euclidean;
 
 /// Four corners of a square, well separated, repeated. The right answer is
 /// known without computing anything.

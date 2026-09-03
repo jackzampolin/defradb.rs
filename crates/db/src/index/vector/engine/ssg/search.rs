@@ -5,9 +5,9 @@ use std::collections::{BinaryHeap, HashSet};
 use super::codec::BuiltState;
 use super::Ssg;
 use crate::index::error::Result;
-use crate::index::vector::core::Element;
 use crate::index::vector::engine::ann::{Admit, Candidate, Neighbor};
 use crate::index::vector::store::{NodeId, VectorNodeStore};
+use defra_core::vector::Element;
 
 impl<S: VectorNodeStore> Ssg<S> {
     pub(super) async fn walk<E: Element, A: Admit>(

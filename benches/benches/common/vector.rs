@@ -2,7 +2,6 @@
 
 #![allow(dead_code)]
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::hnsw::Hnsw;
@@ -10,6 +9,7 @@ use db::index::vector::engine::ivfpq::{IvfPq, IvfPqParams};
 use db::index::vector::engine::ssg::{Ssg, SsgParams};
 use db::index::vector::params::{Params, DEFAULT_M};
 use db::index::vector::store::{MemoryNodeStore, NodeId};
+use defra_core::vector::Metric;
 
 pub const SEED: u64 = 0x0BE9_C4A1;
 

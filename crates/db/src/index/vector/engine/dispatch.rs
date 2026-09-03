@@ -10,8 +10,8 @@ use super::hnsw::Hnsw;
 use super::ivfpq::IvfPq;
 use super::ssg::Ssg;
 use crate::index::error::Result;
-use crate::index::vector::core::Element;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
+use defra_core::vector::Element;
 
 #[derive(Debug)]
 pub enum Engine<S> {

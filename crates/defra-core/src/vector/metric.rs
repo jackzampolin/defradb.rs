@@ -22,7 +22,7 @@ use super::kernel::{self, Element};
 
 /// How two vectors are compared.
 ///
-/// One per [`schema::DistanceMetric`], which is Go's set: `Cosine`,
+/// One per `schema::DistanceMetric`, which is Go's set: `Cosine`,
 /// `Euclidean`, and `NegativeDot` for Go's `DOT`. The negation is ours; a dot
 /// product is a similarity, and everything here is a distance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -118,6 +118,46 @@ impl Metric {
             normalize(&mut out);
         }
         out
+    }
+
+    /// How near two vectors are, where a *larger* result is nearer.
+    ///
+    /// This is the inverse convention to the rest of this module, and it exists
+    /// because it is the one the `SIMILARITY` field publishes: a query orders
+    /// descending by it, and a reader expects the best match to score highest.
+    /// The planner scores an unrouted selection with this while the index ranks
+    /// a routed one by [`distance`](Self::distance), so the two must stay
+    /// order-inverse, which is what the per-metric mapping below guarantees.
+    ///
+    /// Cosine is already a similarity and passes through. The other two are
+    /// distances and are negated, which is monotonic: each metric keeps its own
+    /// ordering and only its direction changes. Euclidean drops the square root
+    /// for the same reason, matching Go's `NegativeSquaredEuclidean`.
+    ///
+    /// Only the shared leading elements are compared. A caller that requires
+    /// equal lengths checks first, because for a query that is a mistake worth
+    /// reporting rather than absorbing.
+    pub fn similarity<T: Element>(self, a: &[T], b: &[T]) -> f64 {
+        let shared = a.len().min(b.len());
+        let (a, b) = (&a[..shared], &b[..shared]);
+        match self {
+            // Not `1 - cosine_distance`: that clamps to [-1, 1], and the clamp
+            // would report exactly -1 or 1 where the reference reports the raw
+            // quotient. A vector with no length has no direction, so its
+            // similarity to anything is zero rather than a division by zero.
+            // The scale is also required finite, which the reference does not
+            // check; without it an infinite component yields a NaN, and a NaN
+            // in a sort key orders nothing.
+            Metric::Cosine => {
+                let scale = squared_norm(a).sqrt() * squared_norm(b).sqrt();
+                if scale == 0.0 || !scale.is_finite() {
+                    return 0.0;
+                }
+                kernel::dot(a, b) / scale
+            }
+            Metric::Euclidean => -kernel::squared_euclidean(a, b),
+            Metric::NegativeDot => kernel::dot(a, b),
+        }
     }
 }
 

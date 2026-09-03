@@ -23,11 +23,11 @@ pub use codec::BuiltState;
 pub use params::{SsgParams, DEFAULT_ANGLE, DEFAULT_POOL, DEFAULT_R, MAX_POOL, MAX_R};
 
 use crate::index::error::Result;
-use crate::index::vector::core::{Element, Metric};
 use crate::index::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::vector::engine::hnsw::Hnsw;
 use crate::index::vector::params::Params;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
+use defra_core::vector::{Element, Metric};
 
 #[derive(Debug, Clone)]
 pub struct Ssg<S> {

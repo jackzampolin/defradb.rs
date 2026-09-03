@@ -12,7 +12,6 @@
 
 use async_trait::async_trait;
 use db::index::error::Result;
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::hnsw::Hnsw;
@@ -26,6 +25,7 @@ use db::index::vector::store::Node;
 use db::index::vector::store::NodeId;
 use db::index::vector::store::VectorNodeStore;
 use defra_core::thread_bounds::MaybeSend;
+use defra_core::vector::Metric;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 

@@ -1,6 +1,6 @@
 //! Fitting centroids over a resident sample.
 
-use crate::index::vector::core::squared_euclidean;
+use defra_core::vector::squared_euclidean;
 
 /// Trained centroids, flat: `k * dimensions`.
 #[derive(Debug, Clone, PartialEq)]

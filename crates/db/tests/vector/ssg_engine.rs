@@ -1,6 +1,5 @@
 //! The SSG engine: building from HNSW layer 0, and searching one flat layer.
 
-use db::index::vector::core::Metric;
 use db::index::vector::engine::ann::EngineKind;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
@@ -10,6 +9,7 @@ use db::index::vector::params::Params;
 use db::index::vector::params::DEFAULT_M;
 use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::NodeId;
+use defra_core::vector::Metric;
 use std::collections::HashSet;
 
 const SEED: u64 = 0x0559_6EED;

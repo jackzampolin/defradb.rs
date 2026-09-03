@@ -16,7 +16,6 @@
 //! the fabrication this repo's honesty rules exist to prevent.
 
 use db::index::error::Result;
-use db::index::vector::core::Metric;
 use db::index::vector::engine::hnsw::Hnsw;
 use db::index::vector::params::Params;
 use db::index::vector::params::DEFAULT_M;
@@ -26,6 +25,7 @@ use db::index::vector::store::Node;
 use db::index::vector::store::NodeId;
 use db::index::vector::store::VectorNodeStore;
 use defra_core::thread_bounds::MaybeSend;
+use defra_core::vector::Metric;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
