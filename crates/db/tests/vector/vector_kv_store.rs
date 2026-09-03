@@ -375,6 +375,7 @@ async fn clearing_an_epoch_leaves_its_neighbours_alone() {
         })
         .await
         .unwrap();
+        kv.put_aux(b's', b"key", b"value").await.unwrap();
     }
 
     KvNodeStore::new(&mut txn, COLLECTION, INDEX, EPOCH)
@@ -393,8 +394,17 @@ async fn clearing_an_epoch_leaves_its_neighbours_alone() {
     .unwrap();
     assert_eq!(count, 0, "the cleared epoch still has nodes");
 
+    assert!(
+        kv.get_aux(b's', b"key").await.unwrap().is_none(),
+        "the cleared epoch kept its aux entry"
+    );
+
     let survivor = KvNodeStore::new(&mut txn, COLLECTION, INDEX, EPOCH + 1);
     assert!(survivor.get_meta().await.unwrap().is_some());
+    assert!(
+        survivor.get_aux(b's', b"key").await.unwrap().is_some(),
+        "the next epoch's aux entry was cleared with the previous one"
+    );
     let mut count = 0;
     survivor
         .iterate_nodes(|_| {
@@ -425,4 +435,71 @@ async fn a_corrupt_stored_value_is_an_error() {
         kv.iterate_nodes(|_| Ok(())).await,
         Err(Error::Other(_))
     ));
+}
+
+/// `clear` has to remove every key of the epoch, which includes the aux space
+/// beside the graph.
+///
+/// It used to scan the node prefix only and then delete the meta key, so a
+/// partitioned kind's centroids, codebooks, inverted lists and trained-state
+/// marker all survived. That has two consequences and neither is quiet: a
+/// reindex re-inserts into lists built from centroids that are gone, because
+/// the surviving state marker says the index is trained; and a dropped index
+/// leaks its whole aux keyspace, because nothing else ever removes it.
+#[tokio::test]
+async fn clear_removes_the_aux_space_too() {
+    let store = RegolithStore::in_memory().unwrap();
+
+    // Kinds an engine actually uses, plus one nobody uses yet: the sweep is by
+    // prefix, so a kind added later must be covered without being listed here.
+    const KINDS: [u8; 4] = *b"sckz";
+
+    {
+        let mut txn = txn(&store).await;
+        let mut kv = KvNodeStore::new(&mut txn, COLLECTION, INDEX, EPOCH);
+        kv.put_node(Node::new(NodeId(1), vec![1.0, 0.0], 0))
+            .await
+            .unwrap();
+        kv.put_meta(Meta {
+            entry_point: NodeId(1),
+            top_layer: 0,
+        })
+        .await
+        .unwrap();
+        for kind in KINDS {
+            kv.put_aux(kind, b"key", b"value").await.unwrap();
+        }
+        txn.commit().await.unwrap();
+    }
+
+    {
+        let mut txn = txn(&store).await;
+        let kv = KvNodeStore::new(&mut txn, COLLECTION, INDEX, EPOCH);
+        for kind in KINDS {
+            assert!(
+                kv.get_aux(kind, b"key").await.unwrap().is_some(),
+                "kind {} was not written",
+                kind as char
+            );
+        }
+    }
+
+    {
+        let mut txn = txn(&store).await;
+        let mut kv = KvNodeStore::new(&mut txn, COLLECTION, INDEX, EPOCH);
+        kv.clear().await.unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    let mut txn = txn(&store).await;
+    let kv = KvNodeStore::new(&mut txn, COLLECTION, INDEX, EPOCH);
+    assert!(kv.get_node(NodeId(1)).await.unwrap().is_none(), "node kept");
+    assert!(kv.get_meta().await.unwrap().is_none(), "meta kept");
+    for kind in KINDS {
+        assert!(
+            kv.get_aux(kind, b"key").await.unwrap().is_none(),
+            "aux kind {} survived the clear",
+            kind as char
+        );
+    }
 }

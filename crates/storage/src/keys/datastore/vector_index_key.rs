@@ -77,6 +77,16 @@ impl VectorIndexKey {
     }
 }
 
+/// `/<collShortID>/<indexID>/<epoch>/`, shared by every key of one build of one
+/// index: its nodes, its meta key, and every aux kind beside them.
+///
+/// Public because it is the only prefix that covers all of them, and dropping a
+/// build means dropping all of them. Enumerating the kinds instead would leak
+/// whichever kind an engine added last.
+pub fn vector_epoch_prefix(collection_short_id: u32, index_id: u32, epoch: u32) -> Vec<u8> {
+    epoch_prefix(collection_short_id, index_id, epoch)
+}
+
 /// `/<collShortID>/<indexID>/<epoch>/`, shared by every key in this space.
 fn epoch_prefix(collection_short_id: u32, index_id: u32, epoch: u32) -> Vec<u8> {
     let mut buf = vec![SEPARATOR];
