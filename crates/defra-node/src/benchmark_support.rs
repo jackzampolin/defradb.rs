@@ -152,7 +152,7 @@ type CodingMessage {
     files_referenced: [String]
     input_tokens: Int
     output_tokens: Int
-    content_v: [Float32!] @vectorIndex(dimensions: 14, metric: "DOT") @embedding(provider: "openai", model: "coding-message-model", fields: ["content"])
+    content_v: [Float32!] @index(vector: {dimensions: 14, hnsw: {metric: DOT}}) @embedding(provider: "openai", model: "coding-message-model", fields: ["content"])
     search_chunks: [CodingSearchChunk]
 }
 
@@ -164,7 +164,7 @@ type CodingAction {
     tags: [String]
     created_at: DateTime @index(direction: DESC)
     command: String @fulltext
-    command_v: [Float32!] @vectorIndex(dimensions: 14, metric: "DOT") @embedding(provider: "openai", model: "coding-action-model", fields: ["command"])
+    command_v: [Float32!] @index(vector: {dimensions: 14, hnsw: {metric: DOT}}) @embedding(provider: "openai", model: "coding-action-model", fields: ["command"])
     search_chunks: [CodingSearchChunk]
 }
 
@@ -186,7 +186,7 @@ type CodingSearchChunk {
     chunk_count: Int
     created_at: DateTime @index(direction: DESC)
     content: String @fulltext
-    content_v: [Float32!] @vectorIndex(dimensions: 14, metric: "DOT") @embedding(provider: "openai", model: "coding-search-chunk-model", fields: ["content"])
+    content_v: [Float32!] @index(vector: {dimensions: 14, hnsw: {metric: DOT}}) @embedding(provider: "openai", model: "coding-search-chunk-model", fields: ["content"])
 }
 "#;
 

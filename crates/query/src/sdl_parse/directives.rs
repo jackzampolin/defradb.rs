@@ -18,7 +18,6 @@ pub const KNOWN_FIELD_DIRECTIVES: &[&str] = &[
     "embedding",
     "encryptedIndex",
     "fulltext",
-    "vectorIndex",
     "immutable",
     "policy", // Go allows @policy on fields in some contexts
 ];
@@ -37,7 +36,16 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
     match directive_name {
         "primary" => &[],
         "crdt" => &["type"],
-        "index" => &["name", "unique", "direction", "fields", "includes"],
+        "index" => &[
+            "name",
+            "kind",
+            "ordered",
+            "vector",
+            "unique",
+            "direction",
+            "fields",
+            "includes",
+        ],
         "relation" => &["name"],
         "default" => &["value"],
         "constraints" => &["size"],
@@ -48,7 +56,6 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
         "fulltext" => &["language", "k1", "b"],
-        "vectorIndex" => &["dimensions", "algorithm", "metric", "HNSW", "IVFPQ", "SSG"],
         "immutable" => &[],
         _ => &[],
     }
@@ -93,19 +100,6 @@ pub fn get_directive_string_list(directive: &Directive<'_, String>, arg_name: &s
             .collect(),
         _ => Vec::new(),
     }
-}
-
-/// Get a non-negative integer argument from a directive.
-///
-/// `None` for an absent argument; `Some(Err)` for one that is present but not a
-/// non-negative integer, because a mistyped parameter is a schema error rather
-/// than something to silently default.
-pub fn get_directive_u32(
-    directive: &Directive<'_, String>,
-    arg_name: &str,
-) -> Option<Result<u32, String>> {
-    let value = get_directive_arg(directive, arg_name)?;
-    Some(directive_u32(arg_name, value))
 }
 
 /// Reads a non-negative integer out of one AST value.
@@ -192,7 +186,7 @@ pub struct ParsedDirectives {
     pub embedding: Option<EmbeddingConfig>,
     /// Full-text search configuration from @fulltext directive
     pub fulltext: Option<FullTextConfig>,
-    /// Vector index configuration from @vectorIndex directive
+    /// Vector index configuration from `@index(vector: {...})`
     pub vector_index: Option<VectorIndexConfig>,
     /// Whether this field is immutable after document creation
     pub immutable: bool,
@@ -206,33 +200,47 @@ pub struct FullTextConfig {
     pub b: Option<f64>,
 }
 
-/// Vector index configuration from the `@vectorIndex` directive.
+/// The `vector` argument of `@index`, which is what selects the vector kind.
 ///
 /// The argument names are Go's, because the SDL is what users and parity tests
-/// see. `dimensions` sits at the top level rather than inside the algorithm
-/// config because it describes the field, not the algorithm, and the algorithm
-/// is chosen by *which* config argument is present.
+/// see. `dimensions` sits here rather than inside the algorithm config because
+/// it describes the field, not the algorithm. `metric` does not: it lives
+/// inside each algorithm's block, where the reference put it, so a client
+/// configuring one algorithm sees only that algorithm's knobs.
 #[derive(Debug, Clone, Default)]
 pub struct VectorIndexConfig {
-    /// Vector length. `None` when an `@embedding` on the same field fixes it.
+    /// Index name from `@index(name:)`. Go's `@vectorIndex` could not name an
+    /// index at all; folding into `@index` gives it one for free.
+    pub name: Option<String>,
+    /// Vector length. Required and greater than zero, matching Go after
+    /// sourcenetwork/defradb#5188, which dropped inferring it from an
+    /// `@embedding`.
     pub dimensions: Option<u32>,
-    /// `None` means HNSW, matching the reference where it is the only value.
+    /// From `alg:`, which selects an algorithm with its default configuration.
+    /// `None` means HNSW, or whichever algorithm block was given.
     pub algorithm: Option<String>,
-    /// How the index ranks. Applies to every algorithm, so it sits here rather
-    /// than inside the HNSW block, which the older form still accepts.
-    pub metric: Option<String>,
-    /// Present when the `IVFPQ` argument was given.
+    /// Present when the `flat` argument was given. Flat has no tuning, so the
+    /// block exists to select the algorithm and to give its metric a home:
+    /// under this grammar the metric lives in the algorithm's block, so an
+    /// algorithm with no block could not be built with anything but cosine.
+    pub flat: Option<FlatConfig>,
+    /// Present when the `ivfpq` argument was given.
     pub ivfpq: Option<IvfPqConfig>,
-    /// Present when the `SSG` argument was given.
+    /// Present when the `ssg` argument was given.
     pub ssg: Option<SsgConfig>,
-    /// Present when the `HNSW` argument was given. Its absence still means
+    /// Present when the `hnsw` argument was given. Its absence still means
     /// HNSW, with defaults.
     pub hnsw: Option<HnswConfig>,
 }
 
-/// The `HNSW` argument of `@vectorIndex`. Every member is optional: an omitted
-/// one keeps the default from `schema`, so the directive and the defaults
-/// cannot drift apart.
+/// The `flat` block, which has only a metric.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlatConfig {
+    pub metric: Option<String>,
+}
+
+/// The `hnsw` block. Every member is optional: an omitted one keeps the default
+/// from `schema`, so the directive and the defaults cannot drift apart.
 #[derive(Debug, Clone, Default)]
 pub struct HnswConfig {
     pub metric: Option<String>,
@@ -241,8 +249,8 @@ pub struct HnswConfig {
     pub ef_search: Option<u32>,
 }
 
-/// Index configuration from @index directive
-#[derive(Debug, Clone)]
+/// Index configuration from the ordered kind of `@index`.
+#[derive(Debug, Clone, Default)]
 pub struct IndexConfig {
     pub name: Option<String>,
     pub unique: bool,
@@ -258,19 +266,21 @@ pub enum IndexDirection {
     Desc,
 }
 
-/// The `IVFPQ` argument of `@vectorIndex`. Every member is optional; an omitted
-/// one keeps its default, and a zero is derived from the corpus.
+/// The `ivfpq` block. Every member is optional; an omitted one keeps its
+/// default, and a zero is derived from the corpus.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IvfPqConfig {
+    pub metric: Option<String>,
     pub nlist: Option<u32>,
     pub nprobe: Option<u32>,
     pub m: Option<u32>,
     pub sample_bytes: Option<u32>,
 }
 
-/// The `SSG` argument of `@vectorIndex`.
+/// The `ssg` block.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SsgConfig {
+    pub metric: Option<String>,
     pub r: Option<u32>,
     pub angle: Option<u32>,
     pub pool: Option<u32>,

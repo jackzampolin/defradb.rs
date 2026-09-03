@@ -343,8 +343,8 @@ mod tests {
 /// from the coverage every consumer derives from `ALL`.
 macro_rules! vector_algorithms {
     (
-        $(#[doc = $first_doc:literal])* $first:ident => $first_name:literal,
-        $($(#[doc = $doc:literal])* $variant:ident => $name:literal),+ $(,)?
+        $(#[doc = $first_doc:literal])* $first:ident => $first_name:literal / $first_block:literal,
+        $($(#[doc = $doc:literal])* $variant:ident => $name:literal / $block:literal),+ $(,)?
     ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
         pub enum VectorAlgorithm {
@@ -367,12 +367,34 @@ macro_rules! vector_algorithms {
             /// than reachable only through its own engine tests.
             pub const ALL: &'static [Self] = &[Self::$first, $(Self::$variant),+];
 
-            /// The name used in `@vectorIndex(algorithm:)` and on the wire.
+            /// The name used in `@index(vector: {alg:})` and on the wire.
             pub fn as_str(self) -> &'static str {
                 match self {
                     Self::$first => $first_name,
                     $(Self::$variant => $name),+
                 }
+            }
+
+            /// The `@index(vector: {...})` block that configures this
+            /// algorithm, and whose presence selects it.
+            ///
+            /// Every algorithm has one even when it has nothing to tune,
+            /// because under this grammar the metric lives inside the block:
+            /// an algorithm with no block could only ever be built with the
+            /// default metric.
+            pub fn sdl_block(self) -> &'static str {
+                match self {
+                    Self::$first => $first_block,
+                    $(Self::$variant => $block),+
+                }
+            }
+
+            /// The algorithm a `@index(vector: {...})` block name selects.
+            pub fn from_sdl_block(block: &str) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|algorithm| algorithm.sdl_block() == block)
             }
         }
     };
@@ -381,14 +403,14 @@ macro_rules! vector_algorithms {
 // The first entry is the default.
 vector_algorithms! {
     /// Hierarchical Navigable Small World graph.
-    Hnsw => "HNSW",
+    Hnsw => "HNSW" / "hnsw",
     /// Exhaustive scan. Exact, no build parameters, no tuning.
-    Flat => "FLAT",
+    Flat => "FLAT" / "flat",
     /// Coarse lists of product-quantized codes. Approximate and lossy, in
     /// exchange for a code far smaller than the vector it stands for.
-    IvfPq => "IVF_PQ",
+    IvfPq => "IVF_PQ" / "ivfpq",
     /// Satellite System Graph: one flat layer, edges pruned by angle.
-    Ssg => "SSG",
+    Ssg => "SSG" / "ssg",
 }
 
 impl VectorAlgorithm {

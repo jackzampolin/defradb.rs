@@ -760,7 +760,7 @@ impl<'a> SdlParser<'a> {
             .map(|f| schema::EncryptedIndexDescription::new(&f.name))
             .collect();
 
-        // Build vector indexes from @vectorIndex directives.
+        // Build vector indexes from `@index(vector: {...})` directives.
         //
         // These join `indexes` as a kind rather than becoming a parallel list
         // the way full-text did. That is what #1326 asks for, and it is what
@@ -771,26 +771,70 @@ impl<'a> SdlParser<'a> {
             let Some(config) = field.directives.vector_index.as_ref() else {
                 continue;
             };
-            let name = generate_index_name(&type_def.name, &field.name, &existing_index_names);
+            let name = config.name.clone().unwrap_or_else(|| {
+                generate_index_name(&type_def.name, &field.name, &existing_index_names)
+            });
             existing_index_names.push(name.clone());
             index_id_counter += 1;
 
-            let algorithm = match config.algorithm.as_deref() {
-                None => schema::VectorAlgorithm::default(),
-                Some(name) => schema::VectorAlgorithm::from_sdl_name(name).ok_or_else(|| {
-                    QueryError::parse(format!("@vectorIndex has no algorithm named '{name}'"))
+            // The algorithm is chosen by which block is set, which is also
+            // what the wire envelope does. `alg:` names one directly, for the
+            // default configuration; giving both is fine as long as they agree,
+            // and a disagreement is refused rather than resolved by precedence.
+            let mut algorithm: Option<schema::VectorAlgorithm> = None;
+            for (present, selected) in [
+                (config.flat.is_some(), schema::VectorAlgorithm::Flat),
+                (config.hnsw.is_some(), schema::VectorAlgorithm::Hnsw),
+                (config.ivfpq.is_some(), schema::VectorAlgorithm::IvfPq),
+                (config.ssg.is_some(), schema::VectorAlgorithm::Ssg),
+            ] {
+                if !present {
+                    continue;
+                }
+                if let Some(existing) = algorithm.filter(|existing| *existing != selected) {
+                    return Err(QueryError::parse(format!(
+                        "@index vector configures both {} and {}",
+                        existing.as_str(),
+                        selected.as_str()
+                    )));
+                }
+                algorithm = Some(selected);
+            }
+            if let Some(named) = config.algorithm.as_deref() {
+                let named = schema::VectorAlgorithm::from_sdl_name(named).ok_or_else(|| {
+                    QueryError::parse(format!("@index vector has no algorithm named '{named}'"))
+                })?;
+                if let Some(existing) = algorithm.filter(|existing| *existing != named) {
+                    return Err(QueryError::parse(format!(
+                        "@index vector alg is {} but the {} block is configured",
+                        named.as_str(),
+                        existing.as_str()
+                    )));
+                }
+                algorithm = Some(named);
+            }
+            let algorithm = algorithm.unwrap_or_default();
+
+            // The metric belongs to the algorithm, so it is read from that
+            // algorithm's own block and nowhere else.
+            let hnsw = config.hnsw.clone().unwrap_or_default();
+            let named_metric = match algorithm {
+                schema::VectorAlgorithm::Flat => {
+                    config.flat.as_ref().and_then(|f| f.metric.clone())
+                }
+                schema::VectorAlgorithm::Hnsw => hnsw.metric.clone(),
+                schema::VectorAlgorithm::IvfPq => {
+                    config.ivfpq.as_ref().and_then(|b| b.metric.clone())
+                }
+                schema::VectorAlgorithm::Ssg => config.ssg.as_ref().and_then(|b| b.metric.clone()),
+            };
+            let metric = match named_metric.as_deref() {
+                None => schema::DistanceMetric::default(),
+                Some(name) => schema::DistanceMetric::from_sdl_name(name).ok_or_else(|| {
+                    QueryError::parse(format!("@index vector has no metric named '{name}'"))
                 })?,
             };
 
-            let hnsw = config.hnsw.clone().unwrap_or_default();
-            // The top-level argument applies to every algorithm; the HNSW block
-            // is the older spelling and still works.
-            let metric = match config.metric.as_deref().or(hnsw.metric.as_deref()) {
-                None => schema::DistanceMetric::default(),
-                Some(name) => schema::DistanceMetric::from_sdl_name(name).ok_or_else(|| {
-                    QueryError::parse(format!("@vectorIndex has no metric named '{name}'"))
-                })?,
-            };
             let defaults = schema::HnswParams::default();
 
             indexes.push(
@@ -808,7 +852,9 @@ impl<'a> SdlParser<'a> {
                 .as_vector(schema::VectorIndexDescription {
                     algorithm,
                     metric,
-                    // Zero means an `@embedding` on the field fixes the length.
+                    // Absent leaves this zero, which definition validation
+                    // rejects. Go stopped inferring it from an `@embedding` in
+                    // sourcenetwork/defradb#5188.
                     dimensions: config.dimensions.unwrap_or(0),
                     hnsw: match algorithm {
                         schema::VectorAlgorithm::Hnsw => Some(schema::HnswParams {

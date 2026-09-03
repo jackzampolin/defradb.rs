@@ -20,10 +20,20 @@ fn schema(algorithm: &str) -> String {
     let args = if algorithm.is_empty() {
         format!("dimensions: {DIMENSIONS}")
     } else {
-        format!("dimensions: {DIMENSIONS}, algorithm: \"{algorithm}\"")
+        format!("dimensions: {DIMENSIONS}, alg: {algorithm}")
     };
     format!(
-        "type Note {{ title: String  tag: String  embedding: [Float32!] @vectorIndex({args}) }}"
+        "type Note {{ title: String  tag: String  embedding: [Float32!] @index(vector: {{{args}}}) }}"
+    )
+}
+
+/// `@index(vector: {...})` for one algorithm and metric. The metric lives in
+/// the algorithm's own block, so the block name has to come from the algorithm.
+fn vector_index_sdl(algorithm: schema::VectorAlgorithm, metric: schema::DistanceMetric) -> String {
+    format!(
+        "@index(vector: {{dimensions: {DIMENSIONS}, {}: {{metric: {}}}}})",
+        algorithm.sdl_block(),
+        metric.as_str()
     )
 }
 
@@ -228,7 +238,7 @@ async fn a_filtered_similarity_query_returns_a_full_page() {
 async fn a_cosine_index_routes_and_agrees_with_the_exhaustive_scan() {
     let node = EmbeddedNode::builder().build().await.unwrap();
     node.add_schema(&format!(
-        "type Note {{ title: String  tag: String  embedding: [Float32!] @vectorIndex(dimensions: {DIMENSIONS}, metric: \"COSINE\") }}"
+        "type Note {{ title: String  tag: String  embedding: [Float32!] @index(vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: COSINE}}}}) }}"
     ))
     .await
     .expect("add cosine schema");
@@ -301,7 +311,7 @@ async fn a_cosine_index_routes_and_agrees_with_the_exhaustive_scan() {
 async fn a_scalar_index_on_the_filter_does_not_displace_the_vector_index() {
     let node = EmbeddedNode::builder().build().await.unwrap();
     node.add_schema(&format!(
-        "type Note {{ title: String  tag: String @index  embedding: [Float32!] @vectorIndex(dimensions: {DIMENSIONS}, metric: \"DOT\") }}"
+        "type Note {{ title: String  tag: String @index  embedding: [Float32!] @index(vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: DOT}}}}) }}"
     ))
     .await
     .expect("add schema with an indexed tag");
@@ -370,9 +380,8 @@ async fn every_combination_agrees_with_an_exhaustive_scan() {
                     };
                     let node = EmbeddedNode::builder().build().await.unwrap();
                     node.add_schema(&format!(
-                        "type Note {{ title: String  {tag_field}  embedding: [Float32!] @vectorIndex(dimensions: {DIMENSIONS}, algorithm: \"{}\", metric: \"{}\") }}",
-                        algorithm.as_str(),
-                        metric.as_str()
+                        "type Note {{ title: String  {tag_field}  embedding: [Float32!] {} }}",
+                        vector_index_sdl(*algorithm, *metric)
                     ))
                     .await
                     .unwrap_or_else(|e| panic!("{case}: add schema: {e}"));
@@ -457,6 +466,34 @@ async fn every_combination_agrees_with_an_exhaustive_scan() {
     }
 }
 
+/// Dimensions are required and must be greater than zero, which Go made
+/// unconditional in sourcenetwork/defradb#5188 by dropping the inference from an
+/// `@embedding` on the same field. A zero-dimension index cannot check a query
+/// vector's length, so a wrong-length query would be scored on its shared
+/// leading elements alone: silently wrong rather than merely approximate.
+#[tokio::test]
+async fn dimensions_are_required_when_the_schema_is_written() {
+    for sdl in [
+        "type Note { embedding: [Float32!] @index(vector: {}) }".to_string(),
+        "type Note { embedding: [Float32!] @index(vector: {dimensions: 0}) }".to_string(),
+        // An @embedding fixes the length, and used to supply it. It no longer does.
+        "type Note { title: String  embedding: [Float32!] @index(vector: {}) \
+             @embedding(provider: \"openai\", model: \"m\", fields: [\"title\"]) }"
+            .to_string(),
+    ] {
+        let node = EmbeddedNode::builder().build().await.unwrap();
+        let error = node
+            .add_schema(&sdl)
+            .await
+            .expect_err(&format!("must be refused: {sdl}"))
+            .to_string();
+        assert!(
+            error.contains("dimensions"),
+            "the error must name dimensions, got: {error}"
+        );
+    }
+}
+
 /// An algorithm that cannot rank by a metric must be refused when the schema is
 /// written, not when the first document is indexed.
 #[tokio::test]
@@ -469,9 +506,8 @@ async fn an_unsupported_metric_is_refused_when_the_schema_is_written() {
             let node = EmbeddedNode::builder().build().await.unwrap();
             let result = node
                 .add_schema(&format!(
-                    "type Note {{ embedding: [Float32!] @vectorIndex(dimensions: {DIMENSIONS}, algorithm: \"{}\", metric: \"{}\") }}",
-                    algorithm.as_str(),
-                    metric.as_str()
+                    "type Note {{ embedding: [Float32!] {} }}",
+                    vector_index_sdl(*algorithm, *metric)
                 ))
                 .await;
             let error = result.expect_err(&format!(
@@ -498,7 +534,7 @@ async fn a_relation_filter_above_the_scan_still_fills_the_page() {
     let node = EmbeddedNode::builder().build().await.unwrap();
     node.add_schema(
         "type Owner { name: String  notes: [Note] }
-         type Note { title: String  owner: Owner  embedding: [Float32!] @vectorIndex(dimensions: 4, metric: \"DOT\") }",
+         type Note { title: String  owner: Owner  embedding: [Float32!] @index(vector: {dimensions: 4, hnsw: {metric: DOT}}) }",
     )
     .await
     .expect("add schema");

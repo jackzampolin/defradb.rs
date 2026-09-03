@@ -368,8 +368,9 @@ pub(super) fn validate_embedding_and_kind_compatible(
     errs
 }
 
-/// A vector index must be built with a metric its algorithm can rank by, and a
-/// field must not carry two vector indexes that disagree about the metric.
+/// A vector index must declare its dimensions, be built with a metric its
+/// algorithm can rank by, and not share a field with another vector index that
+/// disagrees about the metric.
 ///
 /// Without the first the definition is accepted and the failure surfaces on the
 /// first document write, as an index-manager construction error naming an
@@ -392,6 +393,17 @@ pub(super) fn validate_vector_index_metrics(
             let Some(vector) = index.vector() else {
                 continue;
             };
+            // Go required this from sourcenetwork/defradb#5188, which dropped
+            // inferring the length from an `@embedding` on the same field. A
+            // zero-dimension index cannot check a query vector's length, so a
+            // wrong-length query would silently be scored on its shared leading
+            // elements.
+            if vector.dimensions == 0 {
+                errs.push(format!(
+                    "index '{}' must set dimensions greater than zero",
+                    index.name
+                ));
+            }
             if !vector.algorithm.supports_metric(vector.metric) {
                 errs.push(format!(
                     "index '{}' cannot rank by {}: the {} algorithm does not order it",
