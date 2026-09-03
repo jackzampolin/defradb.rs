@@ -1,10 +1,14 @@
 //! Tests for the start command
 
+use std::collections::BTreeSet;
+
+use clap::Args;
 use cli::commands::StartArgs;
-use cli::config::{Config, DatastoreType};
+use cli::config::{Config, DatastoreType, TransportType};
 use cli::error::Error;
 #[cfg(feature = "orbis")]
 use identity::Identity as _;
+use storage::backends::DurabilityMode;
 
 fn default_start_args() -> StartArgs {
     StartArgs {
@@ -157,7 +161,7 @@ fn test_apply_to_config_all_flags() {
         no_searchable_encryption: Some(true),
         identity: None, // identity is handled in Node::new, not apply_to_config
         replicator_retry_intervals: Some(vec![10, 20, 30]),
-        durability: None,
+        durability: Some("eventual".to_string()),
         #[cfg(feature = "orbis")]
         signer_type: None,
         #[cfg(feature = "orbis")]
@@ -196,14 +200,14 @@ fn test_apply_to_config_all_flags() {
         query_max_depth: Some(12),
         query_max_width: Some(64),
         query_max_filter_depth: Some(24),
-        p2p_transport: None,
+        p2p_transport: Some("libp2p".to_string()),
         #[cfg(feature = "postgres")]
-        pg_address: None,
-        acp_cache_ttl: None,
-        acp_circuit_breaker_threshold: None,
-        acp_circuit_breaker_reset_timeout: None,
-        acp_request_timeout: None,
-        acp_receipt_timeout: None,
+        pg_address: Some("127.0.0.1:5433".to_string()),
+        acp_cache_ttl: Some(600),
+        acp_circuit_breaker_threshold: Some(5),
+        acp_circuit_breaker_reset_timeout: Some(45),
+        acp_request_timeout: Some(10),
+        acp_receipt_timeout: Some(90),
         embedding_url: Some("http://localhost:11434/v1".to_string()),
         embedding_model: Some("nomic-embed-text".to_string()),
         embedding_api_key_env: Some("CUSTOM_EMBEDDING_KEY".to_string()),
@@ -238,6 +242,7 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.datastore.max_txn_retries, 10);
     assert_eq!(config.datastore.store, DatastoreType::Memory);
     assert_eq!(config.datastore.valuelogfilesize, Some(2 << 30));
+    assert_eq!(config.datastore.durability, DurabilityMode::Eventual);
     assert_eq!(config.net.p2p_addresses, vec!["/ip4/0.0.0.0/tcp/4001"]);
     assert!(config.net.p2p_disabled);
     assert_eq!(config.api.allowed_origins, vec!["http://localhost:3000"]);
@@ -255,6 +260,14 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.api.query_max_depth, 12);
     assert_eq!(config.api.query_max_width, 64);
     assert_eq!(config.api.query_max_filter_depth, 24);
+    assert_eq!(config.net.transport, TransportType::Libp2p);
+    #[cfg(feature = "postgres")]
+    assert_eq!(config.api.pg_address, "127.0.0.1:5433");
+    assert_eq!(config.acp.cache_ttl, 600);
+    assert_eq!(config.acp.circuit_breaker_threshold, 5);
+    assert_eq!(config.acp.circuit_breaker_reset_timeout, 45);
+    assert_eq!(config.acp.request_timeout, 10);
+    assert_eq!(config.acp.receipt_timeout, 90);
     assert_eq!(config.embedding.url, "http://localhost:11434/v1");
     assert_eq!(config.embedding.model, "nomic-embed-text");
     assert_eq!(config.embedding.api_key_env, "CUSTOM_EMBEDDING_KEY");
@@ -322,4 +335,142 @@ fn orbis_service_identity_is_absent_without_the_flag() {
         .parse_orbis_service_identity()
         .expect("an absent flag is not an error")
         .is_none());
+}
+
+// Each group is asserted above to change Config and names the runtime boundary
+// that consumes those fields. A new flag must be assigned to a real consumer.
+const STORAGE_START_FLAGS: &[&str] = &[
+    "max-txn-retries",
+    "store",
+    "valuelogfilesize",
+    "no-encryption",
+    "default-key-type",
+    "no-searchable-encryption",
+    "at-rest-encryption",
+    "durability",
+    "max-merge-depth",
+];
+
+// Consumed by start/p2p.rs and start/server_p2p/ host construction.
+const P2P_START_FLAGS: &[&str] = &[
+    "peers",
+    "p2paddr",
+    "no-p2p",
+    "replicator-retry-intervals",
+    "max-msg-size",
+    "max-car-size",
+    "stream-timeout",
+    "max-p2p-tasks",
+    "connection-manager-low-water",
+    "connection-manager-high-water",
+    "connection-manager-grace-period-ms",
+    "max-connections-per-peer",
+    "p2p-rate-limit-burst",
+    "p2p-rate-limit-rate",
+    "p2p-max-doc-sync-request-doc-ids",
+    "p2p-max-pending-dags",
+    "p2p-rebroadcast-on-merge",
+    "p2p-push-queue-capacity",
+    "p2p-push-queue-byte-capacity",
+    "p2p-max-active-pushes-per-peer",
+    "p2p-transport",
+];
+
+// Consumed by start/server_http.rs; limit and signing behavior is asserted in
+// defra_http::server_tests.
+const HTTP_START_FLAGS: &[&str] = &[
+    "allowed-origins",
+    "pubkeypath",
+    "privkeypath",
+    "no-signing",
+    "max-body-size",
+    "max-schema-size",
+    "max-backup-size",
+    "request-timeout",
+    "max-concurrent-requests",
+    "transaction-idle-timeout",
+    "transaction-cleanup-interval",
+    #[cfg(feature = "postgres")]
+    "pg-address",
+];
+
+// Consumed by start/server_query.rs and the HTTP query limits.
+const QUERY_START_FLAGS: &[&str] = &[
+    "query-timeout",
+    "query-max-depth",
+    "query-max-width",
+    "query-max-filter-depth",
+];
+
+// Consumed by start/server_acp.rs provider construction.
+const ACP_START_FLAGS: &[&str] = &[
+    "acp-circuit-breaker-threshold",
+    "acp-circuit-breaker-reset-timeout",
+    "acp-request-timeout",
+    "acp-cache-ttl",
+    "acp-receipt-timeout",
+];
+
+// Consumed by start/server.rs when constructing DbOptions.
+const EMBEDDING_START_FLAGS: &[&str] =
+    &["embedding-url", "embedding-model", "embedding-api-key-env"];
+
+const CONFIG_BACKED_START_FLAG_GROUPS: &[&[&str]] = &[
+    STORAGE_START_FLAGS,
+    P2P_START_FLAGS,
+    HTTP_START_FLAGS,
+    QUERY_START_FLAGS,
+    ACP_START_FLAGS,
+    EMBEDDING_START_FLAGS,
+];
+
+// These bypass Config and are consumed directly at the named startup boundary.
+const DIRECT_START_FLAGS: &[(&str, &str)] = &[
+    ("profile", "cli/src/main.rs::should_profile"),
+    ("identity", "StartArgs::parse_user_identity"),
+    #[cfg(feature = "orbis")]
+    ("signer-type", "StartArgs::execute"),
+    #[cfg(feature = "orbis")]
+    ("signer-orbis-endpoint", "StartArgs::setup_orbis_signer"),
+    #[cfg(feature = "orbis")]
+    ("signer-orbis-ring-id", "StartArgs::setup_orbis_signer"),
+    #[cfg(feature = "orbis")]
+    ("signer-orbis-derivation", "StartArgs::setup_orbis_signer"),
+    #[cfg(feature = "orbis")]
+    ("signer-orbis-identity", "StartArgs::parse_orbis_service_identity"),
+];
+
+#[test]
+fn every_start_flag_has_an_enforcement_path() {
+    let mut command = StartArgs::augment_args(clap::Command::new("start"));
+    command.build();
+    let actual: BTreeSet<_> = command
+        .get_arguments()
+        .filter_map(|arg| arg.get_long())
+        .filter(|name| *name != "help")
+        .collect();
+
+    let classified: BTreeSet<_> = CONFIG_BACKED_START_FLAG_GROUPS
+        .iter()
+        .flat_map(|flags| flags.iter().copied())
+        .chain(DIRECT_START_FLAGS.iter().map(|(name, _)| *name))
+        .collect();
+    let classified_count = CONFIG_BACKED_START_FLAG_GROUPS
+        .iter()
+        .map(|flags| flags.len())
+        .sum::<usize>()
+        + DIRECT_START_FLAGS.len();
+
+    assert_eq!(
+        classified.len(),
+        classified_count,
+        "start flag enforcement inventory contains a duplicate"
+    );
+    assert!(DIRECT_START_FLAGS
+        .iter()
+        .all(|(_, enforcement_path)| !enforcement_path.is_empty()));
+    assert_eq!(
+        actual, classified,
+        "classify every start flag by its config assertion or direct enforcement path"
+    );
 }

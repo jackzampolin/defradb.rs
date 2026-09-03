@@ -1,11 +1,15 @@
 //! Tests for the Config struct and configuration loading
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use clap::CommandFactory;
 use cli::cli::{Cli, Command};
 use cli::commands::VersionArgs;
-use cli::config::{Config, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput};
+use cli::config::{
+    AcpDocumentType, Config, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput,
+};
 use cli::error::Error;
 
 /// Helper to create a minimal Cli for testing apply_cli_flags
@@ -134,18 +138,124 @@ fn test_apply_cli_flags_valid_values_succeed() {
     cli.log_level = Some("debug".to_string());
     cli.log_output = Some("stdout".to_string());
     cli.log_format = Some("json".to_string());
+    cli.log_stacktrace = Some(true);
+    cli.log_source = Some(true);
+    cli.log_overrides = Some("db,level=debug".to_string());
+    cli.no_log_color = Some(true);
     cli.keyring_backend = Some("system".to_string());
+    cli.keyring_namespace = Some("test-defradb".to_string());
+    cli.keyring_path = Some("/tmp/test-keys".to_string());
+    cli.no_keyring = Some(true);
     cli.url = Some("0.0.0.0:8080".to_string());
+    cli.secret_file = Some("test.env".to_string());
+    cli.no_telemetry = Some(true);
     cli.development = Some(true);
+    cli.acp_node_enable = Some(true);
+    cli.acp_document_type = Some("local".to_string());
+    #[cfg(feature = "sourcehub")]
+    {
+        cli.source_hub_address = Some("http://localhost:1317".to_string());
+        cli.source_hub_comet_address = Some("http://localhost:26657".to_string());
+        cli.source_hub_events_ws = Some("ws://localhost:26657/websocket".to_string());
+        cli.source_hub_chain_id = Some("sourcehub-test".to_string());
+        cli.hub_rs_address = Some("http://localhost:8545".to_string());
+    }
 
     let result = config.apply_cli_flags(&cli);
     assert!(result.is_ok());
     assert_eq!(config.log.level, LogLevel::Debug);
     assert_eq!(config.log.output, LogOutput::Stdout);
     assert_eq!(config.log.format, LogFormat::Json);
+    assert!(config.log.stacktrace);
+    assert!(config.log.source);
+    assert_eq!(config.log.overrides, "db,level=debug");
+    assert!(config.log.color_disabled);
     assert_eq!(config.keyring.backend, KeyringBackend::System);
+    assert_eq!(config.keyring.namespace, "test-defradb");
+    assert_eq!(config.keyring.path, "/tmp/test-keys");
+    assert!(config.keyring.disabled);
     assert_eq!(config.api.address, "0.0.0.0:8080");
+    assert_eq!(config.secret_file, "test.env");
+    assert!(config.telemetry_disabled);
     assert!(config.development);
+    assert!(config.acp.node_enable);
+    assert_eq!(config.acp.document_type, AcpDocumentType::Local);
+    #[cfg(feature = "sourcehub")]
+    {
+        assert_eq!(config.acp.sourcehub_address, "http://localhost:1317");
+        assert_eq!(config.acp.sourcehub_comet_address, "http://localhost:26657");
+        assert_eq!(
+            config.acp.sourcehub_events_ws,
+            "ws://localhost:26657/websocket"
+        );
+        assert_eq!(config.acp.sourcehub_chain_id, "sourcehub-test");
+        assert_eq!(config.acp.hub_rs_address, "http://localhost:8545");
+    }
+}
+
+// These are all asserted above to change the typed node configuration.
+const CONFIG_BACKED_GLOBAL_FLAGS: &[&str] = &[
+    "log-level",
+    "log-output",
+    "log-format",
+    "log-stacktrace",
+    "log-source",
+    "log-overrides",
+    "no-log-color",
+    "url",
+    "keyring-namespace",
+    "keyring-backend",
+    "keyring-path",
+    "no-keyring",
+    #[cfg(feature = "sourcehub")]
+    "source-hub-address",
+    #[cfg(feature = "sourcehub")]
+    "source-hub-comet-address",
+    #[cfg(feature = "sourcehub")]
+    "source-hub-events-ws",
+    #[cfg(feature = "sourcehub")]
+    "source-hub-chain-id",
+    #[cfg(feature = "sourcehub")]
+    "hub-rs-address",
+    "secret-file",
+    "no-telemetry",
+    "development",
+    "node-acp-enable",
+    "document-acp-type",
+];
+
+// `rootdir` selects the config file before Config exists, so it cannot be
+// covered by the apply-to-config assertion above.
+const DIRECT_GLOBAL_FLAGS: &[(&str, &str)] = &[("rootdir", "Config::resolve_rootdir")];
+
+#[test]
+fn every_global_config_flag_has_an_enforcement_path() {
+    let mut command = Cli::command();
+    command.build();
+    let actual: BTreeSet<_> = command
+        .get_arguments()
+        .filter_map(|arg| arg.get_long())
+        .filter(|name| !matches!(*name, "help" | "version"))
+        .collect();
+
+    let classified: BTreeSet<_> = CONFIG_BACKED_GLOBAL_FLAGS
+        .iter()
+        .copied()
+        .chain(DIRECT_GLOBAL_FLAGS.iter().map(|(name, _)| *name))
+        .collect();
+
+    assert_eq!(
+        classified.len(),
+        CONFIG_BACKED_GLOBAL_FLAGS.len() + DIRECT_GLOBAL_FLAGS.len(),
+        "global flag enforcement inventory contains a duplicate"
+    );
+    assert!(DIRECT_GLOBAL_FLAGS
+        .iter()
+        .all(|(_, enforcement_path)| !enforcement_path.is_empty()));
+    assert_eq!(
+        actual, classified,
+        "classify every global config flag by its config assertion or direct enforcement path"
+    );
 }
 
 #[test]
