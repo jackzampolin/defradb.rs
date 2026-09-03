@@ -15,6 +15,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup> {
         info!("Initializing P2P network (libp2p)");
@@ -27,6 +28,7 @@ impl Node {
             config,
             bitswap_store,
             peer_keypair,
+            node_identity,
             config.net.pubsub_enabled,
             classifier.clone(),
             serve_acp.clone(),
