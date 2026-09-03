@@ -1,5 +1,6 @@
 //! Tests for the Config struct and configuration loading
 
+use std::fs;
 use std::path::PathBuf;
 
 use cli::cli::{Cli, Command};
@@ -158,6 +159,48 @@ fn test_config_defaults() {
     assert_eq!(config.datastore.store, DatastoreType::Regolith);
     assert!(!config.development);
     assert_eq!(config.secret_file, ".env");
+}
+
+#[test]
+fn test_load_secret_file() {
+    let rootdir = tempfile::tempdir().unwrap();
+    let secret_file = rootdir.path().join("secrets.env");
+    let variable = format!("DEFRA_SECRET_FILE_TEST_{}", std::process::id());
+    fs::write(&secret_file, format!("{variable}=loaded\n")).unwrap();
+    let mut cli = cli_with_defaults();
+    cli.rootdir = Some(rootdir.path().display().to_string());
+    cli.secret_file = Some(secret_file.display().to_string());
+
+    Config::load(&cli).unwrap();
+
+    assert_eq!(std::env::var(variable).unwrap(), "loaded");
+}
+
+#[test]
+fn test_missing_secret_file_is_ignored() {
+    let rootdir = tempfile::tempdir().unwrap();
+    let mut cli = cli_with_defaults();
+    cli.rootdir = Some(rootdir.path().display().to_string());
+    cli.secret_file = Some(rootdir.path().join("missing.env").display().to_string());
+
+    Config::load(&cli).unwrap();
+}
+
+#[test]
+fn test_invalid_secret_file_returns_error() {
+    let rootdir = tempfile::tempdir().unwrap();
+    let secret_file = rootdir.path().join("invalid.env");
+    fs::write(&secret_file, "SECRET='unterminated\n").unwrap();
+    let mut cli = cli_with_defaults();
+    cli.rootdir = Some(rootdir.path().display().to_string());
+    cli.secret_file = Some(secret_file.display().to_string());
+
+    let result = Config::load(&cli);
+
+    assert!(matches!(
+        result,
+        Err(Error::LoadSecretFile { path, .. }) if path == secret_file
+    ));
 }
 
 #[test]
