@@ -249,6 +249,30 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 ))
             })?;
 
+            // Two creates with the same field value encode to the same
+            // byte-identical delta and so to the same content-addressed key,
+            // which the engine may treat as a non-conflicting blind write.
+            // `has_for_update` records the read even though this txn just
+            // wrote the block, so the second commit is validated against it
+            // and aborts (#1599).
+            //
+            // Interactive creates only: autocommit, batch and merge keep the
+            // blind write, and interactive updates rely on that to let
+            // distinct documents share a delta block (#1194). Encryption
+            // blocks stay out: the KMS commits the DEK in its own txn, so
+            // reading it back aborts every encrypted create.
+            for cid in block_result.field_cids.iter().chain([&block_result.cid]) {
+                blockstore
+                    .has_for_update(&cid.to_bytes())
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to record block read for {}: {}",
+                            cid, e
+                        ))
+                    })?;
+            }
+
             let doc_id = crate::write::autocommit::helpers::register_created_doc(
                 &systemstore,
                 &datastore,
