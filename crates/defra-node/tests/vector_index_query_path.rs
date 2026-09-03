@@ -77,6 +77,15 @@ fn similarity_query(vector: &[f64], limit: usize, filter: Option<&str>) -> Strin
     )
 }
 
+/// Same shape as `similarity_query`, with a `metric` argument alongside the
+/// vector.
+fn similarity_query_with_metric(vector: &[f64], limit: usize, metric: &str) -> String {
+    format!(
+        r#"{{ Note(order: {{ _alias: {{ sim: DESC }} }}, limit: {limit}) {{ title tag sim: SIMILARITY(embedding: {{vector: [{}], metric: {metric}}}) }} }}"#,
+        render(vector)
+    )
+}
+
 /// Sum a counter across every node of an execute-explain tree.
 fn total(explain: &Value, counter: &str) -> u64 {
     match explain {
@@ -798,6 +807,86 @@ async fn ascending_order_warns_vector_index_unused() {
     assert_eq!(detail["field"], "embedding");
 }
 
+/// A metric no index on the field carries must still answer correctly: the
+/// query falls back to a full scan scored by the metric it named, and warns
+/// that the vector index went unused rather than silently ranking by the
+/// index's own metric instead.
+#[tokio::test]
+async fn a_metric_no_index_carries_scans_and_warns() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema(&format!(
+        "type Note {{ title: String  tag: String  embedding: [Float32!] @index(vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: COSINE}}}}) }}"
+    ))
+    .await
+    .expect("add cosine schema");
+    seed(&node).await;
+
+    let query = similarity_query_with_metric(&vector_for(3), 5, "DOT");
+    let explain = query_data(
+        &node,
+        &format!("query @explain(type: execute) {query}"),
+        "metric mismatch explain",
+    )
+    .await;
+    assert_eq!(
+        vector_index(&explain),
+        None,
+        "a metric no index carries must not be served by the index\n{explain:#}"
+    );
+
+    let response = node.execute(&query).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+
+    let extensions = response
+        .extensions
+        .as_ref()
+        .expect("a metric mismatch must warn");
+    assert_eq!(extensions.warnings.len(), 1);
+    let warning = &extensions.warnings[0];
+    assert_eq!(warning.code, "VECTOR_INDEX_UNUSED");
+    let detail = warning.detail.as_ref().expect("detail");
+    assert_eq!(detail["reason"], "metricMismatch");
+    assert_eq!(detail["field"], "embedding");
+
+    let rows = response.data.as_ref().unwrap()["Note"]
+        .as_array()
+        .expect("Note array")
+        .clone();
+    assert_eq!(rows.len(), 5, "the scan must still fill the page");
+    let titles: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["title"].as_str())
+        .collect();
+    let scores: Vec<f64> = rows
+        .iter()
+        .map(|row| row["sim"].as_f64().expect("sim"))
+        .collect();
+    assert!(
+        scores.windows(2).all(|pair| pair[0] >= pair[1]),
+        "rows are not ordered by similarity: {scores:?}"
+    );
+
+    // The exhaustive answer under the same named metric, computed without a
+    // limit so no index can narrow it: the scanned page must be its top slice.
+    let exhaustive = query_data(
+        &node,
+        &similarity_query_with_metric(&vector_for(3), CORPUS, "DOT"),
+        "exhaustive dot scores",
+    )
+    .await;
+    let exhaustive_rows = exhaustive["Note"].as_array().expect("Note array");
+    let expected_titles: Vec<&str> = exhaustive_rows
+        .iter()
+        .filter_map(|row| row["title"].as_str())
+        .take(5)
+        .collect();
+
+    assert_eq!(
+        titles, expected_titles,
+        "the scanned page must be the exhaustive DOT-scored page"
+    );
+}
+
 /// The precision condition: a field with no vector index never warns, however
 /// the query is shaped. Written with the limit removed, the one shape that
 /// *would* warn if this field had an index (see
@@ -829,5 +918,112 @@ async fn a_field_without_a_vector_index_never_warns() {
         response.extensions.is_none(),
         "a similarity query on an unindexed field must never warn: {:?}",
         response.extensions
+    );
+}
+
+/// Two vector indexes on one field, and a query that says which it means.
+///
+/// This is the whole point of the `metric` argument, and it was unreachable
+/// from SDL until a repeated `@index` on a field stopped overwriting: the
+/// parser kept the last directive, so a field could never carry two indexes and
+/// there was nothing for the argument to choose between. Each metric must reach
+/// its own index, and the routed page must be the exhaustive page for that
+/// metric, not for the other one.
+#[tokio::test]
+async fn a_named_metric_reaches_its_own_index_among_several() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema(&format!(
+        "type Note {{ title: String  tag: String  embedding: [Float32!] \
+         @index(name: \"by_cosine\", vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: COSINE}}}}) \
+         @index(name: \"by_dot\", vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: DOT}}}}) }}"
+    ))
+    .await
+    .expect("two vector indexes on one field");
+    seed(&node).await;
+
+    let probe = vector_for(3);
+    for (metric, index_name) in [("COSINE", "Note_by_cosine"), ("DOT", "Note_by_dot")] {
+        let query = format!(
+            r#"{{ Note(order: {{ _alias: {{ sim: DESC }} }}, limit: 5) {{ title sim: SIMILARITY(embedding: {{vector: [{}], metric: {metric}}}) }} }}"#,
+            render(&probe)
+        );
+
+        let explain = query_data(
+            &node,
+            &format!("query @explain(type: execute) {query}"),
+            metric,
+        )
+        .await;
+        let served = vector_index(&explain)
+            .unwrap_or_else(|| panic!("{metric}: no vector index served the scan\n{explain:#}"));
+        assert!(
+            served.contains(index_name) || served.contains(metric.to_lowercase().as_str()),
+            "{metric}: served by {served}, not the index built with that metric"
+        );
+
+        let routed = query_data(&node, &query, metric).await;
+        let rows = routed["Note"].as_array().expect("Note array");
+        assert_eq!(rows.len(), 5, "{metric}");
+        let titles: Vec<&str> = rows.iter().filter_map(|r| r["title"].as_str()).collect();
+
+        // Unlimited, so nothing narrows it: the answer the routed page must
+        // reproduce, scored by the metric this query named.
+        let all = query_data(
+            &node,
+            &format!(
+                r#"{{ Note(order: {{_alias: {{sim: DESC}}}}, limit: {CORPUS}) {{ title sim: SIMILARITY(embedding: {{vector: [{}], metric: {metric}}}) }} }}"#,
+                render(&probe)
+            ),
+            metric,
+        )
+        .await;
+        let expected: Vec<&str> = all["Note"]
+            .as_array()
+            .expect("Note array")
+            .iter()
+            .filter_map(|r| r["title"].as_str())
+            .take(5)
+            .collect();
+        assert_eq!(
+            titles, expected,
+            "{metric}: routed page differs from the exhaustive one"
+        );
+    }
+}
+
+/// Naming no metric when the field carries several is ambiguous, so the query
+/// declines to route and says so rather than letting index order decide the
+/// results.
+#[tokio::test]
+async fn several_indexes_without_a_metric_warn_ambiguous() {
+    let node = EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema(&format!(
+        "type Note {{ title: String  tag: String  embedding: [Float32!] \
+         @index(name: \"by_cosine\", vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: COSINE}}}}) \
+         @index(name: \"by_dot\", vector: {{dimensions: {DIMENSIONS}, hnsw: {{metric: DOT}}}}) }}"
+    ))
+    .await
+    .expect("two vector indexes on one field");
+    seed(&node).await;
+
+    let query = similarity_query(&vector_for(3), 5, None);
+    let response = node.execute(&query).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+
+    let extensions = response
+        .extensions
+        .as_ref()
+        .expect("an ambiguous metric must warn");
+    let detail = extensions.warnings[0].detail.as_ref().expect("detail");
+    assert_eq!(detail["reason"], "ambiguousMetric");
+    assert_eq!(detail["field"], "embedding");
+
+    assert_eq!(
+        response.data.as_ref().unwrap()["Note"]
+            .as_array()
+            .expect("Note array")
+            .len(),
+        5,
+        "declining to route must still fill the page"
     );
 }

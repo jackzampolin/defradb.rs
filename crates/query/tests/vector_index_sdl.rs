@@ -314,6 +314,50 @@ fn unknown_or_mistyped_arguments_are_refused() {
     }
 }
 
+/// A field carries as many indexes as it has `@index` directives. The reference
+/// appends every one it finds rather than keeping the last, and two vector
+/// indexes of different metrics on one field is precisely what a query's
+/// `metric` argument exists to choose between: without this the argument has
+/// nothing to disambiguate.
+#[test]
+fn a_field_takes_more_than_one_index() {
+    let collections = collections(
+        r#"type Doc {
+            embedding: [Float32!]
+                @index(name: "by_cosine", vector: {dimensions: 8, hnsw: {metric: COSINE}})
+                @index(name: "by_euclidean", vector: {dimensions: 8, hnsw: {metric: EUCLIDEAN}})
+        }"#,
+    );
+    let indexes = &collections[0].indexes;
+    assert_eq!(indexes.len(), 2, "both directives must build an index");
+    assert_ne!(indexes[0].id, indexes[1].id, "ids must not collide");
+
+    let by_name = |name: &str| {
+        indexes
+            .iter()
+            .find(|index| index.name == name)
+            .and_then(|index| index.vector())
+            .unwrap_or_else(|| panic!("no vector index named {name}"))
+            .metric
+    };
+    assert_eq!(by_name("by_cosine"), DistanceMetric::Cosine);
+    assert_eq!(by_name("by_euclidean"), DistanceMetric::Euclidean);
+}
+
+/// The same, mixing kinds: an ordered index and a vector index on one field.
+#[test]
+fn a_field_takes_an_ordered_and_a_vector_index() {
+    let collections = collections(
+        r#"type Doc {
+            embedding: [Float32!] @index @index(vector: {dimensions: 8})
+        }"#,
+    );
+    let indexes = &collections[0].indexes;
+    assert_eq!(indexes.len(), 2);
+    assert_eq!(indexes.iter().filter(|i| i.is_vector()).count(), 1);
+    assert_eq!(indexes.iter().filter(|i| !i.is_vector()).count(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Algorithm selection
 // ---------------------------------------------------------------------------

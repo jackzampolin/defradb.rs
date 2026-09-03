@@ -49,12 +49,20 @@ pub enum NotRouted {
     /// The query vector's length does not match the index's declared
     /// dimensions. Scoring it would silently use the shared prefix only.
     DimensionMismatch { expected: u32, actual: usize },
+    /// Several vector indexes on the field and no metric named to choose
+    /// between them: which one answered would silently decide the results
+    /// rather than just the cost.
+    AmbiguousMetric,
+    /// The query named a metric no vector index on the field was built with, so
+    /// none of them ranks the way this query scores.
+    MetricMismatch { requested: DistanceMetric },
 }
 
 impl NotRouted {
     /// The `reason` detail of a `VECTOR_INDEX_UNUSED` warning. Clients match on
     /// these, so they do not change once released. The first four are the
-    /// reference's spellings; the last two are ours, for shapes it does not check.
+    /// reference's spellings; the last four are ours, for shapes it does not
+    /// check.
     pub fn reason(&self) -> &'static str {
         match self {
             NotRouted::NoLimit => "noLimit",
@@ -63,6 +71,8 @@ impl NotRouted {
             NotRouted::NoVectorIndex => "noVectorIndex",
             NotRouted::ShowDeleted => "showDeleted",
             NotRouted::DimensionMismatch { .. } => "dimensionMismatch",
+            NotRouted::AmbiguousMetric => "ambiguousMetric",
+            NotRouted::MetricMismatch { .. } => "metricMismatch",
         }
     }
 }
@@ -99,6 +109,10 @@ pub struct SimilarityField {
     /// otherwise. An alias-ordered query is therefore the same shape here as a
     /// directly-ordered one.
     pub output_name: String,
+    /// The metric named by the query, selecting among several vector indexes on
+    /// the field. `None` means the field's only index, or cosine when it has
+    /// none.
+    pub metric: Option<DistanceMetric>,
 }
 
 /// The single order-by key of a routable query.
@@ -130,6 +144,7 @@ pub fn similarity_query(select: &Select) -> SimilarityQuery {
                     target_field: similarity.target_field.clone(),
                     vector: similarity.vector.clone(),
                     output_name: similarity.output_name().to_string(),
+                    metric: similarity.metric,
                 }),
                 _ => None,
             })
@@ -175,7 +190,7 @@ pub fn route(
     }
 
     let (index_id, vector) =
-        vector_index_on(indexes, &similarity.target_field).ok_or(NotRouted::NoVectorIndex)?;
+        vector_index_for(indexes, &similarity.target_field, similarity.metric)?;
 
     // A wrong-length query would be scored on its shared leading elements
     // only, which is silently wrong rather than merely approximate. Zero
@@ -187,13 +202,6 @@ pub fn route(
             actual: similarity.vector.len(),
         });
     }
-
-    // No metric check: `SimilarityNode` scores by whatever metric this index
-    // was built with (see `scoring_metric`), so the index's nearest neighbours
-    // are the query's highest scorers whichever metric that is. A collection
-    // cannot carry two vector indexes on one field with different metrics, so
-    // the metric the scan would use and the metric the index ranks by are the
-    // same one by construction.
 
     Ok(VectorRoute {
         index_id,
@@ -255,33 +263,80 @@ pub fn first_indexed_similarity<'a>(
 ) -> Option<&'a str> {
     similarities
         .iter()
-        .find(|field| vector_index_on(indexes, &field.target_field).is_some())
+        .find(|field| !vector_indexes_on(indexes, &field.target_field).is_empty())
         .map(|field| field.target_field.as_str())
 }
 
 /// The metric a `SIMILARITY` on `field_name` is scored by.
 ///
-/// The field's vector index metric, or cosine when it has no vector index,
-/// matching the reference. Routing and the unrouted scan both resolve through
-/// here, so the ranking a query gets does not depend on whether the index was
-/// used.
-pub fn scoring_metric(indexes: &[IndexDescription], field_name: &str) -> DistanceMetric {
-    vector_index_on(indexes, field_name)
+/// The metric the query names, when it names one, whether or not the field
+/// carries an index built with it: an unindexed or mismatched field still
+/// scores by what the query asked for. Otherwise the field's vector index
+/// metric, or cosine when it has none, matching the reference. A field
+/// carrying several indexes and no named metric scores by the first, since
+/// scoring has to produce something and routing has already declined for that
+/// shape. Routing and the unrouted scan both resolve through here, so the
+/// ranking a query gets does not depend on whether the index was used.
+pub fn scoring_metric(
+    indexes: &[IndexDescription],
+    field_name: &str,
+    requested: Option<DistanceMetric>,
+) -> DistanceMetric {
+    if let Some(metric) = requested {
+        return metric;
+    }
+    vector_indexes_on(indexes, field_name)
+        .first()
         .map(|(_, vector)| vector.metric)
         .unwrap_or_default()
 }
 
-/// The vector index over `field_name`, if a collection has one.
-fn vector_index_on(
+/// The vector index that answers a `SIMILARITY` on `field_name` under
+/// `requested`.
+///
+/// With no metric named, the field's only index answers; a field carrying
+/// several is ambiguous, since which one answered would silently decide the
+/// results rather than just the cost. With one named, the index built with that
+/// metric answers, and no such index is a mismatch rather than a fallback.
+pub fn vector_index_for(
     indexes: &[IndexDescription],
     field_name: &str,
-) -> Option<(u32, VectorIndexDescription)> {
-    indexes.iter().find_map(|index| {
-        let vector = index.vector()?;
-        let indexes_field = index
-            .fields
-            .first()
-            .is_some_and(|field| field.name == field_name);
-        indexes_field.then_some((index.id, *vector))
-    })
+    requested: Option<DistanceMetric>,
+) -> Result<(u32, VectorIndexDescription), NotRouted> {
+    let candidates = vector_indexes_on(indexes, field_name);
+
+    match requested {
+        Some(metric) => candidates
+            .iter()
+            .find(|(_, vector)| vector.metric == metric)
+            .copied()
+            .ok_or(if candidates.is_empty() {
+                NotRouted::NoVectorIndex
+            } else {
+                NotRouted::MetricMismatch { requested: metric }
+            }),
+        None => match candidates.as_slice() {
+            [] => Err(NotRouted::NoVectorIndex),
+            [only] => Ok(*only),
+            _ => Err(NotRouted::AmbiguousMetric),
+        },
+    }
+}
+
+/// Every vector index on `field_name`, in index order.
+fn vector_indexes_on(
+    indexes: &[IndexDescription],
+    field_name: &str,
+) -> Vec<(u32, VectorIndexDescription)> {
+    indexes
+        .iter()
+        .filter_map(|index| {
+            let vector = index.vector()?;
+            let indexes_field = index
+                .fields
+                .first()
+                .is_some_and(|field| field.name == field_name);
+            indexes_field.then_some((index.id, *vector))
+        })
+        .collect()
 }

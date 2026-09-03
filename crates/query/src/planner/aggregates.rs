@@ -56,8 +56,12 @@ impl Planner {
                     field_index,
                     similarity_index,
                     sim.vector.clone(),
-                    crate::planner::vector_routing::scoring_metric(indexes, &sim.target_field)
-                        .engine_metric(),
+                    crate::planner::vector_routing::scoring_metric(
+                        indexes,
+                        &sim.target_field,
+                        sim.metric,
+                    )
+                    .engine_metric(),
                 ));
             }
         }

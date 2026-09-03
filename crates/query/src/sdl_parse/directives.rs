@@ -172,8 +172,11 @@ pub struct ParsedDirectives {
     pub is_primary: bool,
     /// CRDT type override (default is LwwRegister)
     pub crdt_type: Option<CType>,
-    /// Index configuration
-    pub index: Option<IndexConfig>,
+    /// Ordered index configurations, one per `@index` on the field.
+    ///
+    /// A list because the reference appends every `@index` directive it finds
+    /// on a field rather than keeping one, so a field can carry several.
+    pub index: Vec<IndexConfig>,
     /// Explicit relation name from @relation directive
     pub relation_name: Option<String>,
     /// Default value from @default directive
@@ -186,8 +189,10 @@ pub struct ParsedDirectives {
     pub embedding: Option<EmbeddingConfig>,
     /// Full-text search configuration from @fulltext directive
     pub fulltext: Option<FullTextConfig>,
-    /// Vector index configuration from `@index(vector: {...})`
-    pub vector_index: Option<VectorIndexConfig>,
+    /// Vector index configurations, one per `@index(vector: {...})` on the
+    /// field. Several are how a field carries indexes of different metrics,
+    /// which is what a query's `metric` argument then chooses between.
+    pub vector_index: Vec<VectorIndexConfig>,
     /// Whether this field is immutable after document creation
     pub immutable: bool,
 }

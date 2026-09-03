@@ -45,7 +45,32 @@ fn similarity(field: &str, output_name: &str) -> SimilarityField {
         target_field: field.to_string(),
         vector: vec![1.0, 0.0, 0.0, 0.0],
         output_name: output_name.to_string(),
+        metric: None,
     }
+}
+
+/// A vector index built with a chosen metric, so a field can carry several
+/// that disagree.
+fn vector_index_with_metric(id: u32, field: &str, metric: DistanceMetric) -> IndexDescription {
+    IndexDescription {
+        name: format!("by_{field}_{}", metric.as_str()),
+        id,
+        fields: vec![IndexedFieldDescription {
+            name: field.to_string(),
+            descending: false,
+        }],
+        unique: false,
+        kind: None,
+        auto_generated: false,
+    }
+    .as_vector(VectorIndexDescription {
+        algorithm: VectorAlgorithm::Hnsw,
+        metric,
+        dimensions: DIMENSIONS,
+        hnsw: Some(HnswParams::default()),
+        ivfpq: None,
+        ssg: None,
+    })
 }
 
 fn order(field: &str, descending: bool) -> Option<OrderKey> {
@@ -292,20 +317,104 @@ fn the_scoring_metric_follows_the_field_index() {
         vector_index(9, "embedding", DIMENSIONS),
     ];
 
-    assert_eq!(scoring_metric(&indexes, "embedding"), DistanceMetric::Dot);
     assert_eq!(
-        scoring_metric(&indexes, "title"),
+        scoring_metric(&indexes, "embedding", None),
+        DistanceMetric::Dot
+    );
+    assert_eq!(
+        scoring_metric(&indexes, "title", None),
         DistanceMetric::Cosine,
         "an ordered index is not a vector index"
     );
     assert_eq!(
-        scoring_metric(&indexes, "unindexed"),
+        scoring_metric(&indexes, "unindexed", None),
         DistanceMetric::Cosine,
         "an unindexed field scores as cosine"
     );
     assert_eq!(
-        scoring_metric(&[], "embedding"),
+        scoring_metric(&[], "embedding", None),
         DistanceMetric::Cosine,
         "a collection with no indexes at all scores as cosine"
+    );
+    assert_eq!(
+        scoring_metric(&[], "embedding", Some(DistanceMetric::Dot)),
+        DistanceMetric::Dot,
+        "a named metric scores by what the query asked for, even on an \
+         unindexed field"
+    );
+}
+
+/// With one index on the field, that index is the only candidate whatever
+/// metric it was built with, so no metric needs naming.
+#[test]
+fn a_single_index_routes_without_a_named_metric() {
+    for metric in DistanceMetric::ALL {
+        let indexes = [vector_index_with_metric(7, "embedding", *metric)];
+        let route = route(&routable(), &indexes)
+            .unwrap_or_else(|e| panic!("{metric:?} with a single index must route: {e:?}"));
+        assert_eq!(route.index_id, 7);
+    }
+}
+
+/// Two indexes and no named metric: which one would answer is ambiguous, so
+/// routing declines rather than silently picking one.
+#[test]
+fn several_indexes_without_a_named_metric_do_not_route() {
+    let indexes = [
+        vector_index_with_metric(1, "embedding", DistanceMetric::Cosine),
+        vector_index_with_metric(2, "embedding", DistanceMetric::Dot),
+    ];
+    assert_eq!(
+        route(&routable(), &indexes),
+        Err(NotRouted::AmbiguousMetric)
+    );
+}
+
+/// With a metric named, the index built with that metric answers, whichever
+/// index carries it.
+#[test]
+fn a_named_metric_selects_its_own_index_among_several() {
+    let indexes = [
+        vector_index_with_metric(1, "embedding", DistanceMetric::Cosine),
+        vector_index_with_metric(2, "embedding", DistanceMetric::Dot),
+    ];
+
+    for (metric, expected_id) in [(DistanceMetric::Cosine, 1), (DistanceMetric::Dot, 2)] {
+        let query = SimilarityQuery {
+            similarities: vec![SimilarityField {
+                metric: Some(metric),
+                ..similarity("embedding", "SIMILARITY")
+            }],
+            ..routable()
+        };
+        assert_eq!(
+            route(&query, &indexes).unwrap().index_id,
+            expected_id,
+            "{metric:?} should select index {expected_id}"
+        );
+    }
+}
+
+/// Naming a metric no index on the field carries is a mismatch: it does not
+/// fall back to whatever the field does have.
+#[test]
+fn a_metric_no_index_carries_does_not_route() {
+    let indexes = [vector_index_with_metric(
+        7,
+        "embedding",
+        DistanceMetric::Cosine,
+    )];
+    let query = SimilarityQuery {
+        similarities: vec![SimilarityField {
+            metric: Some(DistanceMetric::Dot),
+            ..similarity("embedding", "SIMILARITY")
+        }],
+        ..routable()
+    };
+    assert_eq!(
+        route(&query, &indexes),
+        Err(NotRouted::MetricMismatch {
+            requested: DistanceMetric::Dot
+        })
     );
 }

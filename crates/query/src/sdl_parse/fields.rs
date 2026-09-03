@@ -61,8 +61,8 @@ impl<'a> SdlParser<'a> {
                 "primary" => result.is_primary = true,
                 "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
                 "index" => match self.parse_index_directive(directive, Some(field_name))? {
-                    ParsedIndex::Ordered(config) => result.index = Some(config),
-                    ParsedIndex::Vector(config) => result.vector_index = Some(config),
+                    ParsedIndex::Ordered(config) => result.index.push(config),
+                    ParsedIndex::Vector(config) => result.vector_index.push(config),
                 },
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
                 "default" => {
