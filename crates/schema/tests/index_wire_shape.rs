@@ -206,21 +206,22 @@ fn an_absent_hnsw_block_is_omitted_and_parses_back() {
     assert_eq!(from_go.vector().map(|v| v.hnsw), Some(None));
 }
 
-/// `DOT` is ours alone: Go's `DistanceMetric` defines only `COSINE`, so a
-/// definition carrying it is not parseable by a Go node. The divergence has to
-/// be visible to anything deciding whether a definition can leave this node.
+/// Every metric is Go's, spelled Go's way, so the metric axis carries no
+/// divergence at all: `EUCLIDEAN` and `DOT` are both `client.DistanceMetric`
+/// values as of sourcenetwork/defradb#5169. Anything deciding whether a
+/// definition can leave this node reads that off `is_go_compatible`.
 #[test]
-fn dot_is_the_one_metric_go_cannot_parse() {
-    assert!(DistanceMetric::Cosine.is_go_compatible());
-    assert!(!DistanceMetric::Dot.is_go_compatible());
+fn every_metric_is_one_go_parses() {
+    for metric in DistanceMetric::ALL {
+        assert!(metric.is_go_compatible(), "{metric:?} must be exchangeable");
+    }
 
     assert_eq!(
-        serde_json::to_value(DistanceMetric::Cosine).unwrap(),
-        json!("COSINE")
-    );
-    assert_eq!(
-        serde_json::to_value(DistanceMetric::Dot).unwrap(),
-        json!("DOT")
+        DistanceMetric::ALL
+            .iter()
+            .map(|metric| serde_json::to_value(metric).unwrap())
+            .collect::<Vec<_>>(),
+        vec![json!("COSINE"), json!("EUCLIDEAN"), json!("DOT")]
     );
 
     let desc = IndexDescription::new("i")
@@ -283,11 +284,24 @@ fn flat_is_an_algorithm_go_cannot_parse() {
     );
 }
 
-/// A definition is exchangeable only when every divergent value is absent.
+/// A definition is exchangeable only when every divergent value is absent. The
+/// algorithm is the only axis that still carries one; the check reads both so
+/// that a Rust-only metric added later is caught here rather than on the wire.
 #[test]
 fn go_compatibility_is_checkable_across_both_axes() {
     let ok = vector();
     assert!(ok.algorithm.is_go_compatible() && ok.metric.is_go_compatible());
+
+    for metric in DistanceMetric::ALL {
+        let exchangeable = VectorIndexDescription {
+            metric: *metric,
+            ..vector()
+        };
+        assert!(
+            exchangeable.algorithm.is_go_compatible() && exchangeable.metric.is_go_compatible(),
+            "{exchangeable:?} must be exchangeable"
+        );
+    }
 
     for diverged in [
         VectorIndexDescription {
@@ -296,7 +310,8 @@ fn go_compatibility_is_checkable_across_both_axes() {
             ..vector()
         },
         VectorIndexDescription {
-            metric: DistanceMetric::Dot,
+            algorithm: VectorAlgorithm::Ssg,
+            hnsw: None,
             ..vector()
         },
     ] {

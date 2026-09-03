@@ -5,7 +5,7 @@ use std::collections::{BinaryHeap, HashSet};
 use super::codec::BuiltState;
 use super::Ssg;
 use crate::index::error::Result;
-use crate::index::vector::core::{normalize, Element, Metric};
+use crate::index::vector::core::Element;
 use crate::index::vector::engine::ann::{Admit, Candidate, Neighbor};
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 
@@ -23,10 +23,7 @@ impl<S: VectorNodeStore> Ssg<S> {
         }
 
         let metric = self.metric();
-        let mut query: Vec<f32> = query.iter().map(|x| f32::narrow(x.widen())).collect();
-        if metric == Metric::Cosine {
-            normalize(&mut query);
-        }
+        let query = metric.prepare(query);
 
         let pool = effort
             .map(|e| e.max(1))

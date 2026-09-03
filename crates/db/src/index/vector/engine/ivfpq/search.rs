@@ -5,7 +5,7 @@ use std::collections::BinaryHeap;
 use super::codec::{self, TrainedState};
 use super::IvfPq;
 use crate::index::error::Result;
-use crate::index::vector::core::{normalize, Element, Metric};
+use crate::index::vector::core::{Element, Metric};
 use crate::index::vector::engine::ann::{Admit, Neighbor, Quantizer};
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 
@@ -22,10 +22,7 @@ impl<S: VectorNodeStore> IvfPq<S> {
             return Ok(Vec::new());
         }
 
-        let mut query: Vec<f32> = query.iter().map(|x| f32::narrow(x.widen())).collect();
-        if self.metric() == Metric::Cosine {
-            normalize(&mut query);
-        }
+        let query = self.metric().prepare(query);
 
         let (coarse, quantizer) = self.trained_parts(state).await?;
 
