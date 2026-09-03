@@ -154,6 +154,12 @@ impl<T: Reader + Writer + MaybeSend> VectorNodeStore for KvNodeStore<'_, T> {
         Ok(())
     }
 
+    async fn delete_aux(&mut self, kind: u8, key: &[u8]) -> Result<()> {
+        let full = self.aux_key(kind, key);
+        self.txn.delete(&full).await?;
+        Ok(())
+    }
+
     /// Streams one kind's entries, holding one at a time. The prefix stops at
     /// this epoch's discriminator, so a scan cannot reach the graph or another
     /// kind.

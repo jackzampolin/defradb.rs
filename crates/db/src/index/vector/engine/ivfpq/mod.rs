@@ -133,15 +133,39 @@ impl<S: VectorNodeStore> VectorIndexEngine for IvfPq<S> {
 
     /// The vector is always stored, trained or not: it is what a rebuild reads
     /// and what keeps the index exact until one happens.
+    ///
+    /// Re-inserting under an id that already has one is an update, and its list
+    /// assignment can move. The previous entry has to go with it: a list holds
+    /// the code of whatever vector was assigned to it, so a stale one returns
+    /// the document a second time, ranked by an embedding it no longer has.
     async fn insert<E: Element>(&mut self, id: NodeId, vector: &[E]) -> Result<()> {
+        let trained = self.trained().await?;
+
+        // Read before the write, because `staging.insert` overwrites the node
+        // and the old vector is what names the list to clear.
+        let previous = match trained {
+            Some(_) => self.store().get_node(id).await?,
+            None => None,
+        };
+
         self.staging.insert(id, vector).await?;
 
-        if let Some(state) = self.trained().await? {
+        if let Some(state) = trained {
             let stored =
                 self.store().get_node(id).await?.ok_or_else(|| {
                     Error::Other("vector index: a just-stored node is gone".into())
                 })?;
             let (list, code) = self.assign(&state, &stored.vector).await?;
+
+            if let Some(previous) = previous {
+                let (previous_list, _) = self.assign(&state, &previous.vector).await?;
+                if previous_list != list {
+                    self.store_mut()
+                        .delete_aux(codec::LIST, &codec::list_key(previous_list, id))
+                        .await?;
+                }
+            }
+
             self.store_mut()
                 .put_aux(codec::LIST, &codec::list_key(list, id), &code)
                 .await?;

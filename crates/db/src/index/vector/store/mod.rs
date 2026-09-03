@@ -98,6 +98,14 @@ pub trait VectorNodeStore: MaybeSendSync {
 
     async fn put_aux(&mut self, kind: u8, key: &[u8], value: &[u8]) -> Result<()>;
 
+    /// Removes one entry, if it is there. Absent is not an error: a caller
+    /// clearing an entry it is not sure exists is the normal case.
+    ///
+    /// Without this a partitioned kind can only ever add, so a vector that
+    /// moves between lists leaves its old entry behind to be found by a later
+    /// probe.
+    async fn delete_aux(&mut self, kind: u8, key: &[u8]) -> Result<()>;
+
     /// Visits every entry of `kind` whose key starts with `key_prefix`, in key
     /// order, one at a time.
     async fn iterate_aux<F>(&self, kind: u8, key_prefix: &[u8], visit: F) -> Result<()>

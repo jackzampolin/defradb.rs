@@ -80,6 +80,11 @@ impl VectorNodeStore for MemoryNodeStore {
         Ok(())
     }
 
+    async fn delete_aux(&mut self, kind: u8, key: &[u8]) -> Result<()> {
+        self.aux.remove(&(kind, key.to_vec()));
+        Ok(())
+    }
+
     /// A range over the ordered map, not a full scan: an inverted-list probe
     /// is a prefix lookup and must cost what the prefix holds, not what the
     /// index holds.
