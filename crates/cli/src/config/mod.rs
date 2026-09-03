@@ -143,9 +143,8 @@ impl Config {
             Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(())
             }
-            Err(source) => Err(Error::LoadSecretFile {
+            Err(_) => Err(Error::LoadSecretFile {
                 path: PathBuf::from(&self.secret_file),
-                source,
             }),
         }
     }

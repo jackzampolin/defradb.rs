@@ -190,17 +190,17 @@ fn test_missing_secret_file_is_ignored() {
 fn test_invalid_secret_file_returns_error() {
     let rootdir = tempfile::tempdir().unwrap();
     let secret_file = rootdir.path().join("invalid.env");
-    fs::write(&secret_file, "SECRET='unterminated\n").unwrap();
+    let secret = "must-not-appear";
+    fs::write(&secret_file, format!("SECRET='{secret}\n")).unwrap();
     let mut cli = cli_with_defaults();
     cli.rootdir = Some(rootdir.path().display().to_string());
     cli.secret_file = Some(secret_file.display().to_string());
 
     let result = Config::load(&cli);
 
-    assert!(matches!(
-        result,
-        Err(Error::LoadSecretFile { path, .. }) if path == secret_file
-    ));
+    let error = result.unwrap_err();
+    assert!(matches!(&error, Error::LoadSecretFile { path } if path == &secret_file));
+    assert!(!error.to_string().contains(secret));
 }
 
 #[test]

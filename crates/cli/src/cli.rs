@@ -108,7 +108,7 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_HUB_RS_ADDRESS")]
     pub hub_rs_address: Option<String>,
 
-    /// Path to the file containing secrets
+    /// Path to the file containing secrets. Relative paths use the working directory.
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,
 

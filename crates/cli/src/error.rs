@@ -32,11 +32,8 @@ pub enum Error {
         source: serde_yaml::Error,
     },
 
-    #[error("failed to load secret file {path}: {source}")]
-    LoadSecretFile {
-        path: PathBuf,
-        source: dotenvy::Error,
-    },
+    #[error("failed to load secret file {path}")]
+    LoadSecretFile { path: PathBuf },
 
     #[error("failed to write config file {path}: {source}")]
     WriteConfig {
