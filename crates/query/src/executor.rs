@@ -90,6 +90,11 @@ pub struct QueryResponse {
     /// Errors that occurred during execution.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub errors: Vec<QueryResponseError>,
+
+    /// Extra information about a request that worked, such as warnings.
+    /// Absent when there is nothing to report, so existing responses do not change.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extensions: Option<GqlExtensions>,
 }
 
 impl QueryResponse {
@@ -98,6 +103,7 @@ impl QueryResponse {
         Self {
             data: Some(data),
             errors: Vec::new(),
+            extensions: None,
         }
     }
 
@@ -106,6 +112,7 @@ impl QueryResponse {
         Self {
             data: None,
             errors: vec![err.into()],
+            extensions: None,
         }
     }
 
@@ -114,6 +121,7 @@ impl QueryResponse {
         Self {
             data: Some(data),
             errors,
+            extensions: None,
         }
     }
 
@@ -133,7 +141,43 @@ impl QueryResponse {
             && self.errors.len() == 1
             && self.errors[0].code() == Some(TXN_CONFLICT_ERROR_CODE)
     }
+
+    /// Attach warnings, dropping the member entirely when there are none so an
+    /// empty `extensions` is never serialized.
+    pub fn with_warnings(mut self, warnings: Vec<GqlWarning>) -> Self {
+        if !warnings.is_empty() {
+            self.extensions = Some(GqlExtensions { warnings });
+        }
+        self
+    }
 }
+
+/// Sits next to `data` and `errors` in a response. Holds anything that is
+/// neither a result nor an error. A client skips what it does not recognise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GqlExtensions {
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<GqlWarning>,
+}
+
+/// Something that happened during a request that still worked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GqlWarning {
+    /// Names the warning. Clients match on this, so it does not change once released.
+    pub code: String,
+    /// Explains the warning to a person. The wording can change, so do not read it in code.
+    pub message: String,
+    /// Values belonging to this warning. Sent to the client and possibly logged,
+    /// so no secrets, keys, or counts that reveal documents the caller cannot see.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detail: Option<serde_json::Map<String, JsonValue>>,
+}
+
+/// A similarity query read the whole collection even though the field it scored
+/// has a vector index. The results are correct, but the query costs more as the
+/// collection grows. The `reason` detail says which part of the query shape
+/// ruled the index out.
+pub const WARNING_CODE_VECTOR_INDEX_UNUSED: &str = "VECTOR_INDEX_UNUSED";
 
 /// GraphQL error extensions exposed to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]

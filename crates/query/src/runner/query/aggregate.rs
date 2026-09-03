@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::{QueryError, Result};
+use crate::executor::GqlWarning;
 use crate::mapper::{Requestable, Select};
 use crate::planner::{Doc, Planner};
 use crate::txn::TransactionRegistry;
@@ -253,6 +254,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         fetcher: &dyn DocFetcher,
         identity: Option<Did>,
+        warnings: &mut Vec<GqlWarning>,
     ) -> Result<JsonValue> {
         use crate::mapper::AggregateType;
 
@@ -338,6 +340,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             planner = planner.with_lens_store(lens_store.clone());
         }
         let plan_result = planner.plan_with_index_info(&filter_select)?;
+        warnings.extend(plan_result.warnings);
         let mut plan = plan_result.plan;
         let mapping = plan.document_map().clone();
 

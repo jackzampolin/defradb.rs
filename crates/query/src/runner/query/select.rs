@@ -5,6 +5,7 @@ use identity::Did;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::error::{QueryError, Result};
+use crate::executor::GqlWarning;
 use crate::mapper::{Filter, Requestable, Select};
 use crate::planner::index_selection::{can_be_ordered_by_index, can_or_filter_use_index};
 use crate::txn::TransactionRegistry;
@@ -19,6 +20,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
+        warnings: &mut Vec<GqlWarning>,
     ) -> Result<JsonValue> {
         // Handle encrypted search queries (encrypted_<Collection>)
         if select.is_encrypted {
@@ -58,7 +60,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For queries with _version, execute documents first then add version data
         if version_selection.is_some() {
             return self
-                .execute_query_with_version(select, fetcher, caller_identity, version_selection)
+                .execute_query_with_version(
+                    select,
+                    fetcher,
+                    caller_identity,
+                    version_selection,
+                    warnings,
+                )
                 .await;
         }
 
@@ -149,7 +157,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             if aggregate_filter_has_relations {
                 // Use planner path to join relation data before filtering
                 return self
-                    .execute_top_level_aggregate_with_planner(select, fetcher, caller_identity)
+                    .execute_top_level_aggregate_with_planner(
+                        select,
+                        fetcher,
+                        caller_identity,
+                        warnings,
+                    )
                     .await;
             } else {
                 return self
@@ -302,7 +315,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         if needs_planner {
             // Use the Planner for queries with nested selections (joins) or relation filters.
-            self.execute_nested_select_with_planner(select, fetcher, caller_identity)
+            self.execute_nested_select_with_planner(select, fetcher, caller_identity, warnings)
                 .await
         } else {
             // Use the optimized path for simple queries

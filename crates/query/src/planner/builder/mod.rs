@@ -23,11 +23,13 @@ use schema::CollectionVersion;
 use tracing::{debug, instrument};
 
 use crate::error::{QueryError, Result};
+use crate::executor::GqlWarning;
 use crate::fetcher::DocFetcher;
 use crate::limits::QueryLimits;
 use crate::mapper::{Requestable, Select};
 use crate::plan::{IndexScanNode, PermissionFilterNode, SEFilterNode, ScanNode, SelectNode};
 use crate::planner::index_selection::IndexScanParams;
+use crate::planner::vector_routing;
 use crate::planner::PlanNode;
 
 /// Maximum allowed nesting depth for nested queries (0-indexed).
@@ -50,6 +52,8 @@ pub struct PlanResult {
     /// with a relation selection (e.g., both `_count(published: {})` and `published(limit: 2)`).
     /// Maps: aggregate_output_name -> (relation_field_name, internal_key)
     pub aggregate_internal_keys: HashMap<String, (String, String)>,
+    /// Warnings raised while planning, for the response's `extensions` member.
+    pub warnings: Vec<GqlWarning>,
 }
 
 impl PlanResult {
@@ -269,16 +273,29 @@ impl Planner {
             || is_complex_filter
             || (self.acp.is_some() && collection.policy.is_some());
 
-        let vector_route = self
-            .fetcher
-            .as_ref()
-            .filter(|_| !rows_rejected_above_the_scan)
-            .filter(|fetcher| fetcher.supports_vector_search())
-            .and_then(|_| {
-                match crate::planner::vector_routing::route(
-                    &crate::planner::vector_routing::similarity_query(select),
-                    &collection.indexes,
-                ) {
+        let mut warnings: Vec<GqlWarning> = Vec::new();
+
+        let sim_query = vector_routing::similarity_query(select);
+        let warning_field =
+            vector_routing::first_indexed_similarity(&sim_query.similarities, &collection.indexes);
+
+        let vector_route = if let Some(ref fetcher) = self.fetcher {
+            if rows_rejected_above_the_scan {
+                if let Some(field) = warning_field {
+                    warnings.push(vector_routing::vector_index_unused_warning_for_filter(
+                        field,
+                    ));
+                }
+                None
+            } else if !fetcher.supports_vector_search() {
+                if let Some(field) = warning_field {
+                    warnings.push(
+                        vector_routing::vector_index_unused_warning_for_unsupported_fetcher(field),
+                    );
+                }
+                None
+            } else {
+                match vector_routing::route(&sim_query, &collection.indexes) {
                     Ok(route) => Some(route),
                     Err(reason) => {
                         debug!(
@@ -286,10 +303,20 @@ impl Planner {
                             ?reason,
                             "vector routing declined"
                         );
+                        if let Some(field) = warning_field {
+                            if let Some(warning) =
+                                vector_routing::vector_index_unused_warning(&reason, field)
+                            {
+                                warnings.push(warning);
+                            }
+                        }
                         None
                     }
                 }
-            });
+            }
+        } else {
+            None
+        };
 
         // Check if an index can be used for the filter or ordering.
         // Index selection works for both pre-loaded docs and fetcher-based loading.
@@ -643,6 +670,7 @@ impl Planner {
             index_scan,
             ordering_only_fields,
             aggregate_internal_keys,
+            warnings,
         })
     }
 

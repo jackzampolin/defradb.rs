@@ -12,6 +12,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 
 use crate::error::{QueryError, Result};
+use crate::executor::GqlWarning;
 use crate::mapper::{Requestable, Select};
 use crate::txn::TransactionRegistry;
 
@@ -278,6 +279,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
         version_selection: Option<&Select>,
+        warnings: &mut Vec<GqlWarning>,
     ) -> Result<JsonValue> {
         // Get collection schema
         let collection = self.get_collection(&select.collection_name).await?;
@@ -347,6 +349,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 &select_without_version,
                 fetcher,
                 caller_identity,
+                warnings,
             )
             .await?
         } else {
