@@ -153,6 +153,21 @@ impl VectorIndex {
         })
     }
 
+    /// Gives the engine one chance to train and build, if it judges enough has
+    /// accumulated. Called after a bulk load lands a whole corpus at once,
+    /// where asking on every write the way [`save`](Self::save) does would
+    /// repeat the same question for every document instead of once at the end.
+    pub async fn build_if_needed<T: Reader + Writer + MaybeSend>(
+        &self,
+        txn: &mut T,
+    ) -> storage::corekv::Result<()> {
+        let mut engine = self.engine(txn).map_err(into_storage)?;
+        if engine.should_build().await.map_err(into_storage)? {
+            engine.build().await.map_err(into_storage)?;
+        }
+        Ok(())
+    }
+
     /// The vector a document contributes, if any.
     ///
     /// `None` means the document is simply not in the index, which is the same
@@ -263,7 +278,14 @@ impl CollectionIndex for VectorIndex {
             Indexable::Wide(v) => engine.insert(id, v).await,
             Indexable::Integral(v) => engine.insert(id, v).await,
         }
-        .map_err(into_storage)
+        .map_err(into_storage)?;
+
+        // Once built, `should_build`'s trained/built check is an O(1) aux
+        // lookup, so this costs one extra read per write and nothing else.
+        if engine.should_build().await.map_err(into_storage)? {
+            engine.build().await.map_err(into_storage)?;
+        }
+        Ok(())
     }
 
     /// Re-inserting under the same id replaces the node's vector and rebuilds

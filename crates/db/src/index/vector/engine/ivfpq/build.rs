@@ -29,13 +29,46 @@ impl<S: VectorNodeStore> IvfPq<S> {
         Ok(count)
     }
 
+    /// Whether at least `wanted` live vectors are stored, counting no further.
+    ///
+    /// The count is bounded by what the question needs rather than by the
+    /// corpus, so asking it on every write costs a constant rather than a scan.
+    /// `iterate_nodes` stops as soon as the visitor returns an error, so the
+    /// visitor becomes that stop signal itself once `wanted` is reached; `count`
+    /// having reached `wanted` is what distinguishes the signal from a real
+    /// failure the store raised on its own.
+    pub async fn live_count_at_least(&self, wanted: u64) -> Result<bool> {
+        if wanted == 0 {
+            return Ok(true);
+        }
+        let mut count = 0u64;
+        match self
+            .store()
+            .iterate_nodes(|_| {
+                count += 1;
+                if count < wanted {
+                    Ok(())
+                } else {
+                    Err(Error::Other(
+                        "vector index: live_count_at_least stopped early".into(),
+                    ))
+                }
+            })
+            .await
+        {
+            Ok(()) => Ok(false),
+            Err(_) if count >= wanted => Ok(true),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Whether there are enough vectors to fit the configured lists.
     pub async fn should_build(&self) -> Result<bool> {
         if self.is_trained().await? {
             return Ok(false);
         }
-        let live = self.live_count().await?;
-        Ok(live >= self.params().train_threshold(live).max(1))
+        self.live_count_at_least(self.params().resolved_train_threshold())
+            .await
     }
 
     /// Trains from a byte-bounded sample and writes centroids, codebooks and

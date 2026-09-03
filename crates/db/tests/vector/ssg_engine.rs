@@ -3,6 +3,7 @@
 use db::index::vector::engine::ann::EngineKind;
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
+use db::index::vector::engine::ivfpq::TRAIN_PER_LIST;
 use db::index::vector::engine::ssg::Ssg;
 use db::index::vector::engine::ssg::SsgParams;
 use db::index::vector::params::Params;
@@ -292,4 +293,68 @@ async fn a_document_written_after_the_build_is_searchable() {
         hits.iter().any(|n| n.id == NodeId(9_999)),
         "the late document was not found: {hits:?}"
     );
+}
+
+#[tokio::test]
+async fn should_build_is_false_on_an_empty_index() {
+    let index = index(SsgParams::default());
+    assert!(!index.should_build().await.unwrap());
+}
+
+#[tokio::test]
+async fn should_build_is_false_once_built() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0xAA);
+    let vectors = corpus.clustered(300, DIMENSIONS, 8, 0.2);
+    let mut index = filled(SsgParams::default(), &vectors).await;
+    index.build().await.unwrap();
+
+    assert!(!index.should_build().await.unwrap());
+}
+
+/// The regression #1463 closes, mirrored from the IVF-PQ engine: crossing the
+/// threshold must make `should_build` answer `true`.
+#[tokio::test]
+async fn should_build_becomes_true_once_the_threshold_is_crossed() {
+    let params = SsgParams {
+        r: 8,
+        ..SsgParams::default()
+    };
+    let threshold = 8u64 * u64::from(TRAIN_PER_LIST);
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0xBB);
+    let vectors = corpus.clustered(threshold as usize, DIMENSIONS, 8, 0.2);
+    let mut index = index(params);
+
+    for (i, vector) in vectors.iter().take(threshold as usize - 1).enumerate() {
+        index.insert(NodeId(i as u64 + 1), vector).await.unwrap();
+    }
+    assert!(
+        !index.should_build().await.unwrap(),
+        "one short of the threshold"
+    );
+
+    index
+        .insert(NodeId(threshold), &vectors[threshold as usize - 1])
+        .await
+        .unwrap();
+    assert!(index.should_build().await.unwrap(), "at the threshold");
+}
+
+/// `live_count_at_least` must answer exactly what a full count would, at
+/// targets on both sides of the true count.
+#[tokio::test]
+async fn live_count_at_least_agrees_with_live_count() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0xCC);
+    let vectors = corpus.clustered(150, DIMENSIONS, 8, 0.2);
+    let index = filled(SsgParams::default(), &vectors).await;
+
+    let true_count = index.live_count().await.unwrap();
+    assert_eq!(true_count, 150);
+
+    for target in [0u64, 1, 50, 149, 150, 151, 500] {
+        assert_eq!(
+            index.live_count_at_least(target).await.unwrap(),
+            true_count >= target,
+            "target={target}, true_count={true_count}"
+        );
+    }
 }

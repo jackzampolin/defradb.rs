@@ -484,6 +484,14 @@ impl IndexManager {
             indexed_count += 1;
         }
 
+        // One chance to build here, rather than leaving a vector index to
+        // notice on its own: the loop above would otherwise ask the same
+        // per-write question for every document a bulk load lands at once.
+        index
+            .build_if_needed(&mut mutable_datastore)
+            .await
+            .map_err(Error::Storage)?;
+
         Ok(BulkIndexResult {
             indexed: indexed_count,
             skipped: skipped_count,

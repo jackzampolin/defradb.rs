@@ -22,3 +22,4 @@ mod vector_kv_cost;
 mod vector_kv_store;
 mod vector_recall_baseline;
 mod vector_recall_gate;
+mod vector_train_trigger;

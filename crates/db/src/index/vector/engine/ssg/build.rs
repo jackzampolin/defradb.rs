@@ -6,6 +6,7 @@ use super::codec::{self, BuiltState};
 use super::Ssg;
 use crate::index::error::{Error, Result};
 use crate::index::vector::engine::ann::{Candidate, EdgeSelector};
+use crate::index::vector::engine::ivfpq::TRAIN_PER_LIST;
 use crate::index::vector::engine::select::Angular;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 
@@ -20,6 +21,66 @@ pub struct SsgBuildReport {
 }
 
 impl<S: VectorNodeStore> Ssg<S> {
+    /// Vectors held, tombstones excluded.
+    pub async fn live_count(&self) -> Result<u64> {
+        let mut count = 0u64;
+        self.store()
+            .iterate_nodes(|_| {
+                count += 1;
+                Ok(())
+            })
+            .await?;
+        Ok(count)
+    }
+
+    /// Whether at least `wanted` live vectors are stored, counting no further.
+    ///
+    /// The count is bounded by what the question needs rather than by the
+    /// corpus, so asking it on every write costs a constant rather than a scan.
+    /// See [`IvfPq::live_count_at_least`](super::super::ivfpq::IvfPq::live_count_at_least)
+    /// for why returning an error from the visitor is what stops the walk early.
+    pub async fn live_count_at_least(&self, wanted: u64) -> Result<bool> {
+        if wanted == 0 {
+            return Ok(true);
+        }
+        let mut count = 0u64;
+        match self
+            .store()
+            .iterate_nodes(|_| {
+                count += 1;
+                if count < wanted {
+                    Ok(())
+                } else {
+                    Err(Error::Other(
+                        "vector index: live_count_at_least stopped early".into(),
+                    ))
+                }
+            })
+            .await
+        {
+            Ok(()) => Ok(false),
+            Err(_) if count >= wanted => Ok(true),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Whether there are enough nodes for a build to be worth it.
+    ///
+    /// SSG's own parameters (`r`, `angle`, `pool`) are all fixed by
+    /// configuration and none scale with the corpus, so unlike IVF-PQ's
+    /// `nlist` none of them implies a threshold on their own. This borrows
+    /// IVF-PQ's rule instead, substituting `r` for `nlist`: both are the
+    /// structural fan-out a build commits to (coarse lists there, edges per
+    /// node here), so the same `TRAIN_PER_LIST` per-unit minimum applies,
+    /// giving `r * TRAIN_PER_LIST` live nodes before a build pays for itself.
+    pub async fn should_build(&self) -> Result<bool> {
+        if self.is_built().await? {
+            return Ok(false);
+        }
+        let wanted = u64::from(self.params().r) * u64::from(TRAIN_PER_LIST);
+        self.live_count_at_least(wanted).await
+    }
+
     /// Prunes every node's layer-0 neighbours by angle, then repairs
     /// connectivity so no node is stranded.
     ///

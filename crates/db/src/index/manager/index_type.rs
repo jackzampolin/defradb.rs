@@ -130,6 +130,15 @@ impl IndexType {
         }
     }
 
+    /// Gives a vector index one chance to train and build, if it should. A
+    /// no-op for every other index kind, which has nothing to train.
+    pub async fn build_if_needed<T: Reader + Writer + MaybeSend>(&self, txn: &mut T) -> Result<()> {
+        match self {
+            IndexType::Simple(_) | IndexType::Unique(_) | IndexType::FullText(_) => Ok(()),
+            IndexType::Vector(idx) => idx.build_if_needed(txn).await,
+        }
+    }
+
     /// RemoveAll removes all entries for this index.
     pub async fn remove_all<T: Reader + Writer + MaybeSend>(&self, txn: &mut T) -> Result<()> {
         match self {

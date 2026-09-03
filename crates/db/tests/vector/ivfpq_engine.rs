@@ -5,6 +5,7 @@ use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::flat::Flat;
 use db::index::vector::engine::ivfpq::IvfPq;
 use db::index::vector::engine::ivfpq::IvfPqParams;
+use db::index::vector::engine::ivfpq::TRAIN_PER_LIST;
 use db::index::vector::store::MemoryNodeStore;
 use db::index::vector::store::NodeId;
 use defra_core::vector::Metric;
@@ -346,4 +347,64 @@ async fn updating_within_one_list_keeps_the_document() {
         1,
         "document 1 must appear exactly once"
     );
+}
+
+#[tokio::test]
+async fn should_build_is_false_on_an_empty_index() {
+    let index = index(8, 8);
+    assert!(!index.should_build().await.unwrap());
+}
+
+#[tokio::test]
+async fn should_build_is_false_once_built() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0x777);
+    let vectors = corpus.vectors(400, DIMENSIONS);
+    let mut index = filled(8, 8, &vectors).await;
+    index.build().await.unwrap();
+
+    assert!(!index.should_build().await.unwrap());
+}
+
+/// The regression #1463 closes: crossing the threshold must make
+/// `should_build` answer `true`, or nothing downstream ever trains the index.
+#[tokio::test]
+async fn should_build_becomes_true_once_the_threshold_is_crossed() {
+    let threshold = 4u64 * u64::from(TRAIN_PER_LIST);
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0x888);
+    let vectors = corpus.vectors(threshold as usize, DIMENSIONS);
+    let mut index = index(4, 4);
+
+    for (i, vector) in vectors.iter().take(threshold as usize - 1).enumerate() {
+        index.insert(NodeId(i as u64 + 1), vector).await.unwrap();
+    }
+    assert!(
+        !index.should_build().await.unwrap(),
+        "one short of the threshold"
+    );
+
+    index
+        .insert(NodeId(threshold), &vectors[threshold as usize - 1])
+        .await
+        .unwrap();
+    assert!(index.should_build().await.unwrap(), "at the threshold");
+}
+
+/// `live_count_at_least` must answer exactly what a full count would, at
+/// targets on both sides of the true count.
+#[tokio::test]
+async fn live_count_at_least_agrees_with_live_count() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0x999);
+    let vectors = corpus.vectors(150, DIMENSIONS);
+    let index = filled(8, 8, &vectors).await;
+
+    let true_count = index.live_count().await.unwrap();
+    assert_eq!(true_count, 150);
+
+    for target in [0u64, 1, 50, 149, 150, 151, 500] {
+        assert_eq!(
+            index.live_count_at_least(target).await.unwrap(),
+            true_count >= target,
+            "target={target}, true_count={true_count}"
+        );
+    }
 }

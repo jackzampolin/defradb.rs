@@ -53,6 +53,22 @@ pub trait VectorIndexEngine: MaybeSendSync {
     /// Removes `id`, returning whether this call was the one that did it.
     async fn delete(&mut self, id: NodeId) -> Result<bool>;
 
+    /// Whether enough has accumulated that building would pay for itself.
+    ///
+    /// Defaulted false: a kind with nothing to train is never asked to build,
+    /// and adding a kind does not mean remembering to answer this.
+    async fn should_build(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Train and rebuild from what is stored.
+    ///
+    /// Called only when [`should_build`](Self::should_build) says so. Defaulted
+    /// to a no-op for the same reason.
+    async fn build(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Up to `k` nearest live nodes to `query`, nearest first.
     ///
     /// Takes any element width, for the same reason [`insert`](Self::insert)
