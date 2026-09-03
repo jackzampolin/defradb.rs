@@ -1997,3 +1997,68 @@ mod unique_boundaries {
         );
     }
 }
+
+/// A vector index covers exactly one field and is never unique, which is why
+/// `IndexKind::Vector` has no `unique` to carry.
+///
+/// The reference refuses both pairings (`errVectorIndexCannotBeUnique`,
+/// `errVectorIndexRequiresSingleField`); we used to absorb them, building an
+/// index that did not enforce the uniqueness asked for, or one over a different
+/// column than the request named.
+mod requested_kind {
+    use db::index::manager::IndexManager;
+    use schema::{
+        DistanceMetric, IndexKind, IndexedFieldDescription, VectorAlgorithm, VectorIndexDescription,
+    };
+
+    fn field(name: &str) -> IndexedFieldDescription {
+        IndexedFieldDescription {
+            name: name.to_string(),
+            descending: false,
+        }
+    }
+
+    fn vector() -> VectorIndexDescription {
+        VectorIndexDescription::with_defaults(VectorAlgorithm::Hnsw, DistanceMetric::Cosine, 8)
+    }
+
+    #[test]
+    fn no_vector_config_is_an_ordered_index() {
+        for unique in [false, true] {
+            let kind = IndexManager::requested_kind(&[field("name")], unique, None)
+                .expect("an ordered index takes any uniqueness");
+            match kind {
+                IndexKind::Ordered(ordered) => assert_eq!(ordered.unique, unique),
+                other => panic!("expected ordered, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_field_vector_request_is_a_vector_index() {
+        let kind = IndexManager::requested_kind(&[field("embedding")], false, Some(vector()))
+            .expect("one field and not unique is the valid shape");
+        match kind {
+            IndexKind::Vector(described) => assert_eq!(described, vector()),
+            other => panic!("expected vector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_unique_vector_request_is_refused() {
+        let error = IndexManager::requested_kind(&[field("embedding")], true, Some(vector()))
+            .expect_err("unique and vector cannot both hold")
+            .to_string();
+        assert!(error.contains("unique"), "got: {error}");
+    }
+
+    #[test]
+    fn a_multi_field_vector_request_is_refused() {
+        for fields in [vec![], vec![field("a"), field("b")]] {
+            let error = IndexManager::requested_kind(&fields, false, Some(vector()))
+                .expect_err("a vector index covers exactly one field")
+                .to_string();
+            assert!(error.contains("exactly one field"), "got: {error}");
+        }
+    }
+}
