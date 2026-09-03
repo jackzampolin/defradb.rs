@@ -361,6 +361,8 @@ impl StartArgs {
             })?,
         };
 
+        Self::require_ed25519_service_key(service_identity.key_type())?;
+
         let endpoint = self.signer_orbis_endpoint.as_ref().ok_or_else(|| {
             Error::InvalidConfig("--signer-orbis-endpoint required for orbis signer".into())
         })?;
@@ -437,6 +439,25 @@ impl StartArgs {
         tracing::info!("User identity DID: {}", did);
 
         Ok(Some(std::sync::Arc::new(raw_identity)))
+    }
+
+    /// The Orbis ring authenticates a Sign request with a bearer token and
+    /// accepts EdDSA only. `new_token_with_custom_claims` picks the algorithm
+    /// from the key type, so a secp256k1 service key presents ES256K and the
+    /// ring refuses it. Reject it here, naming the flag, rather than letting it
+    /// surface as `unknown variant ES256K` from the ring at the first write.
+    #[cfg(feature = "orbis")]
+    fn require_ed25519_service_key(key_type: crypto::KeyType) -> Result<()> {
+        if key_type == crypto::KeyType::Ed25519 {
+            return Ok(());
+        }
+        Err(Error::InvalidConfig(format!(
+            "--signer-type=orbis needs an ed25519 service key, got {:?}. Pass \
+             one with --signer-orbis-identity: the ring accepts an EdDSA bearer \
+             token only, while --identity may be secp256k1 because it also \
+             signs chain transactions.",
+            key_type
+        )))
     }
 
     /// Build an identity from a hex private key, choosing the key type by
@@ -689,5 +710,30 @@ mod tests {
             format!("{err}").contains("invalid key length"),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(feature = "orbis")]
+    #[test]
+    fn an_ed25519_service_key_is_accepted() {
+        StartArgs::require_ed25519_service_key(crypto::KeyType::Ed25519)
+            .expect("ed25519 is what the ring accepts");
+    }
+
+    #[cfg(feature = "orbis")]
+    #[test]
+    fn a_non_ed25519_service_key_is_refused_before_the_ring_sees_it() {
+        for key_type in [crypto::KeyType::Secp256k1, crypto::KeyType::Secp256r1] {
+            let err = StartArgs::require_ed25519_service_key(key_type)
+                .expect_err("the ring accepts EdDSA only");
+            let message = format!("{err}");
+            assert!(
+                message.contains("--signer-orbis-identity"),
+                "the error must name the flag that fixes it: {message}"
+            );
+            assert!(
+                message.contains(&format!("{key_type:?}")),
+                "the error must name the key type it got: {message}"
+            );
+        }
     }
 }
