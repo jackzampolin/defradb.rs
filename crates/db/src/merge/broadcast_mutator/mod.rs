@@ -190,6 +190,27 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRep
     for BroadcastMutator<S, B, T>
 {
     async fn regenerate_and_push_se_artifacts(&self, collection_id: &str, doc_id: &str) {
+        // Durable retry markers may be doc-scoped with no collection id; resolve
+        // it from the document the same way `retry_doc` does.
+        let resolved_collection_id;
+        let collection_id = if collection_id.is_empty() {
+            resolved_collection_id =
+                match crate::merge::push_docs_common::resolve_collection_id_for_doc(
+                    &self.db, doc_id,
+                )
+                .await
+                {
+                    Ok(Some(id)) => id,
+                    Ok(None) => return,
+                    Err(error) => {
+                        tracing::warn!(doc_id, error = %error, "SE retry: failed to resolve collection");
+                        return;
+                    }
+                };
+            resolved_collection_id.as_str()
+        } else {
+            collection_id
+        };
         let collection = match self.db.find_collection_by_id(collection_id) {
             Ok(Some(collection)) => collection,
             Ok(None) => return,
