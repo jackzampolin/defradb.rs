@@ -853,11 +853,15 @@ perf-compare baseline current threshold="5":
 
 # Serve the dashboard. It fetches its run documents, which a file:// page
 # cannot do in every browser.
+#
+# Loopback only. The default binds every interface, which would put a page
+# naming this machine's CPU, core count and memory on the local network while
+# printing a 127.0.0.1 URL.
 [doc("Serve the local performance dashboard on :8099.")]
 [group('misc')]
 perf-serve dir="perf-site" port="8099":
     @echo "http://127.0.0.1:{{ port }}/"
-    python3 -m http.server {{ port }} --directory {{ dir }}
+    python3 -m http.server {{ port }} --bind 127.0.0.1 --directory {{ dir }}
 
 # Remove build output. Leaves .tooling/ alone.
 [group('misc')]

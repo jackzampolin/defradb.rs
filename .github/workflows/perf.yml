@@ -63,6 +63,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
+      # Its own interpreter rather than the system one: a PEP 668 image refuses
+      # to let pip touch the system environment, and this gate must not be the
+      # thing that fails before it has checked anything.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       # A bench target the matrix does not name measures nothing, and nothing
       # else in CI would notice.
       - name: Check every bench target is measured
@@ -70,6 +76,8 @@ jobs:
           python3 -m pip install --quiet pyyaml
           just perf-matrix
       - id: decide
+        env:
+          THRESHOLD_INPUT: ${{ github.event.inputs.threshold }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "push" ]; then
@@ -82,7 +90,7 @@ jobs:
             echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "threshold=${{ github.event.inputs.threshold || '5' }}" >> "$GITHUB_OUTPUT"
+          echo "threshold=${THRESHOLD_INPUT:-5}" >> "$GITHUB_OUTPUT"
           # The full matrix costs macOS and browser runners, so a pull request
           # opts into it rather than paying for it by default.
           if [ "${{ github.event_name }}" = "pull_request" ] \
@@ -158,13 +166,15 @@ jobs:
         working-directory: head
         env:
           DEFRA_BENCH_OUT: ${{ github.workspace }}/head.jsonl
+          PERF_COMMIT: ${{ github.event.pull_request.head.sha }}
+          PERF_LABEL: pr-${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           cargo run --profile "$PERF_PROFILE" -p defra-perf --bin collect -- \
             --criterion-root "$GITHUB_WORKSPACE/criterion-head" \
             --out "$GITHUB_WORKSPACE/platform-head.json" \
-            --commit "${{ github.event.pull_request.head.sha }}" \
-            --label "pr-${{ github.event.pull_request.number }}" \
+            --commit "$PERF_COMMIT" \
+            --label "$PERF_LABEL" \
             --target x86_64-unknown-linux-gnu \
             --loadguard "$GITHUB_WORKSPACE/loadguard.json"
 
@@ -216,6 +226,7 @@ jobs:
         env:
           DEFRA_BENCH_OUT: ${{ github.workspace }}/base.jsonl
           CARGO_TARGET_DIR: ${{ github.workspace }}/head/target
+          PERF_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Built from the base checkout when it has the collector, and from
@@ -228,13 +239,15 @@ jobs:
             -p defra-perf --bin collect -- \
             --criterion-root "$GITHUB_WORKSPACE/criterion-base" \
             --out "$GITHUB_WORKSPACE/platform-base.json" \
-            --commit "${{ github.event.pull_request.base.sha }}" \
+            --commit "$PERF_BASE_COMMIT" \
             --label "base" \
             --target x86_64-unknown-linux-gnu \
             --loadguard "$GITHUB_WORKSPACE/loadguard.json"
 
       - name: Compare
         id: compare
+        env:
+          PERF_THRESHOLD: ${{ needs.scope.outputs.threshold }}
         run: |
           set -euo pipefail
           mkdir -p head-site base-site
@@ -251,7 +264,7 @@ jobs:
             python3 head/tools/perf-site/compare.py \
               --baseline "$(ls base-site/runs/*.json | grep -v index.json | head -1)" \
               --current  "$(ls head-site/runs/*.json | grep -v index.json | head -1)" \
-              --threshold "${{ needs.scope.outputs.threshold }}" \
+              --threshold "$PERF_THRESHOLD" \
               --markdown report.md \
               --note "Quick check: \`$QUICK_FAMILIES\` on \`x86_64-unknown-linux-gnu\`, built with the \`$PERF_PROFILE\` profile against this PR's own merge base on this runner. Both sides were built and measured identically, so the deltas are real; the absolute figures are not the release-profile ones the dashboard publishes. Add the \`perf-full\` label for the full matrix across Linux, macOS and the browser."
           fi
@@ -490,6 +503,9 @@ jobs:
           pattern: perf-${{ matrix.target }}-*
           path: artifacts
       - name: Assemble the platform document
+        env:
+          PERF_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PERF_LABEL: ${{ needs.scope.outputs.label }}
         run: |
           set -euo pipefail
           if [ ! -d artifacts ] || [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
@@ -516,8 +532,8 @@ jobs:
           cargo run -p defra-perf --bin collect -- \
               --criterion-root "$PWD/criterion-merged" \
               --out "platform-${{ matrix.target }}.json" \
-              --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
-              --label "${{ needs.scope.outputs.label }}" \
+              --commit "$PERF_COMMIT" \
+              --label "$PERF_LABEL" \
               --target "${{ matrix.target }}" \
               ${guard:+--loadguard "$guard"}
       - uses: actions/upload-artifact@v4
@@ -629,6 +645,8 @@ jobs:
           echo "file=base/runs/$newest" >> "$GITHUB_OUTPUT"
       - name: Compare
         id: compare
+        env:
+          PERF_THRESHOLD: ${{ needs.scope.outputs.threshold }}
         run: |
           set -euo pipefail
           if [ "${{ steps.baseline.outputs.found }}" != "true" ]; then
@@ -645,7 +663,7 @@ jobs:
           python3 tools/perf-site/compare.py \
             --baseline "${{ steps.baseline.outputs.file }}" \
             --current "$cur" \
-            --threshold "${{ needs.scope.outputs.threshold }}" \
+            --threshold "$PERF_THRESHOLD" \
             --markdown report.md \
             ${{ github.event.inputs.fail_on_regression == 'true' && '--fail-on-regression' || '' }}
           cat report.md >> "$GITHUB_STEP_SUMMARY"

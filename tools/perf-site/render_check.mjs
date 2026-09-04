@@ -28,7 +28,7 @@ const script = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</scri
 // written, and `boot` depends on that to pick the run and the platform it
 // draws. Setting the values from here instead would test a path the browser
 // never takes.
-const nodes = {};
+let nodes = {};
 const node = (id) =>
   (nodes[id] ??= {
     _html: "",
@@ -100,12 +100,48 @@ if (!index.runs?.length) {
   process.exit(1);
 }
 
-new Function(script)();
-await new Promise((r) => setTimeout(r, 250));
-const out = node("#main").innerHTML;
+/// Render the page once, for one platform.
+///
+/// A run holds a platform per runner and the page draws one at a time, so
+/// checking only whichever the picker landed on leaves every other platform
+/// unverified. That is exactly the gap this check exists to close, so each one
+/// gets its own render against fresh stubs.
+async function render(platform) {
+  nodes = {};
+  // Seeded before boot because `syncPlatforms` reads the current value first
+  // and restores it when the new run also has that platform, which is the same
+  // path a browser takes when the reader changes runs.
+  if (platform) node("#plat").value = platform;
+  new Function(script)();
+  await new Promise((r) => setTimeout(r, 250));
+  return { html: node("#main").innerHTML, platform: node("#plat").value };
+}
 
 const failures = [];
+const newestRun = JSON.parse(readFileSync(`${site}/runs/${index.runs[0].file}`, "utf8"));
+const platforms = Object.keys(newestRun.platforms ?? {});
+if (!platforms.length) {
+  console.error("render check: the newest run records no platform");
+  process.exit(1);
+}
 
+let out = "";
+let checked = 0;
+let cardsTotal = 0;
+for (const wanted of platforms) {
+  const drawn = await render(wanted);
+  if (drawn.platform !== wanted) {
+    failures.push(`the page would not select ${wanted}; it drew ${drawn.platform || "nothing"}`);
+    continue;
+  }
+  out = drawn.html;
+  cardsTotal += (out.match(/<h3>/g) || []).length;
+  checked += 1;
+  verify(out, wanted, newestRun);
+}
+out = out || "";
+
+function verify(out, platform, newest) {
 // A section that throws is not a section that is missing, and until this
 // existed it was not a failure either: `section(name, build)` catches every
 // throw and emits the heading plus a `card broken` panel, which satisfies a
@@ -113,19 +149,10 @@ const failures = [];
 for (const m of out.matchAll(
   /<div class="card broken">\s*<h3>([^<]*)<\/h3>\s*<p class="note">([^<]*)<\/p>/g
 )) {
-  failures.push(`${m[1]}: ${m[2]}`);
+  failures.push(`${platform}: ${m[1]}: ${m[2]}`);
 }
-if (/class="card broken"/.test(out) && !failures.length) {
-  failures.push("a section rendered as a broken card, in a shape this check could not name");
-}
-
-// Every family the collector did not mark absent has data, so it owes the page
-// a section. The page draws one <h2> per family titled by the family itself,
-// so the title is what gets matched.
-const newest = JSON.parse(readFileSync(`${site}/runs/${index.runs[0].file}`, "utf8"));
-const platform = node("#plat").value;
-if (!platform) {
-  failures.push("the page selected no platform, so it drew no family");
+if (/class="card broken"/.test(out) && !failures.some((f) => f.startsWith(`${platform}:`))) {
+  failures.push(`${platform}: a section rendered as a broken card, in a shape this check could not name`);
 }
 // Nothing below may throw on a malformed document. A check that crashes
 // reports "the check broke", and the reader has to go and find out which
@@ -138,7 +165,7 @@ for (const [name, family] of Object.entries(families)) {
   const title = family.title || name;
   // The heading carries a trust pill after the title, so match the opening.
   if (!out.includes(`<span class="h2-name">${title}</span>`)) {
-    failures.push(`${name} was collected (trust=${family.trust}) but "${title}" is not on the page`);
+    failures.push(`${platform}: ${name} was collected (trust=${family.trust}) but "${title}" is not on the page`);
     continue;
   }
   drawn += 1;
@@ -149,23 +176,23 @@ for (const [name, family] of Object.entries(families)) {
   // document is the defect, not the page.
   if (!Array.isArray(family.groups)) {
     failures.push(
-      `${name} was collected (trust=${family.trust}) but its "groups" is ` +
+      `${platform}: ${name} was collected (trust=${family.trust}) but its "groups" is ` +
         `${family.groups === undefined ? "missing" : typeof family.groups}, not an array`
     );
     continue;
   }
   if (!family.groups.length) {
-    failures.push(`${name} was collected (trust=${family.trust}) but recorded no groups`);
+    failures.push(`${platform}: ${name} was collected (trust=${family.trust}) but recorded no groups`);
     continue;
   }
   for (const group of family.groups) {
     const rows = asArray(group?.rows).filter((r) => Number.isFinite(r?.value)).length;
     if (!rows) {
-      failures.push(`${name}/${group?.name} recorded no usable row`);
+      failures.push(`${platform}: ${name}/${group?.name} recorded no usable row`);
       continue;
     }
     if (!out.includes(`<h3>${group.name}`)) {
-      failures.push(`${name}/${group.name} has ${rows} row(s) but drew no card`);
+      failures.push(`${platform}: ${name}/${group.name} has ${rows} row(s) but drew no card`);
     }
   }
 }
@@ -175,20 +202,31 @@ if (!drawn) {
   );
 }
 const drewHeading = (name) => out.includes(`<span class="h2-name">${name}</span>`);
-if (!drewHeading("Overview")) failures.push("the overview section is missing");
+if (!drewHeading("Overview")) failures.push(`${platform}: the overview section is missing`);
 if (Object.keys(newest.platforms ?? {}).length > 1 && !drewHeading("Across platforms")) {
-  failures.push("the run has more than one platform but the cross-platform section is missing");
+  failures.push(`${platform}: the run has more than one platform but the cross-platform section is missing`);
 }
 if (index.runs.length && !drewHeading("Trend across every recorded run")) {
-  failures.push("the trend section is missing");
+  failures.push(`${platform}: the trend section is missing`);
 }
 if (out.length < 2000) {
-  failures.push(`the page rendered only ${out.length} bytes, which is not a populated dashboard`);
+  failures.push(`${platform}: the page rendered only ${out.length} bytes, which is not a populated dashboard`);
 }
 
-const cards = (out.match(/<h3>/g) || []).length;
+// The jump index is built by reading back the headings the page produced, so a
+// link that points at no heading means the two drifted. A dead anchor is silent
+// in a browser: the click simply does nothing.
+const headings = new Set([...out.matchAll(/<h2 id="([^"]+)"/g)].map((m) => m[1]));
+for (const m of out.matchAll(/<a class="jump" href="#([^"]+)"/g)) {
+  if (!headings.has(m[1])) {
+    failures.push(`${platform}: the index links to #${m[1]}, which is not a heading on the page`);
+  }
+}
+}
+
 console.log(
-  `render check: ${out.length} bytes, ${cards} cards, ${drawn} famil(ies) drawn on ${platform}, ` +
+  `render check: ${checked} of ${platforms.length} platform(s) verified ` +
+    `(${platforms.join(", ")}), ${cardsTotal} cards across them, ` +
     `${index.runs.length} run(s) on file`
 );
 

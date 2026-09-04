@@ -58,6 +58,12 @@ fn main() {
         .unwrap_or_else(criterion::criterion_root);
     let harvested = criterion::harvest(&criterion_root, timing_trust);
     if harvested.is_empty() {
+        // The same refusal the harvested families get below: silently replacing
+        // a bench's own family with a stub saying nothing was collected would
+        // report a gap over data that exists.
+        if families.contains_key("criterion") {
+            die("a bench emitted a family named 'criterion', which the criterion harvester owns");
+        }
         families.insert(
             "criterion".to_string(),
             absent(

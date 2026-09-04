@@ -71,9 +71,10 @@ fn validate(c: &mut Criterion) {
     );
     group.bench_function("reject_unknown_field", |b| {
         b.iter(|| {
-            black_box(
-                validate_replication_filter(&schema, COLLECTION_ID, black_box(&unknown)).is_err(),
-            )
+            let rejected =
+                validate_replication_filter(&schema, COLLECTION_ID, black_box(&unknown)).is_err();
+            assert!(rejected, "a predicate on an unknown field must be refused");
+            black_box(rejected)
         })
     });
     group.finish();

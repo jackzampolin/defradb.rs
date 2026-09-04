@@ -77,6 +77,10 @@ fn by_id(c: &mut Criterion) {
         // One id from the middle: the first and the last can both be
         // accidentally cheap depending on how the store lays keys out.
         let one = vec![ids[ids.len() / 2].clone()];
+        // Set for every benchmark, not just the batched one: criterion keeps a
+        // group's throughput until it is replaced, so leaving it unset here
+        // would report the single read at the previous iteration's batch size.
+        group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("single", count), &one, |b, ids| {
             b.iter(|| {
                 black_box(

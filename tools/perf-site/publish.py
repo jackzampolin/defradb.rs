@@ -151,6 +151,11 @@ def main():
         merged = dict(existing["platforms"])
         merged.update(run["platforms"])
         run["platforms"] = merged
+        # A run is as old as its earliest platform, and the platforms already on
+        # file are part of it. Keeping the timestamp computed before the merge
+        # would date the run by whichever platform happened to publish last.
+        stamps = [p.get("timestamp") for p in merged.values() if p.get("timestamp")]
+        run["timestamp"] = min(stamps) if stamps else run.get("timestamp", "")
         print(f"publish: merged {len(run['platforms'])} platform(s) into the existing {commit[:12]}")
     target.write_text(json.dumps(run, indent=1, sort_keys=True) + "\n")
 

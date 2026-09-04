@@ -324,11 +324,18 @@ function heading(name,trust){
 ///
 /// The suite reports one family per bench target, so a run carries dozens of
 /// sections and scrolling past all of them to reach one is the whole cost of
-/// having measured everything. The index is the page's table of contents, and
-/// it names what is actually in this run rather than a fixed list.
-function sectionIndex(names){
-  if(names.length<3)return "";
-  const links=names.map(n=>`<a class="jump" href="#s-${esc(slug(n))}">${esc(n)}</a>`).join("");
+/// having measured everything.
+///
+/// Built by reading back the headings the page just produced, not from the list
+/// it expected to produce. A section can decline to draw at all: the
+/// cross-platform one renders nothing when a run has a single platform, and the
+/// trend renders nothing when no metric has a series. Predicting the list gave
+/// those a link to an anchor that was not on the page.
+function sectionIndex(html){
+  const seen=[...html.matchAll(/<h2 id="(s-[^"]+)"><span class="h2-name">([^<]*)<\/span>/g)]
+    .map(m=>({id:m[1],name:m[2]}));
+  if(seen.length<3)return "";
+  const links=seen.map(s=>`<a class="jump" href="#${esc(s.id)}">${esc(s.name)}</a>`).join("");
   return `<nav class="index" aria-label="Sections">${links}</nav>`;
 }
 
@@ -613,15 +620,13 @@ function draw(){
   const th=parseFloat($("#thresh").value);
   const fams=familiesOf(cur,platform);
   const baseFams=base?familiesOf(base,platform):{};
-  const ordered=Object.keys(fams).sort();
-  const titles=ordered.map(f=>fams[f]?.title||f);
-  let html=section("Overview",()=>overview(cur,base,platform,th));
-  html+=sectionIndex(["Overview",...titles,"Across platforms","Trend across every recorded run"]);
-  for(const fname of ordered)
-    html+=section(fams[fname]?.title||fname,()=>familySection(fname,fams[fname],baseFams[fname],th));
-  html+=section("Across platforms",()=>platformSection(cur,th));
-  html+=section("Trend",()=>trendSection(RUNS,platform,th));
-  $("#main").innerHTML=html;
+  const head=section("Overview",()=>overview(cur,base,platform,th));
+  let rest="";
+  for(const fname of Object.keys(fams).sort())
+    rest+=section(fams[fname]?.title||fname,()=>familySection(fname,fams[fname],baseFams[fname],th));
+  rest+=section("Across platforms",()=>platformSection(cur,th));
+  rest+=section("Trend",()=>trendSection(RUNS,platform,th));
+  $("#main").innerHTML=head+sectionIndex(head+rest)+rest;
   const tm=$("#trendmetric");
   if(tm)tm.addEventListener("change",e=>{TREND_METRIC=e.target.value;draw();});
 }
