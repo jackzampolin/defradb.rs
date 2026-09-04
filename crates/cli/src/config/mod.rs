@@ -6,6 +6,7 @@
 //! 3. Config file (config.yaml in rootdir)
 //! 4. Default values
 
+mod secret_file;
 mod sections;
 mod types;
 
@@ -138,15 +139,7 @@ impl Config {
     }
 
     fn load_secret_file(&self) -> Result<()> {
-        match dotenvy::from_path(&self.secret_file) {
-            Ok(_) => Ok(()),
-            Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(())
-            }
-            Err(_) => Err(Error::LoadSecretFile {
-                path: PathBuf::from(&self.secret_file),
-            }),
-        }
+        secret_file::load(Path::new(&self.secret_file))
     }
 
     /// Apply CLI flags to config

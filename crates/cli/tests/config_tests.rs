@@ -173,7 +173,8 @@ fn test_load_secret_file() {
 
     Config::load(&cli).unwrap();
 
-    assert_eq!(std::env::var(variable).unwrap(), "loaded");
+    assert_eq!(std::env::var(&variable).unwrap(), "loaded");
+    std::env::remove_var(variable);
 }
 
 #[test]
@@ -199,7 +200,10 @@ fn test_invalid_secret_file_returns_error() {
     let result = Config::load(&cli);
 
     let error = result.unwrap_err();
-    assert!(matches!(&error, Error::LoadSecretFile { path } if path == &secret_file));
+    assert!(matches!(
+        &error,
+        Error::ParseSecretFile { path, line: 1 } if path == &secret_file
+    ));
     assert!(!error.to_string().contains(secret));
 }
 
