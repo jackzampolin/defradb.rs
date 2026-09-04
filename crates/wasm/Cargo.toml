@@ -72,6 +72,9 @@ cid.workspace = true
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# The browser benchmark reports through the same contract the native suite
+# does, so the two describe a measurement identically.
+defra-perf = { path = "../../tools/perf" }
 
 [features]
 # The shipped browser artifact depends on this default. Building with

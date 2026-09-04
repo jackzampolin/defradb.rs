@@ -46,6 +46,31 @@ query = { path = "../crates/query" }
 schema = { path = "../crates/schema" }
 storage = { path = "../crates/storage" }
 
+# How a bench reports what it measured to the performance site.
+defra-perf = { path = "../tools/perf" }
+
+# Crates the coverage sweep reaches that the older benches never linked.
+acp = { path = "../crates/acp" }
+cursor = { path = "../crates/cursor" }
+libp2p-identity = { version = "0.2", features = ["ed25519", "peerid"] }
+p2p = { path = "../crates/p2p" }
+replication-filter = { path = "../crates/replication-filter" }
+events = { path = "../crates/events", features = ["channel"] }
+identity = { path = "../crates/identity" }
+x25519-dalek = "2"
+
+[[bench]]
+name = "acp"
+harness = false
+
+[[bench]]
+name = "allocs"
+harness = false
+
+[[bench]]
+name = "backup"
+harness = false
+
 [[bench]]
 name = "block"
 harness = false
@@ -59,11 +84,43 @@ name = "blockstore"
 harness = false
 
 [[bench]]
+name = "crypto"
+harness = false
+
+[[bench]]
+name = "cursor_codec"
+harness = false
+
+[[bench]]
+name = "document_read"
+harness = false
+
+[[bench]]
+name = "document_write"
+harness = false
+
+[[bench]]
+name = "document_codec"
+harness = false
+
+[[bench]]
+name = "events"
+harness = false
+
+[[bench]]
+name = "identity"
+harness = false
+
+[[bench]]
 name = "filter"
 harness = false
 
 [[bench]]
 name = "groupby"
+harness = false
+
+[[bench]]
+name = "memory"
 harness = false
 
 [[bench]]
@@ -75,6 +132,10 @@ name = "merge_dag"
 harness = false
 
 [[bench]]
+name = "p2p_codec"
+harness = false
+
+[[bench]]
 name = "parsing"
 harness = false
 
@@ -83,11 +144,27 @@ name = "planner"
 harness = false
 
 [[bench]]
+name = "query_e2e"
+harness = false
+
+[[bench]]
+name = "replication_filter"
+harness = false
+
+[[bench]]
 name = "retry_markers"
 harness = false
 
 [[bench]]
+name = "schema_validate"
+harness = false
+
+[[bench]]
 name = "sift"
+harness = false
+
+[[bench]]
+name = "startup"
 harness = false
 
 [[bench]]
