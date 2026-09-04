@@ -74,7 +74,7 @@ fn targets(root: &Path) -> Vec<(String, PathBuf)> {
 }
 
 fn one_target(target: &str, dir: &Path, trust: Trust) -> Option<Family> {
-    let mut found: Vec<(String, f64)> = Vec::new();
+    let mut found: Vec<(String, Estimate)> = Vec::new();
     walk(dir, dir, 0, &mut found);
     if found.is_empty() {
         return None;
@@ -82,12 +82,12 @@ fn one_target(target: &str, dir: &Path, trust: Trust) -> Option<Family> {
     found.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut groups: BTreeMap<String, Vec<Row>> = BTreeMap::new();
-    for (id, median_ns) in found {
+    for (id, estimate) in found {
         let (group, rest) = match id.split_once('/') {
             Some((g, r)) => (g.to_string(), r.to_string()),
             None => ("ungrouped".to_string(), id),
         };
-        groups.entry(group).or_default().push(row(rest, median_ns));
+        groups.entry(group).or_default().push(row(rest, estimate));
     }
 
     // How criterion was driven is part of what the number means: a run taken at
@@ -118,17 +118,32 @@ fn one_target(target: &str, dir: &Path, trust: Trust) -> Option<Family> {
     }))
 }
 
+/// Criterion's median for one benchmark, with the interval it is confident the
+/// true median lies in.
+struct Estimate {
+    median_ns: f64,
+    lower_ns: f64,
+    upper_ns: f64,
+}
+
 /// A criterion benchmark id is a string, so `16` sorts before `4`. When every
 /// name in a group is a number the row carries it as its x, which both orders
 /// the table and lets the group draw as a curve instead of a list.
-fn row(name: String, median_ns: f64) -> Row {
+///
+/// The confidence interval is carried as the row's range, and that is what
+/// makes a criterion row comparable honestly: a comparison refuses to call a
+/// delta real when the two runs' ranges overlap, and a row with no range gets
+/// judged on the threshold alone. Discarding the interval turned every noisy
+/// benchmark on a shared runner into a reported regression.
+fn row(name: String, estimate: Estimate) -> Row {
+    let row = Row::new(&name, estimate.median_ns).range(estimate.lower_ns, estimate.upper_ns);
     match name.parse::<f64>() {
-        Ok(x) if x.is_finite() => Row::new(name, median_ns).at(x),
-        _ => Row::new(name, median_ns),
+        Ok(x) if x.is_finite() => row.at(x),
+        _ => row,
     }
 }
 
-fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<(String, f64)>) {
+fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<(String, Estimate)>) {
     // Criterion nests one directory per benchmark id segment. Eight is deeper
     // than any id this suite produces and stops a symlink loop cheaply.
     if depth > 8 {
@@ -148,8 +163,8 @@ fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<(String, f64)>) {
         if sub.file_name().is_some_and(|n| n == "new") {
             let estimates = sub.join("estimates.json");
             let id = sub.parent().and_then(|p| p.strip_prefix(root).ok());
-            if let (Some(median), Some(id)) = (median_ns(&estimates), id) {
-                out.push((id.to_string_lossy().replace('\\', "/"), median));
+            if let (Some(estimate), Some(id)) = (estimate(&estimates), id) {
+                out.push((id.to_string_lossy().replace('\\', "/"), estimate));
             }
             continue;
         }
@@ -157,12 +172,30 @@ fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<(String, f64)>) {
     }
 }
 
-fn median_ns(path: &Path) -> Option<f64> {
+fn estimate(path: &Path) -> Option<Estimate> {
     let text = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value
-        .get("median")?
+    let median = value.get("median")?;
+    let point = median
         .get("point_estimate")?
         .as_f64()
-        .filter(|v| v.is_finite())
+        .filter(|v| v.is_finite())?;
+    let interval = median.get("confidence_interval");
+    let bound = |name: &str| {
+        interval
+            .and_then(|i| i.get(name))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|v| v.is_finite())
+    };
+    // An older sample set without an interval still reports its median; it just
+    // has no range, and is then compared on the threshold alone.
+    let (lower, upper) = match (bound("lower_bound"), bound("upper_bound")) {
+        (Some(lower), Some(upper)) if lower <= upper => (lower, upper),
+        _ => (point, point),
+    };
+    Some(Estimate {
+        median_ns: point,
+        lower_ns: lower,
+        upper_ns: upper,
+    })
 }
