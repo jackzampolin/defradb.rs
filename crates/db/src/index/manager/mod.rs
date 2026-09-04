@@ -520,6 +520,9 @@ impl IndexManager {
 
         let mut mutable_datastore = datastore.clone();
 
+        // Conflict resolution is a read-modify-write operation on the shared
+        // transaction. Running these writes concurrently can make the winner
+        // depend on scheduling instead of the public DocID ordering.
         for (doc_short_id, doc) in documents {
             if *doc_short_id == 0 {
                 continue;
