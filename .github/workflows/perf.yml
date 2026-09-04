@@ -5,21 +5,16 @@ name: Performance
 # the code is wrong, a regression here means the code is slow. Mixing them makes
 # every PR wait for the slower answer to a question it did not ask.
 #
-# Two paths, because a pull request and a release history want different
-# things from a benchmark:
+# The full sweep: every family across Linux, macOS and a browser.
 #
-#   * every pull request runs the QUICK path: a handful of families on Linux,
-#     measured against this PR's own merge base on the same runner, commented
-#     back onto the PR. Minutes, not tens of minutes.
-#   * a push to `main`, a `workflow_dispatch`, or the `perf-full` PR label runs
-#     the FULL matrix across Linux, macOS and the browser. Only the push to
-#     `main` publishes to the dashboard.
+# A push to `main` measures and publishes to the dashboard. A
+# `workflow_dispatch` measures whichever branch it is pointed at and compares it
+# with the newest published run without publishing.
 #
-# The quick path measures its own baseline rather than reading one off the
-# dashboard, and that is the point. A PR built one way compared against
-# published numbers built another way, on another runner, produces deltas that
-# are real arithmetic over incomparable measurements. Measuring both sides here
-# costs a second build and is the only version of this number worth posting.
+# Deliberately not triggered by a pull request. GitHub renders a skipped matrix
+# job without expanding its matrix, so gating forty jobs behind an `if` filled
+# every PR's check list with literal `${{ matrix.family }}` rows. The pull
+# request path is `perf-pr.yml`, which has no matrix and creates one check.
 on:
   push:
     branches: [main]
@@ -33,9 +28,6 @@ on:
         description: 'Fail the run when a metric regresses'
         type: boolean
         default: false
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
-
 permissions:
   contents: read
 
@@ -59,7 +51,6 @@ jobs:
       label: ${{ steps.decide.outputs.label }}
       publish: ${{ steps.decide.outputs.publish }}
       threshold: ${{ steps.decide.outputs.threshold }}
-      full: ${{ steps.decide.outputs.full }}
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
@@ -78,225 +69,20 @@ jobs:
       - id: decide
         env:
           THRESHOLD_INPUT: ${{ github.event.inputs.threshold }}
+          GITHUB_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "label=main"     >> "$GITHUB_OUTPUT"
-            echo "publish=true"   >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "label=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
+          # Only a push to `main` writes history. A dispatch measures whichever
+          # branch it was pointed at and reports, so a branch can never file a
+          # run document under a `main` label.
+          if [ "$GITHUB_EVENT" = "push" ]; then
+            echo "label=main"   >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
           echo "threshold=${THRESHOLD_INPUT:-5}" >> "$GITHUB_OUTPUT"
-          # The full matrix costs macOS and browser runners, so a pull request
-          # opts into it rather than paying for it by default.
-          if [ "${{ github.event_name }}" = "pull_request" ] \
-             && [ "${{ contains(github.event.pull_request.labels.*.name, 'perf-full') }}" != "true" ]; then
-            echo "full=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "full=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Every pull request, no label and no ceremony. Four families on Linux,
-  # measured against this PR's own merge base on this same runner with this
-  # same profile, and posted back as a comment.
-  #
-  # Two decisions keep it quick without making it dishonest.
-  #
-  # `release-fast` rather than the `bench` profile: thin LTO and sixteen
-  # codegen units build in a fraction of the time fat LTO takes. It produces
-  # different absolute numbers, which is exactly why this path never publishes
-  # to the dashboard and never compares against it. Both sides of this
-  # comparison are built the same way, so the delta between them is real even
-  # though neither figure is the one a release would post.
-  #
-  # And the base measurement is cached by its commit. A base is measured once
-  # and then reused by every later pull request that shares it, so only the
-  # first one after a merge to `main` pays for the second build.
-  quick:
-    name: Quick benchmark
-    if: github.event_name == 'pull_request'
-    needs: scope
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      DEFRA_BENCH_CRITERION_ARGS: --warm-up-time 0.5 --measurement-time 1.5 --sample-size 10
-      PERF_PROFILE: release-fast
-      # The write path, the allocation counts that catch a stray clone before
-      # the clock does, cold start, and the storage transaction seam.
-      QUICK_FAMILIES: document_write allocs startup transaction
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: head
-      - uses: dtolnay/rust-toolchain@stable
-      - run: head/.github/scripts/install-linux-ci-deps.sh
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: perf-quick
-          workspaces: head
-
-      - name: Record how quiet the host is
-        run: python3 head/tools/perf-site/loadguard.py --out loadguard.json
-
-      - name: Measure this pull request
-        working-directory: head
-        env:
-          DEFRA_BENCH_OUT: ${{ github.workspace }}/head.jsonl
-        run: |
-          set -euo pipefail
-          for family in $QUICK_FAMILIES; do
-            echo "::group::$family"
-            rm -rf target/criterion
-            cargo bench --profile "$PERF_PROFILE" -p benches --bench "$family" \
-              -- $DEFRA_BENCH_CRITERION_ARGS
-            mkdir -p "$GITHUB_WORKSPACE/criterion-head/$family"
-            [ -d target/criterion ] && cp -R target/criterion/. "$GITHUB_WORKSPACE/criterion-head/$family/"
-            echo "::endgroup::"
-          done
-          touch "$DEFRA_BENCH_OUT"
-
-      - name: Assemble this pull request's document
-        working-directory: head
-        env:
-          DEFRA_BENCH_OUT: ${{ github.workspace }}/head.jsonl
-          PERF_COMMIT: ${{ github.event.pull_request.head.sha }}
-          PERF_LABEL: pr-${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          cargo run --profile "$PERF_PROFILE" -p defra-perf --bin collect -- \
-            --criterion-root "$GITHUB_WORKSPACE/criterion-head" \
-            --out "$GITHUB_WORKSPACE/platform-head.json" \
-            --commit "$PERF_COMMIT" \
-            --label "$PERF_LABEL" \
-            --target x86_64-unknown-linux-gnu \
-            --loadguard "$GITHUB_WORKSPACE/loadguard.json"
-
-      # A base is the same commit for every PR branched off it, so measuring it
-      # once and reusing the document is the difference between paying for two
-      # builds on every pull request and paying for them once per merge.
-      - name: Restore the baseline measured for this base commit
-        id: basecache
-        uses: actions/cache@v4
-        with:
-          path: platform-base.json
-          key: perf-quick-base-${{ github.event.pull_request.base.sha }}-v1
-
-      - uses: actions/checkout@v4
-        if: steps.basecache.outputs.cache-hit != 'true'
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base
-
-      - name: Measure the merge base
-        if: steps.basecache.outputs.cache-hit != 'true'
-        working-directory: base
-        env:
-          DEFRA_BENCH_OUT: ${{ github.workspace }}/base.jsonl
-          # The same target directory as the head build, so the second build
-          # reuses every dependency artifact the first one produced.
-          CARGO_TARGET_DIR: ${{ github.workspace }}/head/target
-        run: |
-          set -euo pipefail
-          for family in $QUICK_FAMILIES; do
-            # A family this pull request introduces does not exist on the base,
-            # and that is a new measurement rather than a failure. The
-            # comparison reports it as measured on one side only.
-            echo "::group::$family"
-            rm -rf "$CARGO_TARGET_DIR/criterion"
-            cargo bench --profile "$PERF_PROFILE" -p benches --bench "$family" \
-              -- $DEFRA_BENCH_CRITERION_ARGS \
-              || echo "::notice::$family did not run on the base commit; it will show as new"
-            mkdir -p "$GITHUB_WORKSPACE/criterion-base/$family"
-            [ -d "$CARGO_TARGET_DIR/criterion" ] && \
-              cp -R "$CARGO_TARGET_DIR/criterion/." "$GITHUB_WORKSPACE/criterion-base/$family/"
-            echo "::endgroup::"
-          done
-          touch "$DEFRA_BENCH_OUT"
-
-      - name: Assemble the merge base's document
-        if: steps.basecache.outputs.cache-hit != 'true'
-        working-directory: base
-        env:
-          DEFRA_BENCH_OUT: ${{ github.workspace }}/base.jsonl
-          CARGO_TARGET_DIR: ${{ github.workspace }}/head/target
-          PERF_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          # Built from the base checkout when it has the collector, and from
-          # this PR's when the PR is what introduces it.
-          manifest=Cargo.toml
-          if ! grep -q '"tools/perf"' Cargo.toml; then
-            manifest="$GITHUB_WORKSPACE/head/Cargo.toml"
-          fi
-          cargo run --manifest-path "$manifest" --profile "$PERF_PROFILE" \
-            -p defra-perf --bin collect -- \
-            --criterion-root "$GITHUB_WORKSPACE/criterion-base" \
-            --out "$GITHUB_WORKSPACE/platform-base.json" \
-            --commit "$PERF_BASE_COMMIT" \
-            --label "base" \
-            --target x86_64-unknown-linux-gnu \
-            --loadguard "$GITHUB_WORKSPACE/loadguard.json"
-
-      - name: Compare
-        id: compare
-        env:
-          PERF_THRESHOLD: ${{ needs.scope.outputs.threshold }}
-        run: |
-          set -euo pipefail
-          mkdir -p head-site base-site
-          python3 head/tools/perf-site/publish.py --site head-site platform-head.json
-          if [ ! -f platform-base.json ]; then
-            {
-              echo "## Performance"
-              echo ""
-              echo "The merge base could not be measured, so there is nothing to compare"
-              echo "against. This pull request's own numbers are attached to the workflow run."
-            } > report.md
-          else
-            python3 head/tools/perf-site/publish.py --site base-site platform-base.json
-            python3 head/tools/perf-site/compare.py \
-              --baseline "$(ls base-site/runs/*.json | grep -v index.json | head -1)" \
-              --current  "$(ls head-site/runs/*.json | grep -v index.json | head -1)" \
-              --threshold "$PERF_THRESHOLD" \
-              --markdown report.md \
-              --note "Quick check: \`$QUICK_FAMILIES\` on \`x86_64-unknown-linux-gnu\`, built with the \`$PERF_PROFILE\` profile against this PR's own merge base on this runner. Both sides were built and measured identically, so the deltas are real; the absolute figures are not the release-profile ones the dashboard publishes. Add the \`perf-full\` label for the full matrix across Linux, macOS and the browser."
-          fi
-          cat report.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Comment on the pull request
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = require('fs').readFileSync('report.md', 'utf8');
-            const marker = '<!-- defradb-perf-quick -->';
-            const { owner, repo } = context.repo;
-            const issue_number = context.payload.pull_request.number;
-            const existing = (await github.rest.issues.listComments({ owner, repo, issue_number }))
-              .data.find(c => c.body && c.body.includes(marker));
-            const payload = `${marker}\n${body}`;
-            if (existing) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: payload });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body: payload });
-            }
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: perf-quick
-          path: |
-            report.md
-            platform-head.json
-            platform-base.json
-          if-no-files-found: warn
-          retention-days: 30
 
   # Each family on its own runner. A sweep that runs every benchmark in one job
   # takes as long as the sum of them and reports nothing until the slowest
@@ -311,7 +97,6 @@ jobs:
   bench:
     name: ${{ matrix.family }} (${{ matrix.target }})
     needs: scope
-    if: needs.scope.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -425,7 +210,6 @@ jobs:
   bench-wasm:
     name: browser (wasm32-unknown-unknown)
     needs: scope
-    if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -481,8 +265,12 @@ jobs:
   # the database on every platform in the matrix.
   collect:
     name: Collect (${{ matrix.target }})
+    # `always()` and never a condition that can be false: a skipped matrix job
+    # is rendered by GitHub without expanding its matrix, so the job list would
+    # show a literal `${{ matrix.target }}`. Whether scope actually produced
+    # anything is checked below, where it can fail with a reason.
     needs: [scope, bench, bench-wasm]
-    if: always() && needs.scope.result == 'success' && needs.scope.outputs.full == 'true'
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -502,6 +290,15 @@ jobs:
         with:
           pattern: perf-${{ matrix.target }}-*
           path: artifacts
+      - name: Refuse to assemble without the run's identity
+        env:
+          PERF_LABEL: ${{ needs.scope.outputs.label }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PERF_LABEL" ]; then
+            echo "::error::the scope job produced no label, so this run has no identity to file it under" >&2
+            exit 1
+          fi
       - name: Assemble the platform document
         env:
           PERF_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -601,7 +398,7 @@ jobs:
   compare:
     name: Compare with main
     needs: [scope, collect]
-    if: needs.scope.outputs.full == 'true' && needs.scope.outputs.publish != 'true'
+    if: needs.scope.outputs.publish != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

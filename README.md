@@ -206,7 +206,8 @@ presumed comparable.
 
 Every pull request gets a quick check commented back onto it: a few families on
 Linux, measured against that PR's own merge base on the same runner with the
-same build profile. Add the `perf-full` label for the whole matrix.
+same build profile. Run the whole matrix on a branch with the **Performance**
+workflow's `Run workflow` button.
 
 ```bash
 just perf                     # measure this machine, build the dashboard locally

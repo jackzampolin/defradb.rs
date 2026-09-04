@@ -818,11 +818,13 @@ perf-matrix:
         sys.exit("perf-matrix: pyyaml is needed to read the workflow")
     targets = set(re.findall(r'\[\[bench\]\]\nname = "([^"]+)"',
                              pathlib.Path("benches/Cargo.toml").read_text()))
-    workflow = yaml.safe_load(open(".github/workflows/perf.yml"))
-    jobs = workflow["jobs"]
-    linux = {row["family"] for row in jobs["bench"]["strategy"]["matrix"]["include"]
+    full = yaml.safe_load(open(".github/workflows/perf.yml"))
+    linux = {row["family"] for row in full["jobs"]["bench"]["strategy"]["matrix"]["include"]
              if row["target"] == "x86_64-unknown-linux-gnu"}
-    quick = set(jobs["quick"]["env"]["QUICK_FAMILIES"].split())
+    # The pull-request path is its own workflow: a skipped matrix job renders
+    # its matrix unexpanded, so the forty-job sweep is kept off a PR entirely.
+    pr = yaml.safe_load(open(".github/workflows/perf-pr.yml"))
+    quick = set(pr["jobs"]["quick"]["env"]["QUICK_FAMILIES"].split())
     problems = []
     for name in sorted(targets - linux):
         problems.append(f"  {name} is a bench target but the workflow never runs it")
