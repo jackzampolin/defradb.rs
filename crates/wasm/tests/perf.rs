@@ -97,6 +97,7 @@ fn document(field_count: usize, seq: usize) -> Document {
 /// purpose: that is what puts a browser column beside the native ones instead
 /// of a separate table nothing lines up with.
 #[wasm_bindgen_test]
+#[allow(clippy::arc_with_non_send_sync)]
 async fn document_ops() {
     let mut create = Group::higher_better("create", "ops/s").over("fields");
     let mut read = Group::higher_better("read", "ops/s").over("fields");
