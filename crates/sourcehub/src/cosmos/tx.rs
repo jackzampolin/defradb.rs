@@ -39,7 +39,7 @@ impl TxSigner {
 
         let public_key = signing_key.public_key();
         let account_id = public_key
-            .account_id("source")
+            .account_id("vera")
             .map_err(|e| TxSignerError::Key(format!("failed to derive address: {}", e)))?;
 
         let chain_id: cosmrs::tendermint::chain::Id = chain_id
@@ -53,7 +53,7 @@ impl TxSigner {
         })
     }
 
-    /// Get the bech32 account address (e.g., "source1...").
+    /// Get the bech32 account address (e.g., "vera1...").
     pub(crate) fn address(&self) -> String {
         self.account_id.to_string()
     }
@@ -259,7 +259,7 @@ fn build_msg_create_policy(creator: &str, policy: &str) -> Any {
     encode_varint_field(&mut buf, 3, 1);
 
     Any {
-        type_url: "/sourcehub.acp.MsgCreatePolicy".to_string(),
+        type_url: "/vera.acp.MsgCreatePolicy".to_string(),
         value: buf,
     }
 }
@@ -285,7 +285,7 @@ fn build_msg_bearer_policy_cmd(
     encode_bytes_field(&mut buf, 4, &cmd_bytes);
 
     Any {
-        type_url: "/sourcehub.acp.MsgBearerPolicyCmd".to_string(),
+        type_url: "/vera.acp.MsgBearerPolicyCmd".to_string(),
         value: buf,
     }
 }

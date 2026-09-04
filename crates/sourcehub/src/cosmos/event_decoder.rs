@@ -1,12 +1,12 @@
 use base64::Engine as _;
 use prost::Message;
 
-const BEARER_POLICY_COMMAND: &str = "sourcehub.acp.MsgBearerPolicyCmd";
-const CHECK_ACCESS: &str = "sourcehub.acp.MsgCheckAccess";
-const CREATE_POLICY: &str = "sourcehub.acp.MsgCreatePolicy";
-const DIRECT_POLICY_COMMAND: &str = "sourcehub.acp.MsgDirectPolicyCmd";
-const EDIT_POLICY: &str = "sourcehub.acp.MsgEditPolicy";
-const SIGNED_POLICY_COMMAND: &str = "sourcehub.acp.MsgSignedPolicyCmd";
+const BEARER_POLICY_COMMAND: &str = "vera.acp.MsgBearerPolicyCmd";
+const CHECK_ACCESS: &str = "vera.acp.MsgCheckAccess";
+const CREATE_POLICY: &str = "vera.acp.MsgCreatePolicy";
+const DIRECT_POLICY_COMMAND: &str = "vera.acp.MsgDirectPolicyCmd";
+const EDIT_POLICY: &str = "vera.acp.MsgEditPolicy";
+const SIGNED_POLICY_COMMAND: &str = "vera.acp.MsgSignedPolicyCmd";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum CacheInvalidation {
@@ -85,46 +85,45 @@ fn decode_transaction(tx_bytes: &[u8]) -> Result<Vec<CacheInvalidation>, EventDe
 
     for message in body.messages {
         let message_type = message.type_url.trim_start_matches('/');
-        let invalidation = match message_type {
-            BEARER_POLICY_COMMAND => {
-                let command =
-                    BearerPolicyCommand::decode(message.value.as_slice()).map_err(|source| {
-                        EventDecodeError::AcpMessage {
+        let invalidation =
+            match message_type {
+                BEARER_POLICY_COMMAND => {
+                    let command = BearerPolicyCommand::decode(message.value.as_slice()).map_err(
+                        |source| EventDecodeError::AcpMessage {
                             message_type: message.type_url.clone(),
                             source,
-                        }
-                    })?;
-                command_invalidation(command.policy_id, command.command)
-            }
-            DIRECT_POLICY_COMMAND => {
-                let command =
-                    DirectPolicyCommand::decode(message.value.as_slice()).map_err(|source| {
-                        EventDecodeError::AcpMessage {
-                            message_type: message.type_url.clone(),
-                            source,
-                        }
-                    })?;
-                command_invalidation(command.policy_id, command.command)
-            }
-            EDIT_POLICY => {
-                let edit =
-                    EditPolicyCommand::decode(message.value.as_slice()).map_err(|source| {
-                        EventDecodeError::AcpMessage {
-                            message_type: message.type_url.clone(),
-                            source,
-                        }
-                    })?;
-                if edit.policy_id.is_empty() {
-                    CacheInvalidation::All
-                } else {
-                    CacheInvalidation::Policy(edit.policy_id)
+                        },
+                    )?;
+                    command_invalidation(command.policy_id, command.command)
                 }
-            }
-            SIGNED_POLICY_COMMAND => CacheInvalidation::All,
-            CREATE_POLICY | CHECK_ACCESS => continue,
-            message_type if message_type.starts_with("sourcehub.acp.") => CacheInvalidation::All,
-            _ => continue,
-        };
+                DIRECT_POLICY_COMMAND => {
+                    let command = DirectPolicyCommand::decode(message.value.as_slice()).map_err(
+                        |source| EventDecodeError::AcpMessage {
+                            message_type: message.type_url.clone(),
+                            source,
+                        },
+                    )?;
+                    command_invalidation(command.policy_id, command.command)
+                }
+                EDIT_POLICY => {
+                    let edit =
+                        EditPolicyCommand::decode(message.value.as_slice()).map_err(|source| {
+                            EventDecodeError::AcpMessage {
+                                message_type: message.type_url.clone(),
+                                source,
+                            }
+                        })?;
+                    if edit.policy_id.is_empty() {
+                        CacheInvalidation::All
+                    } else {
+                        CacheInvalidation::Policy(edit.policy_id)
+                    }
+                }
+                SIGNED_POLICY_COMMAND => CacheInvalidation::All,
+                CREATE_POLICY | CHECK_ACCESS => continue,
+                message_type if message_type.starts_with("vera.acp.") => CacheInvalidation::All,
+                _ => continue,
+            };
 
         if invalidation == CacheInvalidation::All {
             return Ok(vec![CacheInvalidation::All]);
@@ -375,7 +374,7 @@ mod tests {
     fn unknown_acp_message_fails_safe() {
         let event = transaction_event(
             vec![ProtoAny {
-                type_url: "/sourcehub.acp.MsgFuturePolicyMutation".into(),
+                type_url: "/vera.acp.MsgFuturePolicyMutation".into(),
                 value: Vec::new(),
             }],
             0,

@@ -3,6 +3,8 @@
 use cli::commands::StartArgs;
 use cli::config::{Config, DatastoreType};
 use cli::error::Error;
+#[cfg(feature = "orbis")]
+use identity::Identity as _;
 
 fn default_start_args() -> StartArgs {
     StartArgs {
@@ -32,6 +34,8 @@ fn default_start_args() -> StartArgs {
         signer_orbis_ring_id: None,
         #[cfg(feature = "orbis")]
         signer_orbis_derivation: None,
+        #[cfg(feature = "orbis")]
+        signer_orbis_identity: None,
         max_body_size: None,
         max_schema_size: None,
         max_backup_size: None,
@@ -162,6 +166,8 @@ fn test_apply_to_config_all_flags() {
         signer_orbis_ring_id: None,
         #[cfg(feature = "orbis")]
         signer_orbis_derivation: None,
+        #[cfg(feature = "orbis")]
+        signer_orbis_identity: None,
         max_body_size: Some(1024),
         max_schema_size: Some(2048),
         max_backup_size: Some(4096),
@@ -270,4 +276,50 @@ fn test_rebroadcast_flag_precedence() {
     let args = default_start_args();
     args.apply_to_config(&mut config).unwrap();
     assert!(config.net.p2p_rebroadcast_on_merge);
+}
+
+/// The Orbis ring authenticates a signing request with an EdDSA bearer token,
+/// while a node whose document ACP is SourceHub/Vera must keep a secp256k1
+/// identity to sign chain transactions. `--signer-orbis-identity` is what lets
+/// one node hold both, and it falls back to `--identity` when unset.
+#[cfg(feature = "orbis")]
+#[test]
+fn orbis_service_identity_is_separate_from_the_node_identity() {
+    const SECP256K1_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    // RFC 8032 test vector 1: seed followed by its public key.
+    const ED25519_KEY: &str = concat!(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    );
+
+    let mut args = default_start_args();
+    args.identity = Some(SECP256K1_KEY.to_string());
+    args.signer_orbis_identity = Some(ED25519_KEY.to_string());
+
+    let node = args
+        .parse_user_identity()
+        .expect("node identity parses")
+        .expect("node identity is set");
+    let service = args
+        .parse_orbis_service_identity()
+        .expect("service identity parses")
+        .expect("service identity is set");
+
+    assert_eq!(node.key_type(), crypto::KeyType::Secp256k1);
+    assert_eq!(service.key_type(), crypto::KeyType::Ed25519);
+    assert_ne!(
+        node.did().expect("node did"),
+        service.did().expect("service did"),
+        "the two roles must not collapse onto one DID"
+    );
+}
+
+#[cfg(feature = "orbis")]
+#[test]
+fn orbis_service_identity_is_absent_without_the_flag() {
+    let args = default_start_args();
+    assert!(args
+        .parse_orbis_service_identity()
+        .expect("an absent flag is not an error")
+        .is_none());
 }

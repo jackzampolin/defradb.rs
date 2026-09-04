@@ -129,6 +129,22 @@ pub struct StartArgs {
     #[arg(long)]
     pub signer_orbis_derivation: Option<String>,
 
+    /// Hex private key this node authenticates to the Orbis ring with,
+    /// separately from `--identity`.
+    ///
+    /// The ring authenticates a Sign request by a JWT whose algorithm follows
+    /// the key type, and it accepts EdDSA (ed25519) only. `--identity` is also
+    /// the key that signs SourceHub/Vera transactions, which must be
+    /// secp256k1. One key therefore cannot serve both roles: without this
+    /// flag a node with a secp256k1 identity presents an ES256K token and the
+    /// ring rejects it as an unknown algorithm.
+    ///
+    /// Defaults to `--identity` when unset, which keeps the previous behaviour
+    /// for a node whose identity is already ed25519.
+    #[cfg(feature = "orbis")]
+    #[arg(long)]
+    pub signer_orbis_identity: Option<String>,
+
     /// Max request body size in bytes (0 = unlimited, default)
     #[arg(long)]
     pub max_body_size: Option<u64>,
@@ -334,13 +350,21 @@ impl StartArgs {
         &self,
         user_identity: &Option<std::sync::Arc<identity::RawIdentity>>,
     ) -> Result<()> {
-        let service_identity = user_identity.as_ref().ok_or_else(|| {
-            Error::InvalidConfig(
-                "--identity is required when --signer-type=orbis \
-                 (service key signs JWTs for Orbis auth)"
-                    .into(),
-            )
-        })?;
+        let service_identity = match self.parse_orbis_service_identity()? {
+            Some(identity) => identity,
+            None => user_identity.as_ref().cloned().ok_or_else(|| {
+                Error::InvalidConfig(
+                    "--identity or --signer-orbis-identity is required when \
+                     --signer-type=orbis (service key signs JWTs for Orbis auth)"
+                        .into(),
+                )
+            })?,
+        };
+
+        Self::require_ed25519_service_key(
+            service_identity.key_type(),
+            self.signer_orbis_identity.is_some(),
+        )?;
 
         let endpoint = self.signer_orbis_endpoint.as_ref().ok_or_else(|| {
             Error::InvalidConfig("--signer-orbis-endpoint required for orbis signer".into())
@@ -385,27 +409,80 @@ impl StartArgs {
         Ok(())
     }
 
+    /// Parse `--signer-orbis-identity`, the key used only to authenticate to
+    /// the Orbis ring. It is separate from `--identity` because the ring
+    /// accepts an EdDSA token while the chain needs a secp256k1 signer.
+    #[cfg(feature = "orbis")]
+    pub fn parse_orbis_service_identity(
+        &self,
+    ) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
+        let Some(hex_key) = self.signer_orbis_identity.as_deref() else {
+            return Ok(None);
+        };
+        let identity = Self::identity_from_hex(hex_key)?;
+        tracing::info!("Orbis service identity DID: {}", identity.did()?);
+        Ok(Some(std::sync::Arc::new(identity)))
+    }
+
     /// Parse the user identity from the --identity flag.
     ///
     /// The identity flag should contain a hex-encoded private key.
     /// Key type is auto-detected from byte length:
     /// - 64 bytes -> Ed25519
     /// - 32 bytes -> secp256k1
-    fn parse_user_identity(&self) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
+    pub fn parse_user_identity(&self) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
         let hex_key = match &self.identity {
             Some(key) => key,
             None => return Ok(None),
         };
 
-        // Remove 0x prefix if present
+        let raw_identity = Self::identity_from_hex(hex_key)?;
+
+        let did = raw_identity.did()?;
+        tracing::info!("User identity DID: {}", did);
+
+        Ok(Some(std::sync::Arc::new(raw_identity)))
+    }
+
+    /// The Orbis ring authenticates a Sign request with a bearer token and
+    /// accepts EdDSA only. `new_token_with_custom_claims` picks the algorithm
+    /// from the key type, so a secp256k1 service key presents ES256K and the
+    /// ring refuses it. Reject it here rather than letting it surface as
+    /// `unknown variant ES256K` from the ring at the first write, long after
+    /// the node booted clean.
+    ///
+    /// `from_flag` says whether the key came from `--signer-orbis-identity`,
+    /// because the two ways to get here need different advice: the fallback to
+    /// `--identity` needs the flag, while a key already passed to the flag is
+    /// almost always a 32-byte ed25519 seed, which [`Self::identity_from_hex`]
+    /// reads as secp256k1 by length.
+    #[cfg(feature = "orbis")]
+    fn require_ed25519_service_key(key_type: crypto::KeyType, from_flag: bool) -> Result<()> {
+        if key_type == crypto::KeyType::Ed25519 {
+            return Ok(());
+        }
+        let advice = if from_flag {
+            "--signer-orbis-identity must be the 64-byte ed25519 form, seed \
+             followed by public key. A 32-byte value is read as secp256k1 by \
+             length, which is what happened here."
+        } else {
+            "Pass one with --signer-orbis-identity. --identity is not usable \
+             as the service key when it is secp256k1, because it also signs \
+             chain transactions and must stay that type."
+        };
+        Err(Error::InvalidConfig(format!(
+            "--signer-type=orbis needs an ed25519 service key, got {:?}. {}",
+            key_type, advice
+        )))
+    }
+
+    /// Build an identity from a hex private key, choosing the key type by
+    /// length: 64 bytes is ed25519 (seed + public key), 32 is secp256k1.
+    fn identity_from_hex(hex_key: &str) -> Result<identity::RawIdentity> {
         let hex_str = hex_key.strip_prefix("0x").unwrap_or(hex_key);
+        let key_bytes = hex::decode(hex_str)
+            .map_err(|e| Error::InvalidIdentity(format!("invalid hex in identity key: {}", e)))?;
 
-        // Decode hex to bytes
-        let key_bytes = hex::decode(hex_str).map_err(|e| {
-            Error::InvalidIdentity(format!("invalid hex in --identity flag: {}", e))
-        })?;
-
-        // Auto-detect key type from byte length
         let key_type = match key_bytes.len() {
             64 => identity::IdentityKeyType::Ed25519,
             32 => identity::IdentityKeyType::Secp256k1,
@@ -417,13 +494,9 @@ impl StartArgs {
             }
         };
 
-        // Create identity from bytes
-        let raw_identity = identity::RawIdentity::from_identity_key_type(key_type, &key_bytes)?;
-
-        let did = raw_identity.did()?;
-        tracing::info!("User identity DID: {}", did);
-
-        Ok(Some(std::sync::Arc::new(raw_identity)))
+        Ok(identity::RawIdentity::from_identity_key_type(
+            key_type, &key_bytes,
+        )?)
     }
 
     /// Apply start command flags to config
@@ -604,5 +677,103 @@ impl StartArgs {
         }
         config.api.validate()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECP256K1_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// 64 bytes: seed followed by public key, the layout DefraDB stores an
+    /// ed25519 private key in. RFC 8032 test vector 1, so the public half
+    /// really is the seed's public key; the loader checks that.
+    const ED25519_KEY: &str = concat!(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    );
+
+    #[test]
+    fn identity_key_type_follows_the_key_length() {
+        let secp = StartArgs::identity_from_hex(SECP256K1_KEY).expect("secp256k1 identity");
+        assert_eq!(secp.key_type(), crypto::KeyType::Secp256k1);
+
+        let ed = StartArgs::identity_from_hex(ED25519_KEY).expect("ed25519 identity");
+        assert_eq!(ed.key_type(), crypto::KeyType::Ed25519);
+    }
+
+    #[test]
+    fn identity_from_hex_accepts_a_0x_prefix() {
+        let prefixed = format!("0x{}", SECP256K1_KEY);
+        assert_eq!(
+            StartArgs::identity_from_hex(&prefixed)
+                .expect("prefixed")
+                .did()
+                .expect("did"),
+            StartArgs::identity_from_hex(SECP256K1_KEY)
+                .expect("bare")
+                .did()
+                .expect("did"),
+            "the 0x prefix must not change the identity"
+        );
+    }
+
+    #[test]
+    fn identity_from_hex_rejects_other_lengths() {
+        let err = StartArgs::identity_from_hex("00112233").expect_err("8 bytes is neither");
+        assert!(
+            format!("{err}").contains("invalid key length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "orbis")]
+    #[test]
+    fn an_ed25519_service_key_is_accepted() {
+        for from_flag in [true, false] {
+            StartArgs::require_ed25519_service_key(crypto::KeyType::Ed25519, from_flag)
+                .expect("ed25519 is what the ring accepts");
+        }
+    }
+
+    #[cfg(feature = "orbis")]
+    #[test]
+    fn a_non_ed25519_service_key_is_refused_before_the_ring_sees_it() {
+        for key_type in [crypto::KeyType::Secp256k1, crypto::KeyType::Secp256r1] {
+            for from_flag in [true, false] {
+                let err = StartArgs::require_ed25519_service_key(key_type, from_flag)
+                    .expect_err("the ring accepts EdDSA only");
+                let message = format!("{err}");
+                assert!(
+                    message.contains("--signer-orbis-identity"),
+                    "the error must name the flag that fixes it: {message}"
+                );
+                assert!(
+                    message.contains(&format!("{key_type:?}")),
+                    "the error must name the key type it got: {message}"
+                );
+            }
+        }
+    }
+
+    /// A raw 32-byte ed25519 seed is read as secp256k1 by length, so the error
+    /// for a key that came from the flag has to say which form to pass.
+    #[cfg(feature = "orbis")]
+    #[test]
+    fn a_seed_passed_to_the_flag_is_told_it_needs_the_64_byte_form() {
+        let seed = StartArgs::identity_from_hex(SECP256K1_KEY).expect("32 bytes parses");
+        assert_eq!(
+            seed.key_type(),
+            crypto::KeyType::Secp256k1,
+            "a 32-byte value is secp256k1 by length, which is the trap"
+        );
+        let err = StartArgs::require_ed25519_service_key(seed.key_type(), true)
+            .expect_err("a seed is not the ed25519 form the ring needs");
+        let message = format!("{err}");
+        assert!(
+            message.contains("64-byte"),
+            "the error must name the form to pass: {message}"
+        );
     }
 }
