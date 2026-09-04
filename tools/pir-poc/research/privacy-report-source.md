@@ -12,7 +12,7 @@
 
 This report asks what must surround the selected PIR protocols so that a wallet's private read is not undone by its IP address, timing, result size, authentication, live-delivery path, or later transaction broadcast. It also considers alternatives that avoid a private query entirely and Ethereum ecosystem work that can be reused.
 
-The intended user may be on a phone, but the design may favor desktop efficiency when the improvement is material. A full node and routine download of every generation are not assumed. At the time of this research report, the baseline was replicated Dense XOR for snapshots, Compact DPF for live subscriptions, and separate OHTTP paths for origin separation. The later GPU/epoch pass in `../USE_CASES.md` supersedes the live default with packed-presence Dense whenever fixed epoch latency is acceptable; immediate Compact DPF remains the fallback.
+The intended user may be on a phone, but the design may favor desktop efficiency when the improvement is material. A full node and routine download of every generation are not assumed. At the time of this research report, the baseline was replicated Dense XOR for snapshots, Compact DPF for live subscriptions, and separate OHTTP paths for origin separation. The later GPU/epoch pass in `../DECISIONS.md` supersedes the live default with packed-presence Dense whenever fixed epoch latency is acceptable; immediate Compact DPF remains the fallback.
 
 The source hierarchy was: standards and specifications, protocol papers, official project documentation, then implementation documentation. Current implementation status is time-sensitive and is stated as of the report date.
 

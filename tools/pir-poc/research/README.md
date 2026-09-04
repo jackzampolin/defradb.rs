@@ -2,8 +2,8 @@
 
 This directory contains every historical experiment and evidence ledger used to
 select the product paths. They are not runtime protocol choices. Start with
-`../USE_CASES.md`; enter this directory only to audit a decision or reproduce a
-measurement.
+[the decision guide](../DECISIONS.md) or [benchmark evidence](../BENCHMARKS.md);
+enter this directory only to audit a decision or reproduce a measurement.
 
 The default build excludes DefraDB embedding, unsafe PtrHash/epserde client
 metadata, SinglePass, finite-differences adapters, Fuse/Ribbon/subset-XOR layouts,

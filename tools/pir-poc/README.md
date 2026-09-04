@@ -12,22 +12,28 @@ DefraDB query execution or storage:
 Strict Dense XOR and the visible-candidate baseline share the same immutable
 serving rows. The benchmark uses 100 candidates; the decoy client decodes only
 its known target row and drops the others.
+
 ## Documentation map
 
 The documentation has one owner for each question:
 
 | Read this | For |
 |---|---|
-| [USE_CASES.md](USE_CASES.md) | The authoritative protocol ranking, production use-case choices, benchmark evidence, and future decision triggers |
+| [PROTOCOLS.md](PROTOCOLS.md) | What each protocol does, its trust assumptions and tradeoffs |
+| [USE_CASES.md](USE_CASES.md) | Each application's problem, request, result and privacy need |
+| [DECISIONS.md](DECISIONS.md) | Filterable versus full-state requests, recommendations, limits and server overhead versus decoys |
+| [BENCHMARKS.md](BENCHMARKS.md) | Selected-protocol benchmarks first; alternative protocols and conditional fallbacks second |
+| [ROADMAP.md](ROADMAP.md) | Remaining implementation work and future research triggers |
 | [PRODUCTION.md](PRODUCTION.md) | The minimal DefraDB export/event adapter, artifact, authorization, and deployment boundary |
 | [PRIVACY.md](PRIVACY.md) | OHTTP, Tor, timing, admission, live delivery, and write-path privacy |
-| [USE_CASE_GALLERY.md](USE_CASE_GALLERY.md) | Runnable 256-row fixtures that prove application data shapes and correctness, not scale |
 | [PORTABLE_READINESS.md](PORTABLE_READINESS.md) | Client portability budgets and remaining production gates |
-| [ENCRYPTED_SEARCH.md](ENCRYPTED_SEARCH.md) | The optional, weaker blind exact-search lane and its explicit leakage |
 | [research/README.md](research/README.md) | Historical protocol comparisons, GPU/CPU artifacts, benchmark ledgers, and reproduction commands |
 
 This README is only the operating guide. Research documents are evidence, not
 additional serving choices.
+
+For a team walkthrough: **PROTOCOLS → USE_CASES → DECISIONS**.
+Open BENCHMARKS only when supporting data is needed.
 
 ## Commands
 
@@ -44,17 +50,24 @@ pir-poc query ...
 pir-poc benchmark [quick|full]
 ```
 
-Run the application-shaped gallery without starting servers:
+Run the application-shaped fixtures without starting servers:
 
 ```bash
 cargo run -p pir-poc --release -- use-cases
 cargo run -p pir-poc --release -- use-cases mizu
 ```
 
-The gallery uses the same Dense XOR and Compact-DPF code as the served POC. Its
-256-row fixtures are correctness demonstrations; the research CUDA runner adds
-the packed-presence epoch protocol. Consult `USE_CASES.md` for production-scale
-measurements and the exact immediate-versus-epoch choice.
+The fixtures use the same Dense XOR and Compact-DPF code as the served POC.
+These 256-row tables demonstrate correctness; the research CUDA runner adds
+the packed-presence epoch protocol. See [BENCHMARKS.md](BENCHMARKS.md) for
+measurements and [DECISIONS.md](DECISIONS.md) for protocol choices.
+
+Run the separate blind-token search experiment (not strict PIR):
+
+```bash
+cargo run -p pir-poc --release -- encrypted-search 1000
+cargo run -p pir-poc --release -- encrypted-search 1000000
+```
 
 Run the complete in-memory HTTP demo:
 

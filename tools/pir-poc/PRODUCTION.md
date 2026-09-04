@@ -174,19 +174,8 @@ limits, bounded queue dwell, cancellation and production metrics. Preserve the
 selected service's fail-before-evaluation checks when extracting production
 crates, then add those operational controls at the serving edge.
 
-## Minimal integration sequence
+## Implementation work
 
-1. Freeze this POC as the decision/evidence archive; do not promote its bundled
-   store or CLI to a DefraDB API.
-2. Define one small versioned projection-batch DTO, then add a read-only export
-   adapter using the normal authorized embedded query API. Make the public
-   cutoff and deterministic ordered-output digest part of every build.
-3. Replace JSON-loaded table images with a versioned, bounded binary artifact
-   that servers can memory-map and publish atomically.
-4. Add an optional sidecar listener on `EventName::Update` that seals fixed
-   presence epochs and evaluates registered packed-Dense selectors; preserve
-   immediate Compact DPF behind an explicit low-latency policy.
-5. Extract only the generic table builder/evaluator, stable manifest, client
-   combine/verification, and selected serving DTOs into small crates. Keep
-   product adapters separate and do not move experimental layouts into core
-   Defra crates.
+The ordered work list and current implementation gaps live in
+[ROADMAP.md](ROADMAP.md#implementation-work). This document owns the integration
+contract, not a separate roadmap or protocol ranking.

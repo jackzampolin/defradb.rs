@@ -2,7 +2,7 @@
 
 This program is complete for the current POC selection and is retained as a
 research archive. Runtime behavior and current measurements are documented in
-`../USE_CASES.md`.
+`../DECISIONS.md`.
 
 This document is the execution ledger for the DefraDB PIR POC. It separates
 measured results from analytical estimates and prevents results with different

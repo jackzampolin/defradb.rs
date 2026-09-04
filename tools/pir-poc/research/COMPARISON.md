@@ -1,7 +1,7 @@
 # DefraDB PIR POC: research comparison archive
 
 The bundled default POC exercises three protocol shapes. The current product
-ranking and eight use-case decisions are in [`../USE_CASES.md`](../USE_CASES.md).
+ranking and eight use-case decisions are in [`../DECISIONS.md`](../DECISIONS.md).
 This file preserves the experiments that produced those choices; their code is
 compiled only with the `research` feature.
 
@@ -21,7 +21,7 @@ cryptography.
 
 The selected paths are implemented as correctness-checked modules and benchmark
 commands. Treat the tables below as an experiment ledger: where they record an
-earlier winner, the later decision and benchmark in `../USE_CASES.md` wins.
+earlier winner, the later decision and benchmark in `../DECISIONS.md` wins.
 
 ## Choices at this experiment stage
 
