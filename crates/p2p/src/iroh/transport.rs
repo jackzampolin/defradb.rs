@@ -191,16 +191,21 @@ impl P2PTransport for IrohTransport {
     }
 
     async fn poll_until_connected(&self, peer_id: &PeerId, timeout: Duration) -> Result<()> {
-        let start = std::time::Instant::now();
-        loop {
-            let peers = self.connected_peers().await?;
-            if peers.iter().any(|p| p.as_str() == peer_id.as_str()) {
-                return Ok(());
+        let wait_for_peer = async {
+            loop {
+                let peers = self.connected_peers().await?;
+                if peers.contains(peer_id) {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if start.elapsed() >= timeout {
-                return Err(Error::ConnectionTimeout(peer_id.to_string()));
+        };
+        tokio::select! {
+            biased;
+            _ = self.command_tx.closed() => Err(Error::ChannelSend),
+            result = tokio::time::timeout(timeout, wait_for_peer) => {
+                result.unwrap_or_else(|_| Err(Error::ConnectionTimeout(peer_id.to_string())))
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -582,6 +587,10 @@ impl P2PTransport for IrohTransport {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/iroh/transport_poll.rs"]
+mod poll_tests;
 
 #[cfg(test)]
 mod tests {
