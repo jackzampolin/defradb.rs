@@ -32,7 +32,9 @@
 
 namespace {
 
-constexpr int kThreads = 128;
+// Both Dense reductions retain one row accumulator per thread in shared
+// memory. Keep wide rows below the portable 48 KiB per-block limit.
+constexpr int kThreads = DEFRA_LIMBS > 16 ? 32 : 128;
 constexpr int kUsefulSnapshotBytes = 120;
 constexpr int kUsefulLiveBytes = 16;
 constexpr int kVisibleCandidates = 100;
@@ -246,6 +248,21 @@ double milliseconds(std::chrono::steady_clock::duration elapsed) {
 double median(std::vector<double> values) {
   std::sort(values.begin(), values.end());
   return values[values.size() / 2];
+}
+
+// Aggregate within each measured request before taking a percentile.
+double paired_median(const std::vector<double>& a,
+                     const std::vector<double>& b, bool maximum = false) {
+  if (a.size() != b.size() || a.empty()) throw std::runtime_error("unpaired GPU samples");
+  std::vector<double> combined;
+  for (size_t i=0;i<a.size();++i) combined.push_back(maximum ? std::max(a[i],b[i]) : a[i]+b[i]);
+  return median(combined);
+}
+double interleaved_pair_median(const std::vector<double>& values) {
+  if (values.empty() || values.size()%2) throw std::runtime_error("unpaired transfer samples");
+  std::vector<double> a,b;
+  for(size_t i=0;i<values.size();i+=2){a.push_back(values[i]);b.push_back(values[i+1]);}
+  return paired_median(a,b);
 }
 
 __host__ __device__ uint32_t reverse_bits(uint32_t value) {
@@ -752,12 +769,12 @@ Timings benchmark_dense(const Options& options, const std::vector<int>& targets,
   result.first_parallel_server_ms =
       std::max(first_server0_ms, first_server1_ms);
   result.first_d2h_aggregate_ms = first_d2h0_ms + first_d2h1_ms;
-  result.h2d_p50_ms = median(h2d) * 2.0;
+  result.h2d_p50_ms = interleaved_pair_median(h2d);
   result.server0_p50_ms = median(server0_ms);
   result.server1_p50_ms = median(server1_ms);
-  result.aggregate_p50_ms = result.server0_p50_ms + result.server1_p50_ms;
-  result.wall_p50_ms = std::max(result.server0_p50_ms, result.server1_p50_ms);
-  result.d2h_p50_ms = median(d2h) * 2.0;
+  result.aggregate_p50_ms = paired_median(server0_ms, server1_ms);
+  result.wall_p50_ms = paired_median(server0_ms, server1_ms, true);
+  result.d2h_p50_ms = interleaved_pair_median(d2h);
   result.repetitions = repetitions;
   power.apply(&result, static_cast<size_t>(options.samples) * repetitions *
                            options.batch);
@@ -884,12 +901,12 @@ Timings benchmark_packed_presence(const Options& options,
 
   Timings result;
   result.client_ms = client_ms;
-  result.h2d_p50_ms = median(h2d) * 2.0;
+  result.h2d_p50_ms = interleaved_pair_median(h2d);
   result.server0_p50_ms = median(server0_ms);
   result.server1_p50_ms = median(server1_ms);
-  result.aggregate_p50_ms = result.server0_p50_ms + result.server1_p50_ms;
-  result.wall_p50_ms = std::max(result.server0_p50_ms, result.server1_p50_ms);
-  result.d2h_p50_ms = median(d2h) * 2.0;
+  result.aggregate_p50_ms = paired_median(server0_ms, server1_ms);
+  result.wall_p50_ms = paired_median(server0_ms, server1_ms, true);
+  result.d2h_p50_ms = interleaved_pair_median(d2h);
   result.repetitions = repetitions;
   power.apply(&result, static_cast<size_t>(options.samples) * repetitions *
                            options.batch);
@@ -1021,12 +1038,12 @@ Timings benchmark_dpf(const Options& options, const std::vector<int>& targets,
   result.first_parallel_server_ms =
       std::max(first_server0_ms, first_server1_ms);
   result.first_d2h_aggregate_ms = first_d2h0_ms + first_d2h1_ms;
-  result.h2d_p50_ms = median(h2d) * 2.0;
+  result.h2d_p50_ms = interleaved_pair_median(h2d);
   result.server0_p50_ms = median(server0_ms);
   result.server1_p50_ms = median(server1_ms);
-  result.aggregate_p50_ms = result.server0_p50_ms + result.server1_p50_ms;
-  result.wall_p50_ms = std::max(result.server0_p50_ms, result.server1_p50_ms);
-  result.d2h_p50_ms = median(d2h) * 2.0;
+  result.aggregate_p50_ms = paired_median(server0_ms, server1_ms);
+  result.wall_p50_ms = paired_median(server0_ms, server1_ms, true);
+  result.d2h_p50_ms = interleaved_pair_median(d2h);
   result.repetitions = repetitions;
   power.apply(&result, static_cast<size_t>(options.samples) * repetitions *
                            options.batch);
@@ -1194,7 +1211,7 @@ int main(int argc, char** argv) {
 
     std::printf("{");
     std::printf(
-        "\"schema\":\"defradb-gpu-pir-comparison-v3\","
+        "\"schema\":\"defradb-gpu-pir-comparison-v4\","
         "\"upstream_commit\":\"%s\",\"gpu\":\"%s\","
         "\"compute_capability\":\"%d.%d\",\"mode\":\"%s\","
         "\"entries\":%d,\"batch\":%d,\"samples\":%d,"

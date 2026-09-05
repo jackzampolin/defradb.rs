@@ -9607,6 +9607,7 @@ dependencies = [
  "events",
  "fss-rs",
  "hex",
+ "libc",
  "memmap2",
  "memory-stats",
  "ohttp",

@@ -1,6 +1,6 @@
 pub mod active_generation;
 pub mod benchmark;
-#[cfg(feature = "research")]
+#[cfg(feature = "defra-integration")]
 pub mod demo;
 pub mod dense;
 pub mod dense_batch;

@@ -302,6 +302,15 @@ fn profile(value: Option<&String>) -> Result<Profile> {
 
 #[cfg(feature = "research")]
 async fn research(args: &[String]) -> Result<()> {
+    if args.first().map(String::as_str) == Some("total-work") {
+        let path = args
+            .get(1)
+            .context("total-work requires a JSON config path")?;
+        if args.len() != 2 {
+            bail!("total-work requires exactly one config path");
+        }
+        return print_json(&pir_poc::benchmark::total_work::run_file(Path::new(path))?);
+    }
     let profile = profile(args.get(1))?;
     match args.first().map(String::as_str) {
         Some("active-nullifier") => print_json(&pir_poc::benchmark::run_active_nullifier(profile)?),
@@ -309,7 +318,10 @@ async fn research(args: &[String]) -> Result<()> {
         Some("cold") => print_json(&pir_poc::benchmark::run_cold(profile)?),
         Some("cpu-snapshot") => print_json(&pir_poc::benchmark::run_cpu_snapshot(profile)?),
         Some("dense-batch") => print_json(&pir_poc::benchmark::run_dense_batch(profile)?),
+        #[cfg(feature = "defra-integration")]
         Some("defra-events") => print_json(&pir_poc::subscription::demo().await?),
+        #[cfg(not(feature = "defra-integration"))]
+        Some("defra-events") => bail!("defra-events requires --features defra-integration"),
         Some("end-to-end") => print_json(&pir_poc::benchmark::run_end_to_end(profile)?),
         Some("endpoints") => print_json(&pir_poc::benchmark::run_endpoints(profile).await?),
         Some("fuse") => print_json(&pir_poc::benchmark::run_fuse(profile)?),

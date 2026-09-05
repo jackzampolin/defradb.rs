@@ -7,9 +7,9 @@ Integration contract: [PRODUCTION.md](PRODUCTION.md).
 
 | Priority | Work | What exists | Completion gate |
 |---|---|---|---|
-| 1 | Generic DefraDB export adapter | Authorized-query/event demos; bundled product fixtures | Deterministic export per query/reader class, pinned cutoff, no core query/storage changes |
-| 2 | Stable binary artifacts | Authenticated manifests and immutable JSON-loaded tables | Bounded binary format, memory mapping, atomic publication and replica agreement |
-| 3 | Packed-epoch alert service | Correctness-checked GPU benchmark; served live API still uses immediate DPF | CPU/GPU service integration, bounded registration memory, expiry, durable cursors and replay |
+| 1 | Generic DefraDB export adapter | Optional `defra-integration` query/event demos; independent sidecar | Deterministic export per query/reader class using existing APIs, pinned cutoff, no core query/storage changes |
+| 2 | Directory and stable binary artifacts | Public digest directory in the served POC; sorted answer blocks benchmarked | Implement sorted grouping in the sidecar builder, bind directory/table to one manifest, enforce result caps, atomic publication |
+| 3 | Public epoch artifact | Common 8 KiB bitmap benchmarked; served live API still uses immediate DPF | Authenticated epoch publication and query-independent download, replay/gap handling, private hit retrieval; packed PIR remains optional |
 | 4 | Canonical Mizu witness integration | Verified witness endpoint plus separate active-tree update benchmark | Proof parity with Shieldd, current-root binding, predecessor/node retrieval and update tests |
 | 5 | Production privacy/security | OHTTP/Tor demos, AEAD verification, admission limits | Independent operators, HTTPS, production signatures/root trust, anonymous admission and fixed traffic policy |
 
@@ -23,7 +23,7 @@ merely because the sparse coordinates or leaf indices are stable.
 |---|---|
 | Scope-matched comparisons | Benchmark identical corpora/filters and complete results: all matches for the real tag versus all matches for 100 candidates. Vary match fractions and skew; charge every continuation, padding and repeated scan. Report aggregate server ratios, not just page latency. |
 | Growing active tree | Validate a root-correct bounded working set. A checkpoint/delta chain alone is not a size bound. Benchmark larger populations before extending the tested envelope. |
-| Keyword metadata | The demo's public digest directory can reveal populated keys. Use an approved public directory or a non-enumerating layout; benchmark its actual padding/build cost. |
+| Keyword metadata | Database disclosure is accepted for these decisions. Download the entire common directory; never fetch only the selected entry publicly. Bind it to the payload generation and preserve authorization cohorts. |
 | Large result sets | Configure padded pages and request caps without dropping required results. Charge all continuation/window requests for full recovery; do not silently fall back to decoys. |
 | Private two-stage retrieval | Prove that both stages hide the secret selection and reduce total work; returning a secret partition ID and fetching it publicly is not sufficient. |
 | Immediate alerts | Keep DPF only where the latency requirement rules out epoch batching; test full event-times-subscriber load. |

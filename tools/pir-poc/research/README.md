@@ -14,13 +14,25 @@ cargo check -p pir-poc --features research
 cargo run -p pir-poc --release --features research -- research cold quick
 ```
 
+Protocol research also excludes DefraDB dependencies. Opt into the embedded
+query/export and committed-event contract demos explicitly:
+
+```bash
+cargo run -p pir-poc --release --features defra-integration -- research defra-events
+```
+
 Available research benchmark names:
+
+- [Complete B0–B8 benchmark suite](ALL_BENCHMARKS.md): `run_all_benchmarks.py`,
+  including served private indexes, MPC, Zelda, ORAM, GPU and lifecycle cases.
+
+- `total-work CONFIG.json` — [fresh-process aggregate-work runner](TOTAL_WORK_RUNNER.md), field-bit index experiments and bounded feasibility screening
 
 - `active-nullifier`
 - `billion-tag`
 - `cold`
 - `cpu-snapshot` (same-host two-replica Dense and 100-candidate control at `2^23 x 120 B`)
-- `defra-events` (executable DefraDB `EventName::Update` adapter demonstration)
+- `defra-events` (requires `defra-integration`; executable committed-event/export seam)
 - `dense-batch`
 - `end-to-end`
 - `endpoints`
@@ -36,6 +48,23 @@ Available research benchmark names:
 
 Primary evidence ledgers:
 
+- [Indexed Dense across all use-case shapes](INDEXED_USE_CASE_MEASUREMENTS.md):
+  five-repeat cold and reused-client comparisons with XOR layouts and SinglePass,
+  canonical Poseidon witnesses, skewed all-match queries and public/packed/indexed
+  epoch presence. Reproduce with `run_indexed_use_cases.py`; machine-readable
+  results and resource failures are retained beside the report. This follow-up
+  updates [the decision guide](../DECISIONS.md).
+- [COLD_QUERY_EXPERIMENT_PLAN.md](COLD_QUERY_EXPERIMENT_PLAN.md) and
+  [execution ledger](COLD_QUERY_EXECUTION.md): complete Shinzo/Mizu-style cold
+  predicate searches, persistent service roles, independent clients, bit owners,
+  packed indexes and newer PIR artifact screening. This campaign keeps product
+  cold/catch-up searches separate from client-state reuse and cold hardware caches.
+  [Measured results and all 24 experiment dispositions](COLD_QUERY_RESULTS.md)
+  identify the winning layouts, resource failures and unresolved constructions.
+- [TOTAL_WORK_BENCHMARK_PLAN.md](TOTAL_WORK_BENCHMARK_PLAN.md): current benchmark
+  plan for aggregate server work, distributed field-bit indexes and client limits;
+- [MANY_SERVER_INDEXING.md](MANY_SERVER_INDEXING.md): September 2026 research on
+  bit indexes, distributed workers, preprocessing and many-server tradeoffs;
 - `COMPARISON.md`: complete protocol comparison archive;
 - `EXPLORATION.md`: exploration program and history;
 - `ARTIFACTS.md`: external artifact pins and reproduction status;
@@ -105,4 +134,9 @@ sum of its measured parallel phases.
 `research defra-events` listens to updates from an embedded DefraDB node,
 evaluates a Compact-DPF subscription, seals a snapshot, and privately retrieves
 the matching value. It proves the intended integration seam; it is not a
-production listener and remains outside the default sidecar binary.
+production listener and remains outside both the default and protocol-only research builds.
+
+## Private index compositions
+
+The six follow-up bit-index experiments, compiled controls, Ramen integration,
+and reproduction commands are in [PRIVATE_INDEX_COMPOSITIONS.md](PRIVATE_INDEX_COMPOSITIONS.md).

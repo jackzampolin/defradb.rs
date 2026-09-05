@@ -1,7 +1,13 @@
 # PIR benchmark evidence
 
 Evidence for [DECISIONS.md](DECISIONS.md), grouped by the selected paths first
-and alternative protocols second. Existing results only; no new benchmark run.
+and alternative protocols second.
+
+**2026-09-05 follow-up:** [indexed Dense across use-case shapes](research/INDEXED_USE_CASE_MEASUREMENTS.md)
+contains new complete-lookup CPU measurements, client costs, client reuse,
+canonical witnesses and epoch-presence controls. It drives the updated decision
+guide. The historical figures below retain their original scopes; they are not
+matched controls for the new CPU campaign.
 
 `M` = measured; `P` = projected; `L` = logical execution with a reused resident
 plane. Server figures aggregate replicas unless labelled otherwise. See
@@ -10,8 +16,9 @@ Decoys are the weaker-privacy comparison baseline, not the preferred protocol.
 
 ## Selected protocols
 
-Dense snapshots and packed-presence epoch alerts are the recommendations.
-Their large-workload limits stay here alongside favorable results.
+The original selected paths were Dense snapshots and packed-presence epoch
+alerts. See the decision guide for the newer public-directory and public-bitmap
+research selections. The original large-workload limits remain below.
 
 ### Snapshot costs
 

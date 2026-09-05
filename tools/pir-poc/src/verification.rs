@@ -302,6 +302,23 @@ fn field_order(value: Fq) -> [u8; 32] {
 /// Builds small canonical Shieldd membership fixtures for the executable demo.
 /// Production builders ingest witnesses emitted by Shieldd instead.
 pub(crate) fn build_demo_witnesses(values: &[[u8; 32]]) -> Result<EncodedWitnessFixtures> {
+    build_witness_fixtures(values, false)
+}
+
+/// Canonical benchmark corpus, optionally including the lower sentinel so
+/// absence below the first value is tested through the same private table.
+#[cfg(feature = "research")]
+pub fn build_benchmark_witnesses(
+    values: &[[u8; 32]],
+    include_sentinel: bool,
+) -> Result<EncodedWitnessFixtures> {
+    build_witness_fixtures(values, include_sentinel)
+}
+
+fn build_witness_fixtures(
+    values: &[[u8; 32]],
+    include_sentinel: bool,
+) -> Result<EncodedWitnessFixtures> {
     if values.is_empty() {
         bail!("demo witness tree requires at least one value");
     }
@@ -364,7 +381,11 @@ pub(crate) fn build_demo_witnesses(values: &[[u8; 32]]) -> Result<EncodedWitness
         .to_bytes();
 
     let mut output = Vec::with_capacity(ordered.len());
-    for (leaf_index, leaf) in leaves.iter().enumerate().skip(1) {
+    for (leaf_index, leaf) in leaves
+        .iter()
+        .enumerate()
+        .skip(usize::from(!include_sentinel))
+    {
         let position = u64::try_from(leaf_index)?;
         let mut cursor = position;
         let mut auth_path = Vec::with_capacity(TREE_DEPTH);

@@ -58,6 +58,8 @@ mod single_pass;
 #[cfg(feature = "research")]
 mod subset_xor;
 #[cfg(feature = "research")]
+pub mod total_work;
+#[cfg(feature = "research")]
 mod warm_stateful;
 
 #[cfg(feature = "research")]

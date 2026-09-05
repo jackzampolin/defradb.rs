@@ -6,8 +6,8 @@ DefraDB query execution or storage:
 1. a live Shieldd nullifier generation and fixed 2,008-byte witness;
 2. an encrypted tag projection with a fixed result class;
 3. a Shinzo wallet-event subscription: immediate two-party Compact DPF in the
-   served demo, with packed-presence Dense as the measured block/epoch
-   production direction.
+   served demo. The measured epoch direction is a common public presence bitmap
+   when database disclosure is acceptable; payload retrieval stays private.
 
 Strict Dense XOR and the visible-candidate baseline share the same immutable
 serving rows. The benchmark uses 100 candidates; the decoy client decodes only
@@ -21,7 +21,7 @@ The documentation has one owner for each question:
 |---|---|
 | [PROTOCOLS.md](PROTOCOLS.md) | What each protocol does, its trust assumptions and tradeoffs |
 | [USE_CASES.md](USE_CASES.md) | Each application's problem, request, result and privacy need |
-| [DECISIONS.md](DECISIONS.md) | Filterable versus full-state requests, recommendations, limits and server overhead versus decoys |
+| [DECISIONS.md](DECISIONS.md) | Measured cold/warm layout choices, client costs, limits and integration implications |
 | [BENCHMARKS.md](BENCHMARKS.md) | Selected-protocol benchmarks first; alternative protocols and conditional fallbacks second |
 | [ROADMAP.md](ROADMAP.md) | Remaining implementation work and future research triggers |
 | [PRODUCTION.md](PRODUCTION.md) | The minimal DefraDB export/event adapter, artifact, authorization, and deployment boundary |
@@ -31,6 +31,11 @@ The documentation has one owner for each question:
 
 This README is only the operating guide. Research documents are evidence, not
 additional serving choices.
+
+Both the default sidecar and the optional `research` build exclude DefraDB
+crates. Only `--features defra-integration` enables the embedded-node contract
+demos. The integration seam uses ordinary queries and committed update events;
+it requires no changes to DefraDB storage, query execution or CRDT semantics.
 
 For a team walkthrough: **PROTOCOLS → USE_CASES → DECISIONS**.
 Open BENCHMARKS only when supporting data is needed.
@@ -59,7 +64,8 @@ cargo run -p pir-poc --release -- use-cases mizu
 
 The fixtures use the same Dense XOR and Compact-DPF code as the served POC.
 These 256-row tables demonstrate correctness; the research CUDA runner adds
-the packed-presence epoch protocol. See [BENCHMARKS.md](BENCHMARKS.md) for
+the packed-presence epoch protocol. Sorted block directories and public epoch
+bitmaps are measured research compositions, not new served endpoints. See [BENCHMARKS.md](BENCHMARKS.md) for
 measurements and [DECISIONS.md](DECISIONS.md) for protocol choices.
 
 Run the separate blind-token search experiment (not strict PIR):

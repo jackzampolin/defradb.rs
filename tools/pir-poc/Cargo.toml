@@ -11,19 +11,21 @@ description = "Isolated private information retrieval proof of concept for Defra
 [features]
 default = []
 research = [
-    "dep:defra-node",
+    "dep:libc",
     "dep:epserde",
-    "dep:events",
     "dep:memmap2",
     "dep:memory-stats",
     "dep:ptr_hash",
-    "dep:query",
     "dep:sha2",
     "dep:tempfile",
     "dep:thiserror",
 ]
+# Only the embedded-node contract demos need DefraDB. Protocol research and
+# the serving sidecar stay independent of the database dependency graph.
+defra-integration = ["research", "dep:defra-node", "dep:events", "dep:query"]
 
 [dependencies]
+libc = { version = "0.2", optional = true }
 anyhow.workspace = true
 aes-gcm.workspace = true
 axum.workspace = true
@@ -54,6 +56,16 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "syn
 
 [lints]
 workspace = true
+
+[[example]]
+name = "cold-canonical"
+path = "examples/cold-canonical.rs"
+required-features = ["research"]
+
+[[example]]
+name = "total-work"
+path = "examples/total-work.rs"
+required-features = ["research"]
 
 [[example]]
 name = "export-simplepir-corpus"

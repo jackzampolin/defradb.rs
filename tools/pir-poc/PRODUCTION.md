@@ -30,7 +30,10 @@ surface should contain three narrow contracts:
 
 That direction keeps dependencies one-way: the DefraDB adapter knows the small
 artifact/event DTOs, while the PIR evaluator never imports DefraDB crates. The
-existing embedded-node demos remain research-only contract tests for the seam.
+existing embedded-node demos are opt-in contract tests for the seam, behind
+`--features defra-integration`. The default and `research` builds do not depend
+on DefraDB crates. This feature boundary is tested independently of the serving
+protocols; it is not a new database extension API.
 Each query class and ACP-equivalent reader cohort gets its own artifact; adding
 a Mizu or Shinzo projection is adapter configuration, not another PIR engine.
 
@@ -65,6 +68,13 @@ builds the chosen keyword-to-row layout, and writes immutable artifacts. A
 serving process memory-maps only completed artifacts and atomically switches a
 manifest pointer after all replicas have the same generation.
 
+For the measured cold workloads, use the common public boundary-key directory
+and padded answer blocks described in [DECISIONS.md](DECISIONS.md). The directory
+is downloaded in full, searched locally, and bound to the same generation as
+the PIR table. Group size is a builder parameter, not a new Defra query primitive.
+The sorted-block benchmark is not yet the selected service's persisted format;
+its implementation belongs in this sidecar builder, never the database engine.
+
 The manifest must commit to:
 
 - collection/schema identity and the exact exported projection;
@@ -85,8 +95,8 @@ incorrect bytes.
 committed Update events
   -> projection/tag extractor
   -> fixed public-epoch 65,536-bucket presence bitmap
-  -> registered packed-Dense evaluator on each replica
-  -> one fixed hit share/subscriber/epoch
+  -> common authenticated artifact downloaded by every interested client
+  -> local subscription checks
   -> padded private snapshot fetch on hit
 ```
 
@@ -96,7 +106,16 @@ for each event. A later optimization can decode the committed block or expose
 an optional projection callback from the mutation path, but that is not needed
 to prove the protocol.
 
-Subscription state is generation-scoped and replicated independently to each
+With database metadata disclosure acceptable, the common bitmap is the measured
+minimal-work choice: it needs no server-side predicate registration or PIR
+evaluation. Clients download the same 8 KiB bitmap for the public epoch and keep
+their subscription predicates locally. A bitmap hit is only a hint, including
+collisions; payload retrieval remains private. Publication must bind the bitmap
+to its epoch/cutoff, and clients must have a replay/gap policy. This public-bitmap
+composition is benchmarked, not yet a served endpoint.
+
+Packed Dense remains an alternative when its traffic/serving tradeoff is needed.
+For that variant, subscription state is generation-scoped and replicated independently to each
 server. Registration, renewal, cancellation, event batching, padding, and
 delivery cadence are all observable and must have an explicit leakage policy.
 Packed Dense hides the predicate information-theoretically while any replica
@@ -106,7 +125,7 @@ selector/subscriber/server and deliberately reveals the public epoch cadence.
 Keep the already implemented Compact-DPF evaluator as the immediate fallback
 only when waiting for epoch close is unacceptable. It stores less registration
 state but is computational, exactly two-party, and scales with every event and
-subscription. Neither path hides collection, registration time, event rate or
+subscription. These paths do not hide collection, event rate or
 response timing; fixed anonymous polling remains a separate requirement.
 
 ## What a result contains

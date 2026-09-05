@@ -4,7 +4,7 @@ mod batch_benchmark;
 mod batch_eval;
 #[cfg(feature = "research")]
 mod benchmark;
-#[cfg(feature = "research")]
+#[cfg(feature = "defra-integration")]
 mod demo;
 
 use std::collections::HashMap;
@@ -24,7 +24,7 @@ use rand::{CryptoRng, RngCore};
 pub use batch_benchmark::{run as benchmark_batches, LiveBatchBenchmarkReport};
 #[cfg(feature = "research")]
 pub use benchmark::{run as benchmark, SubscriptionBenchmarkReport};
-#[cfg(feature = "research")]
+#[cfg(feature = "defra-integration")]
 pub use demo::{run as demo, SubscriptionDemoReport};
 
 const INPUT_BYTES: usize = 4;
