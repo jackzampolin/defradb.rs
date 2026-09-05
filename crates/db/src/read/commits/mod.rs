@@ -9,7 +9,7 @@ mod delta;
 use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use document::Document;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
@@ -360,17 +360,28 @@ impl<S: Store> CommitsFetcher<S> {
         if options.doc_id.is_none() {
             let col_opts = IterOptions::new().with_prefix(b"/c/".to_vec());
             let mut col_iter = headstore.iterator(col_opts).await.map_err(Error::Storage)?;
+            let mut collection_ids = BTreeSet::new();
 
             while let Some(pair) = col_iter.next().await.map_err(Error::Storage)? {
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let parts: Vec<&str> = key_str.split('/').collect();
-                if parts.len() >= 4 {
-                    if let Ok(cid) = Cid::from_str(parts[3]) {
-                        cids.push((cid, None));
-                    }
+                let Ok(key) = std::str::from_utf8(&pair.key) else {
+                    continue;
+                };
+                let Some((collection_id, _)) =
+                    key.strip_prefix("/c/").and_then(|key| key.split_once('/'))
+                else {
+                    continue;
+                };
+                if let Ok(collection_id) = collection_id.parse() {
+                    collection_ids.insert(collection_id);
                 }
             }
             col_iter.close().await.map_err(Error::Storage)?;
+
+            for collection_id in collection_ids {
+                let heads =
+                    crate::block::heads::live_collection_heads(&headstore, collection_id).await?;
+                cids.extend(heads.live.into_iter().map(|cid| (cid, None)));
+            }
         }
 
         let (doc_prefix, fixed_doc_id) = if let Some(ref doc_id) = options.doc_id {
