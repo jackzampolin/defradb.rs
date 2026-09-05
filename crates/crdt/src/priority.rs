@@ -48,11 +48,12 @@ pub fn encode_priority(priority: u64) -> EncodedPriority {
 ///
 /// # Returns
 /// * `Ok(priority)` if successful
-/// * `Err(...)` if data is invalid or incomplete
+/// * `Err(...)` if data is invalid, incomplete, or has trailing bytes
 pub fn decode_priority(data: &[u8]) -> Result<u64> {
-    decode_varint(data)
-        .map(|(value, _)| value)
-        .ok_or_else(|| Error::MergeError("invalid priority encoding".into()))
+    match decode_varint(data) {
+        Some((value, consumed)) if consumed == data.len() => Ok(value),
+        _ => Err(Error::MergeError("invalid priority encoding".into())),
+    }
 }
 
 /// Encode unsigned varint (LEB128) into an `EncodedPriority` buffer
@@ -162,5 +163,17 @@ mod tests {
         let encoded = encode_priority(priority);
         assert_eq!(encoded.len(), 2);
         assert_eq!(decode_priority(&encoded).unwrap(), priority);
+    }
+
+    #[test]
+    fn test_trailing_bytes_rejected() {
+        let mut with_trailing = encode_priority(1u64).as_ref().to_vec();
+        with_trailing.extend_from_slice(&[0x00, 0xFF]);
+        assert!(decode_priority(&with_trailing).is_err());
+    }
+
+    #[test]
+    fn test_empty_rejected() {
+        assert!(decode_priority(&[]).is_err());
     }
 }
