@@ -50,6 +50,20 @@ fn decode_rejects_empty_doc_id() {
 }
 
 #[test]
+fn try_from_doc_id_rejects_empty() {
+    let err = Cursor::try_from_doc_id("").unwrap_err();
+    assert!(matches!(err, CursorError::EmptyDocId));
+}
+
+#[test]
+fn try_from_doc_id_round_trips() {
+    let c = Cursor::try_from_doc_id("doc-1").unwrap();
+    let token = c.encode();
+    let decoded = Cursor::decode(&token).unwrap();
+    assert_eq!(decoded.doc_id, "doc-1");
+}
+
+#[test]
 fn encode_omits_empty_keys() {
     let c = Cursor::from_doc_id("doc-1");
     let token = c.encode();

@@ -31,12 +31,31 @@ impl Cursor {
     /// Construct a cursor from a document ID with no key values.
     /// Used when no index is available — the planner falls back to
     /// docID-based iteration.
+    ///
+    /// The ID is not validated: an empty ID encodes fine but `decode`
+    /// rejects it with `EmptyDocId`. Prefer `try_from_doc_id` when the
+    /// ID comes from an untrusted source.
     pub fn from_doc_id(doc_id: impl Into<String>) -> Self {
         Self {
             doc_id: doc_id.into(),
             keys: BTreeMap::new(),
             direction: String::new(),
         }
+    }
+
+    /// Fallible variant of `from_doc_id` that rejects an empty document
+    /// ID with `EmptyDocId` instead of producing a token `decode`
+    /// would refuse.
+    pub fn try_from_doc_id(doc_id: impl Into<String>) -> Result<Self, CursorError> {
+        let doc_id = doc_id.into();
+        if doc_id.is_empty() {
+            return Err(CursorError::EmptyDocId);
+        }
+        Ok(Self {
+            doc_id,
+            keys: BTreeMap::new(),
+            direction: String::new(),
+        })
     }
 
     /// Encode to a base64url-no-pad token: `base64url(json{d, k, o})`.
