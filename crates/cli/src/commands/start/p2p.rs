@@ -14,7 +14,7 @@ impl Node {
     ///
     /// If a peer key exists in the keyring, it is loaded and converted to a libp2p Keypair.
     /// If no peer key exists, a new Ed25519 key is generated and stored in the keyring.
-    pub(super) fn init_peer_key(config: &Config) -> Result<(p2p::Keypair, String)> {
+    pub(super) fn init_peer_key(config: &Config) -> Result<p2p::Keypair> {
         use keyring::PEER_KEY;
 
         let kr = crate::commands::open_keyring(config)?;
@@ -23,9 +23,7 @@ impl Node {
         match kr.get(PEER_KEY) {
             Ok(key_bytes) => {
                 info!("Loaded existing peer key from keyring");
-                let did = Self::derive_and_log_identity_did(&key_bytes)?;
-                let keypair = Self::keypair_from_ed25519_bytes(&key_bytes)?;
-                Ok((keypair, did))
+                Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(keyring::Error::NotFound(_)) => {
                 info!("Generating new peer key");
@@ -38,24 +36,10 @@ impl Node {
                 kr.set(PEER_KEY, key_bytes)
                     .map_err(|e| Error::Keyring(e.to_string()))?;
 
-                let did = Self::derive_and_log_identity_did(key_bytes)?;
-                let keypair = Self::keypair_from_ed25519_bytes(key_bytes)?;
-                Ok((keypair, did))
+                Self::keypair_from_ed25519_bytes(key_bytes)
             }
             Err(e) => Err(Error::Keyring(e.to_string())),
         }
-    }
-
-    /// Derive and log the node's DID from peer key bytes.
-    fn derive_and_log_identity_did(key_bytes: &[u8]) -> Result<String> {
-        use identity::{Identity, IdentityKeyType, RawIdentity};
-
-        let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, key_bytes)?;
-        let did = identity
-            .did()
-            .map_err(|e| Error::Keyring(format!("failed to derive DID: {}", e)))?;
-        info!("Node identity DID: {}", did);
-        Ok(did.to_string())
     }
 
     /// Convert Ed25519 key bytes to libp2p Keypair.

@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use integration_test::{for_each_runtime, DefraClient, NodeKind, TestCluster};
+use serde_json::json;
 
 async fn backup_restore_test(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -101,55 +102,62 @@ async fn backup_restore_test(cluster: TestCluster) {
     backup_import(&client, node_url, &full_path).expect("backup_import full failed");
 
     // 8. Verify restored data
-    let restored_users = client
-        .query("query { User { _docID name } }")
-        .expect("query users after restore");
-    let users = restored_users["User"].as_array().expect("users not array");
-    assert_eq!(users.len(), 2, "expected 2 users after restore");
+    assert_restored_users(&client, &[(&alice_id, "Alice"), (&bob_id, "Bob")]);
 
     let restored_posts = client
-        .query("query { Post { _docID title } }")
+        .query("query { Post(order: {title: ASC}) { _docID title } }")
         .expect("query posts after restore");
     let posts = restored_posts["Post"].as_array().expect("posts not array");
     assert_eq!(posts.len(), 3, "expected 3 posts after restore");
 
-    // 9. Verify doc IDs match originals (CID stability)
-    let user_ids: Vec<&str> = users.iter().filter_map(|u| u["_docID"].as_str()).collect();
-    assert!(
-        user_ids.contains(&alice_id.as_str()),
-        "Alice doc ID should match after restore"
-    );
-    assert!(
-        user_ids.contains(&bob_id.as_str()),
-        "Bob doc ID should match after restore"
-    );
+    for (post, title) in posts.iter().zip(["Hello World", "P2P Guide", "Rust Tips"]) {
+        assert_eq!(post["title"], title);
+    }
 
-    // 10. Truncate User only
+    // 9. Truncate User only
     client
         .collection_truncate("User")
         .expect("truncate User for partial restore");
 
-    // 11. Partial restore (Users only)
+    // 10. Partial restore (Users only)
     backup_import(&client, node_url, &users_path).expect("backup_import users failed");
 
-    // 12. Verify: 2 users restored, 3 posts untouched
-    let final_users = client
-        .query("query { User { _docID } }")
-        .expect("query users after partial restore");
-    assert_eq!(
-        final_users["User"].as_array().expect("not array").len(),
-        2,
-        "expected 2 users after partial restore"
-    );
+    // 11. Verify: 2 users restored, 3 posts untouched
+    assert_restored_users(&client, &[(&alice_id, "Alice"), (&bob_id, "Bob")]);
 
     let final_posts = client
-        .query("query { Post { _docID } }")
+        .query("query { Post(order: {title: ASC}) { _docID title } }")
         .expect("query posts after partial restore");
     assert_eq!(
-        final_posts["Post"].as_array().expect("not array").len(),
-        3,
-        "expected 3 posts still present"
+        final_posts, restored_posts,
+        "partial restore must leave posts unchanged"
     );
+}
+
+fn assert_restored_users(client: &DefraClient, expected: &[(&str, &str)]) {
+    let restored = client
+        .query("query { User(order: {name: ASC}) { _docID name } }")
+        .expect("query users after restore");
+    let users = restored["User"].as_array().expect("users not array");
+    assert_eq!(users.len(), expected.len());
+
+    // JSON import recreates genesis blocks, so signed DocIDs may change.
+    // Original IDs must still resolve as aliases of the restored documents.
+    for (user, (original_id, name)) in users.iter().zip(expected) {
+        assert_eq!(user["name"], *name);
+        let by_original_id = client
+            .query(&format!(
+                r#"query {{ User(docID: "{original_id}") {{ _docID name }} }}"#
+            ))
+            .expect("query restored user by original ID");
+        assert_eq!(by_original_id["User"], json!([user]));
+        let filtered = client
+            .query(&format!(
+                r#"query {{ User(docID: "{original_id}", filter: {{name: {{_neq: "{name}"}}}}) {{ _docID name }} }}"#
+            ))
+            .expect("query restored user with non-matching filter");
+        assert_eq!(filtered["User"], json!([]));
+    }
 }
 
 fn backup_export(

@@ -27,7 +27,7 @@ impl Node {
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
-        node_identity_did: Option<String>,
+        node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
     ) -> Result<ServerSetup> {
         let user_did = match &user_identity {
@@ -43,8 +43,12 @@ impl Node {
         };
 
         let identity_key_bytes = user_identity.as_ref().map(|id| id.private_key_bytes());
+        let node_did = node_identity
+            .as_ref()
+            .map(|identity| identity.did())
+            .transpose()?;
 
-        if let (Some(did), Some(identity)) = (&user_did, &user_identity) {
+        if let (Some(did), Some(identity)) = (&node_did, &node_identity) {
             defra_core::signing::store_identity(
                 did.as_ref(),
                 defra_core::signing::SigningConfig {
@@ -80,9 +84,9 @@ impl Node {
 
         let mut db_options =
             db::DbOptions::new().with_max_txn_retries(config.datastore.max_txn_retries);
-        if let Some(identity) = user_identity.as_ref() {
+        if let Some(identity) = node_identity.as_ref() {
             db_options = db_options.with_node_identity_arc(identity.clone());
-            info!("Database configured with user identity");
+            info!("Database configured with node identity");
         }
         let embedding_api_key = if config.embedding.api_key_env.is_empty() {
             String::new()
@@ -137,7 +141,7 @@ impl Node {
             event_bus.clone(),
             config,
             peer_keypair,
-            user_identity,
+            node_identity,
             se_key,
         )
         .await?;
@@ -317,7 +321,7 @@ impl Node {
             acp_setup: &acp_setup,
             zanzibar_store,
             user_did: user_did.as_ref(),
-            node_identity_did,
+            node_identity_did: node_did.map(|did| did.to_string()),
         })?;
         #[cfg(feature = "postgres")]
         let pg_server = Self::build_pg_server(

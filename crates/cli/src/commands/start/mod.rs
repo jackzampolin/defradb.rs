@@ -1,6 +1,7 @@
 //! Start command implementation
 
 mod node;
+mod node_identity;
 mod p2p;
 mod run;
 mod server;
