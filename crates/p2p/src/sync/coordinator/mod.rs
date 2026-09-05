@@ -71,7 +71,7 @@ use acp::DocumentACP;
 use blockstore::Blockstore;
 use cid::Cid;
 use parking_lot::Mutex;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
@@ -265,6 +265,7 @@ struct SyncShutdownState {
     /// remains the single source of truth and stays a plain atomic because it
     /// is read on hot paths.
     shutdown_notify: Notify,
+    shutdown_complete: watch::Sender<bool>,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
     non_authoritative_broadcast_slots: Arc<Semaphore>,
     non_authoritative_broadcast_high_water: AtomicUsize,
@@ -354,6 +355,7 @@ impl SyncShutdownHandle {
             inner: Arc::new(SyncShutdownState {
                 is_shutting_down: AtomicBool::new(false),
                 shutdown_notify: Notify::new(),
+                shutdown_complete: watch::channel(false).0,
                 background_tasks: Mutex::new(Vec::new()),
                 non_authoritative_broadcast_slots: Arc::new(Semaphore::new(
                     NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
@@ -403,25 +405,36 @@ impl SyncShutdownHandle {
         notified.await;
     }
 
+    /// Wait for registered tasks to finish, including cancellation cleanup.
+    /// Concurrent callers share teardown; cancelling a caller does not stop it.
     pub async fn shutdown(&self) {
-        if !self.begin_shutdown() {
-            return;
+        let mut complete = self.inner.shutdown_complete.subscribe();
+        if self.begin_shutdown() {
+            let shutdown = self.clone();
+            tokio::spawn(async move {
+                shutdown
+                    .drain_background_tasks(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
+                    .await;
+                shutdown.inner.shutdown_complete.send_replace(true);
+            });
         }
-
-        self.drain_background_tasks(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
-            .await;
+        let _ = complete.wait_for(|complete| *complete).await;
     }
 
-    fn register_task(&self, handle: JoinHandle<()>) {
+    fn spawn_task<F>(&self, future: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let mut tasks = self.inner.background_tasks.lock();
+        if self.is_shutting_down() {
+            return false;
+        }
         // Retire completed handles on every registration so retained handles
         // track live tasks instead of total spawn count (#1099).
         tasks.retain(|task| !task.is_finished());
-        if self.is_shutting_down() {
-            handle.abort();
-        } else {
-            tasks.push(handle);
-        }
+        // Hold the registry lock through spawning so shutdown cannot miss the task.
+        tasks.push(tokio::spawn(future));
+        true
     }
 
     fn try_acquire_non_authoritative_broadcast_slot(&self) -> Option<OwnedSemaphorePermit> {
@@ -555,29 +568,26 @@ impl SyncShutdownHandle {
                 })
         });
 
-        let started = tokio::time::Instant::now();
-
-        for handle in &mut handles {
-            let elapsed = started.elapsed();
-            let Some(remaining) = timeout.checked_sub(elapsed) else {
-                break;
-            };
-
-            match tokio::time::timeout(remaining, handle).await {
-                Ok(Ok(())) | Ok(Err(_)) => {}
-                Err(_) => {
-                    tracing::debug!(
-                        timeout_ms = timeout.as_millis() as u64,
-                        "Coordinator background task exceeded shutdown drain window; aborting remaining tasks"
-                    );
-                    break;
-                }
-            }
-        }
-
-        for handle in handles {
-            if !handle.is_finished() {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut handles = handles.into_iter();
+        while let Some(mut handle) = handles.next() {
+            if tokio::time::timeout_at(deadline, &mut handle)
+                .await
+                .is_err()
+            {
+                tracing::debug!(
+                    timeout_ms = timeout.as_millis() as u64,
+                    "Coordinator background task exceeded shutdown drain window; aborting remaining tasks"
+                );
                 handle.abort();
+                for pending in handles.as_slice() {
+                    pending.abort();
+                }
+                let _ = handle.await;
+                for pending in handles {
+                    let _ = pending.await;
+                }
+                return;
             }
         }
     }
@@ -961,13 +971,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        if self.runtime.shutdown.is_shutting_down() {
+        if !self.runtime.shutdown.spawn_task(future) {
             tracing::debug!(task = task_name, "Skipping background task during shutdown");
-            return;
         }
-
-        let handle = tokio::spawn(future);
-        self.runtime.shutdown.register_task(handle);
     }
 
     /// Spawn mutation-adjacent gossip/artifact work in a distinct bounded
@@ -997,11 +1003,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             );
             return;
         };
-        let handle = tokio::spawn(async move {
+        self.runtime.shutdown.spawn_task(async move {
             future.await;
             drop(permit);
         });
-        self.runtime.shutdown.register_task(handle);
     }
 
     pub(crate) fn spawn_pending_dag_fetch_task<F>(
@@ -1095,6 +1100,10 @@ mod dag_fetch_limiter_tests {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/coordinator/shutdown.rs"]
+mod shutdown_completion_tests;
+
+#[cfg(test)]
 mod shutdown_tests {
     use super::broadcast::tests::TestTransport;
     use super::{
@@ -1184,10 +1193,10 @@ mod shutdown_tests {
         let completed = Arc::new(AtomicBool::new(false));
         let completed_for_task = Arc::clone(&completed);
 
-        shutdown.register_task(tokio::spawn(async move {
+        shutdown.spawn_task(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             completed_for_task.store(true, Ordering::SeqCst);
-        }));
+        });
 
         shutdown.shutdown().await;
 
@@ -1228,13 +1237,20 @@ mod shutdown_tests {
 
     /// #1099: completed handles must not accumulate for the process lifetime.
     #[tokio::test]
-    async fn register_task_prunes_finished_handles() {
+    async fn spawn_task_prunes_finished_handles() {
         let shutdown = SyncShutdownHandle::new(4);
         let mut handles = Vec::new();
         for _ in 0..50 {
-            let handle = tokio::spawn(async {});
-            handles.push(handle.abort_handle());
-            shutdown.register_task(handle);
+            shutdown.spawn_task(async {});
+            handles.push(
+                shutdown
+                    .inner
+                    .background_tasks
+                    .lock()
+                    .last()
+                    .unwrap()
+                    .abort_handle(),
+            );
         }
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -1243,9 +1259,9 @@ mod shutdown_tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        shutdown.register_task(tokio::spawn(async {
+        shutdown.spawn_task(async {
             tokio::time::sleep(Duration::from_secs(5)).await;
-        }));
+        });
 
         assert!(
             shutdown.retained_task_count() <= 2,
@@ -1330,25 +1346,21 @@ mod shutdown_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_uses_single_global_budget_for_background_tasks() {
         let shutdown = SyncShutdownHandle::new(4);
 
         for _ in 0..3 {
-            shutdown.register_task(tokio::spawn(async move {
+            shutdown.spawn_task(async move {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-            }));
+            });
         }
 
         let started = tokio::time::Instant::now();
         shutdown.shutdown().await;
         let elapsed = started.elapsed();
 
-        assert!(
-            elapsed < Duration::from_secs(7),
-            "shutdown should use one shared deadline, got {:?}",
-            elapsed
-        );
+        assert_eq!(elapsed, BACKGROUND_TASK_SHUTDOWN_TIMEOUT);
     }
 
     /// #1309: a periodic loop must exit on the shutdown signal, not at the end

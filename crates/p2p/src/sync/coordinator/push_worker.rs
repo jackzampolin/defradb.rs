@@ -171,13 +171,12 @@ pub(super) fn spawn_push_workers<T>(
 {
     for _ in 0..context.backlog.worker_count() {
         let context = Arc::clone(&context);
-        let handle = tokio::spawn(async move {
+        shutdown.spawn_task(async move {
             while let Some(job) = context.backlog.next_job().await {
                 let completion = run_push_job(&context, &job).await;
                 context.backlog.job_done(&job, completion);
             }
         });
-        shutdown.register_task(handle);
     }
 }
 
