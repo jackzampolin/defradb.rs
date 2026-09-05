@@ -104,6 +104,7 @@ pub mod query_context;
 pub mod route_permissions;
 pub mod router;
 pub mod server;
+mod tls;
 pub mod validation;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -121,6 +122,7 @@ pub use router::{
     ReplicatorInfo, TransactionOperations, TransportPeerId, ViewOperations, MANAGE_UNAUTHORIZED,
 };
 pub use server::{Server, ServerConfig, DEFAULT_MAX_BACKUP_SIZE};
+pub use tls::TlsConfig;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use mock::{
