@@ -11,7 +11,12 @@ impl Node {
     #[doc(hidden)]
     pub async fn run(mut self) -> Result<()> {
         info!("DefraDB node started");
-        info!("API endpoint: http://{}", self.config.api.address);
+        let scheme = if self.config.api.tls_enabled() {
+            "https"
+        } else {
+            "http"
+        };
+        info!("API endpoint: {scheme}://{}", self.config.api.address);
 
         // Start HTTP server
         let http_task: Option<JoinHandle<()>> = if let Some(server) = self.http_server.take() {

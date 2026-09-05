@@ -191,6 +191,21 @@ impl Node {
         config: Config,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
     ) -> Result<Self> {
+        config.api.validate()?;
+        // Reject invalid TLS before starting stores or background tasks.
+        let tls = if config.api.tls_enabled() {
+            Some(
+                defra_http::TlsConfig::from_pem_file(
+                    &config.api.pubkey_path,
+                    &config.api.privkey_path,
+                )
+                .await
+                .map_err(|e| crate::error::Error::InvalidConfig(format!("HTTP TLS: {e}")))?,
+            )
+        } else {
+            None
+        };
+
         info!("Initializing DefraDB node");
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
@@ -223,7 +238,7 @@ impl Node {
         }
 
         // Initialize storage, database, and set up P2P and HTTP server
-        let servers = match config.datastore.store {
+        let mut servers = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
@@ -265,6 +280,10 @@ impl Node {
                 .await?
             }
         };
+
+        if let Some(tls) = tls {
+            servers.http_server = servers.http_server.with_tls(tls);
+        }
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 

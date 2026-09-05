@@ -89,6 +89,7 @@ impl Default for ServerConfig {
 /// HTTP server for DefraDB.
 pub struct Server {
     config: ServerConfig,
+    tls: Option<crate::TlsConfig>,
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
@@ -119,6 +120,7 @@ impl Server {
     pub fn new<E: QueryExecutor + 'static>(executor: E) -> Self {
         Self {
             config: ServerConfig::default(),
+            tls: None,
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
@@ -149,6 +151,7 @@ impl Server {
     pub fn with_config<E: QueryExecutor + 'static>(executor: E, config: ServerConfig) -> Self {
         Self {
             config,
+            tls: None,
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
@@ -179,6 +182,7 @@ impl Server {
     pub fn from_arc(executor: Arc<dyn QueryExecutor>) -> Self {
         Self {
             config: ServerConfig::default(),
+            tls: None,
             executor,
             rest: None,
             p2p: None,
@@ -209,6 +213,7 @@ impl Server {
     pub fn from_arc_with_config(executor: Arc<dyn QueryExecutor>, config: ServerConfig) -> Self {
         Self {
             config,
+            tls: None,
             executor,
             rest: None,
             p2p: None,
@@ -233,6 +238,12 @@ impl Server {
             node_identity_did: None,
             dev_mode: false,
         }
+    }
+
+    /// Serve HTTPS using a previously validated certificate and private key.
+    pub fn with_tls(mut self, config: crate::TlsConfig) -> Self {
+        self.tls = Some(config);
+        self
     }
 
     /// Set REST operations for collection/document endpoints.
@@ -676,9 +687,14 @@ impl Server {
             ))
         })?;
 
-        tracing::info!("Providing HTTP API at http://{}", self.config.address);
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        tracing::info!("Providing HTTP API at {scheme}://{}", self.config.address);
 
-        axum::serve(listener, router).await.map_err(|e| {
+        let result = match self.tls {
+            Some(tls) => tls.serve(listener, router).await,
+            None => axum::serve(listener, router).await,
+        };
+        result.map_err(|e| {
             tracing::error!(error = %e, "HTTP server encountered fatal error");
             crate::error::HttpError::Internal(format!("server error: {}", e))
         })?;
