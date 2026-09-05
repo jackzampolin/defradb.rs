@@ -437,7 +437,10 @@ const DIRECT_START_FLAGS: &[(&str, &str)] = &[
     #[cfg(feature = "orbis")]
     ("signer-orbis-derivation", "StartArgs::setup_orbis_signer"),
     #[cfg(feature = "orbis")]
-    ("signer-orbis-identity", "StartArgs::parse_orbis_service_identity"),
+    (
+        "signer-orbis-identity",
+        "StartArgs::parse_orbis_service_identity",
+    ),
 ];
 
 #[test]
