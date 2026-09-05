@@ -4,6 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 
+mod branchable_sync;
+
 use crate::transport_doc_pusher::TransportDocPusher;
 use crate::{
     ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
@@ -1028,24 +1030,16 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 .into_iter()
                 .flat_map(|(_, reply)| reply.heads)
                 .filter_map(|head| cid::Cid::try_from(head.as_slice()).ok());
-            let mut pending_heads = unmerged_heads(coord.blockstore().as_ref(), heads).await;
-
-            while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
-                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
-                {
-                    Ok(Some(msg)) => {
-                        if let Some(data) = msg.as_merge_complete() {
-                            if data.collection_id == collection_id_string {
-                                pending_heads.remove(&data.cid);
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(_) => {}
-                }
-            }
+            let pending_heads = unmerged_heads(coord.blockstore().as_ref(), heads).await;
+            let result = branchable_sync::wait_for_heads(
+                &mut sub,
+                collection_id,
+                pending_heads,
+                (start + overall_timeout).into(),
+            )
+            .await;
             event_bus.unsubscribe(sub.id());
-            return Ok(());
+            return result;
         }
 
         let mut request = p2p::message::BranchableSyncRequest::new(collection_id.to_string());
