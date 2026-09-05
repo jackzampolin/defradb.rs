@@ -1,0 +1,237 @@
+name: Performance (pull request)
+
+# Its own workflow, and that is the whole reason it exists separately.
+#
+# The full matrix is forty jobs across three platforms. Keeping it in the
+# workflow a pull request triggers meant every PR carried forty skipped checks,
+# and GitHub renders a skipped matrix job without expanding its matrix: the
+# check list filled up with literal `${{ matrix.family }}` rows. A pull request
+# triggers this file, which has no matrix, so those checks are never created.
+#
+# The full sweep lives in `perf.yml` and runs on a push to `main` or on a
+# `workflow_dispatch`, which can be pointed at any branch.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  # Every pull request, no ceremony. Four families on Linux,
+  # measured against this PR's own merge base on this same runner with this
+  # same profile, and posted back as a comment.
+  #
+  # Two decisions keep it quick without making it dishonest.
+  #
+  # `release-fast` rather than the `bench` profile: thin LTO and sixteen
+  # codegen units build in a fraction of the time fat LTO takes. It produces
+  # different absolute numbers, which is exactly why this path never publishes
+  # to the dashboard and never compares against it. Both sides of this
+  # comparison are built the same way, so the delta between them is real even
+  # though neither figure is the one a release would post.
+  #
+  # And the base measurement is cached by its commit. A base is measured once
+  # and then reused by every later pull request that shares it, so only the
+  # first one after a merge to `main` pays for the second build.
+  quick:
+    name: Quick benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      DEFRA_BENCH_CRITERION_ARGS: --warm-up-time 0.5 --measurement-time 1.5 --sample-size 10
+      PERF_PROFILE: release-fast
+      # The write path, the allocation counts that catch a stray clone before
+      # the clock does, cold start, and the storage transaction seam.
+      QUICK_FAMILIES: document_write allocs startup transaction
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: head
+      - uses: extractions/setup-just@v2
+      # Its own interpreter rather than the system one: a PEP 668 image refuses
+      # to let pip touch the system environment, and this gate must not be the
+      # thing that fails before it has checked anything.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # A bench target the matrix does not name measures nothing, and nothing
+      # else in CI would notice.
+      - name: Check every bench target is measured
+        working-directory: head
+        run: |
+          python3 -m pip install --quiet pyyaml
+          just perf-matrix
+      - uses: dtolnay/rust-toolchain@stable
+      - run: head/.github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-quick
+          workspaces: head
+
+      - name: Record how quiet the host is
+        run: python3 head/tools/perf-site/loadguard.py --out loadguard.json
+
+      - name: Measure this pull request
+        working-directory: head
+        env:
+          DEFRA_BENCH_OUT: ${{ github.workspace }}/head.jsonl
+        run: |
+          set -euo pipefail
+          for family in $QUICK_FAMILIES; do
+            echo "::group::$family"
+            rm -rf target/criterion
+            cargo bench --profile "$PERF_PROFILE" -p benches --bench "$family" \
+              -- $DEFRA_BENCH_CRITERION_ARGS
+            mkdir -p "$GITHUB_WORKSPACE/criterion-head/$family"
+            [ -d target/criterion ] && cp -R target/criterion/. "$GITHUB_WORKSPACE/criterion-head/$family/"
+            echo "::endgroup::"
+          done
+          touch "$DEFRA_BENCH_OUT"
+
+      - name: Assemble this pull request's document
+        working-directory: head
+        env:
+          DEFRA_BENCH_OUT: ${{ github.workspace }}/head.jsonl
+          PERF_COMMIT: ${{ github.event.pull_request.head.sha }}
+          PERF_LABEL: pr-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          cargo run --profile "$PERF_PROFILE" -p defra-perf --bin collect -- \
+            --criterion-root "$GITHUB_WORKSPACE/criterion-head" \
+            --out "$GITHUB_WORKSPACE/platform-head.json" \
+            --commit "$PERF_COMMIT" \
+            --label "$PERF_LABEL" \
+            --target x86_64-unknown-linux-gnu \
+            --loadguard "$GITHUB_WORKSPACE/loadguard.json"
+
+      # A base is the same commit for every PR branched off it, so measuring it
+      # once and reusing the document is the difference between paying for two
+      # builds on every pull request and paying for them once per merge.
+      - name: Restore the baseline measured for this base commit
+        id: basecache
+        uses: actions/cache@v4
+        with:
+          path: platform-base.json
+          key: perf-quick-base-${{ github.event.pull_request.base.sha }}-v1
+
+      - uses: actions/checkout@v4
+        if: steps.basecache.outputs.cache-hit != 'true'
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Measure the merge base
+        if: steps.basecache.outputs.cache-hit != 'true'
+        working-directory: base
+        env:
+          DEFRA_BENCH_OUT: ${{ github.workspace }}/base.jsonl
+          # The same target directory as the head build, so the second build
+          # reuses every dependency artifact the first one produced.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/head/target
+        run: |
+          set -euo pipefail
+          for family in $QUICK_FAMILIES; do
+            # A family this pull request introduces does not exist on the base,
+            # and that is a new measurement rather than a failure. The
+            # comparison reports it as measured on one side only.
+            echo "::group::$family"
+            rm -rf "$CARGO_TARGET_DIR/criterion"
+            cargo bench --profile "$PERF_PROFILE" -p benches --bench "$family" \
+              -- $DEFRA_BENCH_CRITERION_ARGS \
+              || echo "::notice::$family did not run on the base commit; it will show as new"
+            mkdir -p "$GITHUB_WORKSPACE/criterion-base/$family"
+            [ -d "$CARGO_TARGET_DIR/criterion" ] && \
+              cp -R "$CARGO_TARGET_DIR/criterion/." "$GITHUB_WORKSPACE/criterion-base/$family/"
+            echo "::endgroup::"
+          done
+          touch "$DEFRA_BENCH_OUT"
+
+      - name: Assemble the merge base's document
+        if: steps.basecache.outputs.cache-hit != 'true'
+        working-directory: base
+        env:
+          DEFRA_BENCH_OUT: ${{ github.workspace }}/base.jsonl
+          CARGO_TARGET_DIR: ${{ github.workspace }}/head/target
+          PERF_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Built from the base checkout when it has the collector, and from
+          # this PR's when the PR is what introduces it.
+          manifest=Cargo.toml
+          if ! grep -q '"tools/perf"' Cargo.toml; then
+            manifest="$GITHUB_WORKSPACE/head/Cargo.toml"
+          fi
+          cargo run --manifest-path "$manifest" --profile "$PERF_PROFILE" \
+            -p defra-perf --bin collect -- \
+            --criterion-root "$GITHUB_WORKSPACE/criterion-base" \
+            --out "$GITHUB_WORKSPACE/platform-base.json" \
+            --commit "$PERF_BASE_COMMIT" \
+            --label "base" \
+            --target x86_64-unknown-linux-gnu \
+            --loadguard "$GITHUB_WORKSPACE/loadguard.json"
+
+      - name: Compare
+        id: compare
+        env:
+          PERF_THRESHOLD: '5'
+        run: |
+          set -euo pipefail
+          mkdir -p head-site base-site
+          python3 head/tools/perf-site/publish.py --site head-site platform-head.json
+          if [ ! -f platform-base.json ]; then
+            {
+              echo "## Performance"
+              echo ""
+              echo "The merge base could not be measured, so there is nothing to compare"
+              echo "against. This pull request's own numbers are attached to the workflow run."
+            } > report.md
+          else
+            python3 head/tools/perf-site/publish.py --site base-site platform-base.json
+            python3 head/tools/perf-site/compare.py \
+              --baseline "$(ls base-site/runs/*.json | grep -v index.json | head -1)" \
+              --current  "$(ls head-site/runs/*.json | grep -v index.json | head -1)" \
+              --threshold "$PERF_THRESHOLD" \
+              --markdown report.md \
+              --note "Quick check: \`$QUICK_FAMILIES\` on \`x86_64-unknown-linux-gnu\`, built with the \`$PERF_PROFILE\` profile against this PR's own merge base on this runner. Both sides were built and measured identically, so the deltas are real; the absolute figures are not the release-profile ones the dashboard publishes. The full matrix across Linux, macOS and the browser runs on a push to \`main\`, or on demand from the Performance workflow."
+          fi
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = require('fs').readFileSync('report.md', 'utf8');
+            const marker = '<!-- defradb-perf-quick -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const existing = (await github.rest.issues.listComments({ owner, repo, issue_number }))
+              .data.find(c => c.body && c.body.includes(marker));
+            const payload = `${marker}\n${body}`;
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: payload });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: payload });
+            }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-quick
+          path: |
+            report.md
+            platform-head.json
+            platform-base.json
+          if-no-files-found: warn
+          retention-days: 30

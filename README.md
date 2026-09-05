@@ -191,6 +191,31 @@ ffi-test status                        # Show pass rates
 
 See `tools/ffi-test/README.md` for full usage.
 
+## Performance
+
+Every push to `main` measures the suite across Linux, macOS and a browser, and
+publishes the run to the dashboard:
+
+**https://sourcenetwork.github.io/defradb.rs/**
+
+The run documents under `runs/` are the artifact; the page is a reader over
+them, so any metric can be plotted across every run ever recorded. A family the
+collector did not receive is drawn as an explicit gap and never as a zero, and a
+timing taken on a runner that was not quiet is marked contaminated rather than
+presumed comparable.
+
+Every pull request gets a quick check commented back onto it: a few families on
+Linux, measured against that PR's own merge base on the same runner with the
+same build profile. Run the whole matrix on a branch with the **Performance**
+workflow's `Run workflow` button.
+
+```bash
+just perf                     # measure this machine, build the dashboard locally
+just perf-serve               # then read it at http://127.0.0.1:8099/
+just perf-compare a.json b.json
+cargo bench -p benches --bench document_write
+```
+
 ## P2P Replication
 
 ### Filtered replication

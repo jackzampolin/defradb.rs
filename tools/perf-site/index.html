@@ -1,0 +1,672 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DefraDB Rust Performance</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#04080c; --panel:#0a1119; --panel-2:#0e1922; --line:#16242f; --line-2:#22323f;
+  --ink:#e6eef5; --mute:#7b8d9c;
+  --blue:#10CBFF; --blue-dim:#0b7fa6; --blue-soft:#08222d;
+  --bad:#ff5f52; --warn:#f0a93b;
+  --pad:26px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--ink)}
+body{font-family:Inter,system-ui,-apple-system,sans-serif;font-size:15px;line-height:1.45;
+  -webkit-font-smoothing:antialiased}
+code,.mono,td.num,td.val,select{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+a{color:var(--blue)}
+header{padding:20px var(--pad);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;
+  gap:16px;align-items:center;background:linear-gradient(180deg,#071119 0%,var(--bg) 100%)}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.brand .logo{height:26px;width:auto;flex:none}
+h1{font-size:18px;font-weight:600;margin:0;letter-spacing:-.01em;color:var(--mute)}
+h2{font-size:12px;font-weight:600;margin:30px var(--pad) 12px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--mute);display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+/* The title is its own element so it can wrap: an anonymous flex item beside a
+   growing rule cannot, and a long family name then ran off a narrow screen. */
+h2 .h2-name{min-width:0;overflow-wrap:break-word}
+h2 .rule{flex:1 1 40px;height:1px;background:var(--line);min-width:24px}
+main{padding-bottom:70px}
+.controls{margin-left:auto;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.controls > div{display:flex;flex-direction:column;min-width:0}
+label{font-size:11px;color:var(--mute);margin-bottom:4px;letter-spacing:.03em}
+select{background:var(--panel-2);color:var(--ink);border:1px solid var(--line-2);border-radius:7px;
+  padding:6px 9px;font-size:12px;width:186px;max-width:100%;min-width:0}
+select:focus-visible{outline:2px solid var(--blue-dim);outline-offset:1px;border-color:var(--blue-dim)}
+/* min() keeps the track from staying wider than the content box on a narrow
+   screen, which is what made the page itself scroll sideways. */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:14px;
+  padding:0 var(--pad);align-items:start}
+.grid.wide{grid-template-columns:minmax(0,1fr)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:16px;
+  cursor:zoom-in;position:relative;min-width:0}
+.card:hover{border-color:var(--line-2)}
+.card .scroll{max-height:48vh;overflow:auto;-webkit-overflow-scrolling:touch}
+.card::after{content:"expand";position:absolute;top:13px;right:15px;font-size:9px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--mute);opacity:0;transition:opacity .12s}
+.card:hover::after{opacity:.7}
+.card.zoomed{position:fixed;inset:18px;z-index:50;overflow:auto;cursor:zoom-out;
+  box-shadow:0 24px 90px rgba(0,0,0,.8)}
+.card.zoomed .scroll{max-height:none}
+.card.zoomed::after{content:"close  esc";opacity:.7}
+.zoom-backdrop{position:fixed;inset:0;background:rgba(2,5,8,.8);z-index:40}
+.card.broken{border-color:#43241f}
+.card.broken .note{color:var(--bad)}
+/* Room for the corner label, so it never sits on the title. */
+.card h3{margin:0 0 4px;font-size:14px;font-weight:600;padding-right:74px;overflow-wrap:break-word}
+.note{margin:0 0 12px;font-size:12px;color:var(--mute);line-height:1.45;overflow-wrap:break-word}
+.headline{font-size:27px;font-weight:600;letter-spacing:-.02em;margin:4px 0 12px;color:var(--blue)}
+.headline small{font-size:12px;font-weight:400;color:var(--mute);letter-spacing:0}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--mute);
+  font-weight:500;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid var(--line);overflow-wrap:break-word}
+td.num{text-align:right;white-space:nowrap;overflow-wrap:normal}
+td.val{text-align:right;overflow-wrap:break-word}
+tr:last-child td{border-bottom:none}
+.up{color:var(--blue)} .down{color:var(--bad)} .flat{color:var(--mute)}
+.pill{display:inline-block;font-size:10px;padding:2px 7px;border-radius:99px;
+  vertical-align:middle;border:1px solid var(--line-2);color:var(--mute);text-transform:uppercase;
+  letter-spacing:.06em;font-weight:500;white-space:nowrap}
+h3 .pill{margin-left:8px}
+.pill.clean{color:var(--blue);border-color:#0d4257;background:var(--blue-soft)}
+.pill.contaminated{color:var(--warn);border-color:#43350f}
+.pill.absent{color:var(--mute)}
+.barcell{width:26%}
+.range{font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--mute);font-size:10px}
+.bar{height:8px;border-radius:99px;background:#0d1720;overflow:hidden;min-width:40px}
+.bar i{display:block;height:100%;background:var(--blue-dim)}
+.bar i.regress{background:var(--bad)}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.empty{padding:30px var(--pad);color:var(--mute);font-size:13px}
+svg.chart{display:block;width:100%;height:auto;overflow:visible}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:10.5px;color:var(--mute);margin-top:8px}
+.legend b{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.tag{display:inline-block;font-size:10px;color:var(--mute);border:1px solid var(--line-2);
+  border-radius:5px;padding:1px 6px;margin:0 5px 4px 0}
+.index{display:flex;flex-wrap:wrap;gap:6px;padding:18px var(--pad) 0}
+.jump{font-size:11px;color:var(--mute);text-decoration:none;border:1px solid var(--line);
+  border-radius:6px;padding:3px 8px;background:var(--panel);white-space:nowrap}
+.jump:hover{color:var(--blue);border-color:var(--blue-dim)}
+.jump:focus-visible{outline:2px solid var(--blue-dim);outline-offset:1px}
+/* A jumped-to heading otherwise lands under the top edge of the viewport. */
+h2[id]{scroll-margin-top:14px}
+
+/* Wrapped controls should share the row evenly rather than leaving one
+   stranded, which starts well above the phone breakpoint. */
+@media (max-width:980px){
+  .controls{margin-left:0;width:100%}
+  .controls > div{flex:1 1 170px}
+  .controls select{width:100%}
+}
+@media (max-width:720px){
+  :root{--pad:14px}
+  header{padding:14px var(--pad);gap:12px}
+  .brand .logo{height:22px}
+  h1{font-size:16px}
+  h2{margin:22px var(--pad) 10px}
+  .controls > div{flex:1 1 150px}
+  .headline{font-size:22px}
+  .card{padding:13px}
+  .card .scroll{max-height:none}
+  .card.zoomed{inset:8px;padding:14px}
+  table{font-size:12px}
+  th,td{padding:5px 6px}
+  /* A label column that has given up all its width is unreadable however it
+     wraps, so it keeps a floor and the value beside it yields instead. */
+  td:first-child{min-width:6em}
+  /* The bar is a relative-magnitude cue for the number beside it. On a phone
+     it was taking a quarter of the row and pushing that number off the edge,
+     and the number is the part that has to survive. */
+  .barcell{display:none}
+  /* The measured spread belongs beside the value on a wide screen and under it
+     on a narrow one: inline, it doubled the column's width and pushed the
+     value itself off the edge. */
+  .range{display:block}
+}
+/* No hover means the corner label never appears, so it must not reserve space
+   either; a zoomed card still needs its way out to be visible without one. */
+@media (hover:none){
+  .card{cursor:default}
+  .card h3{padding-right:0}
+  .card::after{display:none}
+  .card.zoomed h3{padding-right:88px}
+  .card.zoomed::after{display:block;content:"tap to close";opacity:.8}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+<header>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 193 43" fill="none" role="img" aria-label="DefraDB"><g stroke="#10CBFF" stroke-width="1.875" stroke-linecap="round" stroke-linejoin="round"><path d="M12.309 15.5657L24.2088 8.5573C25.1555 8.00084 26.2323 7.70431 27.3304 7.69771C28.4284 7.69112 29.5088 7.97468 30.462 8.51973C31.4153 9.06478 32.2077 9.85196 32.759 10.8016C33.3103 11.7513 33.601 12.8297 33.6016 13.9278V19.5434"/><path d="M12.309 27.7552V15.5658"/><path d="M18.2589 31.2091L12.309 27.7551"/><path d="M18.2786 18.919L18.2349 30.5846"/><path d="M18.2593 31.2092L24.666 27.5323C25.7846 26.8752 26.7122 25.9375 27.3571 24.8118C28.002 23.6862 28.3418 22.4117 28.3429 21.1144L28.3875 13.6158"/><path d="M18.2785 18.919L27.7722 13.5165C28.3624 13.1755 29.032 12.9958 29.7136 12.9956C30.3953 12.9954 31.065 13.1747 31.6554 13.5154C32.2458 13.8561 32.7361 14.3462 33.077 14.9365C33.4179 15.5268 33.5974 16.1965 33.5974 16.8781V20.0214"/><path d="M30.2087 8.32791L27.1075 6.53002C25.4823 5.58789 23.6359 5.09466 21.7573 5.10084C19.8788 5.10703 18.0356 5.61241 16.4167 6.56523L6.39801 12.4616V31.8378L16.9162 37.8991L27.3786 31.7598C29.2706 30.6465 30.8394 29.0588 31.9298 27.1536C33.0202 25.2483 33.5945 23.0914 33.5959 20.8962V16.094"/></g><path d="M50.97 35V10.7H59.76C62.4 10.7 64.67 11.19 66.57 12.17C68.49 13.13 69.96 14.52 70.98 16.34C72.02 18.16 72.54 20.33 72.54 22.85C72.54 25.35 72.02 27.51 70.98 29.33C69.94 31.15 68.46 32.55 66.54 33.53C64.64 34.51 62.38 35 59.76 35H50.97ZM54.42 32.06H59.76C62.7 32.06 64.98 31.25 66.6 29.63C68.24 28.01 69.06 25.75 69.06 22.85C69.06 19.93 68.25 17.67 66.63 16.07C65.01 14.45 62.72 13.64 59.76 13.64H54.42V32.06ZM84.7763 35.36C82.8963 35.36 81.2663 34.98 79.8862 34.22C78.5062 33.44 77.4363 32.34 76.6763 30.92C75.9363 29.5 75.5662 27.84 75.5662 25.94C75.5662 24.04 75.9363 22.4 76.6763 21.02C77.4363 19.62 78.4962 18.54 79.8562 17.78C81.2163 17.02 82.8063 16.64 84.6263 16.64C86.3663 16.64 87.8663 16.99 89.1263 17.69C90.4063 18.39 91.3963 19.38 92.0963 20.66C92.7963 21.94 93.1463 23.46 93.1463 25.22V26.57H78.8062C78.9063 28.45 79.4763 29.92 80.5163 30.98C81.5763 32.02 82.9863 32.54 84.7463 32.54C85.9663 32.54 86.9962 32.29 87.8362 31.79C88.6763 31.27 89.2563 30.51 89.5763 29.51H92.9963C92.5563 31.37 91.6063 32.81 90.1463 33.83C88.7063 34.85 86.9163 35.36 84.7763 35.36ZM78.9263 24.11H89.9062C89.7463 22.63 89.1963 21.48 88.2563 20.66C87.3363 19.84 86.1163 19.43 84.5963 19.43C83.0963 19.43 81.8463 19.84 80.8463 20.66C79.8462 21.48 79.2063 22.63 78.9263 24.11ZM98.7469 35V19.58H95.0869V17H98.7769V12.83C98.7769 11.81 99.0569 11.05 99.6169 10.55C100.177 10.05 100.947 9.8 101.927 9.8H106.907V12.38H102.077V17H106.547V19.58H102.107V35H98.7469ZM110.638 35V20.48H108.898V17H112.498V20.36H113.758C114.258 19.26 115.028 18.4 116.068 17.78C117.128 17.16 118.368 16.85 119.788 16.85H121.258V19.73H119.608C117.808 19.73 116.418 20.26 115.438 21.32C114.458 22.38 113.968 23.81 113.968 25.61V35H110.638ZM129.141 35.33C127.101 35.33 125.491 34.83 124.311 33.83C123.151 32.81 122.571 31.48 122.571 29.84C122.571 28.12 123.151 26.79 124.311 25.85C125.471 24.89 127.141 24.41 129.321 24.41H135.471V23.6C135.471 20.82 133.941 19.43 130.881 19.43C128.381 19.43 126.871 20.37 126.351 22.25H122.961C123.261 20.47 124.111 19.09 125.511 18.11C126.931 17.13 128.741 16.64 130.941 16.64C133.441 16.64 135.351 17.23 136.671 18.41C138.011 19.59 138.681 21.29 138.681 23.51V31.52H140.301V35H136.701V32.24H135.441C134.821 33.2 133.971 33.96 132.891 34.52C131.811 35.06 130.561 35.33 129.141 35.33ZM129.591 32.63C130.671 32.63 131.661 32.41 132.561 31.97C133.461 31.53 134.171 30.93 134.691 30.17C135.211 29.41 135.471 28.58 135.471 27.68V26.87H129.531C127.011 26.87 125.751 27.81 125.751 29.69C125.751 30.59 126.091 31.31 126.771 31.85C127.451 32.37 128.391 32.63 129.591 32.63ZM144.732 35V10.7H153.522C156.162 10.7 158.432 11.19 160.332 12.17C162.252 13.13 163.722 14.52 164.742 16.34C165.782 18.16 166.302 20.33 166.302 22.85C166.302 25.35 165.782 27.51 164.742 29.33C163.702 31.15 162.222 32.55 160.302 33.53C158.402 34.51 156.142 35 153.522 35H144.732ZM148.182 32.06H153.522C156.462 32.06 158.742 31.25 160.362 29.63C162.002 28.01 162.822 25.75 162.822 22.85C162.822 19.93 162.012 17.67 160.392 16.07C158.772 14.45 156.482 13.64 153.522 13.64H148.182V32.06ZM170.888 35V10.7H182.678C184.098 10.7 185.328 10.95 186.368 11.45C187.408 11.95 188.218 12.67 188.798 13.61C189.398 14.53 189.698 15.63 189.698 16.91C189.698 18.25 189.288 19.37 188.468 20.27C187.648 21.15 186.688 21.72 185.588 21.98V22.1C186.408 22.22 187.228 22.52 188.048 23C188.868 23.48 189.548 24.15 190.088 25.01C190.628 25.85 190.898 26.9 190.898 28.16C190.898 29.54 190.568 30.74 189.908 31.76C189.268 32.78 188.368 33.58 187.208 34.16C186.048 34.72 184.718 35 183.218 35H170.888ZM174.338 32.06H182.498C184.058 32.06 185.278 31.7 186.158 30.98C187.038 30.26 187.478 29.23 187.478 27.89C187.478 26.53 187.038 25.51 186.158 24.83C185.278 24.15 184.068 23.81 182.528 23.81H174.338V32.06ZM174.338 20.99H182.258C183.518 20.99 184.498 20.67 185.198 20.03C185.918 19.39 186.278 18.49 186.278 17.33C186.278 16.13 185.918 15.22 185.198 14.6C184.498 13.96 183.518 13.64 182.258 13.64H174.338V20.99Z" fill="#9EA0A3"/></svg>
+    <h1>Rust Performance</h1>
+  </div>
+  <div class="controls">
+    <div><label for="cur">This run</label><select id="cur"></select></div>
+    <div><label for="base">Compared with</label><select id="base"></select></div>
+    <div><label for="plat">Platform</label><select id="plat"></select></div>
+    <div><label for="thresh">Highlight over</label>
+      <select id="thresh"><option value="1">1%</option><option value="3">3%</option>
+      <option value="5">5%</option><option value="10" selected>10%</option>
+      <option value="15">15%</option><option value="20">20%</option>
+      <option value="30">30%</option></select></div>
+  </div>
+</header>
+<main id="main"><div class="empty">Loading runs...</div></main>
+<script>
+const BLUE="#10CBFF", DIM="#3a4c5a", BAD="#ff5f52";
+const SERIES=["#10CBFF","#f0a93b","#8b7bff","#3ddc97","#ff8fa3","#67d5f5"];
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const arr=v=>Array.isArray(v)?v:[];
+
+function fmt(n,unit){
+  if(n===null||n===undefined||!Number.isFinite(n))return"n/a";
+  if(unit==="%")return n.toFixed(2)+"%";
+  if(unit==="B"||unit==="bytes")return fmtBytes(n);
+  const a=Math.abs(n);
+  if(a>=1e9)return (n/1e9).toFixed(2)+"B";
+  if(a>=1e6)return (n/1e6).toFixed(2)+"M";
+  if(a>=1e4)return (n/1e3).toFixed(1)+"k";
+  if(a>=100)return Math.round(n).toLocaleString();
+  if(a>=1)return (Math.round(n*100)/100).toString();
+  if(a===0)return "0";
+  return n.toPrecision(3);
+}
+function fmtBytes(n){
+  if(!Number.isFinite(n))return String(n);
+  const a=Math.abs(n);
+  if(a>=1073741824)return (n/1073741824).toFixed(2)+" GiB";
+  if(a>=1048576)return (n/1048576).toFixed(2)+" MiB";
+  if(a>=1024)return (n/1024).toFixed(1)+" KiB";
+  return Math.round(n)+" B";
+}
+function pill(t){return t?`<span class="pill ${esc(t)}">${esc(t)}</span>`:""}
+
+/// A percentage change plus whether it is an improvement. Direction is always
+/// carried by the group that recorded the row, never inferred from the unit:
+/// "MiB/s" is a rate to maximise and "MiB" a footprint to minimise, and both
+/// contain "mib".
+function delta(cur,base,lowerIsBetter){
+  if(!Number.isFinite(cur)||!Number.isFinite(base)||base===0)return null;
+  const pct=100*(cur-base)/Math.abs(base);
+  return {pct,good:lowerIsBetter?pct<0:pct>0};
+}
+
+/// Chart geometry sized to the viewport it will actually be drawn in.
+///
+/// A viewBox is scaled into whatever width the card gives it, so a 1180-unit
+/// box inside a 340px phone renders its 10px labels at three. Sizing the box
+/// near the real pixel width keeps that scale close to 1, so a label ends up
+/// the size it claims to be.
+function chartBox(w,h){
+  const vw=(typeof window!=="undefined"&&window.innerWidth)||1280;
+  if(vw>720)return{w,h};
+  const avail=Math.max(260,vw-56);
+  return {w:Math.min(w,avail),h:Math.max(200,Math.min(h,Math.round(avail*0.82)))};
+}
+
+function lineChart(series,{w=560,h=230,xlab="",ylab=""}={}){
+  const all=series.flatMap(s=>s.pts);
+  if(!all.length)return `<p class="note">not measured yet</p>`;
+  const box=chartBox(w,h); w=box.w; h=box.h;
+  const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
+  const x0=Math.min(...xs),x1=Math.max(...xs);
+  // A series can legitimately go below zero, and clamping the floor at zero
+  // would draw those points off the bottom of the box.
+  const y1=Math.max(...ys)||1, y0=Math.min(0,...ys);
+  const F=10, CH=F*0.62;
+
+  // The left margin is measured from the widest label rather than fixed, so a
+  // "1.07 GiB" tick cannot run off the edge and a "12" tick cannot leave a
+  // third of the plot empty.
+  const yLabels=[0,1,2,3,4].map(i=>fmt(y0+(y1-y0)*i/4,ylab));
+  const L=Math.min(Math.round(w*0.42),
+                   Math.max(34,Math.round(8+CH*Math.max(...yLabels.map(t=>t.length)))));
+  const R=12,T=12,TICK_ROW=15;
+  const span=w-L-R;
+  const labFits=!!xlab&&xlab.length*CH<=span;
+  const B=TICK_ROW+(labFits?14:0)+6;
+  const plot=h-T-B;
+  const px=v=>L+(x1===x0?span/2:(v-x0)/(x1-x0)*span);
+  const py=v=>T+(1-(v-y0)/((y1-y0)||1))*plot;
+
+  let grid="";
+  for(let i=0;i<=4;i++){
+    const y=py(y0+(y1-y0)*i/4);
+    grid+=`<line x1="${L}" x2="${w-R}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="#101c25"/>`
+      +`<text x="${L-8}" y="${(y+3.4).toFixed(1)}" fill="#7b8d9c" font-size="${F}" text-anchor="end">${esc(yLabels[i])}</text>`;
+  }
+
+  let body="";
+  for(const s of series){
+    if(!s.pts.length)continue;
+    const pts=[...s.pts].sort((a,b)=>a[0]-b[0]);
+    const d=pts.map((q,i)=>`${i?"L":"M"}${px(q[0]).toFixed(1)},${py(q[1]).toFixed(1)}`).join("");
+    body+=`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.thick?2.2:1.4}"`
+      +`${s.dash?' stroke-dasharray="4 3"':""}/>`;
+    body+=pts.map(q=>`<circle cx="${px(q[0]).toFixed(1)}" cy="${py(q[1]).toFixed(1)}" r="${s.thick?2.7:2}" fill="${s.color}"/>`).join("");
+  }
+
+  // Thin the ticks to what the axis can hold. Every tick drawn is one a reader
+  // can read; a tick that would land on its neighbour is dropped rather than
+  // printed over it, and the last value is always kept because it is the end
+  // of the range.
+  const uniq=[...new Set(xs)].sort((a,b)=>a-b);
+  const widest=Math.max(...uniq.map(v=>fmt(v).length))*CH+12;
+  // Thinned by position, not by index. The axis is linear, so evenly spaced
+  // values are not evenly spaced pixels: over 0, 1, 10, 100 an index-based
+  // step keeps the first two, which then land on top of each other.
+  const shown=[];
+  for(const v of uniq)
+    if(!shown.length||px(v)-px(shown[shown.length-1])>=widest)shown.push(v);
+  const last=uniq[uniq.length-1];
+  if(shown[shown.length-1]!==last){
+    if(px(last)-px(shown[shown.length-1])>=widest)shown.push(last);
+    else shown[shown.length-1]=last;
+  }
+  const tickY=T+plot+TICK_ROW-3;
+  const ticks=shown.map(v=>`<text x="${px(v).toFixed(1)}" y="${tickY.toFixed(1)}" fill="#7b8d9c" font-size="${F}" text-anchor="middle">${esc(fmt(v))}</text>`).join("");
+
+  // The axis label gets its own baseline below the ticks, and when it is wider
+  // than the axis it moves into the legend instead of being clipped.
+  const axis=labFits
+    ? `<text x="${((L+w-R)/2).toFixed(1)}" y="${(h-4).toFixed(1)}" fill="#7b8d9c" font-size="${F}" text-anchor="middle">${esc(xlab)}</text>`
+    : "";
+  const legend=series.filter(s=>s.pts.length)
+    .map(s=>`<span><b style="background:${s.color}"></b>${esc(s.name)}</span>`);
+  if(xlab&&!labFits)legend.push(`<span>x axis: ${esc(xlab)}</span>`);
+
+  return `<svg class="chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(ylab||xlab||"chart")}">`
+    +`${grid}${body}${ticks}${axis}</svg><div class="legend">${legend.join("")}</div>`;
+}
+
+/// The one table every comparison on this page is drawn with.
+function barTable(rows,threshold){
+  if(!rows.length)return `<p class="note">not measured in this run</p>`;
+  const max=Math.max(...rows.map(r=>Math.abs(r.cur||0)),1);
+  const anyBase=rows.some(r=>Number.isFinite(r.base));
+  return `<div class="scroll"><table><thead><tr><th>metric</th>
+    ${anyBase?'<th class="num">baseline</th>':""}<th class="num">this run</th>
+    ${anyBase?'<th class="num">delta</th>':""}<th class="barcell"></th></tr></thead><tbody>`
+    +rows.map(r=>{
+      const d=anyBase?delta(r.cur,r.base,r.lower):null;
+      const cls=!d?"flat":Math.abs(d.pct)<threshold?"flat":d.good?"up":"down";
+      const txt=!d?"":(d.pct>0?"+":"")+d.pct.toFixed(1)+"%";
+      const regress=d&&!d.good&&Math.abs(d.pct)>=threshold;
+      const range=Number.isFinite(r.min)&&Number.isFinite(r.max)
+        ? ` <span class="range">${esc(fmt(r.min,r.unit))} to ${esc(fmt(r.max,r.unit))}</span>`:"";
+      return `<tr><td>${esc(r.name)}</td>
+        ${anyBase?`<td class="num">${esc(fmt(r.base,r.unit))}</td>`:""}
+        <td class="num">${esc(fmt(r.cur,r.unit))}${range}</td>
+        ${anyBase?`<td class="num ${cls}">${txt}</td>`:""}
+        <td class="barcell"><div class="bar"><i class="${regress?"regress":""}" style="width:${(100*Math.abs(r.cur||0)/max).toFixed(1)}%"></i></div></td></tr>`;
+    }).join("")
+    +`</tbody></table></div>`;
+}
+
+/// A stable anchor for a section name, so the index can jump to it.
+const slug=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+
+/// A section heading. The name is its own element so it can wrap: an anonymous
+/// flex item beside a growing rule cannot, and a long family name then ran off
+/// the side of a narrow screen.
+function heading(name,trust){
+  return `<h2 id="s-${esc(slug(name))}"><span class="h2-name">${esc(name)}</span>${pill(trust)}<span class="rule"></span></h2>`;
+}
+
+/// Jump links to every section on the page.
+///
+/// The suite reports one family per bench target, so a run carries dozens of
+/// sections and scrolling past all of them to reach one is the whole cost of
+/// having measured everything.
+///
+/// Built by reading back the headings the page just produced, not from the list
+/// it expected to produce. A section can decline to draw at all: the
+/// cross-platform one renders nothing when a run has a single platform, and the
+/// trend renders nothing when no metric has a series. Predicting the list gave
+/// those a link to an anchor that was not on the page.
+function sectionIndex(html){
+  const seen=[...html.matchAll(/<h2 id="(s-[^"]+)"><span class="h2-name">([^<]*)<\/span>/g)]
+    .map(m=>({id:m[1],name:m[2]}));
+  if(seen.length<3)return "";
+  const links=seen.map(s=>`<a class="jump" href="#${esc(s.id)}">${esc(s.name)}</a>`).join("");
+  return `<nav class="index" aria-label="Sections">${links}</nav>`;
+}
+
+function card(title,note,body,trust,wide){
+  return `<div class="card"${wide?' style="grid-column:1/-1"':""}><h3>${esc(title)}${pill(trust)}</h3>
+    ${note?`<p class="note">${note}</p>`:""}${body}</div>`;
+}
+
+// ---- reading a run document -------------------------------------------
+//
+// A family describes itself: its groups carry the unit and the direction, and
+// the dashboard renders any of them without knowing the family's name. That is
+// what stops a bench from being collected and drawn nowhere, which no amount of
+// per-family rendering code prevents.
+
+function platformsOf(run){ return Object.keys(run?.platforms||{}).sort(); }
+function familiesOf(run,platform){ return run?.platforms?.[platform]?.families||{}; }
+
+/// Every row in a run, keyed so the same measurement joins across runs and
+/// platforms. The key is the contract; it must not change once published.
+function scalars(run,platform){
+  const out=[];
+  const fams=familiesOf(run,platform);
+  for(const [fname,fam] of Object.entries(fams)){
+    if(!fam||fam.trust==="absent")continue;
+    for(const g of arr(fam.groups)){
+      for(const r of arr(g.rows)){
+        if(!Number.isFinite(r.value))continue;
+        out.push({key:`${fname}/${g.name}/${r.name}`,
+                  name:`${g.name} · ${r.name}`, family:fname, group:g.name,
+                  value:r.value, min:r.min, max:r.max,
+                  unit:g.unit, lower:!!g.lower_is_better});
+      }
+    }
+  }
+  return out;
+}
+
+function scalarMap(run,platform){
+  const m={};
+  for(const s of scalars(run,platform))m[s.key]=s;
+  return m;
+}
+
+/// One family, rendered from its own description.
+function familySection(fname,fam,baseFam,threshold){
+  if(!fam)return "";
+  const cards=[];
+  if(fam.trust==="absent"){
+    cards.push(card(fam.title||fname,
+      esc(fam.note||"")+" This family was not collected in this run.",
+      `<p class="note" style="margin:0">not measured in this run</p>`,"absent"));
+  }else{
+    for(const g of arr(fam.groups)){
+      const bg=arr(baseFam?.groups).find(x=>x.name===g.name);
+      const bmap={};
+      for(const r of arr(bg?.rows))bmap[r.name]=r.value;
+      const rows=arr(g.rows).filter(r=>Number.isFinite(r.value)).map(r=>({
+        name:r.name,cur:r.value,base:bmap[r.name],min:r.min,max:r.max,
+        unit:g.unit,lower:!!g.lower_is_better}));
+      const charted=rows.length>1&&arr(g.rows).every(r=>Number.isFinite(r.x));
+      let body="";
+      if(rows.length===1)
+        body+=`<div class="headline">${esc(fmt(rows[0].cur,g.unit))} <small>${esc(g.unit)}</small></div>`;
+      if(charted){
+        const pts=a=>arr(a).filter(r=>Number.isFinite(r.x)&&Number.isFinite(r.value)).map(r=>[r.x,r.value]);
+        body+=lineChart([{name:"baseline",color:DIM,dash:true,pts:pts(bg?.rows)},
+                         {name:"this run",color:BLUE,thick:true,pts:pts(g.rows)}],
+                        {xlab:g.x_label||"",ylab:g.unit});
+      }
+      body+=barTable(rows,threshold);
+      const note=(g.note?esc(g.note)+" ":"")
+        +`<span class="tag">${esc(g.unit||"unitless")}</span>`
+        +`<span class="tag">${g.lower_is_better?"lower is better":"higher is better"}</span>`;
+      cards.push(card(g.name,note,body,undefined,charted));
+    }
+    if(!cards.length)
+      cards.push(card(fam.title||fname,esc(fam.note||""),
+        `<p class="note" style="margin:0">the family was collected but recorded no groups</p>`,fam.trust));
+  }
+  const head=heading(fam.title||fname,fam.trust);
+  const intro=fam.note&&fam.trust!=="absent"
+    ? `<p class="note" style="padding:0 26px;margin:-4px 0 12px;max-width:70ch">${esc(fam.note)}</p>`:"";
+  return head+intro+`<div class="grid">${cards.join("")}</div>`;
+}
+
+/// The same measurement across every platform that recorded it. This is the
+/// question a cross-platform suite exists to answer, and no single-platform
+/// view can show it.
+function platformSection(run,threshold){
+  const plats=platformsOf(run);
+  if(plats.length<2)return "";
+  const maps=Object.fromEntries(plats.map(p=>[p,scalarMap(run,p)]));
+  const keys=[...new Set(plats.flatMap(p=>Object.keys(maps[p])))].sort();
+  const shared=keys.filter(k=>plats.filter(p=>maps[p][k]).length>1);
+  if(!shared.length)
+    return heading("Across platforms")+`<div class="grid">${card("No shared measurement",
+      "Every platform recorded something, but no metric was recorded on more than one of them, so there is nothing to line up.",
+      `<p class="note" style="margin:0">${plats.map(p=>`<span class="tag">${esc(p)}</span>`).join("")}</p>`)}</div>`;
+  const byFamily={};
+  for(const k of shared)(byFamily[k.split("/")[0]] ||= []).push(k);
+  const ref=plats[0];
+  const cards=Object.entries(byFamily).map(([fam,ks])=>{
+    const head=`<thead><tr><th>metric</th>${plats.map(p=>`<th class="num">${esc(p)}</th>`).join("")}</tr></thead>`;
+    const body=ks.map(k=>{
+      const any=plats.map(p=>maps[p][k]).find(Boolean);
+      const cells=plats.map(p=>{
+        const s=maps[p][k];
+        if(!s)return `<td class="num flat">n/a</td>`;
+        const b=maps[ref][k];
+        const d=p===ref?null:delta(s.value,b?.value,s.lower);
+        const cls=!d?"":Math.abs(d.pct)<threshold?"flat":d.good?"up":"down";
+        const rel=d?` <span class="${cls}" style="font-size:10px">${d.pct>0?"+":""}${d.pct.toFixed(0)}%</span>`:"";
+        return `<td class="num">${esc(fmt(s.value,s.unit))}${rel}</td>`;
+      }).join("");
+      return `<tr><td>${esc(k.split("/").slice(1).join(" · "))}</td>${cells}</tr>`;
+    }).join("");
+    return card(fam,`Every platform that recorded this family, against <code>${esc(ref)}</code>.`,
+      `<div class="scroll"><table>${head}<tbody>${body}</tbody></table></div>`,undefined,true);
+  });
+  return heading("Across platforms")+`<div class="grid wide">${cards.join("")}</div>`;
+}
+
+function overview(run,base,platform,threshold){
+  const p=run?.platforms?.[platform]||{};
+  const bmap=base?scalarMap(base,platform):{};
+  const all=scalars(run,platform).map(s=>({name:`${s.family} · ${s.name}`,cur:s.value,
+    base:bmap[s.key]?.value,min:s.min,max:s.max,unit:s.unit,lower:s.lower}));
+  const fams=Object.entries(familiesOf(run,platform))
+    .map(([k,v])=>`<tr><td>${esc(v?.title||k)}</td><td class="num">${pill(v?.trust)}</td></tr>`).join("");
+  const h=p.host||{};
+  const guard=p.loadguard||{};
+  const meta=`<table><tbody>
+    <tr><td>commit</td><td class="val">${esc((run.commit||"").slice(0,12))}</td></tr>
+    <tr><td>label</td><td class="val">${esc(run.label||"")}</td></tr>
+    <tr><td>recorded</td><td class="val">${esc(p.timestamp||run.timestamp||"")}</td></tr>
+    <tr><td>target</td><td class="val">${esc(platform)}</td></tr>
+    <tr><td>toolchain</td><td class="val">${esc(p.toolchain||"unknown")}</td></tr>
+    <tr><td>cpu</td><td class="val">${esc(h.cpu||"not recorded")}</td></tr>
+    <tr><td>cores / ram</td><td class="val">${esc(h.cores??"n/a")} / ${esc(h.ram_gib??"n/a")} GiB</td></tr>
+    <tr><td>load guard</td><td class="val ${guard.passed?"":"down"}">${guard.passed?"passed":"did not pass"}</td></tr>
+    <tr><td>metrics compared</td><td class="val">${all.filter(x=>Number.isFinite(x.base)).length} of ${all.length}</td></tr>
+  </tbody></table>`;
+  const warn=guard.passed?"":`<p class="note" style="color:var(--warn);margin:10px 0 0">${esc(guard.note||"The load guard did not pass.")}</p>`;
+  return heading("Overview")+`<div class="grid">
+    ${card("This run","",meta+warn)}
+    ${card("What each family reported",
+      "Every family the collector knows about. <code>absent</code> means the family was not collected in this run, never that it measured zero.",
+      `<div class="scroll"><table><tbody>${fams||'<tr><td class="note">nothing collected</td></tr>'}</tbody></table></div>`)}
+  </div><div class="grid wide">
+    ${card("Every number, side by side",
+      base?"Every value this run recorded on this platform, against the run selected above. Direction is carried per metric, so the delta column already knows which way is an improvement."
+          :"Every value this run recorded on this platform. Pick a run to compare with to fill the baseline column.",
+      barTable(all,threshold))}
+  </div>`;
+}
+
+function trendSection(runs,platform,threshold){
+  const byKey={},names={};
+  for(const r of runs){
+    const t=Date.parse(r.doc?.timestamp||r.doc?.platforms?.[platform]?.timestamp||"")||0;
+    for(const s of scalars(r.doc,platform)){
+      (byKey[s.key] ||= []).push([t,s.value]);
+      names[s.key]={name:`${s.family} · ${s.name}`,unit:s.unit};
+    }
+  }
+  const keys=Object.keys(byKey).sort();
+  if(!keys.length)return "";
+  if(!keys.includes(TREND_METRIC))TREND_METRIC=keys[0];
+  const pts=[...byKey[TREND_METRIC]].sort((a,b)=>a[0]-b[0]);
+  const x0=pts.length?pts[0][0]:0;
+  const series=[{name:names[TREND_METRIC].name,color:BLUE,thick:true,
+    pts:pts.map(q=>[(q[0]-x0)/86400000,q[1]])}];
+  const opts=keys.map(k=>`<option value="${esc(k)}"${k===TREND_METRIC?" selected":""}>${esc(names[k].name)}</option>`).join("");
+  const picker=`<p class="note" style="margin:0 0 10px">
+    <label for="trendmetric" style="display:inline;margin-right:7px">Metric</label>
+    <select id="trendmetric">${opts}</select></p>`;
+  return heading("Trend across every recorded run")+`<div class="grid wide">
+    ${card(names[TREND_METRIC].name+(names[TREND_METRIC].unit?` (${names[TREND_METRIC].unit})`:""),
+      `${pts.length} of ${runs.length} run(s) on file recorded this on <code>${esc(platform)}</code>. A step in this line is where the change happened.`,
+      picker+lineChart(series,{xlab:"days since the first run on file",ylab:names[TREND_METRIC].unit||"",w:1180,h:290}),
+      undefined,true)}</div>`;
+}
+
+let RUNS=[],TREND_METRIC=null;
+
+function showControls(on){ $(".controls").style.display=on?"":"none"; }
+
+function emptyState(title,detail){
+  showControls(false);
+  return `<div class="grid" style="padding-top:18px">
+    ${card(title,detail,
+      `<p class="note" style="margin:0 0 10px">Once a run is published this page shows, for every
+       recorded run and against any other run you pick:</p>
+       <table><tbody>
+         <tr><td>Every bench family</td><td class="num">rendered from its own description</td></tr>
+         <tr><td>Across platforms</td><td class="num">the same metric on Linux, macOS and WASM</td></tr>
+         <tr><td>Trend</td><td class="num">any metric across every run on file</td></tr>
+       </tbody></table>`)}
+    ${card("How a run gets here","",
+      `<p class="note" style="margin:0 0 10px">The performance workflow runs each bench family on
+       its own runner, per platform. <code>collect</code> folds a platform's families into one
+       platform document, <code>publish.py</code> merges the platforms into
+       <code>runs/&lt;commit&gt;.json</code> beside every earlier run, and this page reads the
+       whole set.</p>
+       <p class="note" style="margin:0">The run documents are the artifact; this page is only a
+       reader over them. Nothing is drawn from a run that does not exist, so an empty page means
+       no run has been published, not that a run measured zero.</p>`)}
+  </div>`;
+}
+
+async function boot(){
+  let manifest;
+  try{
+    const r=await fetch("runs/index.json",{cache:"no-store"});
+    if(!r.ok)throw new Error(r.status);
+    manifest=await r.json();
+  }catch(e){
+    $("#main").innerHTML=emptyState("No runs published yet",
+      "This page reads the run documents under <code>runs/</code>. There are none yet.");
+    return;
+  }
+  const list=arr(manifest.runs);
+  if(!list.length){
+    $("#main").innerHTML=emptyState("The run index is empty",
+      "<code>runs/index.json</code> exists but lists no runs, so there is nothing to plot.");
+    return;
+  }
+  RUNS=(await Promise.all(list.map(async m=>{
+    try{ return {meta:m,doc:await (await fetch("runs/"+m.file,{cache:"no-store"})).json()}; }
+    catch(e){ return null; }
+  }))).filter(Boolean);
+  if(!RUNS.length){
+    $("#main").innerHTML=emptyState("Every run document failed to load",
+      `The index lists ${list.length} run(s), but none of the files could be read.`);
+    return;
+  }
+  showControls(true);
+  const opt=r=>`<option value="${esc(r.meta.file)}">${esc((r.meta.commit||"").slice(0,10))} ${esc(r.meta.label||"")} ${esc((r.meta.timestamp||"").slice(0,16))}</option>`;
+  $("#cur").innerHTML=RUNS.map(opt).join("");
+  $("#base").innerHTML=`<option value="">(none)</option>`+RUNS.map(opt).join("");
+  if(RUNS.length>1)$("#base").value=RUNS[1].meta.file;
+  for(const el of ["#cur","#base","#plat","#thresh"])$(el).addEventListener("change",e=>{
+    if(e.target.id!=="plat")syncPlatforms();
+    draw();
+  });
+  syncPlatforms();
+  zoomable();
+  draw();
+}
+
+/// The platform list belongs to the selected run, so it is rebuilt whenever
+/// that changes, keeping the current choice when the new run also has it.
+function syncPlatforms(){
+  const cur=RUNS.find(r=>r.meta.file===$("#cur").value)?.doc;
+  const plats=platformsOf(cur);
+  const want=$("#plat").value;
+  $("#plat").innerHTML=plats.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join("")
+    ||`<option value="">(none recorded)</option>`;
+  if(plats.includes(want))$("#plat").value=want;
+}
+
+/// Draw one section, or a card saying why it could not be drawn. One malformed
+/// family must not leave the page on "Loading runs..." forever: a dashboard
+/// that silently shows nothing is worse than one that shows a broken panel,
+/// because only the second is obviously wrong.
+function section(name,build){
+  try{ return build(); }
+  catch(e){
+    return heading(name)+`<div class="grid"><div class="card broken">
+      <h3>${esc(name)} failed to draw</h3>
+      <p class="note">${esc(String(e&&e.message||e))}</p>
+      <p class="note">The run document is on file; this section could not read it. Every other
+      section on this page still drew.</p></div></div>`;
+  }
+}
+
+function draw(){
+  const cur=RUNS.find(r=>r.meta.file===$("#cur").value)?.doc;
+  const base=RUNS.find(r=>r.meta.file===$("#base").value)?.doc||null;
+  const platform=$("#plat").value;
+  const th=parseFloat($("#thresh").value);
+  const fams=familiesOf(cur,platform);
+  const baseFams=base?familiesOf(base,platform):{};
+  const head=section("Overview",()=>overview(cur,base,platform,th));
+  let rest="";
+  for(const fname of Object.keys(fams).sort())
+    rest+=section(fams[fname]?.title||fname,()=>familySection(fname,fams[fname],baseFams[fname],th));
+  rest+=section("Across platforms",()=>platformSection(cur,th));
+  rest+=section("Trend",()=>trendSection(RUNS,platform,th));
+  $("#main").innerHTML=head+sectionIndex(head+rest)+rest;
+  const tm=$("#trendmetric");
+  if(tm)tm.addEventListener("change",e=>{TREND_METRIC=e.target.value;draw();});
+}
+
+/// Click a panel to fill the viewport with it, escape or click again to
+/// return. Delegated from the document so it survives every redraw, and it
+/// keeps its hands off the controls inside a card.
+function zoomable(){
+  const backdrop=document.createElement("div");
+  backdrop.className="zoom-backdrop";
+  backdrop.hidden=true;
+  document.body.appendChild(backdrop);
+  const close=()=>{
+    for(const el of document.querySelectorAll(".card.zoomed"))el.classList.remove("zoomed");
+    backdrop.hidden=true;
+  };
+  backdrop.addEventListener("click",close);
+  document.addEventListener("keydown",e=>{ if(e.key==="Escape")close(); });
+  document.addEventListener("click",e=>{
+    if(e.target.closest("select,option,a,button,input,label"))return;
+    const card=e.target.closest(".card");
+    if(!card)return;
+    const was=card.classList.contains("zoomed");
+    close();
+    if(!was){ card.classList.add("zoomed"); backdrop.hidden=false; card.scrollTop=0; }
+  });
+}
+/// Charts are sized from the viewport, so a width change has to redraw them.
+/// Only a width change: a mobile browser fires resize when its address bar
+/// slides away, and redrawing on that would throw the reader's place away for
+/// a layout that did not move.
+let lastWidth=typeof window!=="undefined"?window.innerWidth:0;
+let resizeTimer=null;
+if(typeof window!=="undefined"&&window.addEventListener){
+  window.addEventListener("resize",()=>{
+    if(Math.abs(window.innerWidth-lastWidth)<40)return;
+    lastWidth=window.innerWidth;
+    clearTimeout(resizeTimer);
+    resizeTimer=setTimeout(()=>{ if(RUNS.length)draw(); },180);
+  });
+}
+boot();
+</script>

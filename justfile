@@ -751,6 +751,120 @@ embedding-server *args:
 bench *args:
     cargo bench --workspace {{ args }}
 
+# ---------------------------------------------------------------------------
+# Performance site
+# ---------------------------------------------------------------------------
+#
+# The published dashboard reads run documents, not a rendered page: one run
+# answers "is this fast", the series answers "when did this change". These
+# recipes produce the same documents CI does, so a number can be reproduced
+# locally before it is argued about.
+
+# Measure this machine and build the dashboard over it in ./perf-site.
+# Point a browser at perf-site/index.html when it finishes.
+[doc("Run the bench suite and build the performance dashboard locally.")]
+[group('test')]
+perf *families:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    families="{{ families }}"
+    if [ -z "$families" ]; then
+        families="$(ls benches/benches/*.rs | xargs -n1 basename | sed 's/\.rs$//' | grep -v '^common$')"
+    fi
+    out="$PWD/perf-out.jsonl"
+    crit="$PWD/perf-criterion"
+    rm -rf "$out" "$crit"
+    python3 tools/perf-site/loadguard.py --out perf-loadguard.json >/dev/null
+    for f in $families; do
+        echo "==> $f"
+        # Criterion records only the group name, so each target's output is
+        # filed under the target before the next one overwrites it. That is
+        # what gives every bench its own section on the page.
+        rm -rf target/criterion
+        DEFRA_BENCH_OUT="$out" cargo bench -p benches --bench "$f" || {
+            echo "perf: $f failed; its family will be absent" >&2
+        }
+        if [ -d target/criterion ]; then
+            mkdir -p "$crit/$f"
+            cp -R target/criterion/. "$crit/$f/"
+        fi
+    done
+    touch "$out"
+    commit="$(git rev-parse HEAD)"
+    rm -f "perf-platform.json"
+    DEFRA_BENCH_OUT="$out" cargo run -p defra-perf --bin collect -- \
+        --criterion-root "$crit" \
+        --out perf-platform.json --commit "$commit" \
+        --label "$(git rev-parse --abbrev-ref HEAD)" \
+        --target "$(rustc -vV | awk '/^host:/{print $2}')" \
+        --loadguard perf-loadguard.json
+    mkdir -p perf-site
+    cp tools/perf-site/index.html perf-site/index.html
+    python3 tools/perf-site/publish.py --site perf-site perf-platform.json
+    just perf-check
+    echo
+    echo "dashboard: file://$PWD/perf-site/index.html"
+
+# A bench target nobody runs measures nothing. This is the only thing standing
+# between adding a benchmark and it silently never appearing on the dashboard.
+[doc("Fail if a registered bench target is missing from the performance workflow.")]
+[group('check')]
+perf-matrix:
+    #!/usr/bin/env python3
+    import pathlib, re, sys
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("perf-matrix: pyyaml is needed to read the workflow")
+    targets = set(re.findall(r'\[\[bench\]\]\nname = "([^"]+)"',
+                             pathlib.Path("benches/Cargo.toml").read_text()))
+    full = yaml.safe_load(open(".github/workflows/perf.yml"))
+    linux = {row["family"] for row in full["jobs"]["bench"]["strategy"]["matrix"]["include"]
+             if row["target"] == "x86_64-unknown-linux-gnu"}
+    # The pull-request path is its own workflow: a skipped matrix job renders
+    # its matrix unexpanded, so the forty-job sweep is kept off a PR entirely.
+    pr = yaml.safe_load(open(".github/workflows/perf-pr.yml"))
+    quick = set(pr["jobs"]["quick"]["env"]["QUICK_FAMILIES"].split())
+    problems = []
+    for name in sorted(targets - linux):
+        problems.append(f"  {name} is a bench target but the workflow never runs it")
+    for name in sorted(linux - targets):
+        problems.append(f"  {name} is in the workflow matrix but is not a bench target")
+    for name in sorted(quick - targets):
+        problems.append(f"  {name} is in QUICK_FAMILIES but is not a bench target")
+    if problems:
+        print("performance matrix is out of step with the bench targets:", file=sys.stderr)
+        print("\n".join(problems), file=sys.stderr)
+        sys.exit(1)
+    print(f"performance matrix: {len(targets)} bench target(s), all measured; "
+          f"{len(quick)} of them on every pull request")
+
+# Refuse a dashboard that would drop a family it collected. A blank section is
+# not an error to a browser, so nothing else catches this.
+[doc("Check the dashboard renders every family the run documents carry.")]
+[group('check')]
+perf-check dir="perf-site":
+    node tools/perf-site/render_check.mjs {{ dir }}
+
+# What changed against the newest run already on file.
+[doc("Compare two run documents with the noise rules CI uses.")]
+[group('test')]
+perf-compare baseline current threshold="5":
+    python3 tools/perf-site/compare.py --baseline {{ baseline }} \
+        --current {{ current }} --threshold {{ threshold }}
+
+# Serve the dashboard. It fetches its run documents, which a file:// page
+# cannot do in every browser.
+#
+# Loopback only. The default binds every interface, which would put a page
+# naming this machine's CPU, core count and memory on the local network while
+# printing a 127.0.0.1 URL.
+[doc("Serve the local performance dashboard on :8099.")]
+[group('misc')]
+perf-serve dir="perf-site" port="8099":
+    @echo "http://127.0.0.1:{{ port }}/"
+    python3 -m http.server {{ port }} --bind 127.0.0.1 --directory {{ dir }}
+
 # Remove build output. Leaves .tooling/ alone.
 [group('misc')]
 clean:

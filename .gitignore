@@ -37,3 +37,13 @@ docs/
 
 # Local dev tooling installed by `just setup`
 .tooling/
+
+# Benchmark output. `bench-out/` is where a bench writes its family when it is
+# run standalone, without DEFRA_BENCH_OUT pointing somewhere; the rest is what
+# `just perf` leaves behind building the dashboard locally.
+bench-out/
+/perf-out.jsonl
+/perf-platform.json
+/perf-loadguard.json
+/perf-criterion/
+/perf-site/

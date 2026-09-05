@@ -1,0 +1,30 @@
+[package]
+name = "defra-perf"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Benchmark reporting contract and run-document collector for the DefraDB performance site"
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Provenance, process accounting and the criterion harvest are native-only:
+# a browser has no `getrusage`, no `/proc`, and no directory of sample sets.
+# The reporting contract itself is pure serde, so a wasm benchmark links this
+# crate and describes what it measured in exactly the shape `collect` reads.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libc = "0.2"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[[bin]]
+name = "collect"
+path = "src/bin/collect.rs"
+
+[lints]
+workspace = true

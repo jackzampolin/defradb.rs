@@ -1448,6 +1448,7 @@ dependencies = [
 name = "benches"
 version = "0.5.0"
 dependencies = [
+ "acp",
  "async-trait",
  "axum",
  "blockstore",
@@ -1456,14 +1457,21 @@ dependencies = [
  "crdt",
  "criterion 0.6.0",
  "crypto",
+ "cursor",
  "datastore",
  "db",
  "defra-core",
  "defra-http",
+ "defra-perf",
  "document",
+ "events",
+ "identity",
+ "libp2p-identity",
  "lru 0.16.4",
  "multihash",
+ "p2p",
  "query",
+ "replication-filter",
  "schema",
  "serde_json",
  "sha2 0.10.9",
@@ -1471,6 +1479,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -3560,6 +3569,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "defra-perf"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sysinfo 0.33.1",
+]
+
+[[package]]
 name = "defra-version"
 version = "0.5.0"
 dependencies = [
@@ -3578,6 +3598,7 @@ dependencies = [
  "crypto",
  "db",
  "defra-core",
+ "defra-perf",
  "document",
  "events",
  "futures",

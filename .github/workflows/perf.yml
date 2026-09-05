@@ -1,0 +1,491 @@
+name: Performance
+
+# Separate from CI on purpose. The bench matrix is far slower than the checks a
+# pull request waits on, and it fails for a different reason: a red CI job means
+# the code is wrong, a regression here means the code is slow. Mixing them makes
+# every PR wait for the slower answer to a question it did not ask.
+#
+# The full sweep: every family across Linux, macOS and a browser.
+#
+# A push to `main` measures and publishes to the dashboard. A
+# `workflow_dispatch` measures whichever branch it is pointed at and compares it
+# with the newest published run without publishing.
+#
+# Deliberately not triggered by a pull request. GitHub renders a skipped matrix
+# job without expanding its matrix, so gating forty jobs behind an `if` filled
+# every PR's check list with literal `${{ matrix.family }}` rows. The pull
+# request path is `perf-pr.yml`, which has no matrix and creates one check.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'Percent change below which a delta is noise'
+        default: '5'
+        required: false
+      fail_on_regression:
+        description: 'Fail the run when a metric regresses'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  # Bounded sampling so a full matrix finishes inside a CI budget. Recorded in
+  # the run document with the numbers it produced, because a reduced sample is
+  # comparable with another reduced sample and not with a full one.
+  DEFRA_BENCH_CRITERION_ARGS: --warm-up-time 1 --measurement-time 3 --sample-size 30
+
+jobs:
+  scope:
+    name: Scope
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.decide.outputs.label }}
+      publish: ${{ steps.decide.outputs.publish }}
+      threshold: ${{ steps.decide.outputs.threshold }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      # Its own interpreter rather than the system one: a PEP 668 image refuses
+      # to let pip touch the system environment, and this gate must not be the
+      # thing that fails before it has checked anything.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # A bench target the matrix does not name measures nothing, and nothing
+      # else in CI would notice.
+      - name: Check every bench target is measured
+        run: |
+          python3 -m pip install --quiet pyyaml
+          just perf-matrix
+      - id: decide
+        env:
+          THRESHOLD_INPUT: ${{ github.event.inputs.threshold }}
+          GITHUB_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Only a push to `main` writes history. A dispatch measures whichever
+          # branch it was pointed at and reports, so a branch can never file a
+          # run document under a `main` label.
+          if [ "$GITHUB_EVENT" = "push" ]; then
+            echo "label=main"   >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "threshold=${THRESHOLD_INPUT:-5}" >> "$GITHUB_OUTPUT"
+
+  # Each family on its own runner. A sweep that runs every benchmark in one job
+  # takes as long as the sum of them and reports nothing until the slowest
+  # finishes; split, the wall clock is the slowest single family and a failure
+  # names which one.
+  #
+  # Linux runs the whole suite. macOS runs the families a user actually feels,
+  # because a macOS minute bills at ten times a Linux one and a full second
+  # matrix buys duplicate answers to questions Linux already answered. A family
+  # macOS does not run is drawn as an explicit gap on that platform, never as a
+  # zero.
+  bench:
+    name: ${{ matrix.family }} (${{ matrix.target }})
+    needs: scope
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { family: acp, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: allocs, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: backup, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: block, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: block_write, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: blockstore, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: crypto, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: cursor_codec, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: document_codec, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: document_read, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: document_write, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: events, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: filter, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: groupby, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: identity, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: memory, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: merge, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: merge_dag, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: p2p_codec, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: parsing, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: planner, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: query_e2e, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: replication_filter, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: retry_markers, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: schema_validate, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: sift, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: startup, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: transaction, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: transport, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: vector_mutations, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: vector_search, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { family: backup, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: crypto, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: document_read, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: document_write, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: memory, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: query_e2e, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: startup, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: transaction, os: macos-latest, target: aarch64-apple-darwin }
+          - { family: transport, os: macos-latest, target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-linux-ci-deps.sh
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-${{ matrix.target }}
+      # Before the benchmarks, never after: a guard that samples load once the
+      # suite has finished is measuring the suite.
+      # The corpus is a third-party FTP fetch. When it fails the bench skips
+      # cleanly and the family is drawn as a gap, which is the honest outcome:
+      # better an empty recall row than a recall number measured on synthetic
+      # vectors and labelled as SIFT.
+      - name: Fetch the SIFT corpus
+        if: matrix.family == 'sift'
+        continue-on-error: true
+        uses: extractions/setup-just@v2
+      - name: Fetch the SIFT corpus (run)
+        if: matrix.family == 'sift'
+        continue-on-error: true
+        run: just setup-sift
+      - name: Record how quiet the host is
+        run: python3 tools/perf-site/loadguard.py --out loadguard.json
+      - name: Run ${{ matrix.family }}
+        env:
+          DEFRA_BENCH_OUT: ${{ github.workspace }}/bench-${{ matrix.family }}.jsonl
+        run: cargo bench -p benches --bench ${{ matrix.family }} -- $DEFRA_BENCH_CRITERION_ARGS
+      - name: Collect what criterion recorded
+        run: |
+          set -euo pipefail
+          mkdir -p "criterion-out/${{ matrix.family }}"
+          # Only the estimate files, which are small; the rest of criterion's
+          # output is plots and raw samples this pipeline never reads. Filed
+          # under the bench target that produced them, because criterion records
+          # only the group name and the target is what gives each set its own
+          # section on the dashboard.
+          if [ -d target/criterion ]; then
+            find target/criterion -name estimates.json -path '*/new/*' -print0 \
+              | while IFS= read -r -d '' f; do
+                  dest="criterion-out/${{ matrix.family }}/${f#target/criterion/}"
+                  mkdir -p "$(dirname "$dest")"
+                  cp "$f" "$dest"
+                done
+          fi
+          touch "bench-${{ matrix.family }}.jsonl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ matrix.target }}-${{ matrix.family }}
+          path: |
+            bench-${{ matrix.family }}.jsonl
+            loadguard.json
+            criterion-out
+          if-no-files-found: error
+          retention-days: 7
+
+  # The browser is a first-class target for this database, so it is measured in
+  # one rather than inferred from a native number. The suite runs under
+  # wasm-bindgen-test in headless Firefox, exactly the harness the WASM tests
+  # already use, and reports through the same family contract.
+  bench-wasm:
+    name: browser (wasm32-unknown-unknown)
+    needs: scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: .github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-wasm
+      - name: Isolate the WASM dependency graph
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1
+      - uses: browser-actions/setup-geckodriver@eb8b0670366f719ca31703766a8cb7e3ea2c56ed # v0.0.0
+        with:
+          geckodriver-version: '0.37.1'
+      - name: Install lockfile-matched wasm-bindgen-cli
+        run: |
+          set -euo pipefail
+          VER="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[",]/,""); print $3; exit}' Cargo.lock)"
+          test -n "$VER"
+          cargo install wasm-bindgen-cli --version "$VER" --locked
+      - name: Record how quiet the host is
+        run: python3 tools/perf-site/loadguard.py --out loadguard.json
+      - name: Run the browser benchmarks
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          RUSTFLAGS: -C target-feature=+simd128
+        run: |
+          set -euo pipefail
+          cargo test -p defra-wasm --target wasm32-unknown-unknown --release \
+            --test perf -- --nocapture 2>&1 | tee wasm-perf.log
+          # The browser cannot write a file, so the harness prints each family
+          # on its own line behind a marker and the marker is stripped here.
+          # An empty result is a failure: a silent zero-family run would
+          # publish a browser platform with nothing on it.
+          grep -o 'DEFRA_BENCH_FAMILY .*' wasm-perf.log | sed 's/^DEFRA_BENCH_FAMILY //' \
+            > bench-wasm.jsonl
+          test -s bench-wasm.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf-wasm32-unknown-unknown-browser
+          path: |
+            bench-wasm.jsonl
+            loadguard.json
+            wasm-perf.log
+          if-no-files-found: error
+          retention-days: 7
+
+  # Fold one platform's families into one platform document. Cheap: `collect`
+  # depends on the reporting contract and nothing else, so this does not build
+  # the database on every platform in the matrix.
+  collect:
+    name: Collect (${{ matrix.target }})
+    # `always()` and never a condition that can be false: a skipped matrix job
+    # is rendered by GitHub without expanding its matrix, so the job list would
+    # show a literal `${{ matrix.target }}`. Whether scope actually produced
+    # anything is checked below, where it can fail with a reason.
+    needs: [scope, bench, bench-wasm]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-apple-darwin
+          - wasm32-unknown-unknown
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-collect
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perf-${{ matrix.target }}-*
+          path: artifacts
+      - name: Refuse to assemble without the run's identity
+        env:
+          PERF_LABEL: ${{ needs.scope.outputs.label }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PERF_LABEL" ]; then
+            echo "::error::the scope job produced no label, so this run has no identity to file it under" >&2
+            exit 1
+          fi
+      - name: Assemble the platform document
+        env:
+          PERF_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PERF_LABEL: ${{ needs.scope.outputs.label }}
+        run: |
+          set -euo pipefail
+          if [ ! -d artifacts ] || [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
+            echo "::warning::no results for ${{ matrix.target }}; every family will be absent"
+            mkdir -p artifacts
+          fi
+          # One JSON Lines stream out of every family this platform recorded,
+          # and one criterion tree out of every runner's estimates.
+          : > families.jsonl
+          find artifacts -name '*.jsonl' -exec cat {} + >> families.jsonl || true
+          mkdir -p criterion-merged
+          for d in artifacts/*/criterion-out; do
+            [ -d "$d" ] && cp -R "$d/." criterion-merged/ || true
+          done
+          # Any runner's guard verdict speaks for the platform: the matrix runs
+          # the same image, and a single busy runner is enough to stop the
+          # timings being called clean.
+          guard=""
+          for g in artifacts/*/loadguard.json; do
+            [ -f "$g" ] || continue
+            guard="$g"
+            python3 -c "import json,sys; sys.exit(0 if json.load(open('$g')).get('passed') else 1)" || break
+          done
+          cargo run -p defra-perf --bin collect -- \
+              --criterion-root "$PWD/criterion-merged" \
+              --out "platform-${{ matrix.target }}.json" \
+              --commit "$PERF_COMMIT" \
+              --label "$PERF_LABEL" \
+              --target "${{ matrix.target }}" \
+              ${guard:+--loadguard "$guard"}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf-platform-${{ matrix.target }}
+          path: platform-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # A push to main is the only thing that writes history. The run documents are
+  # the artifact, not a rendered page: a page regenerated per run shows one run
+  # and loses the comparison the moment it is replaced, and keeping the
+  # documents is what lets the dashboard plot a metric across every run ever
+  # recorded.
+  publish:
+    name: Publish
+    needs: [scope, collect]
+    if: needs.scope.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perf-platform-*
+          path: platforms
+          merge-multiple: true
+      - name: Fetch the history already published
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          git fetch origin gh-pages --depth=1
+          git --work-tree=site checkout origin/gh-pages -- runs 2>/dev/null || true
+      - name: File this run
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          cp tools/perf-site/index.html site/index.html
+          python3 tools/perf-site/publish.py --site site platforms/*.json
+      # Refuse to publish a dashboard that would drop a family it collected. A
+      # blank section is not an error to a browser, so without this the job
+      # stays green and the site goes quiet.
+      - name: Check the page renders every collected family
+        run: node tools/perf-site/render_check.mjs site
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          keep_files: true
+          commit_message: 'perf: record run ${{ github.sha }}'
+      - name: Link
+        run: |
+          {
+            echo "## Performance dashboard"
+            echo ""
+            echo "https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY##*/}/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # A branch reports rather than publishes. The baseline is the newest run on
+  # the dashboard, which is by construction the newest `main` commit measured.
+  compare:
+    name: Compare with main
+    needs: [scope, collect]
+    if: needs.scope.outputs.publish != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perf-platform-*
+          path: platforms
+          merge-multiple: true
+      - name: Assemble this branch's run document
+        run: |
+          set -euo pipefail
+          mkdir -p branch
+          python3 tools/perf-site/publish.py --site branch platforms/*.json
+      - name: Fetch the newest published run
+        id: baseline
+        run: |
+          set -euo pipefail
+          mkdir -p base
+          if ! git fetch origin gh-pages --depth=1 2>/dev/null; then
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git --work-tree=base checkout origin/gh-pages -- runs 2>/dev/null || {
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          }
+          newest="$(python3 -c "
+          import json, pathlib, sys
+          index = pathlib.Path('base/runs/index.json')
+          if not index.is_file():
+              sys.exit(0)
+          runs = json.loads(index.read_text()).get('runs') or []
+          print(runs[0]['file'] if runs else '')
+          ")"
+          if [ -z "$newest" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "file=base/runs/$newest" >> "$GITHUB_OUTPUT"
+      - name: Compare
+        id: compare
+        env:
+          PERF_THRESHOLD: ${{ needs.scope.outputs.threshold }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.baseline.outputs.found }}" != "true" ]; then
+            {
+              echo "## Performance"
+              echo ""
+              echo "No run has been published yet, so there is no baseline to compare with."
+              echo "This branch's numbers were collected and are attached to this workflow run."
+            } > report.md
+            cat report.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cur="$(ls branch/runs/*.json | grep -v index.json | head -1)"
+          python3 tools/perf-site/compare.py \
+            --baseline "${{ steps.baseline.outputs.file }}" \
+            --current "$cur" \
+            --threshold "$PERF_THRESHOLD" \
+            --markdown report.md \
+            ${{ github.event.inputs.fail_on_regression == 'true' && '--fail-on-regression' || '' }}
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = require('fs').readFileSync('report.md', 'utf8');
+            const marker = '<!-- defradb-perf -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const existing = (await github.rest.issues.listComments({ owner, repo, issue_number }))
+              .data.find(c => c.body && c.body.includes(marker));
+            const payload = `${marker}\n${body}`;
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: payload });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: payload });
+            }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf-comparison
+          path: |
+            report.md
+            branch/runs
+          if-no-files-found: warn
+          retention-days: 30
