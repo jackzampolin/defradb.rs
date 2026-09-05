@@ -12,7 +12,7 @@ use crate::message::{Message, PushLogReply};
 use crate::transport::{PeerId, TransportEvent};
 
 use super::endpoint::{
-    track_task, EndpointResources, PendingPushLogReplies, SpawnedTasks, SubscriptionSenders,
+    spawn_task, EndpointResources, PendingPushLogReplies, SpawnedTasks, SubscriptionSenders,
 };
 use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
@@ -98,10 +98,9 @@ pub(super) async fn handle_incoming(
         Arc::clone(pending_pushlog_replies),
         event_tx.clone(),
     );
-    let task = tokio::spawn(async move {
+    let _ = spawn_task(&resources.spawned_tasks, async move {
         handle_connection_streams(connection, remote_id, conn_alpn, context).await;
     });
-    track_task(&resources.spawned_tasks, task);
 }
 
 /// Shared state for every stream accepted on one authenticated connection.
@@ -147,7 +146,7 @@ pub(super) async fn handle_connection_streams(
         let alpn = alpn.clone();
         let pending_pushlog_replies = context.pending_pushlog_replies.clone();
         let node_identity = context.node_identity.clone();
-        let task = tokio::spawn(async move {
+        let _ = spawn_task(&context.spawned_tasks, async move {
             if let Err(e) = dispatch_stream(
                 &alpn,
                 &peer_id,
@@ -162,7 +161,6 @@ pub(super) async fn handle_connection_streams(
                 debug!("Stream error from {}: {}", peer_id, e);
             }
         });
-        track_task(&context.spawned_tasks, task);
     }
 
     let fully_disconnected = context.peer_map.lock().decrement_connections(&remote_id);
