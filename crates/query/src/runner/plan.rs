@@ -219,6 +219,17 @@ pub(crate) fn build_plan(
     acp_filter: Option<AcpFilter>,
     query_limits: QueryLimits,
 ) -> Result<Box<dyn PlanNode>> {
+    // Materialized ID lookups have already resolved aliases to canonical IDs.
+    // Rechecking the input aliases would discard those documents.
+    let scan_doc_ids = match &source {
+        ScanSource::Docs(docs) if select.doc_ids.is_some() && !docs.is_empty() => Some(
+            docs.iter()
+                .filter_map(|doc| doc.doc_id().map(str::to_owned))
+                .collect(),
+        ),
+        _ => select.doc_ids.clone(),
+    };
+
     // Create ScanNode with a document source, filter, and docIDs
     let scan = ScanNode::new(collection.clone(), mapping.clone());
     let mut scan = match source {
@@ -280,8 +291,8 @@ pub(crate) fn build_plan(
     if let Some(ref filter) = filter_for_scan {
         scan = scan.with_filter(filter.clone());
     }
-    if let Some(ref doc_ids) = select.doc_ids {
-        scan = scan.with_doc_ids(doc_ids.clone());
+    if let Some(doc_ids) = scan_doc_ids {
+        scan = scan.with_doc_ids(doc_ids);
     }
 
     let mut plan: Box<dyn PlanNode> = Box::new(scan);
