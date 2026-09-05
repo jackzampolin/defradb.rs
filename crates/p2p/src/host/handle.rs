@@ -877,10 +877,9 @@ impl P2PHostHandle {
     ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if let Ok(connected) = self.connected_peers().await {
-                if connected.contains(&peer_id) {
-                    return Ok(());
-                }
+            let connected = self.connected_peers().await?;
+            if connected.contains(&peer_id) {
+                return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(Error::ConnectionTimeout(peer_id.to_string()));
