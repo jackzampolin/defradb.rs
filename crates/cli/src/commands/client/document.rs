@@ -135,7 +135,7 @@ impl DocumentAddArgs {
         let data = get_data_from_args(&self.document, &self.file)?;
         let parsed: JsonValue = serde_json::from_str(&data)?;
 
-        let input_str = json_to_graphql_input(&parsed);
+        let input_str = json_to_graphql_input(&parsed)?;
         let query = format!(
             r#"mutation {{ add_{collection}(input: {input}) {{ _docID }} }}"#,
             collection = collection,
