@@ -32,6 +32,15 @@ pub enum Error {
         source: serde_yaml::Error,
     },
 
+    #[error("failed to read secret file {path}: {source}")]
+    ReadSecretFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("invalid secret file {path} at line {line}")]
+    ParseSecretFile { path: PathBuf, line: usize },
+
     #[error("failed to write config file {path}: {source}")]
     WriteConfig {
         path: PathBuf,
