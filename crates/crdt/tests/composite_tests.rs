@@ -464,3 +464,69 @@ fn test_composite_delta_empty_field_name_rejected() {
         .to_string()
         .contains("field_name cannot be empty"));
 }
+
+#[tokio::test]
+async fn test_composite_float32_counter_accepts_4_bytes() {
+    let store = RegolithStore::in_memory().unwrap();
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
+    composite.register_counter_field("score".to_string(), true, NumericKind::Float32);
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+    delta
+        .add_field_delta(
+            "score".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 1,
+                data: 1.5f32.to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    let result = composite.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    assert_eq!(result, MergeResult::Applied);
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let count_key = b"/data/v1/doc1/score".to_vec();
+    let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
+    let count = f32::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
+    assert_eq!(count, 1.5f32);
+}
+
+#[tokio::test]
+async fn test_composite_counter_rejects_wrong_length() {
+    let store = RegolithStore::in_memory().unwrap();
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+    delta
+        .add_field_delta(
+            "count".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 1,
+                data: vec![0u8; 4],
+            },
+        )
+        .unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    let result = composite.merge(&mut *txn, &ctx, &delta).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("expected 8 bytes"));
+}

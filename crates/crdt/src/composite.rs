@@ -325,10 +325,15 @@ impl CompositeDAG {
                     data,
                 },
             ) => {
-                if data.len() != 8 {
+                let expected = match kind {
+                    NumericKind::Float32 => 4,
+                    NumericKind::Int64 | NumericKind::Float64 => 8,
+                };
+                if data.len() != expected {
                     return Err(Error::MergeError(format!(
-                        "invalid counter increment data for field '{}': expected 8 bytes, got {}",
+                        "invalid counter increment data for field '{}': expected {} bytes, got {}",
                         field_name,
+                        expected,
                         data.len()
                     )));
                 }
@@ -498,11 +503,18 @@ impl ReplicatedData for CompositeDAG {
             }
 
             // Validate Counter data length if applicable
-            if let FieldDelta::Counter { data, .. } = field_delta {
-                if data.len() != 8 {
+            if let (FieldCrdtType::Counter { kind, .. }, FieldDelta::Counter { data, .. }) =
+                (crdt_type, field_delta)
+            {
+                let expected = match kind {
+                    NumericKind::Float32 => 4,
+                    NumericKind::Int64 | NumericKind::Float64 => 8,
+                };
+                if data.len() != expected {
                     return Err(Error::MergeError(format!(
-                        "invalid counter increment data for field '{}': expected 8 bytes, got {}",
+                        "invalid counter increment data for field '{}': expected {} bytes, got {}",
                         field_name,
+                        expected,
                         data.len()
                     )));
                 }
