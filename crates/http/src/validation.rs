@@ -54,6 +54,17 @@ pub fn validate_multiaddr(address: &str) -> Result<(), HttpError> {
         return Err(HttpError::BadRequest("address cannot be empty".to_string()));
     }
 
+    // None of the accepted shapes (multiaddr, iroh URI, bare endpoint
+    // ID) may contain whitespace or control characters. Rejecting them
+    // here fails fast with 400 instead of a confusing transport-layer
+    // error deeper in the stack.
+    if address.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(HttpError::BadRequest(format!(
+            "invalid peer address '{}': must not contain whitespace or control characters",
+            address
+        )));
+    }
+
     Ok(())
 }
 
@@ -334,6 +345,16 @@ mod tests {
     #[test]
     fn test_validate_multiaddr_invalid() {
         assert!(validate_multiaddr("").is_err());
+    }
+
+    #[test]
+    fn test_validate_multiaddr_rejects_inner_whitespace() {
+        assert!(validate_multiaddr("!!! not an addr !!!").is_err());
+        assert!(validate_multiaddr("/ip4/127.0.0.1/tcp/9000 ").is_err());
+        assert!(validate_multiaddr(" /ip4/127.0.0.1/tcp/9000").is_err());
+        assert!(validate_multiaddr("/ip4/127.0.0.1/ tcp/9000").is_err());
+        assert!(validate_multiaddr("iroh://abc 123").is_err());
+        assert!(validate_multiaddr("/ip4/127.0.0.1/tcp/9000\n").is_err());
     }
 
     #[test]
