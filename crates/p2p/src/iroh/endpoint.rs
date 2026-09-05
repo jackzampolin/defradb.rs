@@ -221,7 +221,8 @@ async fn run_event_loop(
 
     'endpoint: loop {
         tokio::select! {
-            Some(cmd) = command_rx.recv() => {
+            cmd = command_rx.recv() => {
+                let Some(cmd) = cmd else { break };
                 let mut pending_cmd = Some(cmd);
                 let mut processed = 0;
                 while let Some(cmd) = pending_cmd.take() {
@@ -275,6 +276,9 @@ async fn run_event_loop(
             else => break,
         }
     }
+
+    // Reject queued and new commands before waiting for network teardown.
+    drop(command_rx);
 
     // Clean up
     let subscriptions_started = std::time::Instant::now();
