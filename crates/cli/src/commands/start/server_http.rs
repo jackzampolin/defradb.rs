@@ -82,6 +82,7 @@ impl Node {
 
         let remote_signer_did = defra_core::signing::find_remote_signer_did();
         let user_identity_present = user_did.is_some();
+        let node_identity_present = node_identity_did.is_some();
         let signing_did = remote_signer_did
             .clone()
             .or_else(|| user_did.map(ToString::to_string))
@@ -89,6 +90,7 @@ impl Node {
         server = server.with_node_options(sanitized_node_options(
             config,
             user_identity_present,
+            node_identity_present,
             signing_did.is_some() && !config.datastore.no_signing,
         ));
         if let Some(did) = signing_did {

@@ -8,7 +8,8 @@ fn seconds_as_nanos(seconds: u64) -> u64 {
 
 pub(super) fn sanitized_node_options(
     config: &Config,
-    user_identity_present: bool,
+    _user_identity_present: bool,
+    node_identity_present: bool,
     signing_enabled: bool,
 ) -> Map<String, Value> {
     let redacted = |present: bool| present.then_some("<redacted>");
@@ -25,7 +26,7 @@ pub(super) fn sanitized_node_options(
     #[cfg(not(feature = "sourcehub"))]
     let (sourcehub_chain_id, sourcehub_grpc_address, sourcehub_comet_address) = ("", "", "");
     #[cfg(feature = "sourcehub")]
-    let document_signer_present = user_identity_present
+    let document_signer_present = _user_identity_present
         && matches!(
             config.acp.document_type,
             AcpDocumentType::SourceHub | AcpDocumentType::HubRs
@@ -59,7 +60,7 @@ pub(super) fn sanitized_node_options(
         },
         "DB": {
             "MaxTxnRetries": config.datastore.max_txn_retries,
-            "Identity": redacted(user_identity_present),
+            "Identity": redacted(node_identity_present),
             "EnableSigning": signing_enabled,
             "SearchableEncryptionKey": redacted(
                 !config.datastore.no_searchable_encryption && !config.keyring.disabled
@@ -124,7 +125,7 @@ mod tests {
         config.api.allowed_origins = vec!["https://private.example".into()];
         config.api.privkey_path = "/private/tls/key.pem".into();
 
-        let options = sanitized_node_options(&config, true, true);
+        let options = sanitized_node_options(&config, true, true, true);
 
         assert_eq!(options["DisableP2P"], false);
         assert_eq!(options["Store"]["Store"], "memory");

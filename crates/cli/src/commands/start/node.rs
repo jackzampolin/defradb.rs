@@ -164,7 +164,7 @@ impl Node {
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
-        node_identity_did: Option<String>,
+        node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
     ) -> Result<ServerSetup> {
         info!("Using unified ACP store (namespace isolated in main database)");
@@ -179,7 +179,7 @@ impl Node {
             user_identity,
             acp_store,
             zanzibar_store,
-            node_identity_did,
+            node_identity,
             se_key,
         )
         .await
@@ -195,17 +195,12 @@ impl Node {
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
 
-        // Initialize peer keypair from keyring (if P2P enabled and keyring not disabled)
-        let (peer_keypair, node_identity_did) =
-            if !config.net.p2p_disabled && !config.keyring.disabled {
-                let (kp, did) = Self::init_peer_key(&config)?;
-                (Some(kp), Some(did))
-            } else if !config.net.p2p_disabled {
-                info!("Keyring disabled, using ephemeral peer identity");
-                (None, None)
-            } else {
-                (None, None)
-            };
+        let node_identity = super::node_identity::resolve(&config, user_identity.clone())?;
+        let peer_keypair = if !config.net.p2p_disabled && !config.keyring.disabled {
+            Some(Self::init_peer_key(&config)?)
+        } else {
+            None
+        };
 
         // Load the cluster-shared searchable-encryption key from the keyring
         // (Go's getOrCreateSearchableEncryptionKey). `None` when SE or the
@@ -239,7 +234,7 @@ impl Node {
                     user_identity.clone(),
                     acp_store,
                     zanzibar_store,
-                    node_identity_did.clone(),
+                    node_identity.clone(),
                     se_key,
                 )
                 .await?
@@ -259,7 +254,7 @@ impl Node {
                     &config,
                     peer_keypair,
                     user_identity.clone(),
-                    node_identity_did.clone(),
+                    node_identity.clone(),
                     se_key,
                 )
                 .await?
