@@ -47,6 +47,9 @@
 //! sourcenetwork/defradb#5058 (sender never sees error replies — why the Go
 //! mode is silent). See defradb.rs#1134.
 
+#[path = "mutation.rs"]
+mod mutation;
+
 use crate::support;
 use defra_harness::{DefraClient, NodeKind, TestCluster};
 use std::collections::BTreeSet;
@@ -1273,18 +1276,21 @@ async fn run_indexed_lww_parity(
     }
 
     // Concurrent same-field LWW: node0 -> 20, node1 -> 99. Higher value wins (99).
-    cluster
-        .client(0)
-        .query(&format!(
-            r#"mutation {{ update_User(docID: "{id}", input: {{age: 20}}) {{ _docID }} }}"#
-        ))
-        .expect("node0 age=20");
-    cluster
-        .client(1)
-        .query(&format!(
-            r#"mutation {{ update_User(docID: "{id}", input: {{age: 99}}) {{ _docID }} }}"#
-        ))
-        .expect("node1 age=99");
+    for (node, age) in [(0, 20), (1, 99)] {
+        let updated = mutation::execute(
+            &cluster,
+            node,
+            &format!(
+                r#"mutation {{ update_User(docID: "{id}", input: {{age: {age}}}) {{ _docID }} }}"#
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{label}] node{node} age={age}: {error:#}"));
+        assert_eq!(
+            updated["update_User"][0]["_docID"].as_str(),
+            Some(id.as_str())
+        );
+    }
 
     // MERGE PROOF: node1 locally wrote the winner (99), so its index-resolved
     // check is satisfied by its own write; require the identical commit DAG on
