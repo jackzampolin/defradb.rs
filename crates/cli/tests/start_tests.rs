@@ -2,7 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use clap::Args;
+use clap::{Args, Parser};
+use cli::cli::{Cli, Command};
 use cli::commands::StartArgs;
 use cli::config::{Config, DatastoreType, TransportType};
 use cli::error::Error;
@@ -305,9 +306,19 @@ fn orbis_service_identity_is_separate_from_the_node_identity() {
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
     );
 
-    let mut args = default_start_args();
-    args.identity = Some(SECP256K1_KEY.to_string());
-    args.signer_orbis_identity = Some(ED25519_KEY.to_string());
+    let Command::Start(args) = Cli::try_parse_from([
+        "defra",
+        "start",
+        "--identity",
+        SECP256K1_KEY,
+        "--signer-orbis-identity",
+        ED25519_KEY,
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("expected start command");
+    };
 
     let node = args
         .parse_user_identity()
@@ -424,27 +435,53 @@ const CONFIG_BACKED_START_FLAG_GROUPS: &[&[&str]] = &[
     EMBEDDING_START_FLAGS,
 ];
 
-// These bypass Config and are consumed directly at the named startup boundary.
-const DIRECT_START_FLAGS: &[(&str, &str)] = &[
-    ("profile", "cli/src/main.rs::should_profile"),
-    ("identity", "StartArgs::parse_user_identity"),
-    #[cfg(feature = "orbis")]
-    ("signer-type", "StartArgs::execute"),
-    #[cfg(feature = "orbis")]
-    ("signer-orbis-endpoint", "StartArgs::setup_orbis_signer"),
-    #[cfg(feature = "orbis")]
-    ("signer-orbis-ring-id", "StartArgs::setup_orbis_signer"),
-    #[cfg(feature = "orbis")]
-    ("signer-orbis-derivation", "StartArgs::setup_orbis_signer"),
+const DIRECT_START_FLAGS: &[(&str, fn())] = &[
+    ("identity", identity_flag_selects_signing_key),
     #[cfg(feature = "orbis")]
     (
         "signer-orbis-identity",
-        "StartArgs::parse_orbis_service_identity",
+        orbis_service_identity_is_separate_from_the_node_identity,
     ),
 ];
 
+// `profile` is checked against the private binary entry point in main_tests.rs.
+const BINARY_TESTED_START_FLAGS: &[&str] = &["profile"];
+
+// These need a live Orbis ring to verify public-key derivation and signing.
+// Inventory membership is not runtime enforcement coverage for these flags.
+#[cfg(feature = "orbis")]
+const RUNTIME_EXEMPT_START_FLAGS: &[&str] = &[
+    "signer-type",
+    "signer-orbis-endpoint",
+    "signer-orbis-ring-id",
+    "signer-orbis-derivation",
+];
+#[cfg(not(feature = "orbis"))]
+const RUNTIME_EXEMPT_START_FLAGS: &[&str] = &[];
+
+fn identity_flag_selects_signing_key() {
+    for byte in [1u8, 2] {
+        let key = hex::encode([byte; 32]);
+        let Command::Start(args) = Cli::try_parse_from(["defra", "start", "--identity", &key])
+            .unwrap()
+            .command
+        else {
+            panic!("expected start command");
+        };
+        let identity = args.parse_user_identity().unwrap().unwrap();
+        assert_eq!(identity.private_key_bytes(), [byte; 32]);
+    }
+    let Command::Start(args) = Cli::try_parse_from(["defra", "start", "--identity", "not-hex"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected start command");
+    };
+    assert!(args.parse_user_identity().is_err());
+}
+
 #[test]
-fn every_start_flag_has_an_enforcement_path() {
+fn every_start_flag_has_a_check_or_explicit_runtime_exemption() {
     let mut command = StartArgs::augment_args(clap::Command::new("start"));
     command.build();
     let actual: BTreeSet<_> = command
@@ -457,23 +494,27 @@ fn every_start_flag_has_an_enforcement_path() {
         .iter()
         .flat_map(|flags| flags.iter().copied())
         .chain(DIRECT_START_FLAGS.iter().map(|(name, _)| *name))
+        .chain(BINARY_TESTED_START_FLAGS.iter().copied())
+        .chain(RUNTIME_EXEMPT_START_FLAGS.iter().copied())
         .collect();
     let classified_count = CONFIG_BACKED_START_FLAG_GROUPS
         .iter()
         .map(|flags| flags.len())
         .sum::<usize>()
-        + DIRECT_START_FLAGS.len();
+        + DIRECT_START_FLAGS.len()
+        + BINARY_TESTED_START_FLAGS.len()
+        + RUNTIME_EXEMPT_START_FLAGS.len();
 
     assert_eq!(
         classified.len(),
         classified_count,
         "start flag enforcement inventory contains a duplicate"
     );
-    assert!(DIRECT_START_FLAGS
-        .iter()
-        .all(|(_, enforcement_path)| !enforcement_path.is_empty()));
+    for (_, check) in DIRECT_START_FLAGS {
+        check();
+    }
     assert_eq!(
         actual, classified,
-        "classify every start flag by its config assertion or direct enforcement path"
+        "classify every start flag by its assertion or explicit runtime exemption"
     );
 }

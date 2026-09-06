@@ -48,3 +48,7 @@ fn should_profile(cli: &Cli) -> bool {
 fn enable_telemetry(cli: &Cli) -> bool {
     matches!(&cli.command, Command::Start(_))
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/main_tests.rs"]
+mod tests;

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use clap::CommandFactory;
+use clap::{CommandFactory, Parser};
 use cli::cli::{Cli, Command};
 use cli::commands::VersionArgs;
 use cli::config::{
@@ -226,7 +226,31 @@ const CONFIG_BACKED_GLOBAL_FLAGS: &[&str] = &[
 
 // `rootdir` selects the config file before Config exists, so it cannot be
 // covered by the apply-to-config assertion above.
-const DIRECT_GLOBAL_FLAGS: &[(&str, &str)] = &[("rootdir", "Config::resolve_rootdir")];
+const DIRECT_GLOBAL_FLAGS: &[(&str, fn())] = &[("rootdir", rootdir_selects_config_file)];
+
+fn rootdir_selects_config_file() {
+    let rootdir = tempfile::tempdir().unwrap();
+    let mut stored = Config::default();
+    stored.datastore.path = "selected-data".into();
+    fs::write(
+        rootdir.path().join("config.yaml"),
+        serde_yaml::to_string(&stored).unwrap(),
+    )
+    .unwrap();
+    let cli = Cli::try_parse_from([
+        "defra",
+        "--rootdir",
+        rootdir.path().to_str().unwrap(),
+        "--secret-file",
+        rootdir.path().join("absent.env").to_str().unwrap(),
+        "version",
+    ])
+    .unwrap();
+
+    let config = Config::load(&cli).unwrap();
+    assert_eq!(config.rootdir, rootdir.path());
+    assert_eq!(config.data_path(), rootdir.path().join("selected-data"));
+}
 
 #[test]
 fn every_global_config_flag_has_an_enforcement_path() {
@@ -249,9 +273,9 @@ fn every_global_config_flag_has_an_enforcement_path() {
         CONFIG_BACKED_GLOBAL_FLAGS.len() + DIRECT_GLOBAL_FLAGS.len(),
         "global flag enforcement inventory contains a duplicate"
     );
-    assert!(DIRECT_GLOBAL_FLAGS
-        .iter()
-        .all(|(_, enforcement_path)| !enforcement_path.is_empty()));
+    for (_, check) in DIRECT_GLOBAL_FLAGS {
+        check();
+    }
     assert_eq!(
         actual, classified,
         "classify every global config flag by its config assertion or direct enforcement path"
