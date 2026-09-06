@@ -128,6 +128,7 @@ async fn wait_before_marker_retry(_attempt: usize) {
 /// Peerstore provides storage for peer and replication metadata
 pub struct Peerstore<S: Store> {
     store: NamespacedStore<S>,
+    retry_schedule: super::RetrySchedule,
 }
 
 impl<S: Store> Peerstore<S> {
@@ -135,7 +136,14 @@ impl<S: Store> Peerstore<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store: NamespacedStore::new(store, Namespace::Peerstore),
+            retry_schedule: super::RetrySchedule::default(),
         }
+    }
+
+    /// Set the runtime retry policy without rewriting persisted deadlines.
+    pub fn with_retry_schedule(mut self, schedule: super::RetrySchedule) -> Self {
+        self.retry_schedule = schedule;
+        self
     }
 
     /// Store a replicator's configuration.
@@ -329,7 +337,7 @@ impl<S: Store> Peerstore<S> {
         if !txn.has(&id_key.bytes()).await? {
             let mut info = super::RetryInfo::from_bytes(retry_info_bytes)
                 .unwrap_or_else(|_| super::RetryInfo::new_initial());
-            info.bump_for(peer_id);
+            info.bump_with_schedule(peer_id, &self.retry_schedule);
             txn.set(
                 &id_key.bytes(),
                 &info.to_bytes().map_err(crate::corekv::Error::Other)?,
@@ -421,7 +429,7 @@ impl<S: Store> Peerstore<S> {
                 let id_key = ReplicatorRetryIDKey::new(&peer);
                 if !txn.has(&id_key.bytes()).await? {
                     let mut info = super::RetryInfo::new_initial();
-                    info.bump_for(&peer);
+                    info.bump_with_schedule(&peer, &self.retry_schedule);
                     txn.set(
                         &id_key.bytes(),
                         &info.to_bytes().map_err(crate::corekv::Error::Other)?,
@@ -616,7 +624,7 @@ impl<S: Store> Peerstore<S> {
             if let Some(delay) = defer_for {
                 info.defer_for(delay);
             } else {
-                info.bump_for(peer_id);
+                info.bump_with_schedule(peer_id, &self.retry_schedule);
             }
             txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
                 .await?;

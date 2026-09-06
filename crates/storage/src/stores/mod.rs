@@ -26,7 +26,8 @@ pub use headstore::Headstore;
 pub use multistore::Multistore;
 pub use peerstore::Peerstore;
 pub use retry_info::{
-    rewrite_legacy_push_retry_doc_id, PushRetryMarker, PushRetryMarkerStats, RetryInfo, RetryScope,
+    rewrite_legacy_push_retry_doc_id, PushRetryMarker, PushRetryMarkerStats, RetryInfo,
+    RetrySchedule, RetryScope,
 };
 pub use rootstore::RootStore;
 pub use systemstore::Systemstore;
