@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 /// Retry information for failed replicator pushes.
 ///
 /// Tracks the number of retries and the next retry time using exponential
@@ -11,6 +12,31 @@ use web_time::{SystemTime, UNIX_EPOCH};
 /// Source parity: Go `cli/config/config.go`, default
 /// `replicator.retryintervals`.
 pub const RETRY_INTERVALS_SECS: &[u64] = &[30, 60, 120, 240, 480, 960, 1920];
+
+/// Non-empty retry intervals in seconds. The final interval is the retry cap.
+#[derive(Debug, Clone)]
+pub struct RetrySchedule(Cow<'static, [u64]>);
+
+impl RetrySchedule {
+    pub fn new(intervals: Vec<u64>) -> Result<Self, String> {
+        if intervals.is_empty() || intervals.contains(&0) {
+            return Err(
+                "replicator retry intervals must be a non-empty list of positive integers".into(),
+            );
+        }
+        Ok(Self(Cow::Owned(intervals)))
+    }
+
+    fn cap(&self, attempt: u32) -> u64 {
+        self.0[(attempt as usize).min(self.0.len() - 1)]
+    }
+}
+
+impl Default for RetrySchedule {
+    fn default() -> Self {
+        Self(Cow::Borrowed(RETRY_INTERVALS_SECS))
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RetryInfo {
@@ -146,19 +172,23 @@ impl RetryInfo {
     /// retry rung.  The published Go-compatible ladder remains the cap while
     /// peers do not wake in lockstep after a fleet-wide outage.
     pub fn bump_for(&mut self, retry_key: &str) {
+        self.bump_with_schedule(retry_key, &RetrySchedule::default());
+    }
+
+    /// Advance using the configured ladder, preserving peer-scoped jitter.
+    pub fn bump_with_schedule(&mut self, retry_key: &str, schedule: &RetrySchedule) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let idx = (self.num_retries as usize).min(RETRY_INTERVALS_SECS.len() - 1);
-        let cap = RETRY_INTERVALS_SECS[idx];
+        let cap = schedule.cap(self.num_retries);
         let floor = (cap / 2).max(1);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         retry_key.hash(&mut hasher);
         self.num_retries.hash(&mut hasher);
         let delay = floor + hasher.finish() % (cap - floor + 1);
-        self.next_retry_unix = now + delay;
-        self.num_retries += 1;
+        self.next_retry_unix = now.saturating_add(delay);
+        self.num_retries = self.num_retries.saturating_add(1);
     }
 
     /// Move the next bounded pass to a different lexical marker prefix.
