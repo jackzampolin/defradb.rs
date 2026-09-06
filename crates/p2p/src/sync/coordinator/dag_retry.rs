@@ -33,12 +33,17 @@ pub(super) fn retry_backoff(attempt: u32) -> Duration {
 pub(super) struct ProviderRotation {
     peers: Vec<PeerId>,
     cursor: usize,
+    unservable: std::collections::HashMap<PeerId, cid::Cid>,
 }
 
 impl ProviderRotation {
     pub(super) fn new(peers: Vec<PeerId>) -> Self {
         debug_assert!(!peers.is_empty(), "DagFetchContext always has source_peer");
-        Self { peers, cursor: 0 }
+        Self {
+            peers,
+            cursor: 0,
+            unservable: std::collections::HashMap::new(),
+        }
     }
 
     pub(super) fn current(&self) -> &PeerId {
@@ -55,6 +60,16 @@ impl ProviderRotation {
 
     pub(super) fn peers(&self) -> &[PeerId] {
         &self.peers
+    }
+
+    pub(super) fn record_size_limit(&mut self, cid: cid::Cid) {
+        self.unservable.insert(self.current().clone(), cid);
+    }
+
+    pub(super) fn cannot_serve(&self, cids: &[cid::Cid]) -> bool {
+        self.unservable
+            .get(self.current())
+            .is_some_and(|cid| cids.contains(cid))
     }
 }
 

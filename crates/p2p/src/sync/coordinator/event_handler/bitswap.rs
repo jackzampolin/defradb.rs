@@ -9,6 +9,32 @@ use crate::error::Result;
 use crate::transport::P2PTransport;
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    pub(crate) async fn handle_car_size_limit(
+        &self,
+        query_id: crate::QueryId,
+        cid: Cid,
+    ) -> Result<()> {
+        if self
+            .manager
+            .block_sync_completion_tracker()
+            .size_limit(query_id, cid)
+        {
+            return Ok(());
+        }
+        if let Some(root_cid) = self.manager.take_query_root(query_id) {
+            self.manager
+                .block_sync_completion_tracker()
+                .cancel(query_id);
+            self.manager.record_pending_dag_fetch_failure(
+                &root_cid,
+                &format!("provider cannot serve oversized CAR block {cid}"),
+            );
+            self.retry_pending_root_after_bitswap(query_id, root_cid)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn retry_pending_root_after_bitswap(
         &self,
         query_id: crate::QueryId,

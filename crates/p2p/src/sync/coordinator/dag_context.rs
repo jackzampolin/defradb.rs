@@ -163,10 +163,11 @@ impl DagFetchContext {
     pub(crate) fn track_rooted_car(
         &self,
         root_cid: Cid,
+        peer_id: &PeerId,
     ) -> Option<tokio::sync::oneshot::Receiver<crate::sync::manager::FetchCompletion>> {
         self.rooted_car_completions
             .as_ref()
-            .map(|tracker| tracker.register(root_cid))
+            .map(|tracker| tracker.register(root_cid, peer_id.clone()))
     }
 
     pub(crate) fn cancel_rooted_car_tracking(&self, root_cid: Cid) {

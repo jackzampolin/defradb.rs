@@ -21,6 +21,7 @@ pub(crate) enum FetchCompletion {
     Success,
     Failure,
     Deferred,
+    SizeLimit(Cid),
 }
 
 impl FetchCompletion {
@@ -101,36 +102,62 @@ impl BlockSyncCompletionState {
 /// alone adds avoidable ownership latency at small admission capacities.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RootedCarCompletionTracker {
-    waiters: std::sync::Arc<
-        parking_lot::Mutex<
-            std::collections::HashMap<Cid, tokio::sync::oneshot::Sender<FetchCompletion>>,
-        >,
-    >,
+    waiters: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<Cid, RootedCarWaiter>>>,
+}
+
+#[derive(Debug)]
+struct RootedCarWaiter {
+    peer: crate::transport::PeerId,
+    completion: tokio::sync::oneshot::Sender<FetchCompletion>,
 }
 
 impl RootedCarCompletionTracker {
     pub(crate) fn register(
         &self,
         root_cid: Cid,
+        peer_id: crate::transport::PeerId,
     ) -> tokio::sync::oneshot::Receiver<FetchCompletion> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiters.lock().insert(root_cid, tx);
+        self.waiters.lock().insert(
+            root_cid,
+            RootedCarWaiter {
+                peer: peer_id,
+                completion: tx,
+            },
+        );
         rx
     }
 
-    pub(crate) fn complete(&self, root_cid: Cid, success: bool) -> bool {
-        self.complete_with(root_cid, FetchCompletion::from_success(success))
+    pub(crate) fn complete(
+        &self,
+        root_cid: Cid,
+        peer_id: &crate::transport::PeerId,
+        success: bool,
+    ) -> bool {
+        self.complete_with(root_cid, peer_id, FetchCompletion::from_success(success))
     }
 
-    pub(crate) fn defer(&self, root_cid: Cid) -> bool {
-        self.complete_with(root_cid, FetchCompletion::Deferred)
+    pub(crate) fn defer(&self, root_cid: Cid, peer_id: &crate::transport::PeerId) -> bool {
+        self.complete_with(root_cid, peer_id, FetchCompletion::Deferred)
     }
 
-    fn complete_with(&self, root_cid: Cid, completion: FetchCompletion) -> bool {
-        let Some(waiter) = self.waiters.lock().remove(&root_cid) else {
+    pub(crate) fn complete_with(
+        &self,
+        root_cid: Cid,
+        peer_id: &crate::transport::PeerId,
+        completion: FetchCompletion,
+    ) -> bool {
+        let mut waiters = self.waiters.lock();
+        if !waiters
+            .get(&root_cid)
+            .is_some_and(|waiter| &waiter.peer == peer_id)
+        {
+            return false;
+        }
+        let Some(waiter) = waiters.remove(&root_cid) else {
             return false;
         };
-        let _ = waiter.send(completion);
+        let _ = waiter.completion.send(completion);
         true
     }
 
@@ -168,6 +195,10 @@ impl BlockSyncCompletionTracker {
 
     pub(crate) fn defer(&self, query_id: QueryId) -> bool {
         self.complete_with(query_id, FetchCompletion::Deferred)
+    }
+
+    pub(crate) fn size_limit(&self, query_id: QueryId, cid: Cid) -> bool {
+        self.complete_with(query_id, FetchCompletion::SizeLimit(cid))
     }
 
     fn complete_with(&self, query_id: QueryId, completion: FetchCompletion) -> bool {
