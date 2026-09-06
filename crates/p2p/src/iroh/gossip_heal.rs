@@ -31,7 +31,7 @@ use iroh::EndpointId;
 use tracing::{debug, warn};
 
 use super::endpoint::{
-    join_peer_to_subscription_senders, snapshot_subscription_senders, track_task,
+    join_peer_to_subscription_senders, snapshot_subscription_senders, spawn_task,
     EndpointResources, SubscriptionSenders, TopicSubscription,
 };
 use super::endpoint_rpc::{close_peer_connections, connect_with_direct_addr_fallback};
@@ -292,10 +292,9 @@ pub(super) fn spawn_peer_connected_heal(
             return;
         }
         let senders = senders.clone();
-        let task = tokio::spawn(async move {
+        let _ = spawn_task(&spawned_tasks, async move {
             join_peer_to_subscription_senders(&senders, endpoint_id).await;
         });
-        track_task(&spawned_tasks, task);
         return;
     }
     // Refresh even with no persistent subscriptions: ephemeral publishers
@@ -305,10 +304,9 @@ pub(super) fn spawn_peer_connected_heal(
     res.healer.note_connected(endpoint_id, Instant::now());
     let res = res.clone();
     let senders = senders.clone();
-    let task = tokio::spawn(async move {
+    let _ = spawn_task(&spawned_tasks, async move {
         refresh_peer(&res, &senders, endpoint_id, HealContext::PeerConnected).await;
     });
-    track_task(&spawned_tasks, task);
 }
 
 /// Periodic sweep: refresh due peers and drop injected connections to
@@ -325,10 +323,9 @@ pub(super) fn sweep(res: &EndpointResources, subscriptions: &HashMap<String, Top
     for endpoint_id in res.healer.due_peers(&connected, Instant::now()) {
         let task_res = res.clone();
         let senders = senders.clone();
-        let task = tokio::spawn(async move {
+        let _ = spawn_task(&res.spawned_tasks, async move {
             refresh_peer(&task_res, &senders, endpoint_id, HealContext::Sweep).await;
         });
-        track_task(&res.spawned_tasks, task);
     }
 }
 
@@ -413,11 +410,10 @@ async fn dial_and_inject(
 
     if let Some(previous) = res.healer.store_conn(endpoint_id, conn) {
         let grace = res.healer.config().superseded_close_grace;
-        let task = tokio::spawn(async move {
+        let _ = spawn_task(&res.spawned_tasks, async move {
             tokio::time::sleep(grace).await;
             previous.close(0u32.into(), b"gossip-refresh");
         });
-        track_task(&res.spawned_tasks, task);
     }
     Ok(())
 }

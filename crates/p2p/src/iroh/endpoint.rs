@@ -6,12 +6,13 @@
 //! - Commands from the `IrohTransport` facade
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointId};
 use iroh_gossip::net::Gossip;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
@@ -31,6 +32,10 @@ use super::peer_map::{parse_endpoint_id, PeerMap};
 use super::protocols;
 
 const MAX_COMMAND_BATCH: usize = 16;
+
+#[cfg(test)]
+#[path = "../../tests/iroh/task_shutdown.rs"]
+mod task_shutdown_tests;
 
 /// Shared handles to the endpoint's long-lived state, cloneable into spawned
 /// tasks (dials, incoming connections, gossip heals).
@@ -59,61 +64,33 @@ pub(super) struct ActiveSync {
     pub(super) abort_handle: tokio::task::AbortHandle,
 }
 
-pub(super) type SpawnedTasks = Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>;
+pub(super) type SpawnedTasks = Arc<parking_lot::Mutex<Option<JoinSet<()>>>>;
 pub(super) type PendingPushLogReplies =
     Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>;
 
-pub(super) fn track_task(spawned_tasks: &SpawnedTasks, task: JoinHandle<()>) {
+pub(super) fn spawn_task(
+    spawned_tasks: &SpawnedTasks,
+    future: impl Future<Output = ()> + Send + 'static,
+) -> Option<AbortHandle> {
     let mut tasks = spawned_tasks.lock();
-    // The heal sweep (#1092) pushes tasks on a timer, so finished handles must
-    // be dropped here or the vec grows without bound over a node's lifetime.
-    tasks.retain(|task| !task.is_finished());
-    tasks.push(task);
+    let tasks = tasks.as_mut()?;
+    // Reap completed work so periodic gossip healing does not grow the set.
+    while let Some(result) = tasks.try_join_next() {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                debug!(%error, "Tracked Iroh spawned task failed");
+            }
+        }
+    }
+    Some(tasks.spawn(future))
 }
 
 async fn shutdown_tracked_tasks(spawned_tasks: SpawnedTasks) {
-    let mut tasks = {
-        let mut guard = spawned_tasks.lock();
-        std::mem::take(&mut *guard)
-    };
-
-    if tasks.is_empty() {
-        return;
-    }
-
-    debug!(
-        task_count = tasks.len(),
-        "Aborting tracked Iroh spawned tasks during shutdown"
-    );
-    for task in &tasks {
-        task.abort();
-    }
-
-    let shutdown_start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(5);
-    while let Some(task) = tasks.pop() {
-        let remaining = timeout.saturating_sub(shutdown_start.elapsed());
-        if remaining.is_zero() {
-            warn!(
-                remaining_tasks = tasks.len() + 1,
-                "Timed out draining tracked Iroh spawned tasks during shutdown"
-            );
-            break;
-        }
-        match tokio::time::timeout(remaining, task).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) if error.is_cancelled() => {}
-            Ok(Err(error)) => {
-                debug!(%error, "Tracked Iroh spawned task failed during shutdown");
-            }
-            Err(_) => {
-                warn!(
-                    remaining_tasks = tasks.len() + 1,
-                    "Timed out waiting for tracked Iroh spawned task during shutdown"
-                );
-                break;
-            }
-        }
+    // Closing registration under the spawn lock also covers child tasks
+    // scheduled by work that was already running when shutdown began.
+    let tasks = spawned_tasks.lock().take();
+    if let Some(mut tasks) = tasks {
+        tasks.shutdown().await;
     }
 }
 
@@ -197,7 +174,7 @@ async fn run_event_loop(
     let raw_topics: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
         Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
-    let spawned_tasks: SpawnedTasks = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let spawned_tasks: SpawnedTasks = Arc::new(parking_lot::Mutex::new(Some(JoinSet::new())));
     let mut next_query_id: u64 = 1;
 
     let heal_enabled = gossip_heal_config.enabled();
@@ -266,7 +243,7 @@ async fn run_event_loop(
                         let pending_pushlog_replies = Arc::clone(&pending_pushlog_replies);
                         let subscription_senders = snapshot_subscription_senders(&subscriptions);
                         let event_tx = event_tx.clone();
-                        let task = tokio::spawn(async move {
+                        let _ = spawn_task(&spawned_tasks, async move {
                             handle_incoming(
                                 incoming,
                                 &resources,
@@ -276,7 +253,6 @@ async fn run_event_loop(
                             )
                             .await;
                         });
-                        track_task(&spawned_tasks, task);
                     }
                     None => break,
                 }
@@ -293,8 +269,10 @@ async fn run_event_loop(
 
     // Clean up
     let subscriptions_started = std::time::Instant::now();
+    let mut readers = Vec::with_capacity(subscriptions.len());
     for (_, sub) in subscriptions.drain() {
         sub.reader_task.abort();
+        readers.push(sub.reader_task);
     }
     warn!(
         elapsed_ms = subscriptions_started.elapsed().as_millis(),
@@ -312,6 +290,9 @@ async fn run_event_loop(
 
     let tracked_started = std::time::Instant::now();
     shutdown_tracked_tasks(spawned_tasks).await;
+    for reader in readers {
+        let _ = reader.await;
+    }
     warn!(
         elapsed_ms = tracked_started.elapsed().as_millis(),
         "Iroh endpoint shutdown: tracked spawned tasks drained"
