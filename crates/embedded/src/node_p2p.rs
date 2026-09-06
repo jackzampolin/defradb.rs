@@ -282,7 +282,7 @@ where
         event_bus.clone(),
     );
     let failure_recorder_task =
-        defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
+        defra_p2p_adapter::spawn_failure_recorder(Peerstore::new(store.clone()), failure_rx);
 
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
@@ -302,7 +302,7 @@ where
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
     let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-        store.clone(),
+        Peerstore::new(store.clone()),
         p2p::Libp2pTransport::new(handle.clone()),
         doc_pusher.clone(),
         Some(se_repusher),
@@ -373,7 +373,7 @@ where
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &store,
+                &Peerstore::new(store),
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),
@@ -587,7 +587,7 @@ where
         event_bus.clone(),
     );
     let failure_recorder_task =
-        defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
+        defra_p2p_adapter::spawn_failure_recorder(Peerstore::new(store.clone()), failure_rx);
 
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
@@ -608,7 +608,7 @@ where
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
     let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-        store.clone(),
+        Peerstore::new(store.clone()),
         transport.clone(),
         doc_pusher.clone(),
         Some(se_repusher),
@@ -676,7 +676,7 @@ where
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &store,
+                &Peerstore::new(store),
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),

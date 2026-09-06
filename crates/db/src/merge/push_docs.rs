@@ -130,6 +130,7 @@ pub async fn push_existing_docs_by_id<S: Store + 'static, T: P2PTransport>(
     docs: &[(String, String)],
     filters: &p2p::ReplicationFilters,
     se_options: PushExistingDocsSeOptions<'_>,
+    replay_config: ReplayPushConfig,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
     car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
@@ -142,7 +143,7 @@ pub async fn push_existing_docs_by_id<S: Store + 'static, T: P2PTransport>(
         &collections,
         filters,
         se_options,
-        ReplayPushConfig::default(),
+        replay_config,
         matcher,
         car_authority,
         Some(docs),
@@ -225,7 +226,8 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
     }
 
     let local_peer_id = transport.local_peer_id().to_string();
-    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let peerstore = storage::stores::Peerstore::new(db.store().clone())
+        .with_retry_schedule(replay_config.retry_schedule.clone());
     let Some(retry_guard) = peerstore
         .acquire_replicator_retry_guard(peer_id.as_str())
         .await
@@ -534,7 +536,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
         }
     }
     tracing::debug!("all push tasks completed");
-    persist_replay_failures(db.store().clone(), peer_id, &replay_failures).await?;
+    persist_replay_failures(&peerstore, peer_id, &replay_failures).await?;
 
     if skipped_creator_docs > 0 {
         return Err(format!(

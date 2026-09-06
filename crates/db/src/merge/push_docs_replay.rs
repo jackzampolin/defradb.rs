@@ -28,6 +28,9 @@ pub const DEFAULT_REPLAY_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct ReplayPushConfig {
+    /// Retry schedule shared with live replication after replay fails.
+    pub retry_schedule: storage::stores::RetrySchedule,
+
     /// Maximum number of documents whose DAG blocks may be replayed concurrently.
     pub max_concurrent_document_tasks: usize,
 
@@ -55,7 +58,7 @@ pub struct ReplayDocumentFailure {
 /// not hold the peer writer across network waits, so the failure handoff must
 /// reacquire it before mutating the shared peer schedule.
 pub async fn persist_replay_failures<S: storage::corekv::Store>(
-    store: Arc<S>,
+    peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
     failures: &[ReplayDocumentFailure],
 ) -> Result<(), String> {
@@ -63,7 +66,6 @@ pub async fn persist_replay_failures<S: storage::corekv::Store>(
         return Ok(());
     }
 
-    let peerstore = storage::stores::Peerstore::new(store);
     let Some(_retry_guard) = peerstore
         .acquire_replicator_retry_guard(peer_id.as_str())
         .await
@@ -139,6 +141,7 @@ pub async fn persist_replay_failures<S: storage::corekv::Store>(
 impl Default for ReplayPushConfig {
     fn default() -> Self {
         Self {
+            retry_schedule: storage::stores::RetrySchedule::default(),
             max_concurrent_document_tasks: MAX_CONCURRENT_REPLAY_TASKS,
             max_concurrent_outbound_pushes: DEFAULT_MAX_CONCURRENT_REPLAY_SENDS,
             per_peer_rate_limit_burst: DEFAULT_REPLAY_RATE_LIMIT_BURST,

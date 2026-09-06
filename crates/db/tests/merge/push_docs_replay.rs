@@ -16,6 +16,7 @@ async fn replay_push_gate_caps_concurrent_sends() {
         per_peer_rate_limit_burst: 100,
         per_peer_rate_limit_rate: 100.0,
         send_timeout: Duration::from_secs(1),
+        ..Default::default()
     }));
     let current = Arc::new(AtomicUsize::new(0));
     let max_seen = Arc::new(AtomicUsize::new(0));
@@ -55,6 +56,7 @@ async fn replay_push_gate_paces_after_peer_burst() {
         per_peer_rate_limit_burst: 1,
         per_peer_rate_limit_rate: 10.0,
         send_timeout: Duration::from_secs(1),
+        ..Default::default()
     });
     let peer = PeerId::new("peer-1".to_string());
 
@@ -79,11 +81,12 @@ fn record_max(max_seen: &AtomicUsize, value: usize) {
 }
 
 #[tokio::test]
-async fn unfinished_replay_is_persisted_and_marks_replicator_inactive() {
+async fn unfinished_replay_uses_configured_schedule_and_marks_replicator_inactive() {
     use storage::RegolithStore;
 
     let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let peerstore = storage::stores::Peerstore::new(store.clone());
+    let peerstore = storage::stores::Peerstore::new(store.clone())
+        .with_retry_schedule(storage::stores::RetrySchedule::new(vec![3600]).unwrap());
     let peer = PeerId::new("peer-durable".to_string());
     let info =
         p2p::ReplicatorInfo::from_raw(peer.to_string(), vec!["collection".to_string()], Vec::new());
@@ -92,8 +95,12 @@ async fn unfinished_replay_is_persisted_and_marks_replicator_inactive() {
         .await
         .unwrap();
 
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     persist_replay_failures(
-        store,
+        &peerstore,
         &peer,
         &[ReplayDocumentFailure {
             doc_id: "doc-1".to_string(),
@@ -109,6 +116,12 @@ async fn unfinished_replay_is_persisted_and_marks_replicator_inactive() {
     assert_eq!(retries[0].scope, storage::stores::RetryScope::Document);
     assert!(!retries[0].is_collection_commit());
     assert!(!retries[0].retry_info.is_due());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(retries[0].retry_info.next_retry_unix >= before + 1800);
+    assert!(retries[0].retry_info.next_retry_unix <= now + 3600);
     let saved = peerstore
         .get_replicator(peer.as_str())
         .await
@@ -140,7 +153,7 @@ async fn unfinished_replay_uses_the_peer_retry_writer() {
     let persistence_peer = peer.clone();
     let mut persistence = tokio::spawn(async move {
         persist_replay_failures(
-            store,
+            &storage::stores::Peerstore::new(store),
             &persistence_peer,
             &[ReplayDocumentFailure {
                 doc_id: "doc-1".to_string(),

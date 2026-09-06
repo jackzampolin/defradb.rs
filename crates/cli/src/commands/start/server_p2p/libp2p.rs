@@ -18,6 +18,7 @@ impl Node {
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup> {
+        let retry_schedule = config.retry_schedule()?;
         info!("Initializing P2P network (libp2p)");
 
         let blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
@@ -359,20 +360,26 @@ impl Node {
                 database.clone(),
             );
 
-        let doc_pusher_impl = Arc::new(crate::transport_doc_pusher::DbTransportDocPusher::new(
-            database.clone(),
-            p2p::Libp2pTransport::new(handle.clone()),
-            coordinator.head_hint_car_authority(),
-        ));
+        let doc_pusher_impl = Arc::new(
+            crate::transport_doc_pusher::DbTransportDocPusher::new(
+                database.clone(),
+                p2p::Libp2pTransport::new(handle.clone()),
+                coordinator.head_hint_car_authority(),
+            )
+            .with_retry_schedule(retry_schedule.clone()),
+        );
         let doc_pusher_for_acp = doc_pusher_impl.clone();
         let doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> = doc_pusher_impl;
 
-        let failure_recorder_task =
-            defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
+        let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(
+            storage::stores::Peerstore::new(store.clone())
+                .with_retry_schedule(retry_schedule.clone()),
+            failure_rx,
+        );
         let se_repusher: Arc<dyn db::merge::SeArtifactRepusher> =
             replication.broadcast_mutator.clone();
         let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-            store.clone(),
+            storage::stores::Peerstore::new(store.clone()).with_retry_schedule(retry_schedule),
             p2p::Libp2pTransport::new(handle.clone()),
             doc_pusher.clone(),
             Some(se_repusher),

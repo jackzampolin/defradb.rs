@@ -94,6 +94,7 @@ pub struct DbTransportDocPusher<S: storage::corekv::Store, T: P2PTransport> {
     db: Arc<db::DB<S>>,
     transport: T,
     car_authority: p2p::sync::HeadHintCarAuthority,
+    retry_schedule: storage::stores::RetrySchedule,
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
@@ -107,6 +108,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<
             db,
             transport,
             car_authority,
+            retry_schedule: storage::stores::RetrySchedule::default(),
             document_acp: std::sync::OnceLock::new(),
         }
     }
@@ -117,6 +119,11 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<
         car_authority: p2p::sync::HeadHintCarAuthority,
     ) -> Arc<dyn TransportDocPusher> {
         Arc::new(Self::new(db, transport, car_authority))
+    }
+
+    pub fn with_retry_schedule(mut self, schedule: storage::stores::RetrySchedule) -> Self {
+        self.retry_schedule = schedule;
+        self
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
@@ -143,7 +150,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()> {
-        db::merge::push_existing_docs(
+        db::merge::push_existing_docs_with_config(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -153,6 +160,10 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             db::merge::PushExistingDocsSeOptions {
                 encryption_key: se_key,
                 identity_pubkey: se_identity_pubkey,
+            },
+            db::merge::ReplayPushConfig {
+                retry_schedule: self.retry_schedule.clone(),
+                ..Default::default()
             },
             &replication_filter::QueryReplicationFilterMatcher::new(),
             &self.car_authority,
@@ -182,6 +193,10 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             docs,
             &filters,
             db::merge::PushExistingDocsSeOptions::default(),
+            db::merge::ReplayPushConfig {
+                retry_schedule: self.retry_schedule.clone(),
+                ..Default::default()
+            },
             &replication_filter::QueryReplicationFilterMatcher::new(),
             &self.car_authority,
         )
