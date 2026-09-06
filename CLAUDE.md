@@ -38,13 +38,108 @@ This codebase is designed for **AI-human pair programming**. Every structural ch
 
 **No commented-out code. No TODO comments (create issues instead). No speculative docs.**
 
-## 3. No Documentation Files
+## 3. Authority, Ownership, and Callsite Discipline
+
+The recurring high-cost failure is a correct rule in one path with a bypass in
+another. Treat data access as an ownership problem, not as local helper
+cleanup.
+
+### Before Changing a Data Path
+
+- **Name the invariant and its owner.** Identify the canonical durable state,
+  the sole writer for each lifecycle transition, and the owner of retry,
+  recovery, and terminal cleanup. Readers and adapters may observe or request
+  transitions; they must not become alternate writers or clocks.
+- **Map every production callsite.** Use `rg` on the changed trait, method, data
+  type, and storage key, then trace the real entrypoints. Check CLI, HTTP and
+  GraphQL, embedded, FFI/WASM, P2P live delivery, replay, and restart recovery
+  as applicable. Include auto-commit, batch, explicit transaction, fast paths,
+  and already-present/empty branches. A wrapper is not a chokepoint if any
+  caller reaches a deeper method directly.
+- **Classify state before reading it.** Distinguish canonical records from
+  indexes/projections, durable hints, process-local caches, transport evidence,
+  and metrics. Rebuild or replace derived state from an authoritative snapshot;
+  do not union stale cache state back into truth. An empty index result does not
+  prove that the underlying record is absent; compare a scan or direct key read
+  when diagnosing.
+- **Pin the code and feature surface.** Establish the exact revision, enabled
+  features, backend, and transport used by the failing artifact before tracing
+  current source. A passing Local-ACP path does not validate SourceHub ACP; one
+  storage backend or transport does not stand in for the others. Validate Git
+  dependencies and feature resolution from a clean state when reachability or
+  hermeticity matters; a warm cache can make a broken pin appear healthy.
+
+### Implementation Rules
+
+- Put a semantic invariant in the lowest shared layer that has enough context
+  to enforce it. Frontends and transport adapters translate inputs and expose
+  outcomes; they do not choose different persistence, authorization, retry, or
+  merge semantics.
+- Centralize shared mechanism without erasing intentional surface policy.
+  Before replacing parallel implementations, record each surface's observable
+  timeouts, routing, status/error mapping, defaults, and metadata. Preserve real
+  differences as explicit parameters or thin policy wrappers; do not make them
+  accidental forks or silently standardize them during cleanup.
+- A centralization change is complete only when every semantically equivalent
+  callsite routes through the owner, or the remaining exceptions are named and
+  tested. Remove obsolete bypasses and dead recovery paths rather than keeping
+  a second implementation "for safety."
+- Transfer ownership durably before returning a success acknowledgement. An
+  in-memory map, queued event, spawned task, or live connection is not durable
+  backing. If local commit succeeds but marker/index/broadcast registration
+  fails, surface the partial outcome and retain or reconstruct a retryable
+  obligation.
+- Keep exactly one progression mechanism for a lifecycle: one fetch claim, one
+  retry schedule, one merge writer (which may batch), and one terminal cleanup
+  writer. Reconnect, replay, cache resync, and restart may wake that owner; they
+  must not create parallel clocks or writers.
+- Preserve provenance end to end. Carry authenticated caller, creator, sender,
+  and provider identity through the shared path. Do not replace it with the
+  current adapter caller, a relay, ambient process state, or an unsigned payload
+  claim. Re-announcement must not silently rebind a durable owner.
+- Describe atomicity at the real transaction boundary. Do not claim
+  commit-plus-marker atomicity when a channel, coalescer, callback, or second
+  store sits between them.
+- Unsupported feature or backend combinations must fail explicitly at the
+  construction or public boundary. Do not substitute identity transforms,
+  no-op stores, permissive authorization, or another silent behavior for an
+  unavailable capability.
+
+### Verification Bar
+
+- Keep the original failing workload or symptom as a regression fence. A unit
+  test for a local property does not replace an end-to-end test for the reported
+  failure, and green unrelated CI is not evidence for the changed path.
+- Test the owner seam directly, then exercise at least one real public boundary.
+  Add the relevant crash/restart, duplicate/replay, partial-failure, and
+  authorization cases. Verify every affected path in the callsite matrix, not
+  only the first path that failed.
+- Build ordinary fixtures through the production owner so they satisfy current
+  invariants. Direct insertion of impossible or partially owned state belongs
+  only in an explicitly named corruption, migration, or recovery test.
+- For negative dependency, feature, and topology assertions, inspect and assert
+  the evidence-bearing output; an exit code alone may not distinguish "absent"
+  from "unused," unsupported, or not inspected. Preserve the raw result when a
+  harness normalizes known environmental noise.
+- Tests that mutate process-global environment or singleton state belong in an
+  isolated test binary unless synchronization and restoration are explicit.
+- Treat a PR stack as change organization, not as a CI optimization. Verify the
+  workflow's actual branch and path triggers, keep every layer reviewable and
+  mergeable, and validate both the next mergeable layer and the integrated tip.
+- For a nontrivial change, record the invariant, semantic owner, canonical and
+  derived stores, enumerated callsites, failure boundary, and validation matrix
+  in the PR or commit message. Do not create a planning document for it.
+
+## 4. No Documentation Files
 
 Only allowed: `README.md`, `CLAUDE.md`, `Cargo.toml` files.
 
+`AGENTS.md` may exist only as a symlink to the nearest `CLAUDE.md`; never
+maintain a second copy of the guidance.
+
 No `ROADMAP.md`, `DEVELOPMENT.md`, `docs/` directories, or planning documents.
 
-## 4. File Organization
+## 5. File Organization
 
 **One concept per file. Small files over large files.**
 
@@ -111,7 +206,7 @@ rest are scripts and non-Rust harnesses.
 - 200-400 lines: Check if doing one thing
 - Over 400 lines: Consider splitting
 
-## 5. Naming Conventions
+## 6. Naming Conventions
 
 | Thing | Convention | Example |
 |-------|------------|---------|
@@ -121,7 +216,7 @@ rest are scripts and non-Rust harnesses.
 | Functions | snake_case | `encode_priority()` |
 | Constants | SCREAMING_SNAKE_CASE | `STATUS_ACTIVE` |
 
-## 6. Comments Policy
+## 7. Comments Policy
 
 **Minimal comments. Code should be self-documenting.**
 
@@ -129,7 +224,7 @@ rest are scripts and non-Rust harnesses.
 
 ❌ Don't: What the code does, TODO/FIXME, commented-out code, change history
 
-## 7. Git Worktree Workflow
+## 8. Git Worktree Workflow
 
 ```bash
 cd ../defradb.rs-foo     # Work on feature foo
