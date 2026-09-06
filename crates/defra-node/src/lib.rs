@@ -35,6 +35,7 @@ mod node_acp;
 mod p2p_runtime;
 pub mod search_chunks;
 mod signed_query_runtime;
+mod transaction;
 pub mod version;
 
 use std::path::PathBuf;
@@ -68,6 +69,7 @@ pub use schema::CollectionVersion;
 pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
 #[cfg(feature = "otel")]
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
+pub use transaction::EmbeddedTransaction;
 
 #[cfg(not(target_arch = "wasm32"))]
 use signed_query_runtime::{
@@ -468,7 +470,8 @@ impl EmbeddedNode {
         self.event_bus.subscribe(event_names)
     }
 
-    /// Begin a transaction owned by this embedded node.
+    /// Begin a manually finalized transaction. Dropping its handle does not
+    /// roll it back; use [`Self::begin_transaction_guard`] for scope ownership.
     pub async fn begin_transaction(
         &self,
         readonly: bool,
