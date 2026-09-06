@@ -77,15 +77,26 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         };
         let truncated = collected.truncated();
         let collected_count = collected.blocks.len();
+        let blockstore_hit_count = collected.blockstore_hits;
+        let blockstore_miss_count = collected.blockstore_misses;
+        if !collected.oversized_blocks.is_empty() {
+            tracing::warn!(
+                root_cid = %request.root_cid,
+                peer_id = %peer_id,
+                oversized_count = collected.oversized_blocks.len(),
+                oversized_blocks = ?collected.oversized_blocks.iter().take(4).collect::<Vec<_>>(),
+                max_block_bytes = crate::sync::car::CAR_MAX_BYTES,
+                "CAR request contains blocks exceeding the response byte limit"
+            );
+        }
         let blocks = self
             .filter_car_response_blocks(&peer_id, &request.root_cid, collected.blocks)
             .await;
         let kept_count = blocks.len();
         let filtered_count = collected_count.saturating_sub(kept_count);
-        let blockstore_miss_count = request.wanted_cids.len().saturating_sub(collected_count);
         self.manager.diagnostics.record_car_serve_counts(
             request.wanted_cids.len(),
-            collected_count,
+            blockstore_hit_count,
             kept_count,
             filtered_count,
         );
@@ -113,10 +124,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     peer_id = %peer_id,
                     root_present = ?root_present,
                     requested_count = request.wanted_cids.len(),
-                    blockstore_hit_count = collected_count,
+                    blockstore_hit_count,
                     blockstore_miss_count,
                     filtered_count,
                     kept_count,
+                    truncated,
                     requested_cids = ?sample_cids(&request.wanted_cids),
                     requested_presence = ?requested_presence,
                     "CAR handler: no exact blocks served for selective request"

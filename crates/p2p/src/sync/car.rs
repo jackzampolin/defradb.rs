@@ -11,6 +11,10 @@ use cid::Cid;
 
 use crate::error::{Error, Result};
 
+#[cfg(test)]
+#[path = "../../tests/unit/car_collection.rs"]
+mod collection_tests;
+
 /// Maximum number of blocks allowed in a single CAR response.
 ///
 /// Prevents a malicious or faulty peer from causing the server to collect and
@@ -24,6 +28,9 @@ pub const CAR_MAX_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Default)]
 pub struct CarCollectOutcome {
     pub blocks: Vec<(Cid, Bytes)>,
+    pub blockstore_hits: usize,
+    pub blockstore_misses: usize,
+    pub oversized_blocks: Vec<(Cid, usize)>,
     pub truncated_by_blocks: bool,
     pub truncated_by_bytes: bool,
 }
@@ -123,10 +130,10 @@ pub fn decode_car(data: &[u8]) -> Result<CarContents> {
 
 /// Traverse DAGs from a missing frontier, collecting reachable blocks.
 ///
-/// Collection is capped at [`CAR_MAX_BLOCKS`] blocks and [`CAR_MAX_BYTES`] total
-/// bytes.  If either limit is reached the function returns the blocks collected
-/// so far without error; the caller can detect truncation by checking whether
-/// the returned slice represents a complete DAG.
+/// Collection examines at most [`CAR_MAX_BLOCKS`] distinct CIDs and retains at
+/// most [`CAR_MAX_BYTES`] block bytes. Blocks that do not fit are skipped without
+/// walking their links, so later roots and siblings can still be served.
+/// The outcome distinguishes absent blocks, oversized blocks, and truncation.
 /// All roots share the same visited set and response limits, so overlapping
 /// branches are sent once and a large frontier cannot multiply the bounded
 /// CAR response size.
@@ -144,14 +151,17 @@ pub async fn collect_dag_blocks_from_roots<B: Blockstore>(
             continue;
         }
 
-        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
+        if visited.len() > CAR_MAX_BLOCKS {
             outcome.truncated_by_blocks = true;
             break;
         }
 
         let data = match blockstore.get(&cid).await {
             Ok(Some(d)) => d,
-            Ok(None) => continue,
+            Ok(None) => {
+                outcome.blockstore_misses += 1;
+                continue;
+            }
             Err(e) => {
                 return Err(Error::BlockstoreError(format!(
                     "failed to get block {}: {}",
@@ -160,9 +170,13 @@ pub async fn collect_dag_blocks_from_roots<B: Blockstore>(
             }
         };
 
-        if total_bytes + data.len() > CAR_MAX_BYTES {
+        outcome.blockstore_hits += 1;
+        if data.len() > CAR_MAX_BYTES - total_bytes {
             outcome.truncated_by_bytes = true;
-            break;
+            if data.len() > CAR_MAX_BYTES {
+                outcome.oversized_blocks.push((cid, data.len()));
+            }
+            continue;
         }
         total_bytes += data.len();
 
@@ -179,7 +193,8 @@ pub async fn collect_dag_blocks_from_roots<B: Blockstore>(
     Ok(outcome)
 }
 
-/// Collect the exact requested blocks without walking descendant links.
+/// Collect exact requested blocks under the same limits as the recursive walk,
+/// without walking descendant links.
 pub async fn collect_exact_blocks<B: Blockstore>(
     blockstore: &B,
     cids: &[Cid],
@@ -192,14 +207,17 @@ pub async fn collect_exact_blocks<B: Blockstore>(
         if !visited.insert(*cid) {
             continue;
         }
-        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
+        if visited.len() > CAR_MAX_BLOCKS {
             outcome.truncated_by_blocks = true;
             break;
         }
 
         let data = match blockstore.get(cid).await {
             Ok(Some(d)) => d,
-            Ok(None) => continue,
+            Ok(None) => {
+                outcome.blockstore_misses += 1;
+                continue;
+            }
             Err(e) => {
                 return Err(Error::BlockstoreError(format!(
                     "failed to get block {}: {}",
@@ -208,9 +226,13 @@ pub async fn collect_exact_blocks<B: Blockstore>(
             }
         };
 
-        if total_bytes + data.len() > CAR_MAX_BYTES {
+        outcome.blockstore_hits += 1;
+        if data.len() > CAR_MAX_BYTES - total_bytes {
             outcome.truncated_by_bytes = true;
-            break;
+            if data.len() > CAR_MAX_BYTES {
+                outcome.oversized_blocks.push((*cid, data.len()));
+            }
+            continue;
         }
 
         total_bytes += data.len();

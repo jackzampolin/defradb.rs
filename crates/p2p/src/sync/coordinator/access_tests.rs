@@ -3,6 +3,9 @@
 //! Verifies that DocSync and BranchableSync handlers enforce access checks
 //! in Controlled mode before processing requests.
 
+#[path = "../../../tests/unit/car_serving.rs"]
+mod car_serving;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
