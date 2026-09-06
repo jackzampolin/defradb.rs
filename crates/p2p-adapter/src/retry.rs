@@ -18,7 +18,7 @@ fn capacity_retry_delay(error: &str) -> Option<std::time::Duration> {
 /// retry writer. A success acknowledgement clears only the marker still
 /// covered by the acknowledged head fence.
 pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
-    store: Arc<S>,
+    peerstore: storage::stores::Peerstore<S>,
     mut failures: tokio::sync::mpsc::Receiver<p2p::sync::PushFailure>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -36,7 +36,6 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 continue;
             }
 
-            let peerstore = storage::stores::Peerstore::new(Arc::clone(&store));
             let _retry_guard = match peerstore
                 .acquire_replicator_retry_guard(&failure.peer_id)
                 .await
@@ -154,7 +153,7 @@ async fn redial_replicator<S, T>(
 
 /// Run one marker-plus-rederive retry pass for any transport.
 pub async fn run_retry_pass<S, T>(
-    store: &Arc<S>,
+    peerstore: &storage::stores::Peerstore<S>,
     transport: &T,
     doc_pusher: &Arc<dyn TransportDocPusher>,
     se_repusher: Option<&Arc<dyn db::merge::SeArtifactRepusher>>,
@@ -163,7 +162,6 @@ pub async fn run_retry_pass<S, T>(
     S: storage::corekv::Store + 'static,
     T: P2PTransport,
 {
-    let peerstore = storage::stores::Peerstore::new(Arc::clone(store));
     let peers = match peerstore.get_replicator_retry_peers().await {
         Ok(peers) => peers,
         Err(error) => {
@@ -187,7 +185,7 @@ pub async fn run_retry_pass<S, T>(
             }
         };
         if markers.is_empty() {
-            finish_peer(&peerstore, &peer_id_str, true).await;
+            finish_peer(peerstore, &peer_id_str, true).await;
             continue;
         }
         if !force && !markers.iter().any(|marker| marker.retry_info.is_due()) {
@@ -199,9 +197,9 @@ pub async fn run_retry_pass<S, T>(
             // Connectivity is part of the due retry attempt. Do not create a
             // second two-second redial clock for markers whose ladder has not
             // elapsed yet.
-            redial_replicator(&peerstore, transport, &peer_id).await;
+            redial_replicator(peerstore, transport, &peer_id).await;
             let _ = peerstore.reschedule_retry_peer(&peer_id_str, None).await;
-            finish_peer(&peerstore, &peer_id_str, false).await;
+            finish_peer(peerstore, &peer_id_str, false).await;
             continue;
         }
 
@@ -268,7 +266,7 @@ pub async fn run_retry_pass<S, T>(
             .get_retry_documents(&peer_id_str)
             .await
             .is_ok_and(|markers| markers.is_empty());
-        finish_peer(&peerstore, &peer_id_str, complete).await;
+        finish_peer(peerstore, &peer_id_str, complete).await;
     }
 }
 
@@ -288,7 +286,7 @@ async fn finish_peer<S: storage::corekv::Store>(
 
 /// Run the one durable retry clock used by CLI, embedded, and defra-node.
 pub fn spawn_retry_loop<S, T>(
-    store: Arc<S>,
+    peerstore: storage::stores::Peerstore<S>,
     transport: T,
     doc_pusher: Arc<dyn TransportDocPusher>,
     se_repusher: Option<Arc<dyn db::merge::SeArtifactRepusher>>,
@@ -298,13 +296,19 @@ where
     T: P2PTransport,
 {
     tokio::spawn(async move {
-        let peerstore = storage::stores::Peerstore::new(Arc::clone(&store));
         if let Err(error) = peerstore.migrate_legacy_push_retries().await {
             tracing::warn!(%error, "failed to migrate legacy push retries after restart");
         }
         loop {
             tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
-            run_retry_pass(&store, &transport, &doc_pusher, se_repusher.as_ref(), false).await;
+            run_retry_pass(
+                &peerstore,
+                &transport,
+                &doc_pusher,
+                se_repusher.as_ref(),
+                false,
+            )
+            .await;
         }
     })
 }
@@ -351,7 +355,7 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let task = spawn_failure_recorder(Arc::clone(&store), rx);
+        let task = spawn_failure_recorder(storage::stores::Peerstore::new(Arc::clone(&store)), rx);
 
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
         let mut announced = failure(false);

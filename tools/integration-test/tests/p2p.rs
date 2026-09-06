@@ -32,3 +32,14 @@ mod transports;
 mod trust_boundary;
 #[path = "p2p/write_contention.rs"]
 mod write_contention;
+
+#[path = "replicator_retry_common.rs"]
+mod replicator_retry_common;
+
+#[tokio::test]
+async fn rust_replicator_retry_intervals() {
+    replicator_retry_common::retry_intervals_test(
+        integration_test::TestCluster::builder().with_p2p(),
+    )
+    .await;
+}

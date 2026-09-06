@@ -676,6 +676,7 @@ impl StartArgs {
             config.embedding.api_key_env = api_key_env.clone();
         }
         config.api.validate()?;
+        config.retry_schedule()?;
         Ok(())
     }
 }

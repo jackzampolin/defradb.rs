@@ -243,8 +243,10 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
 
     // Failure channel (required by replication loop)
     let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
-    let failure_recorder_task =
-        defra_p2p_adapter::spawn_failure_recorder(store.clone(), failure_rx);
+    let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(
+        storage::stores::Peerstore::new(store.clone()),
+        failure_rx,
+    );
 
     let coordinator = Arc::new(coordinator);
     coordinator
@@ -337,7 +339,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     let doc_pusher_for_acp = doc_pusher_impl.clone();
     let doc_pusher: Arc<dyn defra_p2p_adapter::TransportDocPusher> = doc_pusher_impl;
     let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-        store.clone(),
+        storage::stores::Peerstore::new(store.clone()),
         transport.clone(),
         doc_pusher.clone(),
         None,
