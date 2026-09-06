@@ -35,6 +35,10 @@ impl MockExecutor {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl crate::QueryExecutor for MockExecutor {
+    fn abandon_txn(&self, _handle: &TransactionHandle) {
+        self.rolled_back.store(true, Ordering::SeqCst);
+    }
+
     async fn execute(&self, _request: crate::QueryRequest) -> crate::QueryResponse {
         crate::QueryResponse::success(serde_json::json!({"mock": true}))
     }
@@ -92,6 +96,8 @@ impl FailingCommitExecutor {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl crate::QueryExecutor for FailingCommitExecutor {
+    fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
     async fn execute(&self, _request: crate::QueryRequest) -> crate::QueryResponse {
         crate::QueryResponse::success(serde_json::json!({"mock": true}))
     }
@@ -161,6 +167,7 @@ async fn test_guard_commit_consumes_guard() {
     assert!(!executor.was_committed());
     guard.commit().await.unwrap();
     assert!(executor.was_committed());
+    assert!(!executor.was_rolled_back());
 }
 
 #[tokio::test]
@@ -188,7 +195,7 @@ async fn test_guard_multiple_executes_before_commit() {
 }
 
 #[tokio::test]
-async fn test_guard_drop_without_finalization_does_not_commit_or_rollback() {
+async fn test_guard_drop_without_finalization_abandons_transaction() {
     let executor = MockExecutor::new();
     {
         let _guard = TransactionGuard::begin(&executor, false).await.unwrap();
@@ -198,8 +205,8 @@ async fn test_guard_drop_without_finalization_does_not_commit_or_rollback() {
         "Dropping guard should not commit the transaction"
     );
     assert!(
-        !executor.was_rolled_back(),
-        "Dropping guard should not rollback (async not possible in Drop)"
+        executor.was_rolled_back(),
+        "Dropping guard must abandon the transaction"
     );
 }
 

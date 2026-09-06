@@ -59,6 +59,8 @@ pub(super) fn test_signing_config() -> SigningConfig {
 
 #[async_trait::async_trait]
 impl QueryExecutor for TestExecution {
+    fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
     async fn execute(&self, _request: QueryRequest) -> query::QueryResponse {
         match self {
             Self::Slow { started, completed } => {

@@ -254,6 +254,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             self.broadcaster.clone(),
         ));
 
+        // Registration and returning the handle must be one poll: cancellation
+        // before the caller can construct its guard must not orphan an entry.
         self.transactions
             .write()
             .map_err(|_| TransactionError::lock_poisoned("failed to acquire write lock for begin"))?
@@ -266,6 +268,18 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
+    fn abandon(&self, handle: &TransactionHandle) {
+        let ctx = {
+            // A poisoned registry remains closed to queries, but dropping an
+            // uncommitted entry is safe and must still release its resources.
+            let mut transactions = self.transactions.write().unwrap_or_else(|e| e.into_inner());
+            transactions.remove(handle.as_str())
+        };
+        // Do not run destructors while holding the registry lock. Any in-flight
+        // context borrowers release the remaining storage references on drop.
+        drop(ctx);
+    }
+
     async fn begin(
         &self,
         readonly: bool,

@@ -92,6 +92,8 @@ impl CleanupResult {
 /// returns an error, and `begin()`, `commit()`, and `rollback()` return errors.
 /// A poisoned lock indicates a panic and potential data corruption - continuing
 /// operation would be unsafe.
+/// Abandonment still removes entries from a poisoned map, without clearing its
+/// poison or attempting to commit, so cancellation can release resources.
 pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,

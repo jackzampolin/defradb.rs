@@ -18,6 +18,7 @@ pub trait TransactionRegistry: MaybeSendSync {
     /// Begin a new transaction.
     ///
     /// Returns a handle that can be used with `get()`, `commit()`, and `rollback()`.
+    /// Registration and returning the handle must not be separated by an await.
     async fn begin(
         &self,
         readonly: bool,
@@ -54,6 +55,11 @@ pub trait TransactionRegistry: MaybeSendSync {
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
 
+    /// Synchronously remove an abandoned entry without committing its writes.
+    /// Must be idempotent and work without an async runtime. Existing context
+    /// borrowers may delay resource release, but cannot finalize through this handle.
+    fn abandon(&self, handle: &TransactionHandle);
+
     /// Close a standalone query's implicit read transaction.
     ///
     /// `apply_read_effects` is false when query execution failed. The default
@@ -76,6 +82,8 @@ pub struct NoOpTransactionRegistry;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl TransactionRegistry for NoOpTransactionRegistry {
+    fn abandon(&self, _handle: &TransactionHandle) {}
+
     async fn begin(
         &self,
         _readonly: bool,
