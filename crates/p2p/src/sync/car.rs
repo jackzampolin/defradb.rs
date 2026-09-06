@@ -15,13 +15,17 @@ use crate::error::{Error, Result};
 #[path = "../../tests/unit/car_collection.rs"]
 mod collection_tests;
 
+#[cfg(test)]
+#[path = "../../tests/unit/car_size_notices.rs"]
+mod size_notice_tests;
+
 /// Maximum number of blocks allowed in a single CAR response.
 ///
 /// Prevents a malicious or faulty peer from causing the server to collect and
 /// send an arbitrarily large DAG in a single response.
 pub const CAR_MAX_BLOCKS: usize = 10_000;
 
-/// Maximum total byte size of a single CAR response (16 MiB).
+/// Maximum block payload bytes collected for a CAR response (16 MiB).
 pub const CAR_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// Result of collecting blocks for a CAR response.
@@ -44,11 +48,22 @@ impl CarCollectOutcome {
 /// Encode blocks as a CARv1 byte stream.
 ///
 /// Format: varint-prefixed DAG-CBOR header, then varint-prefixed (CID + data) sections.
+#[cfg(test)]
 pub fn encode_car(roots: &[Cid], blocks: &[(&Cid, &[u8])]) -> Result<Vec<u8>> {
+    encode_car_response(roots, blocks, &[])
+}
+
+/// Rust CAR peers ignore unknown header fields. Keep ordinary responses byte
+/// identical, adding size-limit notices only when authorized blocks cannot fit.
+pub(crate) fn encode_car_response(
+    roots: &[Cid],
+    blocks: &[(&Cid, &[u8])],
+    oversized: &[(Cid, usize)],
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
 
     // Header: DAG-CBOR map {version: 1, roots: [CID]}
-    let header = encode_car_header(roots)?;
+    let header = encode_car_header(roots, oversized)?;
     write_varint_prefixed(&mut out, &header);
 
     // Each block: varint(len(cid_bytes + data)) + cid_bytes + data
@@ -332,7 +347,7 @@ fn extract_links(block_data: &[u8]) -> Vec<Cid> {
 // CIDs are stored as plain CBOR byte strings (no tag 42) since this
 // is an internal Rust-to-Rust protocol.
 
-fn encode_car_header(roots: &[Cid]) -> Result<Vec<u8>> {
+fn encode_car_header(roots: &[Cid], oversized: &[(Cid, usize)]) -> Result<Vec<u8>> {
     use ciborium::Value;
     let roots_val: Vec<Value> = roots
         .iter()
@@ -343,15 +358,79 @@ fn encode_car_header(roots: &[Cid]) -> Result<Vec<u8>> {
     // explicitly here. It previously came from a BTreeMap, which sorted the
     // keys; "roots" < "version" alphabetically, so this order reproduces the
     // existing bytes exactly. `car_header_bytes_unchanged_by_encoder` pins it.
-    let header = Value::Map(vec![
+    let mut fields = vec![
         (Value::Text("roots".into()), Value::Array(roots_val)),
         (Value::Text("version".into()), Value::Integer(1.into())),
-    ]);
+    ];
+    if !oversized.is_empty() {
+        fields.push((
+            Value::Text("oversized".into()),
+            Value::Array(
+                oversized
+                    .iter()
+                    .map(|(cid, size)| {
+                        Value::Array(vec![
+                            Value::Bytes(cid.to_bytes()),
+                            Value::Integer((*size as u64).into()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ));
+    }
+    let header = Value::Map(fields);
 
     let mut out = Vec::new();
     ciborium::into_writer(&header, &mut out)
         .map_err(|e| Error::Codec(format!("failed to encode CAR header: {}", e)))?;
     Ok(out)
+}
+
+/// Optional notices from a Rust peer, not proof of a block's size or absence.
+pub(crate) fn decode_car_oversized(data: &[u8]) -> Result<Vec<(Cid, usize)>> {
+    use ciborium::Value;
+    let mut cursor = data;
+    let header_len = read_varint(&mut cursor)?;
+    let header_len = usize::try_from(header_len)
+        .ok()
+        .filter(|length| *length <= cursor.len())
+        .ok_or_else(|| Error::Codec("CAR header length exceeds data".into()))?;
+    let header: Value = defra_core::cbor::from_slice(&cursor[..header_len])
+        .map_err(|e| Error::Codec(format!("invalid CAR header: {e}")))?;
+    let Value::Map(fields) = header else {
+        return Err(Error::Codec("CAR header is not a CBOR map".into()));
+    };
+    let mut notices = fields
+        .into_iter()
+        .filter_map(|(key, value)| (key == Value::Text("oversized".into())).then_some(value));
+    let Some(value) = notices.next() else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(entries) = value else {
+        return Err(Error::Codec(
+            "CAR oversized notices must be an array".into(),
+        ));
+    };
+    if notices.next().is_some() || entries.len() > CAR_MAX_BLOCKS {
+        return Err(Error::Codec("invalid CAR oversized block notices".into()));
+    }
+    let invalid = || Error::Codec("invalid CAR oversized block notice".into());
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Value::Array(pair) = entry else {
+            return Err(invalid());
+        };
+        let [Value::Bytes(cid), Value::Integer(size)] = pair.as_slice() else {
+            return Err(invalid());
+        };
+        let size = usize::try_from(i128::from(*size)).map_err(|_| invalid())?;
+        if size <= CAR_MAX_BYTES {
+            return Err(invalid());
+        }
+        let cid = Cid::try_from(cid.as_slice()).map_err(|_| invalid())?;
+        result.push((cid, size));
+    }
+    Ok(result)
 }
 
 fn decode_car_header(data: &[u8]) -> Result<Vec<Cid>> {

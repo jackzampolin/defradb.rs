@@ -208,6 +208,9 @@ where
                     crate::sync::manager::FetchCompletion::Deferred => {
                         coordinator.handle_bitswap_deferred(query_id).await
                     }
+                    crate::sync::manager::FetchCompletion::SizeLimit(cid) => {
+                        coordinator.handle_car_size_limit(query_id, cid).await
+                    }
                 };
                 if let Err(error) = result {
                     tracing::warn!(

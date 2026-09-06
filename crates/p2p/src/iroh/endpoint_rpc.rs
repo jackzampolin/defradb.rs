@@ -51,6 +51,7 @@ struct CarFetchAttempt {
 #[derive(Debug, Clone)]
 enum CarFetchOutcome {
     Success,
+    SizeLimited,
     InvalidPeerId(String),
     ConnectFailed(String),
     OpenBiFailed(String),
@@ -69,6 +70,7 @@ impl CarFetchOutcome {
     fn label(&self) -> &'static str {
         match self {
             Self::Success => "success",
+            Self::SizeLimited => "size_limited",
             Self::InvalidPeerId(_) => "invalid_peer_id",
             Self::ConnectFailed(_) => "connect_failed",
             Self::OpenBiFailed(_) => "open_bi_failed",
@@ -88,6 +90,7 @@ impl CarFetchOutcome {
             | Self::WriteFailed(detail)
             | Self::ReadFailed(detail) => Some(detail),
             Self::Success
+            | Self::SizeLimited
             | Self::EmptyResponse
             | Self::HeaderOnlyCar
             | Self::EventChannelClosed => None,
@@ -753,6 +756,8 @@ async fn try_fetch_from_provider(
     // "none returned usable blocks" WARN is suppressed when every provider
     // replies empty (issue #858 review round 3).
     let has_blocks = crate::sync::car::car_has_any_block(&car_data);
+    let has_notices =
+        crate::sync::car::decode_car_oversized(&car_data).is_ok_and(|notices| !notices.is_empty());
 
     debug!(
         provider = %provider,
@@ -782,7 +787,9 @@ async fn try_fetch_from_provider(
     }
     CarFetchAttempt {
         provider: provider.clone(),
-        outcome: if has_blocks {
+        outcome: if has_notices {
+            CarFetchOutcome::SizeLimited
+        } else if has_blocks {
             CarFetchOutcome::Success
         } else {
             CarFetchOutcome::HeaderOnlyCar
@@ -876,6 +883,7 @@ pub(super) async fn handle_block_sync(
     }
 
     let mut any_success = false;
+    let mut size_limited = false;
     let mut failures = Vec::new();
     let provider_count = providers.len();
     let kind = if missing.is_empty() {
@@ -891,7 +899,10 @@ pub(super) async fn handle_block_sync(
                 tasks.abort_all();
                 break;
             }
-            Ok(attempt) => failures.push(attempt),
+            Ok(attempt) => {
+                size_limited |= matches!(attempt.outcome, CarFetchOutcome::SizeLimited);
+                failures.push(attempt);
+            }
             Err(e) => {
                 debug!("Block sync task panicked: {}", e);
                 failures.push(CarFetchAttempt {
@@ -924,7 +935,10 @@ pub(super) async fn handle_block_sync(
     // are durable. An independent success event can otherwise overtake the
     // concurrently dispatched CAR response. Failures have no useful response
     // payload to order behind and retain the aggregate completion event.
+    // Size notices also complete at ingestion; do not overwrite that result
+    // with a generic failure or cancel another provider that can still help.
     if !any_success
+        && !size_limited
         && event_tx
             .send(TransportEvent::BitswapComplete {
                 query_id,
@@ -937,6 +951,10 @@ pub(super) async fn handle_block_sync(
         warn!("Event channel closed, cannot emit BitswapComplete");
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/iroh_car_size.rs"]
+mod car_size_tests;
 
 #[cfg(test)]
 mod tests {
@@ -985,7 +1003,7 @@ mod tests {
         assert!(summary.contains("+1 more"));
     }
 
-    async fn localhost_endpoint(alpns: Vec<Vec<u8>>) -> iroh::Endpoint {
+    pub(super) async fn localhost_endpoint(alpns: Vec<Vec<u8>>) -> iroh::Endpoint {
         iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .alpns(alpns)

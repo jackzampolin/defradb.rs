@@ -49,6 +49,7 @@ enum FetchBatchOutcome {
     Partial,
     NoProgress,
     Deferred,
+    Unservable,
 }
 
 /// Outcome of one provider's poll window, as seen by the rotation loop.
@@ -62,6 +63,7 @@ enum ProviderWindowOutcome {
     Stalled,
     SendFailed,
     Deferred,
+    SizeLimit(Cid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +71,7 @@ enum FetchAttemptOutcome {
     Complete,
     Incomplete { remaining: usize },
     Deferred,
+    Unservable,
 }
 
 /// Fetch an entire DAG rooted at `root_cid`.
@@ -180,6 +183,11 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
         .await
         {
             FetchAttemptOutcome::Complete => return,
+            FetchAttemptOutcome::Unservable => {
+                error!(root_cid = %root_cid, providers = ?providers.peers(),
+                    "Providers cannot serve the remaining DAG within their CAR byte limits; stopping this fetch");
+                return;
+            }
             FetchAttemptOutcome::Incomplete { remaining } => remaining_count = remaining,
             FetchAttemptOutcome::Deferred => {
                 diagnostics.record_pending_dag_fetch_deferred_contention();
@@ -295,7 +303,12 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
     // bounded descendant closure rooted at the already-known missing
     // frontier. This mirrors Go's one per-root blockservice session without
     // returning to an unbounded recursive historical-root walk.
-    let rooted_outcome = if let Some(rooted_watch) = car_missing_watch.as_deref() {
+    let rooted_wants = car_missing_watch
+        .as_deref()
+        .unwrap_or(std::slice::from_ref(&root_cid));
+    let rooted_outcome = if providers.cannot_serve(rooted_wants) {
+        ProviderWindowOutcome::SendFailed
+    } else if let Some(rooted_watch) = car_missing_watch.as_deref() {
         if context.needs_rooted_provider_discovery() {
             if transport.supports_cancellable_rooted_sync() {
                 poll_fetch_rooted_provider(
@@ -321,11 +334,23 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
         } else {
             ProviderWindowOutcome::SendFailed
         }
-    } else if try_car_fetch(transport, blockstore, &root_cid, providers.current()).await {
-        ProviderWindowOutcome::Partial
     } else {
-        ProviderWindowOutcome::SendFailed
+        poll_fetch_rooted_car(
+            &root_cid,
+            std::slice::from_ref(&root_cid),
+            transport,
+            blockstore,
+            providers.current(),
+            context,
+        )
+        .await
     };
+    if let ProviderWindowOutcome::SizeLimit(cid) = rooted_outcome {
+        // libp2p can fall back to Bitswap, whose limits are independent of CAR.
+        if transport.supports_cancellable_rooted_sync() {
+            providers.record_size_limit(cid);
+        }
+    }
     if rooted_outcome == ProviderWindowOutcome::Deferred {
         return FetchAttemptOutcome::Deferred;
     }
@@ -367,6 +392,7 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
     {
         FetchBatchOutcome::Complete => {}
         FetchBatchOutcome::Deferred => return FetchAttemptOutcome::Deferred,
+        FetchBatchOutcome::Unservable => return FetchAttemptOutcome::Unservable,
         FetchBatchOutcome::Partial | FetchBatchOutcome::NoProgress => {
             warn!(root_cid = %root_cid, "Failed to fetch root block");
             return FetchAttemptOutcome::Incomplete { remaining: 1 };
@@ -440,6 +466,7 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
                     );
                 }
                 FetchBatchOutcome::Deferred => return FetchAttemptOutcome::Deferred,
+                FetchBatchOutcome::Unservable => return FetchAttemptOutcome::Unservable,
             }
         }
         if !made_progress {
@@ -487,39 +514,6 @@ async fn emit_dag_ready(
     }
 }
 
-/// Root-absent DocSync/BranchableSync discovery retains the established CAR
-/// request seam. PushLog recovery already has the root and uses the cancellable
-/// rooted-provider probe below instead.
-async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
-    transport: &T,
-    blockstore: &Arc<B>,
-    root_cid: &Cid,
-    source_peer: &PeerId,
-) -> bool {
-    match tokio::time::timeout(
-        Duration::from_secs(10),
-        transport.send_car_request(source_peer, *root_cid),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            debug!(root_cid = %root_cid, error = %error, "CAR discovery request failed");
-            return false;
-        }
-        Err(_) => return false,
-    }
-
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(10) {
-        if matches!(blockstore.has(root_cid).await, Ok(true)) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
 /// Exercise the established libp2p CAR request protocol when the transport's
 /// block-sync primitive cannot express a recursive root request.  Sending the
 /// request and receiving its CAR response are separate streams on libp2p, so
@@ -542,7 +536,7 @@ async fn poll_fetch_rooted_car<B: Blockstore, T: P2PTransport>(
         return ProviderWindowOutcome::Complete;
     }
 
-    let mut completion = context.track_rooted_car(*root_cid);
+    let mut completion = context.track_rooted_car(*root_cid, source_peer);
 
     match tokio::time::timeout(
         Duration::from_secs(10),
@@ -572,7 +566,7 @@ async fn poll_fetch_rooted_car<B: Blockstore, T: P2PTransport>(
         }
     };
     let remaining_now = count_missing(blockstore, watch_cids).await;
-    if remaining_now < initially_missing {
+    if remaining_now < initially_missing && completion.is_none() {
         context.cancel_rooted_car_tracking(*root_cid);
         return observe(remaining_now);
     }
@@ -589,6 +583,9 @@ async fn poll_fetch_rooted_car<B: Blockstore, T: P2PTransport>(
                     if matches!(result, Ok(FetchCompletion::Deferred)) {
                         context.cancel_rooted_car_tracking(*root_cid);
                         return ProviderWindowOutcome::Deferred;
+                    }
+                    if let Ok(FetchCompletion::SizeLimit(cid)) = result {
+                        return ProviderWindowOutcome::SizeLimit(cid);
                     }
                     break;
                 },
@@ -663,6 +660,7 @@ async fn poll_fetch_rooted_provider<B: Blockstore, T: P2PTransport>(
     let mut outcome = ProviderWindowOutcome::Stalled;
     let mut transport_complete = false;
     let mut deferred = false;
+    let mut size_limit = None;
     while start.elapsed() < timeout && context.is_current() {
         let mut remaining = 0usize;
         for cid in watch_cids {
@@ -707,6 +705,10 @@ async fn poll_fetch_rooted_provider<B: Blockstore, T: P2PTransport>(
                             deferred = true;
                             break;
                         }
+                        FetchCompletion::SizeLimit(cid) => {
+                            size_limit = Some(cid);
+                            break;
+                        }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -719,7 +721,9 @@ async fn poll_fetch_rooted_provider<B: Blockstore, T: P2PTransport>(
     if let Err(error) = transport.cancel_sync(query_id).await {
         debug!(root_cid = %root_cid, query_id = query_id.0, error = %error, "Failed to cancel rooted CAR query");
     }
-    if deferred {
+    if let Some(cid) = size_limit {
+        ProviderWindowOutcome::SizeLimit(cid)
+    } else if deferred {
         ProviderWindowOutcome::Deferred
     } else {
         outcome
@@ -746,7 +750,22 @@ async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
     state: &mut ProviderFetchState<'_>,
     context: &DagFetchContext,
 ) -> FetchBatchOutcome {
+    let mut missing = Vec::new();
+    for cid in cids {
+        if !matches!(blockstore.has(cid).await, Ok(true)) {
+            missing.push(*cid);
+        }
+    }
+    if missing.is_empty() {
+        return FetchBatchOutcome::Complete;
+    }
+    let mut unservable = 0;
     for _ in 0..state.providers.len() {
+        if state.providers.cannot_serve(&missing) {
+            unservable += 1;
+            state.providers.advance();
+            continue;
+        }
         if *state.stall_budget == 0 {
             debug!(
                 root_cid = %root_cid,
@@ -777,9 +796,24 @@ async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
                 state.diagnostics.record_provider_rotation();
             }
             ProviderWindowOutcome::Deferred => return FetchBatchOutcome::Deferred,
+            ProviderWindowOutcome::SizeLimit(cid) => {
+                state.providers.record_size_limit(cid);
+                state.providers.advance();
+                state.diagnostics.record_provider_rotation();
+                unservable += 1;
+            }
         }
     }
-    FetchBatchOutcome::NoProgress
+    let remaining = count_missing(blockstore, &missing).await;
+    if remaining == 0 {
+        FetchBatchOutcome::Complete
+    } else if remaining < missing.len() {
+        FetchBatchOutcome::Partial
+    } else if unservable == state.providers.len() {
+        FetchBatchOutcome::Unservable
+    } else {
+        FetchBatchOutcome::NoProgress
+    }
 }
 
 /// Fetch one batch of exact blocks via the transport's block-sync path.
@@ -828,6 +862,7 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     let completion_is_observable = completion.is_some();
     let mut transport_complete = false;
     let mut deferred = false;
+    let mut size_limit = None;
 
     let timeout = BLOCK_SYNC_COMPLETION_WATCHDOG;
     let start = Instant::now();
@@ -873,6 +908,10 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
                             deferred = true;
                             break;
                         }
+                        FetchCompletion::SizeLimit(cid) => {
+                            size_limit = Some(cid);
+                            break;
+                        }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -891,7 +930,9 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
             "Failed to cancel block-sync query after poll window"
         );
     }
-    if deferred {
+    if let Some(cid) = size_limit {
+        ProviderWindowOutcome::SizeLimit(cid)
+    } else if deferred {
         ProviderWindowOutcome::Deferred
     } else {
         outcome

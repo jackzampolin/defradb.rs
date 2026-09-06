@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "../../../tests/unit/car_size_retry.rs"]
+mod car_size_retry;
 use crate::error::Result as P2PResult;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
@@ -60,6 +63,8 @@ struct TestTransport {
     stream_block_delay: Arc<Mutex<Duration>>,
     stream_completed: Arc<AtomicBool>,
     cancelled_before_stream_complete: Arc<AtomicBool>,
+    size_limited_providers:
+        Arc<Mutex<HashMap<String, (Cid, crate::sync::manager::BlockSyncCompletionTracker)>>>,
 }
 
 impl TestTransport {
@@ -99,6 +104,7 @@ impl TestTransport {
             stream_block_delay: Arc::new(Mutex::new(Duration::from_millis(10))),
             stream_completed: Arc::new(AtomicBool::new(false)),
             cancelled_before_stream_complete: Arc::new(AtomicBool::new(false)),
+            size_limited_providers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -367,6 +373,16 @@ impl P2PTransport for TestTransport {
             .unwrap()
             .extend(providers.iter().map(|peer| peer.to_string()));
         let query_id = QueryId(call_index as u64 + 1);
+        if let Some((cid, completion)) = providers.first().and_then(|peer| {
+            self.size_limited_providers
+                .lock()
+                .unwrap()
+                .get(peer.as_str())
+                .cloned()
+        }) {
+            completion.size_limit(query_id, cid);
+            return Ok(query_id);
+        }
         if let Some(completion) = self.early_failure_completion.lock().unwrap().clone() {
             completion.complete(query_id, false);
             return Ok(query_id);

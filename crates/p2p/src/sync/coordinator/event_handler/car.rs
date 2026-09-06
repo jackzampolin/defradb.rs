@@ -1,14 +1,14 @@
 //! CAR fetch event handling for the sync coordinator.
 
 use blockstore::{verify_block_cid, Blockstore};
-use bytes::Bytes;
 use cid::Cid;
 
 use crate::bitswap::BlockClass;
 use crate::error::Result;
 use crate::message::CarFetchRequest;
 use crate::sync::car::{
-    collect_dag_blocks_from_roots, collect_exact_blocks, decode_car, encode_car,
+    collect_dag_blocks_from_roots, collect_exact_blocks, decode_car, decode_car_oversized,
+    encode_car_response, CarCollectOutcome,
 };
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
@@ -18,6 +18,7 @@ use super::super::authorizer::AccessAuthorizer;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CarIngestDisposition {
     Completed,
+    SizeLimit(Cid),
     /// A root or shared descendant already has a storage owner. Wake this
     /// fetch with a non-success terminal result so its sole paced retry/provider
     /// rotation can re-offer the response after the owner completes.
@@ -89,9 +90,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "CAR request contains blocks exceeding the response byte limit"
             );
         }
-        let blocks = self
-            .filter_car_response_blocks(&peer_id, &request.root_cid, collected.blocks)
+        let served = self
+            .filter_car_response_blocks(&peer_id, &request.root_cid, collected)
             .await;
+        let blocks = served.blocks;
         let kept_count = blocks.len();
         let filtered_count = collected_count.saturating_sub(kept_count);
         self.manager.diagnostics.record_car_serve_counts(
@@ -139,7 +141,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             // the libp2p response handler errors on empty bytes and the
             // requester-side car_empty_responses counter stays at zero
             // (issue #858 review feedback).
-            let car_data = encode_car(&response_roots, &[])?;
+            let car_data = encode_car_response(&response_roots, &[], &served.oversized_blocks)?;
             if let Some(token) = token {
                 self.runtime
                     .transport
@@ -155,7 +157,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let block_refs: Vec<(&Cid, &[u8])> = blocks.iter().map(|(c, d)| (c, d.as_ref())).collect();
-        let car_data = encode_car(&response_roots, &block_refs)?;
+        let car_data = encode_car_response(&response_roots, &block_refs, &served.oversized_blocks)?;
 
         tracing::debug!(
             root_cid = %request.root_cid,
@@ -197,8 +199,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         root_cid: &Cid,
-        blocks: Vec<(Cid, Bytes)>,
-    ) -> Vec<(Cid, Bytes)> {
+        mut blocks: CarCollectOutcome,
+    ) -> CarCollectOutcome {
         if self.access.access_mode.is_open() {
             return blocks;
         }
@@ -206,7 +208,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let peer_str = peer_id.to_string();
         let serve = self.serve_acp.get();
         let mut identity: Option<acp::Identity> = None;
-        let mut kept = Vec::with_capacity(blocks.len());
+        let candidates = std::mem::take(&mut blocks.blocks)
+            .into_iter()
+            .map(|(cid, data)| (cid, Some(data), None))
+            .chain(
+                std::mem::take(&mut blocks.oversized_blocks)
+                    .into_iter()
+                    .map(|(cid, size)| (cid, None, Some(size))),
+            );
         let rooted_grant = self
             .runtime
             .selective_car_access
@@ -227,62 +236,80 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             None
         };
 
-        for (cid, data) in blocks {
-            if granted_cids
+        for (cid, data, oversized) in candidates {
+            let granted = granted_cids
                 .as_ref()
-                .is_some_and(|cids| cids.contains(&cid))
-            {
-                kept.push((cid, data));
-                continue;
-            }
-
-            match self.classifier.classify(&cid, &data).await {
-                BlockClass::Allow => kept.push((cid, data)),
-                BlockClass::Deny => {
-                    tracing::debug!(
-                        cid = %cid,
-                        peer_id = %peer_id,
-                        "CAR handler: dropping block denied by classifier"
-                    );
+                .is_some_and(|cids| cids.contains(&cid));
+            // Authorize notices at the same boundary as block bytes, without
+            // retaining oversized payloads for the entire response.
+            let data = match data {
+                Some(data) => data,
+                None if granted => {
+                    blocks
+                        .oversized_blocks
+                        .push((cid, oversized.expect("oversized candidate")));
+                    continue;
                 }
-                BlockClass::Data(meta) => {
-                    if self
-                        .access
-                        .replicators
-                        .is_filtered_replicator(&meta.collection_id, &peer_str)
-                    {
-                        continue;
+                None => match self.manager.blockstore().get(&cid).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                },
+            };
+            let allowed = if granted {
+                true
+            } else {
+                match self.classifier.classify(&cid, &data).await {
+                    BlockClass::Allow => true,
+                    BlockClass::Deny => {
+                        tracing::debug!(
+                            cid = %cid,
+                            peer_id = %peer_id,
+                            "CAR handler: dropping block denied by classifier"
+                        );
+                        false
                     }
-                    if self
-                        .access
-                        .replicators
-                        .is_replicator(&meta.collection_id, &peer_str)
-                    {
-                        kept.push((cid, data));
-                        continue;
+                    BlockClass::Data(meta) => {
+                        if self
+                            .access
+                            .replicators
+                            .is_filtered_replicator(&meta.collection_id, &peer_str)
+                        {
+                            continue;
+                        }
+                        if self
+                            .access
+                            .replicators
+                            .is_replicator(&meta.collection_id, &peer_str)
+                        {
+                            true
+                        } else {
+                            let Some(serve) = serve else {
+                                continue;
+                            };
+                            if identity.is_none() {
+                                identity = Some(match serve.resolver.resolve(peer_id).await {
+                                    Some(did) => acp::Identity::Authenticated(did),
+                                    None => acp::Identity::Anonymous,
+                                });
+                            }
+                            serve
+                                .gate
+                                .may_read(identity.as_ref().expect("identity set"), &meta)
+                                .await
+                        }
                     }
-
-                    let Some(serve) = serve else {
-                        continue;
-                    };
-                    if identity.is_none() {
-                        identity = Some(match serve.resolver.resolve(peer_id).await {
-                            Some(did) => acp::Identity::Authenticated(did),
-                            None => acp::Identity::Anonymous,
-                        });
-                    }
-                    if serve
-                        .gate
-                        .may_read(identity.as_ref().expect("identity set"), &meta)
-                        .await
-                    {
-                        kept.push((cid, data));
-                    }
+                }
+            };
+            if allowed {
+                if let Some(size) = oversized {
+                    blocks.oversized_blocks.push((cid, size));
+                } else {
+                    blocks.blocks.push((cid, data));
                 }
             }
         }
 
-        kept
+        blocks
     }
 
     /// Re-derive the authority installed before a head hint after the sender
@@ -388,6 +415,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let (_roots, blocks) = decode_car(&car_data)?;
+        let oversized = decode_car_oversized(&car_data)?;
 
         if blocks.is_empty() {
             self.manager.diagnostics.record_car_empty_response();
@@ -400,7 +428,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 peer_id = %peer_id,
                 "Received empty CAR response (decoded 0 blocks)"
             );
-            return Ok(CarIngestDisposition::Completed);
+            return self
+                .car_size_limit_disposition(&peer_id, &root_cid, &oversized)
+                .await;
         }
 
         // Verify all block CIDs before storing (finding 03-35).
@@ -459,6 +489,46 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Stored blocks from CAR response"
         );
 
+        self.car_size_limit_disposition(&peer_id, &root_cid, &oversized)
+            .await
+    }
+
+    async fn car_size_limit_disposition(
+        &self,
+        peer_id: &PeerId,
+        root_cid: &Cid,
+        oversized: &[(Cid, usize)],
+    ) -> Result<CarIngestDisposition> {
+        if oversized.is_empty() {
+            return Ok(CarIngestDisposition::Completed);
+        }
+        let missing = match self
+            .manager
+            .blockstore()
+            .get(root_cid)
+            .await
+            .map_err(crate::error::Error::from_blockstore)?
+        {
+            Some(data) => {
+                crate::sync::manager::links::find_all_missing_links(
+                    self.manager.blockstore().as_ref(),
+                    &data,
+                )
+                .await?
+            }
+            None => vec![*root_cid],
+        };
+        let missing: std::collections::HashSet<_> = missing.into_iter().collect();
+        // A peer's notice is only meaningful for a CID in our own missing
+        // frontier. It must not veto a complete DAG or an unrelated document.
+        if let Some((cid, size)) = oversized.iter().find(|(cid, _)| missing.contains(cid)) {
+            tracing::warn!(
+                root_cid = %root_cid, peer_id = %peer_id, block_cid = %cid,
+                block_bytes = size,
+                "Provider cannot serve a required block within its CAR byte limit"
+            );
+            return Ok(CarIngestDisposition::SizeLimit(*cid));
+        }
         Ok(CarIngestDisposition::Completed)
     }
 }

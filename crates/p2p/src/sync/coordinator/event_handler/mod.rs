@@ -613,6 +613,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 car_data,
             } => {
                 let has_blocks = crate::sync::car::car_has_any_block(&car_data);
+                let has_notices = crate::sync::car::decode_car_oversized(&car_data)
+                    .is_ok_and(|notices| !notices.is_empty());
                 let result = self
                     .retry_retriable_event("car_fetch_response", || {
                         self.handle_car_fetch_response(peer_id.clone(), root_cid, car_data.clone())
@@ -623,15 +625,24 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     Some(car::CarIngestDisposition::Completed) => {
                         self.manager
                             .rooted_car_completion_tracker()
-                            .complete(root_cid, true);
+                            .complete(root_cid, &peer_id, true);
                     }
                     Some(car::CarIngestDisposition::Busy) => {
-                        self.manager.rooted_car_completion_tracker().defer(root_cid);
+                        self.manager
+                            .rooted_car_completion_tracker()
+                            .defer(root_cid, &peer_id);
+                    }
+                    Some(car::CarIngestDisposition::SizeLimit(cid)) => {
+                        self.manager.rooted_car_completion_tracker().complete_with(
+                            root_cid,
+                            &peer_id,
+                            crate::sync::manager::FetchCompletion::SizeLimit(cid),
+                        );
                     }
                     None => {
                         self.manager
                             .rooted_car_completion_tracker()
-                            .complete(root_cid, false);
+                            .complete(root_cid, &peer_id, false);
                     }
                 }
                 // Iroh block-sync success is query-correlated with the CAR
@@ -639,13 +650,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 // Header-only responses retain the transport's aggregate
                 // failure completion after all providers have answered.
                 if let Some(query_id) = query_id {
-                    if has_blocks {
+                    if has_blocks || has_notices {
                         match disposition {
                             Some(car::CarIngestDisposition::Completed) => {
                                 self.handle_bitswap_complete(query_id, true, None).await?;
                             }
                             Some(car::CarIngestDisposition::Busy) => {
                                 self.handle_bitswap_deferred(query_id).await?;
+                            }
+                            Some(car::CarIngestDisposition::SizeLimit(cid)) => {
+                                self.handle_car_size_limit(query_id, cid).await?;
                             }
                             None => {
                                 self.handle_bitswap_complete(

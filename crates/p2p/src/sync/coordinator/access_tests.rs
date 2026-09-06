@@ -1451,7 +1451,7 @@ async fn duplicate_car_ingest_defers_without_waiting_for_root_owner() {
     let mut completion = coordinator
         .manager()
         .rooted_car_completion_tracker()
-        .register(root_cid);
+        .register(root_cid, peer.clone());
 
     coordinator
         .handle_transport_event(TransportEvent::CarFetchResponse {
@@ -1486,7 +1486,7 @@ async fn duplicate_car_ingest_defers_without_waiting_for_root_owner() {
     let completion = coordinator
         .manager()
         .rooted_car_completion_tracker()
-        .register(root_cid);
+        .register(root_cid, peer.clone());
     coordinator
         .handle_transport_event(TransportEvent::CarFetchResponse {
             query_id: None,
@@ -1538,7 +1538,7 @@ async fn car_put_many_conflict_retries_before_publishing_one_success_completion(
     let completion = coordinator
         .manager()
         .rooted_car_completion_tracker()
-        .register(root_cid);
+        .register(root_cid, peer.clone());
 
     let ingest = {
         let coordinator = Arc::clone(&coordinator);
