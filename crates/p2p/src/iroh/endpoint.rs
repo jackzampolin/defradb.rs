@@ -172,6 +172,10 @@ pub async fn spawn_endpoint(
     Ok((command_tx, event_rx, replicators, task))
 }
 
+#[cfg(test)]
+#[path = "../../tests/unit/iroh_endpoint_lifecycle.rs"]
+mod lifecycle_tests;
+
 /// Main event loop processing incoming connections, gossip, and commands.
 async fn run_event_loop(
     endpoint: Endpoint,
@@ -220,11 +224,19 @@ async fn run_event_loop(
     }
 
     'endpoint: loop {
+        if command_rx.is_closed() {
+            break;
+        }
         tokio::select! {
-            Some(cmd) = command_rx.recv() => {
+            cmd = command_rx.recv() => {
+                let Some(cmd) = cmd else { break };
                 let mut pending_cmd = Some(cmd);
                 let mut processed = 0;
                 while let Some(cmd) = pending_cmd.take() {
+                    // Closing a channel does not discard its buffered commands.
+                    if command_rx.is_closed() {
+                        break 'endpoint;
+                    }
                     let should_shutdown = handle_command(
                         cmd,
                         &resources,
@@ -275,6 +287,9 @@ async fn run_event_loop(
             else => break,
         }
     }
+
+    // Reject queued and new commands before waiting for network teardown.
+    drop(command_rx);
 
     // Clean up
     let subscriptions_started = std::time::Instant::now();
