@@ -238,6 +238,8 @@ mod tests {
 
     #[async_trait]
     impl QueryExecutor for ConflictExecutor {
+        fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             if self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                 QueryResponse::transaction_conflict("transaction conflict")
@@ -333,6 +335,8 @@ mod tests {
 
     #[async_trait]
     impl QueryExecutor for DacBypassRecorder {
+        fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);

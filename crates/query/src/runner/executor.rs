@@ -556,6 +556,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         self.registry.rollback(handle).await
     }
 
+    fn abandon_txn(&self, handle: &TransactionHandle) {
+        self.registry.abandon(handle);
+    }
+
     async fn schema(&self) -> Result<String> {
         let collections = self.collections_map().await?;
         let mut schema_str = String::new();
@@ -810,6 +814,8 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl TransactionRegistry for SerialTxnRegistry {
+        fn abandon(&self, _handle: &TransactionHandle) {}
+
         async fn begin(
             &self,
             _readonly: bool,

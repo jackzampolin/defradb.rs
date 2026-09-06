@@ -30,6 +30,8 @@ impl FailingMockExecutor {
 
 #[async_trait]
 impl QueryExecutor for FailingMockExecutor {
+    fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
     async fn execute(&self, _request: QueryRequest) -> QueryResponse {
         QueryResponse::error("execution failed")
     }
@@ -101,6 +103,8 @@ impl Default for MockQueryExecutor {
 
 #[async_trait]
 impl QueryExecutor for MockQueryExecutor {
+    fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         let query = request.query.to_lowercase();
 

@@ -7,9 +7,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     ///
     /// This method finds all transactions whose last observed request was more
     /// than `max_idle_age` ago and rolls them back, freeing resources. This
-    /// should be called periodically by a background task to prevent resource
-    /// leaks from dropped `TransactionGuard`s or orphaned HTTP transaction
-    /// handles.
+    /// can be called periodically for orphaned, non-owning transaction handles.
+    /// Owning `TransactionGuard`s clean up on drop without waiting for a sweep.
     ///
     /// Returns a `CleanupResult` containing both successfully cleaned transactions
     /// and any failures. Check `result.is_complete()` to verify all cleanups succeeded.
@@ -76,7 +75,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 warn!(
                     txn_id = %txn_id,
                     idle_secs,
-                    "Cleaning up idle transaction (orphaned HTTP handle or leaked TransactionGuard?)"
+                    "Cleaning up idle transaction"
                 );
 
                 // Try to take and discard the transaction

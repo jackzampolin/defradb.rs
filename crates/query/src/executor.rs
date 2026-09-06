@@ -342,6 +342,9 @@ pub trait QueryExecutor: MaybeSendSync {
     ///
     /// # Arguments
     /// * `readonly` - If true, the transaction cannot perform write operations
+    ///
+    /// Cancellation must not leave an entry behind: register the transaction
+    /// only when returning its handle, with no intervening await.
     async fn begin_txn(
         &self,
         readonly: bool,
@@ -364,6 +367,13 @@ pub trait QueryExecutor: MaybeSendSync {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
+
+    /// Remove an abandoned transaction without committing or spawning cleanup.
+    ///
+    /// Called by `TransactionGuard::drop`, including during runtime shutdown.
+    /// Already-finalized handles are a no-op. Requests holding a context may
+    /// finish, but must not make its uncommitted writes durable.
+    fn abandon_txn(&self, handle: &TransactionHandle);
 
     /// Get the GraphQL schema for introspection.
     async fn schema(&self) -> Result<String>;

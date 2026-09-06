@@ -190,6 +190,10 @@ impl MockTxnRegistry {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl TransactionRegistry for MockTxnRegistry {
+    fn abandon(&self, handle: &TransactionHandle) {
+        self.transactions.lock().unwrap().remove(handle.as_str());
+    }
+
     async fn begin(
         &self,
         readonly: bool,

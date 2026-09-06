@@ -1,4 +1,4 @@
-//! Transaction guard for compile-time safety.
+//! Owning transaction guard with synchronous cancellation cleanup.
 
 use crate::error::TransactionError;
 
@@ -9,13 +9,16 @@ use super::TransactionHandle;
 /// This type provides compile-time safety by consuming itself on `commit()` or
 /// `rollback()`, preventing use-after-finalization bugs.
 ///
-/// # Warning
+/// Dropping the guard removes the registry entry without committing, including
+/// when its task is aborted or the async runtime has stopped. Cloned handles
+/// are non-owning IDs and do not keep the entry alive. In-flight context users
+/// may delay storage release until they also finish or are dropped.
 ///
-/// If dropped without explicit `commit()` or `rollback()`, the guard will log
-/// an error but **cannot perform async rollback**. The transaction will remain
-/// in the registry until cleaned up by the idle transaction cleanup policy.
-/// Always ensure you call `commit()` or `rollback()` explicitly before the
-/// guard goes out of scope.
+/// Cancellation before finalization discards uncommitted writes. Once a commit
+/// becomes durable it cannot be undone, even if cancellation interrupts its
+/// post-commit callbacks. A cancelled commit therefore has an unknown outcome;
+/// do not blindly retry non-idempotent writes. A competing explicit finalizer
+/// that already removed the entry owns that outcome.
 ///
 /// # Example
 ///
@@ -43,6 +46,7 @@ use super::TransactionHandle;
 ///     Ok(responses)
 /// }
 /// ```
+#[must_use = "dropping the guard abandons the transaction"]
 pub struct TransactionGuard<'a, E: crate::QueryExecutor + ?Sized> {
     executor: &'a E,
     pub(crate) handle: Option<TransactionHandle>,
@@ -51,9 +55,7 @@ pub struct TransactionGuard<'a, E: crate::QueryExecutor + ?Sized> {
 impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     /// Begin a new transaction and return a guard for it.
     ///
-    /// The returned guard must be explicitly finalized with `commit()` or `rollback()`.
-    /// Dropping the guard without finalization will leak the transaction in the registry.
-    #[must_use = "TransactionGuard must be explicitly committed or rolled back"]
+    /// Dropping the returned guard abandons the transaction.
     pub async fn begin(
         executor: &'a E,
         readonly: bool,
@@ -82,39 +84,33 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     ///
     /// After calling this, the guard cannot be used again (compile-time enforced).
     pub async fn commit(mut self) -> std::result::Result<(), TransactionError> {
-        match self.handle.take() {
-            Some(handle) => self.executor.commit_txn(&handle).await,
-            None => Err(TransactionError::already_finalized(
-                "transaction already finalized",
-            )),
-        }
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| TransactionError::already_finalized("transaction already finalized"))?;
+        self.executor.commit_txn(handle).await?;
+        self.handle = None;
+        Ok(())
     }
 
     /// Rollback the transaction and consume the guard.
     ///
     /// After calling this, the guard cannot be used again (compile-time enforced).
     pub async fn rollback(mut self) -> std::result::Result<(), TransactionError> {
-        match self.handle.take() {
-            Some(handle) => self.executor.rollback_txn(&handle).await,
-            None => Err(TransactionError::already_finalized(
-                "transaction already finalized",
-            )),
-        }
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| TransactionError::already_finalized("transaction already finalized"))?;
+        self.executor.rollback_txn(handle).await?;
+        self.handle = None;
+        Ok(())
     }
 }
 
 impl<E: crate::QueryExecutor + ?Sized> Drop for TransactionGuard<'_, E> {
     fn drop(&mut self) {
         if let Some(handle) = &self.handle {
-            // Transaction was not finalized - this is a bug in user code.
-            // We can't do async rollback in drop, so we log an error.
-            // The transaction will remain in the registry until idle cleanup
-            // or explicit cleanup removes it.
-            tracing::error!(
-                txn_id = %handle,
-                "TransactionGuard dropped without commit/rollback - transaction leaked! \
-                 This is a BUG: always call commit() or rollback() explicitly."
-            );
+            self.executor.abandon_txn(handle);
         }
     }
 }

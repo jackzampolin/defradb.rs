@@ -37,6 +37,8 @@ impl IdentityRecordingExecutor {
 
 #[async_trait::async_trait]
 impl QueryExecutor for IdentityRecordingExecutor {
+    fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
     async fn execute(&self, request: QueryRequest) -> query::QueryResponse {
         self.record(&request);
         if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
