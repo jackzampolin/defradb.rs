@@ -125,17 +125,25 @@ async fn set_embedding_skips_when_effective_config_is_missing() {
 }
 
 #[tokio::test]
-async fn set_embedding_uses_ollama_contract() {
+async fn set_embedding_uses_each_field_provider_and_model() {
     use axum::{routing::post, Json, Router};
     use serde_json::{json, Value};
     use tokio::net::TcpListener;
 
-    async fn embed(Json(request): Json<Value>) -> Json<Value> {
+    async fn openai(Json(request): Json<Value>) -> Json<Value> {
         assert_eq!(
             request,
-            json!({"model": "nomic-embed-text", "prompt": "hello\n"})
+            json!({"model": "text-embedding-3-small", "input": "hello\n"})
         );
-        Json(json!({"embedding": [3.0, 4.0]}))
+        Json(json!({"data": [{"embedding": [1.0, 0.0]}]}))
+    }
+
+    async fn ollama(Json(request): Json<Value>) -> Json<Value> {
+        assert_eq!(
+            request,
+            json!({"model": "nomic-embed-text", "prompt": "world\n"})
+        );
+        Json(json!({"embedding": [0.0, 2.0]}))
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -143,22 +151,33 @@ async fn set_embedding_uses_ollama_contract() {
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            Router::new().route("/api/embeddings", post(embed)),
+            Router::new()
+                .route("/openai/embeddings", post(openai))
+                .route("/ollama/embeddings", post(ollama)),
         )
         .await
         .unwrap();
     });
 
-    let embeddings = vec![embedding_with_provider(
+    let openai = embedding_with_provider(
+        "openai",
+        &format!("http://{address}/openai"),
+        "text-embedding-3-small",
+    );
+    let mut ollama = embedding_with_provider(
         "ollama",
-        &format!("http://{address}/api"),
+        &format!("http://{address}/ollama"),
         "nomic-embed-text",
-    )];
+    );
+    ollama.field_name = "summary_v".to_string();
+    ollama.fields = vec!["summary".to_string()];
+
     let mut doc = Document::new();
     doc.set("content", "hello");
+    doc.set("summary", "world");
 
     let generated = set_embedding(
-        &embeddings,
+        &[openai, ollama],
         &mut doc,
         true,
         None,
@@ -168,9 +187,13 @@ async fn set_embedding_uses_ollama_contract() {
     .unwrap();
     server.abort();
 
-    assert_eq!(generated, vec!["content_v"]);
+    assert_eq!(generated, vec!["content_v", "summary_v"]);
     assert_eq!(
         doc.get("content_v"),
-        Some(&document::NormalValue::Float64Array(vec![0.6, 0.8]))
+        Some(&document::NormalValue::Float64Array(vec![1.0, 0.0]))
+    );
+    assert_eq!(
+        doc.get("summary_v"),
+        Some(&document::NormalValue::Float64Array(vec![0.0, 1.0]))
     );
 }
